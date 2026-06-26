@@ -1,0 +1,71 @@
+#
+# PiStorm-Atari
+# /boot/config.txt
+# /boot/firmware/config.txt
+#
+# cryptodad
+# Sep 2023
+#
+
+[pi02]
+#overvoltage=6
+#arm_freq=1300
+core_freq=500
+gpu_mem=16
+
+
+[pi3]
+#overvoltage=6
+#arm_freq=1400
+#core_freq=500
+gpu_mem=16
+
+
+[pi4]
+#over_voltage=6 # works for 2100
+arm_freq=1500
+gpu_freq=500
+core_freq=500
+sdram_freq=3200
+#gpu_mem=16
+
+
+[all]
+arm64bit=1
+boot_delay=0
+force_turbo=1
+arm_boost=1
+initial_turbo=5
+temp_limit=80
+
+
+# --- HDMI Output Configuration ---
+#hdmi_force_hotplug=1
+#hdmi_group=2         # Use DMT (Computer Monitor timings)
+#hdmi_mode=4          # Force 640x480 @ 60Hz
+#hdmi_mode=16        # Force 1024x768 @ 60Hz
+#hdmi_drive=2        # Force HDMI mode (with audio)
+
+# --- Framebuffer Memory Settings ---
+# This ensures the Pi allocates exactly 32-bits per pixel
+#framebuffer_depth=32
+#framebuffer_ignore_alpha=1
+#disable_overscan=1
+
+# --- CRITICAL: Driver Compatibility ---
+# PiSTorm JIT needs this
+dtoverlay=vc4-fkms-v3d
+
+# --- GPU Memory ---
+# Ensure enough memory for the 1080p buffer
+gpu_mem=128
+
+# --- Visual Clean-up ---
+disable_splash=1
+
+# currently have to disable gpio irq
+dtoverlay=gpio-no-irq
+
+# Disable Bluetooth
+dtoverlay=disable-bt
+
