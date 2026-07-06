@@ -1610,9 +1610,16 @@ void Exception_build_stack_frame(uae_u32 oldpc, uae_u32 currpc, uae_u32 ssw, int
 	x_put_word(m68k_areg(regs, 7), regs.sr);
 }
 
+static inline bool is_interrupt_frame_vector(int nr)
+{
+	return (nr >= 24 && nr < 24 + 8) || (nr >= 0x40 && nr <= 0x4f);
+}
+
 void Exception_build_stack_frame_common(uae_u32 oldpc, uae_u32 currpc, uae_u32 ssw, int nr, int vector_nr)
 {
-	if (nr == 5 || nr == 6 || nr == 7 || nr == 9) {
+	if (is_interrupt_frame_vector(nr)) {
+		Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0x0);
+	} else if (nr == 5 || nr == 6 || nr == 7 || nr == 9) {
 		if (nr == 9)
 			oldpc = regs.trace_pc;
 		if (currprefs.cpu_model <= 68010)

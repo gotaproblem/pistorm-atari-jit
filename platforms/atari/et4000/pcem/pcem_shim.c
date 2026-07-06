@@ -41,6 +41,22 @@ void pcem_buffer32_alloc(int max_w, int max_h)
     bmp_w = rw; bmp_h = max_h;
 }
 
+void pcem_buffer32_point_at(uint32_t *visible, int pitch_px, int visible_w,
+                            int visible_h, int left_pad_px)
+{
+    if (!buffer32 || !visible || pitch_px <= 0 || visible_w <= 0 || visible_h <= 0)
+        return;
+    if (visible_h > PCEM_MAX_H)
+        visible_h = PCEM_MAX_H;
+
+    buffer32->w = visible_w + 64;
+    buffer32->h = visible_h;
+    for (int y = 0; y < visible_h; y++)
+        buffer32->line[y] = (uint8_t *)(visible + (size_t)y * pitch_px - left_pad_px);
+    for (int y = visible_h; y < PCEM_MAX_H; y++)
+        buffer32->line[y] = buffer32->line[visible_h - 1];
+}
+
 /* ---- framework stubs: all no-ops (we drive the engine ourselves) ---------- */
 void pclog(const char *fmt, ...)                                   { (void)fmt; }
 void rom_init(rom_t *r, char *fn, uint32_t a, int s, int m, int o, int f)

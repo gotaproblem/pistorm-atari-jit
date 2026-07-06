@@ -72,21 +72,28 @@ struct ev2 eventtab2[ev2_max];
  * keep the natmem copy (the linker will flag the duplicate). */
 uae_u8 *baseaddr[MEMORY_BANKS];
 
+static inline uaecptr pistorm_mem_addr(uaecptr addr)
+{
+    return currprefs.address_space_24 ? (addr & 0x00ffffff) : addr;
+}
+
 addrbank *get_mem_bank_real(uaecptr addr)
 {
+    addr = pistorm_mem_addr(addr);
     return mem_banks[bankindex(addr)];
 }
-uae_u32 memory_get_byte(uaecptr addr) { return get_mem_bank(addr).bget(addr); }
-uae_u32 memory_get_word(uaecptr addr) { return get_mem_bank(addr).wget(addr); }
-uae_u32 memory_get_long(uaecptr addr) { return get_mem_bank(addr).lget(addr); }
-uae_u32 memory_get_wordi(uaecptr addr) { return get_mem_bank(addr).wgeti(addr); }
-uae_u32 memory_get_longi(uaecptr addr) { return get_mem_bank(addr).lgeti(addr); }
-void memory_put_byte(uaecptr addr, uae_u32 v) { get_mem_bank(addr).bput(addr, v); }
-void memory_put_word(uaecptr addr, uae_u32 v) { get_mem_bank(addr).wput(addr, v); }
-void memory_put_long(uaecptr addr, uae_u32 v) { get_mem_bank(addr).lput(addr, v); }
+uae_u32 memory_get_byte(uaecptr addr) { addr = pistorm_mem_addr(addr); return get_mem_bank(addr).bget(addr); }
+uae_u32 memory_get_word(uaecptr addr) { addr = pistorm_mem_addr(addr); return get_mem_bank(addr).wget(addr); }
+uae_u32 memory_get_long(uaecptr addr) { addr = pistorm_mem_addr(addr); return get_mem_bank(addr).lget(addr); }
+uae_u32 memory_get_wordi(uaecptr addr) { addr = pistorm_mem_addr(addr); return get_mem_bank(addr).wgeti(addr); }
+uae_u32 memory_get_longi(uaecptr addr) { addr = pistorm_mem_addr(addr); return get_mem_bank(addr).lgeti(addr); }
+void memory_put_byte(uaecptr addr, uae_u32 v) { addr = pistorm_mem_addr(addr); get_mem_bank(addr).bput(addr, v); }
+void memory_put_word(uaecptr addr, uae_u32 v) { addr = pistorm_mem_addr(addr); get_mem_bank(addr).wput(addr, v); }
+void memory_put_long(uaecptr addr, uae_u32 v) { addr = pistorm_mem_addr(addr); get_mem_bank(addr).lput(addr, v); }
 
 uae_u8 *memory_get_real_address(uaecptr addr)
 {
+    addr = pistorm_mem_addr(addr);
     addrbank *ab = mem_banks[bankindex(addr)];
     if (ab && ab->xlateaddr)
         return ab->xlateaddr(addr);
@@ -96,6 +103,7 @@ uae_u8 *memory_get_real_address(uaecptr addr)
 }
 int memory_valid_address(uaecptr addr, uae_u32 size)
 {
+    addr = pistorm_mem_addr(addr);
     addrbank *ab = mem_banks[bankindex(addr)];
     return (ab && ab->check) ? ab->check(addr, size) : 0;
 }
@@ -166,13 +174,11 @@ addrbank dummy_bank = {
  *     nm on the AArch64 objects + the Amiberry headers.
  * ================================================================= */
 
-/* Memory-access policy for the JIT. Setting jit_n_addr_unsafe != 0 (and
- * canbang false) forces compemu_support down the SAFE path: every guest
- * read/write is emitted as a call to the memory-bank handler instead of a
- * direct natmem load/store. That's slower, but it's mandatory for bring-up
- * because our hardware I/O ($FFxxxx) lives behind handlers that hit the real
- * bus — direct natmem access would bypass them. Once ST-RAM-only direct access
- * is wired up safely these can be relaxed. */
+/* Memory-access policy for the JIT. canbang=true allows direct natmem access,
+ * but jit_n_addr_unsafe must stay non-zero until generated memory accesses get
+ * a runtime bank guard. Atari code can run the same compiled block with a later
+ * register value pointing at hardware I/O, so trace-time bank flags alone are
+ * not enough. */
 bool canbang = true;       // default false
 int jit_n_addr_unsafe = 1; // default 1 - still needed for now
 

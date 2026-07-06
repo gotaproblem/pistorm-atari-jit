@@ -10,6 +10,18 @@
 #define DEBUG_CD32CDTVIO 0
 #define EXCEPTION3_DEBUGGER 0
 #define CPUTRACE_DEBUG 0
+#define CPU_EXCEPTION_TRACE 0
+#define CPU_BUSERR_TRACE 0
+#define CPU_MMU30_TRACE 0
+#ifndef ATARI_MFP_IACK_DIAG
+#define ATARI_MFP_IACK_DIAG 0
+#endif
+#ifndef ATARI_VBS_MON
+#define ATARI_VBS_MON 0
+#endif
+#ifndef ATARI_JIT_IRQ_POLL_INTERVAL
+#define ATARI_JIT_IRQ_POLL_INTERVAL 0
+#endif
 
 #define VALIDATE_68030_DATACACHE 0
 #define VALIDATE_68040_DATACACHE 0
@@ -39,7 +51,6 @@
 #include "blitter.h"
 #include "ar.h"
 #include "inputrecord.h"
-#include "inputdevice.h"
 #include "audio.h"
 #include "fpp.h"
 #include "statusline.h"
@@ -2319,13 +2330,12 @@ static void build_cpufunctbl()
 																				: 0,
 			  currprefs.address_space_24);
 #ifdef JIT
-	write_log(_T("JIT: &countdown =  %p\n"), &countdown);
-	write_log(_T("JIT: &build_comp = %p\n"), &build_comp);
-
-	fprintf(stderr, "[PROBE] build_cpufunctbl -> build_comp, cpu_model=%d cachesize=%d\n",
-			currprefs.cpu_model, currprefs.cachesize);
-
-	build_comp();
+	if (currprefs.cachesize)
+	{
+		write_log(_T("JIT: &countdown =  %p\n"), &countdown);
+		write_log(_T("JIT: &build_comp = %p\n"), &build_comp);
+		build_comp();
+	}
 #endif
 
 	write_log(_T("CPU=%d, FPU=%d%s, MMU=%d, JIT%s=%d."),
@@ -2743,7 +2753,7 @@ static void activate_trace()
 }
 
 // make sure interrupt is checked immediately after current instruction
-void checkint()
+void checkint ()
 {
 	return; // cryptodad not for Atari
 	// doint();
@@ -2751,9 +2761,9 @@ void checkint()
 
 	if (!m68k_accurate_ipl && !currprefs.cachesize && !(regs.spcflags & SPCFLAG_INT) && (regs.spcflags & SPCFLAG_DOINT))
 	{
-		intlev(); // cryptodad check for real interrupts
+		intlev (); // cryptodad check for real interrupts
 		// set_special(SPCFLAG_INT);
-		set_special(SPCFLAG_DOINT);
+		set_special (SPCFLAG_DOINT);
 	}
 }
 
@@ -2776,6 +2786,46 @@ static void SetSR(uae_u16 sr)
 
 extern volatile uint8_t g_irq_mask;
 extern volatile uint8_t g_irq;
+extern volatile uint8_t g_ipl;
+extern volatile uint8_t g_buserr;
+extern "C" uint8_t ps_read_ipl(void);
+extern "C" uint8_t ps_read_8_fc(uint32_t addr, uint8_t fc_value, uint8_t *berr_out);
+extern "C" volatile uint32_t pistorm_mfp_iack_counts[16];
+extern "C" volatile uint8_t pistorm_mfp_last_iack_vector;
+
+#ifndef PISTORM_SERIAL_IRQ
+#define PISTORM_SERIAL_IRQ 0
+#endif
+
+static inline void atari_serial_irq_poll(void)
+{
+#if PISTORM_SERIAL_IRQ
+	uint8_t status = ps_read_ipl();
+	if (status & 0x01)
+		return;
+
+	uint8_t irq = (status & 0x60) >> 4;
+	if (!irq)
+		return;
+
+	g_irq = irq;
+	regs.ipl_pin = irq;
+	regs.ipl[0] = irq;
+#endif
+}
+
+extern "C" void pistorm_cpu_irqwatch_dump(uint32_t raw6, uint32_t latched6, uint32_t raw4, uint32_t latched4)
+{
+#if 0
+	uaecptr pc = m68k_getpc();
+	fprintf(stderr,
+		"[IRQCPU] raw6=%u latched6=%u raw4=%u latched4=%u pc=%08X op=%04X sr=%04X srmask=%d intmask=%d irqmask=%u g_irq=%u stopped=%d spc=%08X\n",
+		raw6, latched6, raw4, latched4,
+		(unsigned)pc, (unsigned)regs.ir, regs.sr, (regs.sr >> 8) & 7,
+		regs.intmask, (unsigned)g_irq_mask, (unsigned)g_irq,
+		regs.stopped, (unsigned)regs.spcflags);
+#endif
+}
 
 static void MakeFromSR_x(int t0trace)
 {
@@ -2791,91 +2841,37 @@ static void MakeFromSR_x(int t0trace)
 	SET_VFLG((regs.sr >> 1) & 1);
 	SET_CFLG(regs.sr & 1);
 
+	//int sr_intmask = (regs.sr >> 8) & 7;
+
 	if (regs.t1 == ((regs.sr >> 15) & 1) &&
 		regs.t0 == ((regs.sr >> 14) & 1) &&
 		regs.s == ((regs.sr >> 13) & 1) &&
 		regs.m == ((regs.sr >> 12) & 1) &&
 		regs.intmask == ((regs.sr >> 8) & 7))
+		//g_irq_mask == sr_intmask)
 		return;
 
 	regs.t1 = (regs.sr >> 15) & 1;
 	regs.t0 = (regs.sr >> 14) & 1;
 	regs.s = (regs.sr >> 13) & 1;
 	regs.m = (regs.sr >> 12) & 1;
-#if (0) // cryptodad tidy up int handling
-	if (regs.intmask != ((regs.sr >> 8) & 7))
-	{
+
+	if (regs.intmask != ((regs.sr >> 8) & 7)) {
 		int newimask = (regs.sr >> 8) & 7;
-#if (0) // ATARI uses real ipl
-		if (m68k_accurate_ipl)
-		{
-			// STOP intmask change enabling already active interrupt: delay it by 1 STOP round
-			if (t0trace < 0 && regs.ipl[0] <= regs.intmask && regs.ipl[0] > newimask && regs.ipl[0] < 7)
-			{
-				regs.ipl[0] = 0;
-			}
-		}
-		else
-		{
-#endif
-			// make sure ipl_pin = g_irq;
-			if (regs.ipl_pin <= regs.intmask && regs.ipl_pin > newimask)
-			{
-				if (!currprefs.cachesize)
-				{
+		
+			if (regs.ipl_pin <= regs.intmask && regs.ipl_pin > newimask) {
+#ifndef PISTORM_ATARI
+				if (!currprefs.cachesize) {
 					set_special(SPCFLAG_INT);
-				}
-				else
-				{
+				} else {
 					set_special(SPCFLAG_DOINT);
 				}
-			}
-#if (0)
-		}
 #endif
-		regs.intmask = newimask;
-	}
-#else
-	// if (regs.intmask != ((regs.sr >> 8) & 7)) {
-
-	//	set_special(SPCFLAG_DOINT);
-
-	//	regs.intmask = (regs.sr >> 8) & 7;
-	// if (regs.intmask <= 0)
-	//	fprintf (stderr, "[GOTCHA] 2513 invalid intmask %d\n", regs.intmask);
-	//}
-
-	/* replace the GOTCHA block with this — log ALL intmask changes in MakeFromSR_x */
-	if (regs.intmask != ((regs.sr >> 8) & 7))
-	{
-		int newm = (regs.sr >> 8) & 7;
-		if (regs.intmask == 0)// || newm == 0)
-		{
-			static int n;
-			if (n++ < 200)
-				fprintf(stderr, "[MASK] %d->%d  sr=%04X  s=%d  pc=%08X\n",
-						regs.intmask, newm, regs.sr, regs.s, (unsigned)m68k_getpc());
-
-			//regs.intmask = newm = 3; // cryptodad - will this work?
-		}
-
-		if (g_irq <= regs.intmask && g_irq > newm)
-		{
-			//set_special(SPCFLAG_DOINT);
-			if (!currprefs.cachesize)
-			{
-				set_special (SPCFLAG_INT);
 			}
-			else
-			{
-				set_special (SPCFLAG_DOINT);
-			}
-		}
 		
-		regs.intmask = newm;
-		g_irq_mask = regs.intmask;
+		regs.intmask = newimask;
+		g_irq_mask = newimask;
 	}
-#endif
 
 	if (currprefs.cpu_model >= 68020)
 	{
@@ -2977,6 +2973,106 @@ void REGPARAM2 MakeFromSR_STOP()
 static bool internalexception(const int nr)
 {
 	return nr == 5 || nr == 6 || nr == 7 || (nr >= 32 && nr <= 47);
+}
+
+static bool is_interrupt_exception_vector(const int nr)
+{
+	return nr >= 24 && nr < 24 + 8;
+}
+
+static bool is_interrupt_level_vector(const int nr)
+{
+	return nr > 24 && nr < 24 + 8;
+}
+
+static int pistorm_spurious_interrupt_level;
+
+static int interrupt_level_from_vector(const int nr)
+{
+	if (nr == 24)
+		return pistorm_spurious_interrupt_level;
+	if (is_interrupt_level_vector(nr))
+		return nr - 24;
+	return 0;
+}
+
+static bool set_interrupt_mask_from_vector(const int nr)
+{
+	const int level = interrupt_level_from_vector(nr);
+	if (!level)
+		return false;
+
+	regs.intmask = level;
+	g_irq_mask = level;
+	regs.sr = (regs.sr & ~0x0700) | (level << 8);
+	return true;
+}
+
+static uae_u8 atari_recover_mfp_vector_from_isrb(void)
+{
+#ifdef PISTORM_ATARI
+	uint8_t berr = 0;
+	const uae_u8 isrb = ps_read_8_fc(0x00FFFA11u, 5, &berr);
+	if (berr)
+	{
+		g_buserr = 0;
+		return 0;
+	}
+
+	for (int bit = 7; bit >= 0; bit--)
+	{
+		if (isrb & (1u << bit))
+			return 0x40 + bit;
+	}
+#endif
+	return 0;
+}
+
+static uae_u8 atari_live_ipl_level(void)
+{
+#ifdef PISTORM_ATARI
+	const uae_u8 status = ps_read_ipl();
+	if (status & 0x01)
+		return 0xff;
+	return (status & 0x60) >> 4;
+#else
+	return 0;
+#endif
+}
+
+static bool atari_iack_vector_is_valid(const int level, const int bus_vector)
+{
+#ifdef PISTORM_ATARI
+	/* Atari GLUE autovectors IPL2/IPL4. The MFP on IPL6 supplies vectors from
+	 * its 0x40..0x4f block. Anything outside that range is not a usable Atari
+	 * interrupt vector and must not be stacked or looked up as one. */
+	return level == 6 && bus_vector >= 0x40 && bus_vector <= 0x4f;
+#else
+	return bus_vector >= 0 && bus_vector <= 0xff;
+#endif
+}
+
+static int effective_interrupt_vector(const int nr, const int vector_nr)
+{
+	extern uae_u16 pistorm_iack_vector;
+	const int level = interrupt_level_from_vector(nr);
+	const int bus_vector = pistorm_iack_vector & 0xFF;
+
+	if (!is_interrupt_exception_vector(nr))
+		return vector_nr;
+
+	/* EmuTOS' default vector 24 handler panics. Do not let a stale failed-IACK
+	 * marker leak into a later autovector exception. */
+	if (pistorm_iack_vector == 0xFFFE)
+		return vector_nr;
+
+	if (pistorm_iack_vector == 0xFFFF)
+		return vector_nr;
+
+	if (atari_iack_vector_is_valid(level, bus_vector))
+		return bus_vector;
+
+	return vector_nr;
 }
 
 static void exception_check_trace(int nr)
@@ -3161,6 +3257,7 @@ Interrupt:
 
 */
 
+#ifndef PISTORM_ATARI
 static int iack_cycle(int nr)
 { // returning here makes emulation slower???
 	// return nr; // neutralised - interrupts are handled in intlevel()
@@ -3184,6 +3281,7 @@ static int iack_cycle(int nr)
 	}
 	return vector;
 }
+#endif
 
 static void Exception_ce000(int nr)
 {
@@ -3194,7 +3292,7 @@ static void Exception_ce000(int nr)
 	int frame_id = 0;
 
 	start = 6;
-	interrupt = nr >= 24 && nr < 24 + 8;
+	interrupt = is_interrupt_exception_vector(nr);
 	if (!interrupt)
 	{
 		start = 4;
@@ -3223,6 +3321,8 @@ static void Exception_ce000(int nr)
 
 	exception_debug(nr);
 	MakeSR();
+	if (interrupt)
+		vector_nr = effective_interrupt_vector(nr, vector_nr);
 
 	bool g1 = generates_group1_exception(regs.ir);
 	if (!regs.s)
@@ -3330,11 +3430,10 @@ kludge_me_do:
 		cpu_halt(CPU_HALT_DOUBLE_FAULT);
 		return;
 	}
-	if (interrupt)
-	{
-		regs.intmask = nr - 24;
-		g_irq_mask = regs.intmask;
-	}
+		if (interrupt)
+		{
+			set_interrupt_mask_from_vector(nr);
+		}
 
 	if (regs.intmask <= 0)
 		fprintf(stderr, "[GOTCHA] 2924 invalid intmask %d\n", regs.intmask);
@@ -3349,23 +3448,23 @@ kludge_me_do:
 			cpu_halt(CPU_HALT_DOUBLE_FAULT);
 			return;
 		}
-		if (currprefs.cpu_model == 68000)
-		{
-			// if exception vector is odd:
-			// opcode is last opcode executed, address is address of exception vector
-			// pc is last prefetch address
-			regs.t1 = 0;
-			MakeSR();
-			m68k_setpc(regs.vbr + 4 * vector_nr);
-			if (interrupt)
+			if (currprefs.cpu_model == 68000)
 			{
-				regs.ir = nr;
-				exception3_read_access(regs.ir | 0x20000 | 0x10000, newpc, sz_word, 2);
-			}
-			else
-			{
-				exception3_read_access(regs.ir | 0x40000 | 0x20000 | (g1 ? 0x10000 : 0), newpc, sz_word, 2);
-			}
+				// if exception vector is odd:
+				// opcode is last opcode executed, address is address of exception vector
+				// pc is last prefetch address
+				regs.t1 = 0;
+				MakeSR();
+				m68k_setpc(regs.vbr + 4 * vector_nr);
+				if (interrupt)
+				{
+					regs.ir = interrupt_level_from_vector(nr);
+					exception3_read_access(regs.ir | 0x20000 | 0x10000, newpc, sz_word, 2);
+				}
+				else
+				{
+					exception3_read_access(regs.ir | 0x40000 | 0x20000 | (g1 ? 0x10000 : 0), newpc, sz_word, 2);
+				}
 		}
 		else if (currprefs.cpu_model == 68010)
 		{
@@ -3426,19 +3525,25 @@ kludge_me_do:
 }
 #endif
 
+
+
+
+#if (1)
 // 68030 MMU
 static void Exception_mmu030(int nr, uaecptr oldpc)
 {
 	uae_u32 currpc = m68k_getpc(), newpc;
 	int interrupt, vector_nr = nr;
 
-	interrupt = nr >= 24 && nr < 24 + 8;
+	interrupt = is_interrupt_exception_vector(nr);
 	// cryptodad - Atari - int vec has been decided by real-bus read
 	// if (interrupt)
 	//	vector_nr = iack_cycle(nr);
 
 	// exception_debug (nr);
 	MakeSR();
+	if (interrupt)
+		vector_nr = effective_interrupt_vector(nr, vector_nr);
 
 	if (!regs.s)
 	{
@@ -3492,8 +3597,7 @@ static void Exception_mmu030(int nr, uaecptr oldpc)
 	}
 	if (interrupt)
 	{
-		regs.intmask = nr - 24;
-		g_irq_mask = regs.intmask;
+		set_interrupt_mask_from_vector(nr);
 	}
 
 	if (regs.intmask <= 0)
@@ -3504,6 +3608,70 @@ static void Exception_mmu030(int nr, uaecptr oldpc)
 	exception_check_trace(nr);
 }
 
+#else
+
+static void Exception_mmu030 (int nr, uaecptr oldpc)
+{
+	uae_u32 currpc = m68k_getpc (), newpc;
+	int interrupt, vector_nr = nr;
+
+	interrupt = nr >= 24 && nr < 24 + 8;
+	if (interrupt)
+		vector_nr = nr;
+
+	exception_debug (nr);
+	MakeSR ();
+
+	if (!regs.s) {
+		regs.usp = m68k_areg (regs, 7);
+		m68k_areg(regs, 7) = regs.m ? regs.msp : regs.isp;
+		regs.s = 1;
+		mmu_set_super (true);
+	}
+
+	newpc = x_get_long (regs.vbr + 4 * vector_nr);
+
+	if (regs.m && interrupt) { /* M + Interrupt */
+		Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0x0);
+		MakeSR ();
+		regs.m = 0;
+		regs.msp = m68k_areg (regs, 7);
+		m68k_areg (regs, 7) = regs.isp;
+		Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0x1);
+	} else if (nr == 2) {
+		if (mmu030_state[1] & MMU030_STATEFLAG1_LASTWRITE) {
+			Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0xA);
+		} else {
+			Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0xB);
+		}
+	} else if (nr == 3) {
+		regs.mmu_fault_addr = last_fault_for_exception_3;
+		mmu030_state[0] = mmu030_state[1] = 0;
+		mmu030_data_buffer_out = 0;
+		Exception_build_stack_frame(last_fault_for_exception_3, currpc, MMU030_SSW_RW | MMU030_SSW_SIZE_W | (regs.s ? 6 : 2), vector_nr,  0xB);
+	} else {
+		Exception_build_stack_frame_common(oldpc, currpc, regs.mmu_ssw, nr, vector_nr);
+	}
+
+	if (newpc & 1) {
+		if (nr == 2 || nr == 3)
+			cpu_halt (CPU_HALT_DOUBLE_FAULT);
+		else
+			exception3_read_special(regs.ir, newpc, 1, 1);
+		return;
+	}
+	if (interrupt)
+		regs.intmask = nr - 24;
+	m68k_setpci (newpc);
+	fill_prefetch ();
+	exception_check_trace (nr);
+}
+
+
+#endif
+
+
+
 // 68040/060 MMU
 static void Exception_mmu(int nr, uaecptr oldpc)
 {
@@ -3511,7 +3679,7 @@ static void Exception_mmu(int nr, uaecptr oldpc)
 	int interrupt;
 	int vector_nr = nr;
 
-	interrupt = nr >= 24 && nr < 24 + 8;
+	interrupt = is_interrupt_exception_vector(nr);
 	// if (interrupt)
 	//	vector_nr = iack_cycle(nr);
 
@@ -3521,6 +3689,8 @@ static void Exception_mmu(int nr, uaecptr oldpc)
 
 	exception_debug(nr);
 	MakeSR();
+	if (interrupt)
+		vector_nr = effective_interrupt_vector(nr, vector_nr);
 
 	if (!regs.s)
 	{
@@ -3587,10 +3757,9 @@ static void Exception_mmu(int nr, uaecptr oldpc)
 	m68k_setpci(newpc);
 	if (interrupt)
 	{
-		if (nr <= 24)
+		if (nr < 24 || nr >= 32)
 			fprintf(stderr, "Exception_mmu(): invalid nr 0x%X to set mask\n", nr);
-		regs.intmask = nr - 24;
-		g_irq_mask = regs.intmask;
+		set_interrupt_mask_from_vector(nr);
 		if (regs.intmask <= 0)
 			fprintf(stderr, "[GOTCHA] 3049 invalid intmask %d\n", regs.intmask);
 	}
@@ -3734,7 +3903,7 @@ static void Exception_normal(int nr)
 
 	cache_default_data |= CACHE_DISABLE_ALLOCATE;
 
-	interrupt = nr >= 24 && nr < 24 + 8;
+	interrupt = is_interrupt_exception_vector(nr);
 	// #if (0) // cryptodad this has already been done for real on the bus
 	// if (interrupt)
 	//	vector_nr = iack_cycle(nr);
@@ -3746,6 +3915,8 @@ static void Exception_normal(int nr)
 
 	exception_debug(nr);
 	MakeSR();
+	if (interrupt)
+		vector_nr = effective_interrupt_vector(nr, vector_nr);
 
 	if (!regs.s)
 	{
@@ -3988,10 +4159,9 @@ kludge_me_do:
 	}
 	if (interrupt)
 	{
-		if (nr <= 24)
+		if (nr < 24 || nr >= 32)
 			fprintf(stderr, "Exception_normal(): invalid nr 0x%X to set mask\n", nr);
-		regs.intmask = nr - 24;
-		g_irq_mask = regs.intmask;
+		set_interrupt_mask_from_vector(nr);
 		if (regs.intmask <= 0)
 			fprintf(stderr, "[GOTCHA] 3436 invalid intmask %d\n", regs.intmask);
 	}
@@ -4037,7 +4207,7 @@ kludge_me_do:
 			m68k_setpc(regs.vbr + 4 * vector_nr);
 			if (interrupt)
 			{
-				regs.ir = nr;
+				regs.ir = interrupt_level_from_vector(nr);
 				exception3_read_access(regs.ir | 0x20000 | 0x10000, newpc, sz_word, 2);
 			}
 			else
@@ -4165,17 +4335,33 @@ void REGPARAM2 Exception_cpu(int nr)
 
 void REGPARAM2 Exception(int nr)
 {
+#if CPU_EXCEPTION_TRACE
 	extern volatile uint8_t g_buserr;
 	extern volatile uint32_t g_buserr_addr; /* your ps_protocol fault address */
 
 	if (nr < 24)
 	{
+		static unsigned exc_count[24];
+		static uaecptr exc_last_pc[24];
+		static uae_u16 exc_last_op[24];
+		static uae_u32 exc_last_buserr[24];
+		uaecptr pc = m68k_getpc();
+		uae_u16 op = get_word(pc);
+		bool changed = pc != exc_last_pc[nr] || op != exc_last_op[nr] || g_buserr_addr != exc_last_buserr[nr];
 
-		/* in Exception(), the nr<24 probe */
-		fprintf(stderr, "EXC vec=%d pc=%08X op=%04X g_buserr_addr=%08X stopped=%d\n",
-				nr, (unsigned)m68k_getpc(), (unsigned)get_word(m68k_getpc()),
-				(unsigned)g_buserr_addr, (int)regs.stopped);
+		if (changed || exc_count[nr] < 8)
+		{
+			fprintf(stderr, "EXC vec=%d pc=%08X op=%04X g_buserr_addr=%08X stopped=%d\n",
+					nr, (unsigned)pc, (unsigned)op,
+					(unsigned)g_buserr_addr, (int)regs.stopped);
+			exc_last_pc[nr] = pc;
+			exc_last_op[nr] = op;
+			exc_last_buserr[nr] = g_buserr_addr;
+		}
+		if (exc_count[nr] < 0xffffffffU)
+			exc_count[nr]++;
 	}
+#endif
 
 	// if (!g_buserr)
 	ExceptionX(nr, 0xffffffff, 0xffffffff);
@@ -4191,8 +4377,10 @@ void REGPARAM2 ExceptionL(int nr, uaecptr address)
 
 static void bus_error()
 {
+#if CPU_BUSERR_TRACE
 	fprintf(stderr, "[BE] getpc=%08x instr_pc=%08x fault=%08x\n",
 			m68k_getpc(), regs.instruction_pc, last_fault_for_exception_3);
+#endif
 
 	TRY(prb2)
 	{
@@ -4210,12 +4398,16 @@ static int get_ipl()
 	return regs.ipl[0];
 }
 
-static void do_interrupt(int nr)
+static void do_interrupt (int nr)
 {
 	extern uae_u16 pistorm_iack_vector;
 	extern void intlev_ack(uint8_t nr);
 	extern volatile uint8_t g_irq;
-	extern volatile uint8_t g_irq_mask;
+	extern volatile uint8_t g_intmask;
+	bool interrupt_taken = true;
+	bool clear_irq_latch = true;
+	int exception_nr = nr + 24;
+	pistorm_spurious_interrupt_level = 0;
 #ifdef DEBUGGER
 	if (debug_dma)
 		record_dma_event(DMA_EVENT_CPUIRQ);
@@ -4230,13 +4422,154 @@ static void do_interrupt(int nr)
 	}
 #endif
 	/* IRQ 7 (NMI) is not used on Atari - it can't as only IPL2,1 are used (0,2,4,6) */
-	assert(nr < 7 && nr > 0);
+	assert(nr < 8 && nr > 0);
 
-	/* interrupt acknowledge - this is time consuming, needs to go out to Atari bus */
-#if (1)
+
+	/* Match the old Musashi contract: once a level has been latched, acknowledge
+	 * it on the real bus and build the CPU exception frame. */
 	intlev_ack (nr);
+#if (1)
+	if (nr == 6)
+	{
+		const uae_u8 vec = pistorm_iack_vector & 0xff;
+		static uint32_t noack_retries;
+		static uae_u8 noack_candidate_vec;
 
-// #define IRQ_PROFILE
+		if (pistorm_iack_vector == 0xFFFE)
+		{
+			static uint32_t spurious_iack_count;
+			if (ATARI_MFP_IACK_DIAG && (spurious_iack_count < 8 || (spurious_iack_count & 0x3ff) == 0))
+			{
+				fprintf(stderr, "[MFPACK->NOACK] iack=%04X pc=%08X stopped=%d count=%u\n",
+					(unsigned)pistorm_iack_vector,
+				(unsigned)m68k_getpc(), regs.stopped, spurious_iack_count + 1);
+			}
+			spurious_iack_count++;
+			if (++noack_retries < 2)
+			{
+				pistorm_iack_vector = 0xFFFF;
+				interrupt_taken = false;
+				clear_irq_latch = false;
+			}
+			else if (noack_candidate_vec >= 0x40 && noack_candidate_vec <= 0x4F)
+			{
+				static uint32_t last_iack_count;
+				pistorm_iack_vector = noack_candidate_vec;
+				if (ATARI_MFP_IACK_DIAG && (last_iack_count < 8 || (last_iack_count & 0x3ff) == 0))
+				{
+					fprintf(stderr, "[MFPACK->CANDNOACK] vec=%02X pc=%08X stopped=%d count=%u\n",
+						(unsigned)pistorm_iack_vector,
+					(unsigned)m68k_getpc(), regs.stopped, last_iack_count + 1);
+				}
+				last_iack_count++;
+				noack_retries = 0;
+				noack_candidate_vec = 0;
+				}
+				else
+				{
+					static uint32_t stale_noack_count;
+					static uint32_t live_noack_count;
+					static uint32_t isr_recover_count;
+					const uae_u8 isr_vector = atari_recover_mfp_vector_from_isrb();
+
+					if (isr_vector >= 0x40 && isr_vector <= 0x4F)
+					{
+						pistorm_iack_vector = isr_vector;
+						if (ATARI_MFP_IACK_DIAG && (isr_recover_count < 8 || (isr_recover_count & 0x3ff) == 0))
+						{
+							fprintf(stderr,
+								"[MFPACK->ISRNOACK] vec=%02X pc=%08X stopped=%d count=%u\n",
+								(unsigned)isr_vector, (unsigned)m68k_getpc(),
+								regs.stopped, isr_recover_count + 1);
+						}
+						isr_recover_count++;
+					}
+					else
+					{
+						const uae_u8 live_ipl = atari_live_ipl_level();
+						interrupt_taken = false;
+						pistorm_iack_vector = 0xFFFF;
+
+						if (live_ipl == nr || live_ipl == 0xff)
+						{
+							clear_irq_latch = false;
+							if (ATARI_MFP_IACK_DIAG && (live_noack_count < 8 || (live_noack_count & 0x3ff) == 0))
+							{
+								fprintf(stderr,
+									"[MFPACK->LIVENOACK] level=%d live=%02X pc=%08X stopped=%d count=%u\n",
+									nr, (unsigned)live_ipl, (unsigned)m68k_getpc(),
+									regs.stopped, live_noack_count + 1);
+							}
+							live_noack_count++;
+						}
+						else
+						{
+							clear_irq_latch = true;
+							if (ATARI_MFP_IACK_DIAG && (stale_noack_count < 8 || (stale_noack_count & 0x3ff) == 0))
+							{
+								fprintf(stderr,
+									"[MFPACK->DROPSTALE] level=%d live=%02X pc=%08X stopped=%d count=%u\n",
+									nr, (unsigned)live_ipl, (unsigned)m68k_getpc(),
+									regs.stopped, stale_noack_count + 1);
+							}
+							stale_noack_count++;
+						}
+					}
+					if (interrupt_taken || clear_irq_latch)
+						noack_retries = 0;
+					noack_candidate_vec = 0;
+				}
+			}
+		else if (vec < 0x40 || vec > 0x4F)
+		{
+			noack_retries = 0;
+			const uae_u8 corrected_vec = vec & ~0x38;
+			noack_candidate_vec = (corrected_vec >= 0x40 && corrected_vec <= 0x4F) ? corrected_vec : 0;
+			static uint32_t bad_iack_count;
+			if (ATARI_MFP_IACK_DIAG && (bad_iack_count < 8 || (bad_iack_count & 0x3ff) == 0))
+			{
+				fprintf(stderr, "[BADMFPACK->RETRY] iack=%04X vec=%02X cand=%02X pc=%08X stopped=%d count=%u\n",
+					(unsigned)pistorm_iack_vector, (unsigned)vec, (unsigned)noack_candidate_vec,
+				(unsigned)m68k_getpc(), regs.stopped, bad_iack_count + 1);
+			}
+			bad_iack_count++;
+			interrupt_taken = false;
+			clear_irq_latch = false;
+		}
+		else
+		{
+			noack_retries = 0;
+			noack_candidate_vec = 0;
+		}
+	}
+	if (interrupt_taken)
+		Exception (exception_nr);
+#else
+	if (pistorm_iack_vector == 0xFFFF)
+		Exception (nr + 24);
+
+	else if (pistorm_iack_vector == 0xFFFE)
+	{
+		fprintf(stderr, "do_interrupt(): spurious interrupt 0x%X\n", nr);
+		//Exception (24);
+	}
+
+	else {
+		Exception (pistorm_iack_vector);
+	}
+
+	regs.intmask = nr;
+	regs.sr = (regs.sr & ~0x0700) | (nr << 8);
+	g_irq_mask = regs.intmask;
+
+	g_irq = 0;
+	regs.ipl_pin = 0;
+	return;
+#endif
+
+
+interrupt_done:
+//#define IRQ_PROFILE
 #ifdef IRQ_PROFILE
 	if (nr == 2)
 	{
@@ -4251,56 +4584,80 @@ static void do_interrupt(int nr)
 	}
 #endif
 
-	if (pistorm_iack_vector == 0xFFFF)
-		Exception(nr + 24);
-
-	else if (pistorm_iack_vector == 0xFFFE)
+	
+	#if ATARI_VBS_MON
+		/* VBL = level-4 autovector = vector 0x1C. Count, print once/sec, reset. */
 	{
-		fprintf(stderr, "do_interrupt(): spurious interrupt 0x%X\n", nr);
-		Exception(24);
-	}
-
-	else
-		Exception(pistorm_iack_vector & 0xFF);
-#else
-	// if (nr == 2 || nr == 4) // auto-vectors - do they need real bus ack?
-	//	Exception (nr + 24);
-
-	if (nr == 6)
-	{ // MFP definately needs real bus ack
-		intlev_ack(nr);
-		Exception(pistorm_iack_vector & 0xFF);
-	}
-	else
-	{ // spurious?
-		// fprintf (stderr, "do_interrupt(): spurious interrupt 0x%X\n", nr);
-		// Exception(24);
-		Exception(nr + 24);
-	}
-#endif
-
-	/* interrupt has been acknowledged and exception handled so clear g_irq */
-	g_irq = 0;
-
-#ifdef ATARI_VBS_MON
-	/* VBL = level-4 autovector = vector 0x1C. Count, print once/sec, reset. */
-	{
-		static uint32_t vbl = 0;
+		static uint32_t vbl4, irq2, mfp6, others;
+		static uint32_t last_mfp45, last_mfp46;
 		static time_t t = 0;
 		time_t now = time(NULL);
 
-		if (nr == 4) /* or: vector == 0x1C if you only have the resolved vector */
-			vbl++;
+			if (interrupt_taken)
+			{
+				if (nr == 2) /* or: vector == 0x1C if you only have the resolved vector */
+					irq2++;
+				else if (nr == 4)
+					vbl4++;
+				else if (nr == 6)
+					mfp6++;
+				else
+					others++;
+			}
 
 		if (now != t)
 		{
+			uint32_t cur_mfp45 = pistorm_mfp_iack_counts[5];
+			uint32_t cur_mfp46 = pistorm_mfp_iack_counts[6];
+			uint32_t delta_mfp45 = cur_mfp45 - last_mfp45;
+			uint32_t delta_mfp46 = cur_mfp46 - last_mfp46;
+			last_mfp45 = cur_mfp45;
+			last_mfp46 = cur_mfp46;
 			t = now;
-			printf("[VBL/s] %u\n", vbl);
+			printf("[INTS/s] ipl2 %u,  vbl %u, mfp %u  mfp45 %u mfp46 %u - g_intmask %d, g_irq_mask %d, g_irq %d, intmask %d, ipl_pin %d\n",
+				irq2, vbl4, mfp6, delta_mfp45, delta_mfp46, g_intmask, g_irq_mask, g_irq, regs.intmask, regs.ipl_pin);
 			fflush(stdout);
-			vbl = 0;
+			vbl4 = 0; irq2 = 0; mfp6 = 0; others = 0;
 		}
 	}
 #endif
+		
+	/* Only clear the CPU-side latch after a completed acknowledge/exception or
+		* a stale request. A malformed IACK value is not a completed interrupt; keep
+		* the level pending so the next intlev() pass can retry the real bus ACK. */
+	if (clear_irq_latch)
+	{
+		g_irq = 0;
+		g_ipl = 0;
+		regs.ipl_pin = 0;
+	}
+	else
+	{
+		g_irq = nr;
+		regs.ipl_pin = nr;
+		set_special(SPCFLAG_BRK);
+	}
+}
+
+
+volatile uint8_t g_intmask = 0;
+int intlev (void)
+{
+	uint8_t ipl;
+
+	ipl = g_irq;
+
+	if (ipl > regs.intmask)
+	{
+		//printf ("[INTLEV] got interrupt level %d, intmask %d\n", ipl, regs.intmask);
+		g_irq = ipl;
+		g_intmask = regs.intmask;
+		//set_special (SPCFLAG_DOINT);
+		do_interrupt (ipl);
+		return ipl;
+	}
+
+	return 0;
 }
 
 void NMI()
@@ -4605,10 +4962,10 @@ void REGPARAM2 op_unimpl(uae_u32 opcode)
 	static int warned;
 	if (warned < 1000)
 	{
-		write_log(_T("68060 unimplemented opcode %04X, PC=%08x SP=%08x\n"), opcode, regs.instruction_pc, regs.regs[15]);
+		write_log(_T("68060 unimplemented opcode %04X, PC=%08x SP=%08x -> illegal instruction\n"), opcode, regs.instruction_pc, regs.regs[15]);
 		warned++;
 	}
-	ExceptionL(61, regs.instruction_pc);
+	Exception(4);
 }
 
 uae_u32 REGPARAM2 op_illg(uae_u32 opcode)
@@ -4952,25 +5309,39 @@ bool mmu_op30(uaecptr pc, uae_u32 opcode, uae_u16 extra, uaecptr extraa)
 {
 	int type = extra >> 13;
 	int fline = 0;
+	bool use_real_mmu = currprefs.mmu_model && !currprefs.cachesize;
+
+#if CPU_MMU30_TRACE
+	{
+		static unsigned mmu30_log_count;
+		if (mmu30_log_count < 16)
+		{
+			fprintf(stderr, "[MMU30] pc=%08X opcode=%04X extra=%04X extraa=%08X type=%d mmu_model=%d cachesize=%d real=%d\n",
+					(unsigned)pc, (unsigned)opcode, (unsigned)extra, (unsigned)extraa,
+					type, currprefs.mmu_model, currprefs.cachesize, use_real_mmu ? 1 : 0);
+			mmu30_log_count++;
+		}
+	}
+#endif
 
 	switch (type)
 	{
 	case 0:
 	case 2:
 	case 3:
-		if (currprefs.mmu_model)
+		if (use_real_mmu)
 			fline = mmu_op30_pmove(pc, opcode, extra, extraa);
 		else
 			fline = mmu_op30fake_pmove(pc, opcode, extra, extraa);
 		break;
 	case 1:
-		if (currprefs.mmu_model)
+		if (use_real_mmu)
 			fline = mmu_op30_pflush(pc, opcode, extra, extraa);
 		else
 			fline = mmu_op30fake_pflush(pc, opcode, extra, extraa);
 		break;
 	case 4:
-		if (currprefs.mmu_model)
+		if (use_real_mmu)
 			fline = mmu_op30_ptest(pc, opcode, extra, extraa);
 		else
 			fline = mmu_op30fake_ptest(pc, opcode, extra, extraa);
@@ -5491,10 +5862,11 @@ void ipl_fetch_next()
 
 void intlev_load()
 {
-	// if (m68k_accurate_ipl) {
-	//	ipl_fetch_now();
-	// }
-	// doint();
+	return; // cryptodad not for ATARI
+	 if (m68k_accurate_ipl) {
+		ipl_fetch_now();
+	 }
+	 doint();
 }
 
 static void update_ipl(int ipl)
@@ -5611,9 +5983,7 @@ static void debug_cpu_stop()
 extern "C" void jit_cpu_reset(void);
 static int do_specialties(int cycles)
 {
-	uaecptr pc = m68k_getpc();
 	uae_atomic spcflags = regs.spcflags;
-	extern volatile uint8_t g_irq_mask;
 
 	if (spcflags & SPCFLAG_MODE_CHANGE)
 		return 1;
@@ -5662,6 +6032,7 @@ static int do_specialties(int cycles)
 	}
 
 #ifdef ACTION_REPLAY
+	uaecptr pc = m68k_getpc();
 #ifdef ACTION_REPLAY_HRTMON
 	if ((spcflags & SPCFLAG_ACTION_REPLAY) && hrtmon_flag != ACTION_REPLAY_INACTIVE)
 	{
@@ -5706,6 +6077,7 @@ static int do_specialties(int cycles)
 	}
 #endif
 
+#ifndef PISTORM_ATARI
 	while ((spcflags & SPCFLAG_BLTNASTY) && dmaen(DMA_BLITTER) && cycles > 0 && ((currprefs.waiting_blits && currprefs.cpu_model >= 68020) || !currprefs.blitter_cycle_exact))
 	{
 		int c = blitnasty();
@@ -5734,7 +6106,9 @@ static int do_specialties(int cycles)
 		}
 #endif
 	}
+#endif
 
+#ifndef PISTORM_ATARI
 	if (spcflags & SPCFLAG_CPU_SLOW)
 	{
 
@@ -5747,6 +6121,7 @@ static int do_specialties(int cycles)
 		}
 		unset_special(SPCFLAG_CPU_SLOW);
 	}
+#endif
 
 	if (spcflags & SPCFLAG_MMURESTART)
 	{
@@ -5780,11 +6155,11 @@ static int do_specialties(int cycles)
 			do_trace();
 		}
 
-		if (spcflags & SPCFLAG_UAEINT)
-		{
+		//if (spcflags & SPCFLAG_UAEINT)
+		//{
 			// check_uae_int_request();
-			unset_special(SPCFLAG_UAEINT);
-		}
+		//	unset_special(SPCFLAG_UAEINT);
+		//}
 
 		// if (m68k_interrupt_delay && m68k_accurate_ipl) {
 		//	printf ("INT path 1\n");
@@ -5795,51 +6170,62 @@ static int do_specialties(int cycles)
 		//	}
 		// } else
 		//{
-		/*
-		 * intlev() should be called periodically to get g_irq
-		 * intlev() sets regs.ipl_pin = g_ipl
-		 * intlev() also sets SPCFLAG_DOINT
-		 */
-		// if (spcflags & SPCFLAG_INT) {
-		if (spcflags & SPCFLAG_DOINT)
+		/* Non-Atari cores still use the UAE special-flag interrupt route.
+		 * Atari consumes intlev() directly after a block/instruction instead. */
+#ifdef PISTORM_ATARI
+		if (spcflags & (SPCFLAG_DOINT | SPCFLAG_INT))
 		{
+#if (0)
+			unset_special (SPCFLAG_DOINT | SPCFLAG_INT);
 
-			// int intr = intlev();
+			uint8_t irq = g_irq;
+			regs.ipl_pin = irq;
 
-			unset_special(SPCFLAG_DOINT);
-			// set_special(SPCFLAG_INT);
-			// if (g_buserr) {
-			//	printf ("[SXB] got a BERR in do_specialties()\n");
-			//	unset_special(SPCFLAG_INT);
-			//	g_irq = 0;
-			// }
+			if (irq > regs.intmask) {
+				if (regs.stopped) {
+					//printf ("[STOPPED] irq %d, intmask %d, stopped %d\n", irq, regs.intmask, regs.stopped);
+					m68k_resumestopped ();
+				}
 
-			regs.ipl_pin = g_irq;
-			// g_irq_mask = regs.intmask;
-			// if (intr > regs.intmask || (intr == 7 && intr > regs.lastipl)) {
-			// printf ("ipl_pin %d, g_irq %d, intmask %d\n", regs.ipl_pin, g_irq, regs.intmask);
-			if ((regs.ipl_pin > regs.intmask))
-			{ // || (regs.ipl_pin > regs.lastipl)) {//} || (g_irq == 7 && g_irq > regs.lastipl)) {
-
-				// printf("[INT] take ipl=%d mask=%d stopped=%d\n", g_irq, regs.intmask, regs.stopped);
-
-				do_interrupt(regs.ipl_pin);
+				do_interrupt (irq);
 			}
-			regs.lastipl = regs.ipl_pin; // intr;
-			// g_irq_mask = (regs.sr >> 8) & 7;
-			// regs.intmask = (regs.sr >> 8) & 7;
-
-			// g_irq = 0; // interrupt has been serviced so clear it
-			//}
+			else if (irq) {
+				g_irq = 0;
+				regs.ipl_pin = 0;
+			}
+			regs.lastipl = irq;
+#else
+			
+				//int intr = g_irq;//intlev();
+				unset_special(SPCFLAG_INT | SPCFLAG_DOINT);
+				
+				//if (intr > regs.intmask || (intr == 7 && intr > regs.lastipl)) {
+				//if (g_irq > g_intmask || (g_irq == 7 && g_irq > regs.lastipl)) {
+				//	printf ("[INTMASK] regs.intmask %d, g_intmask %d, g_irq %d\n", regs.intmask, g_intmask, g_irq);
+				//	regs.ipl_pin = g_irq;
+				//	do_interrupt (g_irq);
+			
+				//regs.lastipl = intr;
+			
+#endif
+			
 		}
-		//}
-
+#endif
+/*
 		if (spcflags & SPCFLAG_INT)
 		{
-			// unset_special(SPCFLAG_DOINT);
 			unset_special(SPCFLAG_INT);
-			// regs.lastipl = g_irq;
+			//set_special (SPCFLAG_DOINT);
+			printf ("[INT] got special flag - unexpected - irq %d, intmask %d, stopped %d\n", g_irq, regs.intmask, regs.stopped);
 		}
+
+		if (spcflags & SPCFLAG_DOINT)
+		{
+			unset_special(SPCFLAG_DOINT);
+			//set_special (SPCFLAG_INT);
+			printf ("[DOINT] got special flag - unexpected - irq %d, intmask %d, stopped %d\n", g_irq, regs.intmask, regs.stopped);
+		}
+*/
 	}
 
 	if (spcflags & SPCFLAG_BRK)
@@ -5996,6 +6382,7 @@ static void m68k_run_1()
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				do_cycles(cpu_cycles);
 				regs.instruction_cnt++;
+				atari_serial_irq_poll();
 				if (r->spcflags || regs.ipl[0] > 0)
 				{
 					if (do_specialties(cpu_cycles))
@@ -6154,6 +6541,7 @@ static void m68k_run_1_ce()
 #endif
 				}
 
+				atari_serial_irq_poll();
 				if (r->spcflags || regs.ipl[0] > 0)
 				{
 					if (do_specialties(0))
@@ -6283,6 +6671,9 @@ static int do_specialties_thread()
 
 		if (spcflags & (SPCFLAG_INT | SPCFLAG_DOINT))
 		{
+#ifdef PISTORM_ATARI
+			unset_special(SPCFLAG_INT | SPCFLAG_DOINT);
+#else
 			int intr = cpu_thread_ilvl;
 			if (intr > regs.intmask || (intr == 7 && intr > regs.lastipl))
 			{
@@ -6290,6 +6681,7 @@ static int do_specialties_thread()
 			}
 			regs.lastipl = intr;
 			unset_special(SPCFLAG_INT | SPCFLAG_DOINT);
+#endif
 		}
 	}
 	if (spcflags & SPCFLAG_BRK)
@@ -6550,14 +6942,14 @@ static void run_cpu_thread(int (*f)(void *))
 			}
 
 			if ((cck_cnt & 1) == 0)
-			{
-				check_uae_int_request();
-				int intr = intlev();
-				if (intr != intlev_prev)
 				{
-					cpu_thread_ilvl = intr;
-					if (intr > 0)
+					check_uae_int_request();
+					int intr = intlev();
+					if (intr != intlev_prev)
 					{
+						cpu_thread_ilvl = intr;
+						if (intr > 0)
+						{
 						cycles_do_special();
 						uae_sem_post(&cpu_wakeup_sema);
 					}
@@ -6974,16 +7366,17 @@ static void m68k_run_jit(void)
 
 	if (regs.spcflags)
 	{
-		fprintf(stderr, "[PROBE] before do_specialties, pc=0x%08x sr_int=%d spc=0x%x\n",
-				(unsigned)m68k_getpc(), regs.intmask, regs.spcflags);
-
 		if (do_specialties(0))
 		{
 			return;
 		}
 	}
 
-	fprintf(stderr, "[PROBE] after do_specialties\n");
+#ifdef PISTORM_ATARI
+#if ATARI_JIT_IRQ_POLL_INTERVAL > 0
+	unsigned atari_irq_poll_countdown = 0;
+#endif
+#endif
 
 	for (;;)
 	{
@@ -7005,15 +7398,15 @@ static void m68k_run_jit(void)
 				{
 					jit_in_compiled_code = false;
 					// Exception(bus_error_exc);
-					TRY(prb2)
-					{
+					//TRY(prb2)
+					//{
 						Exception(bus_error_exc);
-					}
-					CATCH(prb2)
-					{
-						cpu_halt(CPU_HALT_BUS_ERROR_DOUBLE_FAULT);
-					}
-					ENDTRY
+					//}
+					//CATCH(prb2)
+					//{
+					//	cpu_halt(CPU_HALT_BUS_ERROR_DOUBLE_FAULT);
+					//}
+					//ENDTRY
 				}
 			}
 			/* Set once before entering the hot dispatch loop.
@@ -7038,8 +7431,49 @@ static void m68k_run_jit(void)
 					//	fprintf(stderr, "[PROBE] run_jit dispatch: pc=0x%08x natmem=%p pushall=%p\n",
 					//		(unsigned)m68k_getpc(), natmem_offset, pushall_call_handler); } }
 
+#ifdef PISTORM_ATARI_
+					if (regs.stopped)
+					{
+						do_cycles_stop(4);
+						const uae_u8 pending_irq = g_irq;
+						if (pending_irq > regs.intmask)
+						{
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+							jit_in_compiled_code = false;
+#endif
+							intlev();
+							if (regs.spcflags)
+							{
+								if (do_specialties(0))
+								{
+									STOPTRY;
+									return;
+								}
+							}
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+							jit_in_compiled_code = true;
+#endif
+						}
+						else if (regs.spcflags)
+						{
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+							jit_in_compiled_code = false;
+#endif
+							if (do_specialties(0))
+							{
+								STOPTRY;
+								return;
+							}
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+							jit_in_compiled_code = true;
+#endif
+						}
+						continue;
+					}
+#endif
+
 					((compiled_handler *)(pushall_call_handler))();
-					// printf ("here 20\n");
+
 					/* Check for pending exception from SIGSEGV handler (x86-64) */
 #if defined(CPU_x86_64) || defined(_M_AMD64)
 					if (jit_exception_pending)
@@ -7058,9 +7492,32 @@ static void m68k_run_jit(void)
 					}
 #endif
 
-					/* Whenever we return from that, we should check spcflags */
+#ifdef PISTORM_ATARI
+					/* Match the old Musashi contract: after each translated block,
+					 * sample the latched IPL and build the interrupt frame if the
+					 * current SR mask allows it.  The sampler normally wakes us with
+					 * SPCFLAG_BRK; this countdown is only a cheap fallback for missed
+					 * block breaks. */
+#if ATARI_JIT_IRQ_POLL_INTERVAL > 0
+					if (atari_irq_poll_countdown == 0) {
+						atari_irq_poll_countdown = ATARI_JIT_IRQ_POLL_INTERVAL - 1;
+						if (g_irq > regs.intmask)
+							intlev();
+					} else {
+						atari_irq_poll_countdown--;
+					}
+#endif
+					//if (regs.stopped) {
+					//	do_cycles_stop(4);
+					//}
+#else
 					// check_uae_int_request();
-					intlev(); // check for real Atari interrupts
+					intlev();
+#endif
+					if (g_irq > regs.intmask) {
+						intlev();
+						continue;
+					}
 
 					if (regs.spcflags)
 					{
@@ -7073,10 +7530,19 @@ static void m68k_run_jit(void)
 							return;
 						}
 
+#ifdef PISTORM_ATARI
+							//if (g_irq > regs.intmask)
+							//	intlev();
+#if ATARI_JIT_IRQ_POLL_INTERVAL > 0
+							atari_irq_poll_countdown = 0;
+#endif
+#endif
+
 #if defined(JIT_HAS_BUS_ERROR_RECOVERY)
-						jit_in_compiled_code = true;
+							jit_in_compiled_code = true;
 #endif
 					}
+
 					// If T0, T1 or M got set: run normal emulation loop
 					if (regs.t0 || regs.t1 || regs.m)
 					{
@@ -7113,9 +7579,8 @@ static void m68k_run_jit(void)
 						jit_in_compiled_code = true;
 #endif
 					}
-					// printf ("here 23\n");
-				}
-// printf ("here 24\n");
+				} // end of for loop
+
 #if defined(JIT_HAS_BUS_ERROR_RECOVERY) && !defined(USE_STRUCTURED_EXCEPTION_HANDLING)
 			}
 			catch (m68k_exception &e)
@@ -7819,6 +8284,7 @@ static void m68k_run_2ce()
 				regs.ce020extracycles++;
 
 			cont:
+				atari_serial_irq_poll();
 				if (r->spcflags || regs.ipl[0] > 0)
 				{
 					if (do_specialties(0))
@@ -7978,6 +8444,7 @@ static void m68k_run_2p()
 					x_do_cycles(cpu_cycles);
 
 			cont:
+				atari_serial_irq_poll();
 				if (r->spcflags || regs.ipl[0] > 0)
 				{
 					if (do_specialties(cpu_cycles))
@@ -8017,12 +8484,20 @@ static int cpu_thread_run_2(void *v)
 	{
 		check_debugger();
 		TRY(prb)
-		{
-			while (!exit)
 			{
-				r->instruction_pc = m68k_getpc();
+				while (!exit)
+				{
+#ifdef PISTORM_ATARI
+					if (regs.stopped)
+					{
+						do_cycles_stop(4);
+						intlev();
+						continue;
+					}
+#endif
+					r->instruction_pc = m68k_getpc();
 
-				r->opcode = x_get_iword(0);
+					r->opcode = x_get_iword(0);
 				count_instr(r->opcode);
 #ifdef DEBUGGER
 				if (debug_opcode_watch)
@@ -8072,6 +8547,19 @@ static void m68k_run_2_000()
 		{
 			while (!exit)
 			{
+#ifdef PISTORM_ATARI
+				if (regs.stopped)
+				{
+					do_cycles_stop(4);
+					intlev();
+					if (r->spcflags)
+					{
+						if (do_specialties(0))
+							exit = true;
+					}
+					continue;
+				}
+#endif
 				r->instruction_pc = m68k_getpc();
 
 				r->opcode = x_get_iword(0);
@@ -8083,13 +8571,17 @@ static void m68k_run_2_000()
 				}
 #endif
 
-				cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) & 0xffff;
-				cpu_cycles = adjust_cycles(cpu_cycles);
-				do_cycles(cpu_cycles);
+					cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) & 0xffff;
+					cpu_cycles = adjust_cycles(cpu_cycles);
+					do_cycles(cpu_cycles);
 
-				if (r->spcflags)
-				{
-					if (do_specialties(cpu_cycles))
+#ifdef PISTORM_ATARI
+					intlev();
+#endif
+
+					if (r->spcflags)
+					{
+						if (do_specialties(cpu_cycles))
 						exit = true;
 				}
 			}
@@ -8125,12 +8617,25 @@ static void m68k_run_2_020()
 		check_debugger();
 		TRY(prb)
 		{
-			while (!exit)
-			{
-				r->instruction_pc = m68k_getpc();
+				while (!exit)
+				{
+#ifdef PISTORM_ATARI
+					if (regs.stopped)
+					{
+						do_cycles_stop(4);
+						intlev();
+						if (r->spcflags)
+						{
+							if (do_specialties(0))
+								exit = true;
+						}
+						continue;
+					}
+#endif
+					r->instruction_pc = m68k_getpc();
 
-				r->opcode = x_get_iword(0);
-				count_instr(r->opcode);
+					r->opcode = x_get_iword(0);
+					count_instr(r->opcode);
 
 #ifdef DEBUGGER
 				if (debug_opcode_watch)
@@ -8142,6 +8647,10 @@ static void m68k_run_2_020()
 				cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) >> 16;
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				do_cycles(cpu_cycles);
+
+#ifdef PISTORM_ATARI
+				intlev();
+#endif
 
 				if (r->spcflags)
 				{
@@ -9684,9 +10193,25 @@ void exception2_setup(uae_u32 opcode, uaecptr addr, bool read, int size, uae_u32
 void hardware_exception2(uaecptr addr, uae_u32 v, bool read, bool ins, int size)
 {
 	extern volatile uint8_t g_buserr;
-	/* top of hardware_exception2() */
-	fprintf(stderr, "[HWX2] addr=%08X pc=%08X g_buserr=%u\n",
-			(unsigned)addr, (unsigned)m68k_getpc(), (unsigned)g_buserr);
+#if CPU_BUSERR_TRACE
+	static uaecptr last_addr;
+	static uaecptr last_pc;
+	static unsigned repeat_count;
+	uaecptr pc = m68k_getpc();
+
+	if (addr != last_addr || pc != last_pc)
+	{
+		last_addr = addr;
+		last_pc = pc;
+		repeat_count = 0;
+	}
+	if (repeat_count < 8)
+	{
+		fprintf(stderr, "[HWX2] addr=%08X pc=%08X g_buserr=%u\n",
+				(unsigned)addr, (unsigned)pc, (unsigned)g_buserr);
+		repeat_count++;
+	}
+#endif
 
 	g_buserr = 0; /* clear now as the following trap jumps god knows where */
 

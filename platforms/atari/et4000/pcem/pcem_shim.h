@@ -94,6 +94,8 @@ typedef struct VIDEO_BITMAP {
 
 extern VIDEO_BITMAP *buffer32;     /* defined in pcem_shim.c, pointed at our buffer */
 extern int changeframecount;
+void pcem_buffer32_point_at(uint32_t *visible, int pitch_px, int visible_w,
+                            int visible_h, int left_pad_px);
 
 #define MEM_MAPPING_EXTERNAL 1     /* used by rom_init() call; value irrelevant */
 

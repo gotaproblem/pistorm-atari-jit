@@ -31,8 +31,10 @@
 #include "sysdeps.h"
 
 #include <math.h>
+#include <stddef.h>
 #if defined(CPU_AARCH64) && !defined(_WIN32)
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 #if defined(CPU_AARCH64) && defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -329,6 +331,17 @@ uae_u8* popallspace = NULL;
 static size_t popall_combined_alloc_size = 0;
 static uint8 *popall_combined_cache_start = NULL;
 static uint32 popall_combined_cache_kb = 0;
+static size_t popall_combined_stub_bytes = 0;
+
+static size_t arm64_jit_page_size(void)
+{
+#if defined(_SC_PAGESIZE)
+	long page_size = sysconf(_SC_PAGESIZE);
+	if (page_size > 0)
+		return (size_t)page_size;
+#endif
+	return 4096;
+}
 #endif
 
 void* pushall_call_handler = NULL;
@@ -2174,10 +2187,11 @@ void compiler_exit(void)
     // Deallocate popallspace
     if (popallspace) {
 #if defined(CPU_AARCH64)
-        vm_release(popallspace, popall_combined_alloc_size ? popall_combined_alloc_size : POPALLSPACE_SIZE);
-        popall_combined_alloc_size = 0;
-        popall_combined_cache_start = NULL;
-        popall_combined_cache_kb = 0;
+	        vm_release(popallspace, popall_combined_alloc_size ? popall_combined_alloc_size : POPALLSPACE_SIZE);
+	        popall_combined_alloc_size = 0;
+	        popall_combined_cache_start = NULL;
+	        popall_combined_cache_kb = 0;
+	        popall_combined_stub_bytes = 0;
 #else
         vm_release(popallspace, POPALLSPACE_SIZE);
 #endif
@@ -3025,32 +3039,37 @@ STATIC_INLINE void create_popalls(void)
         /* On ARM64, allocate popallspace + JIT cache as one contiguous block
          * to guarantee the cache is within B/BL branch range (+-128 MB). */
         if (currprefs.cachesize > 0) {
-            const uint32 cache_kb = currprefs.cachesize;
-            const size_t cache_bytes = (size_t)cache_kb * 1024;
-            const size_t combined_size = POPALLSPACE_SIZE + cache_bytes;
-            jit_log("ARM64: allocating popallspace+cache (cache=%u KB, total=%zu bytes)",
-                cache_kb, combined_size);
-            popallspace = alloc_code(combined_size);
-            if (popallspace) {
-                popall_combined_alloc_size = combined_size;
-                popall_combined_cache_start = popallspace + POPALLSPACE_SIZE;
-                popall_combined_cache_kb = cache_kb;
-                jit_log("ARM64: combined popallspace+cache allocation at %p (%u KB cache)",
-                    popallspace, cache_kb);
-            } else {
-                /* Fall back to popallspace-only allocation */
-                popall_combined_alloc_size = 0;
-                popall_combined_cache_start = NULL;
-                popall_combined_cache_kb = 0;
+	        const uint32 cache_kb = currprefs.cachesize;
+	        const size_t cache_bytes = (size_t)cache_kb * 1024;
+	        const size_t page_size = arm64_jit_page_size();
+	        const size_t stub_bytes = ((size_t)POPALLSPACE_SIZE + page_size - 1) & ~(page_size - 1);
+	        const size_t combined_size = stub_bytes + cache_bytes;
+	        jit_log("ARM64: allocating popallspace+cache (cache=%u KB, total=%zu bytes)",
+	            cache_kb, combined_size);
+	        popallspace = alloc_code(combined_size);
+	        if (popallspace) {
+	            popall_combined_alloc_size = combined_size;
+	            popall_combined_cache_start = popallspace + stub_bytes;
+	            popall_combined_cache_kb = cache_kb;
+	            popall_combined_stub_bytes = stub_bytes;
+	            jit_log("ARM64: combined popallspace+cache allocation at %p, cache starts %p (%u KB cache)",
+	                popallspace, popall_combined_cache_start, cache_kb);
+	        } else {
+	            /* Fall back to popallspace-only allocation */
+	            popall_combined_alloc_size = 0;
+	            popall_combined_cache_start = NULL;
+	            popall_combined_cache_kb = 0;
+	            popall_combined_stub_bytes = 0;
                 jit_log("ARM64: combined popallspace+cache allocation failed; retrying popallspace-only (%u bytes)",
                     (unsigned)POPALLSPACE_SIZE);
                 popallspace = alloc_code(POPALLSPACE_SIZE);
             }
         } else {
-            popall_combined_alloc_size = 0;
-            popall_combined_cache_start = NULL;
-            popall_combined_cache_kb = 0;
-            popallspace = alloc_code(POPALLSPACE_SIZE);
+	        popall_combined_alloc_size = 0;
+	        popall_combined_cache_start = NULL;
+	        popall_combined_cache_kb = 0;
+	        popall_combined_stub_bytes = 0;
+	        popallspace = alloc_code(POPALLSPACE_SIZE);
         }
         if (popallspace == NULL) {
 #else
@@ -3271,11 +3290,11 @@ void build_comp(void)
             compfunctbl[cft_map(tbl[i].opcode)] = tbl[i].handler;
     }
 
-    for (i = 0; nftbl[i].opcode < 65536; i++) {
-        bool uses_fpu = (tbl[i].specific & COMP_OPCODE_USES_FPU) != 0;
-        if (uses_fpu && avoid_fpu)
-            nfcompfunctbl[cft_map(nftbl[i].opcode)] = NULL;
-        else
+	for (i = 0; nftbl[i].opcode < 65536; i++) {
+		bool uses_fpu = (nftbl[i].specific & COMP_OPCODE_USES_FPU) != 0;
+		if (uses_fpu && avoid_fpu)
+			nfcompfunctbl[cft_map(nftbl[i].opcode)] = NULL;
+		else
             nfcompfunctbl[cft_map(nftbl[i].opcode)] = nftbl[i].handler;
         for (j = 0; nfctbl[j].handler_ff; j++) {
             if (nfctbl[j].opcode == nftbl[i].opcode) {

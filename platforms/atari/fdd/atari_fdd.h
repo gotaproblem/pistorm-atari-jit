@@ -118,6 +118,7 @@
 #define FDD_TRACKS_80       80
 #define FDD_DD_SECTORS      9
 #define FDD_HD_SECTORS      18
+#define FDD_IMAGE_SIZE_SS   (80 * 1 * 9 * 512)
 #define FDD_IMAGE_SIZE_DD   (80 * 2 * 9 * 512)
 #define FDD_IMAGE_SIZE_HD   (80 * 2 * 18 * 512)
 
@@ -143,6 +144,7 @@ typedef struct {
     int         current_track;
     int         sectors_per_track;
     int         num_tracks;
+    int         num_sides;
     uint32_t    image_size;
     int         reserved_sectors;   /* actual reserved sectors from image scan */
 } fdd_drive_t;

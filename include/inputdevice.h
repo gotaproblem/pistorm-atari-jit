@@ -215,18 +215,11 @@ extern int input_get_default_joystick (struct uae_input_device *uid, int num, in
 extern int input_get_default_joystick_analog (struct uae_input_device *uid, int num, int port, int af, bool gp, bool joymouseswap, bool default_osk);
 extern int input_get_default_keyboard (int num);
 
-#define DEFEVENT(A, B, C, D, E, F) INPUTEVENT_ ## A,
-#define DEFEVENT2(A, B, B2, C, D, E, F, G) INPUTEVENT_ ## A,
-#define DEFEVENTKB(A, B, C, F, PC) INPUTEVENT_ ## A,
-
 enum inputevents {
 INPUTEVENT_ZERO,
-#include "../inputevents.def"
+INPUTEVENT_DUMMY,
 INPUTEVENT_END
 };
-#undef DEFEVENT
-#undef DEFEVENT2
-#undef DEFEVENTKB
 
 extern void handle_cd32_joystick_cia (uae_u8, uae_u8);
 extern uae_u8 handle_parport_joystick (int port, uae_u8 data);

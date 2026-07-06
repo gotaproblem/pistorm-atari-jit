@@ -11549,7 +11549,7 @@ uae_u32 REGPARAM2 op_4890_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11581,7 +11581,7 @@ uae_u32 REGPARAM2 op_48a0_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem && !(mask & (1 << (7 - dstreg)))) {
+	if (!special_mem && !jit_n_addr_unsafe && !(mask & (1 << (7 - dstreg)))) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11619,7 +11619,7 @@ uae_u32 REGPARAM2 op_48a8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11652,7 +11652,7 @@ uae_u32 REGPARAM2 op_48b0_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11684,7 +11684,7 @@ uae_u32 REGPARAM2 op_48b8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11716,7 +11716,7 @@ uae_u32 REGPARAM2 op_48b9_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11761,7 +11761,7 @@ uae_u32 REGPARAM2 op_48d0_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11793,7 +11793,7 @@ uae_u32 REGPARAM2 op_48e0_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem && !(mask & (1 << (7 - dstreg)))) {
+	if (!special_mem && !jit_n_addr_unsafe && !(mask & (1 << (7 - dstreg)))) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11831,7 +11831,7 @@ uae_u32 REGPARAM2 op_48e8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11864,7 +11864,7 @@ uae_u32 REGPARAM2 op_48f0_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11896,7 +11896,7 @@ uae_u32 REGPARAM2 op_48f8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -11928,7 +11928,7 @@ uae_u32 REGPARAM2 op_48f9_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13430,7 +13430,7 @@ uae_u32 REGPARAM2 op_4c90_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13462,7 +13462,7 @@ uae_u32 REGPARAM2 op_4c98_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13498,7 +13498,7 @@ uae_u32 REGPARAM2 op_4ca8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13531,7 +13531,7 @@ uae_u32 REGPARAM2 op_4cb0_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13563,7 +13563,7 @@ uae_u32 REGPARAM2 op_4cb8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13595,7 +13595,7 @@ uae_u32 REGPARAM2 op_4cb9_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13630,7 +13630,7 @@ uae_u32 REGPARAM2 op_4cba_0_comp_ff(uae_u32 opcode) {
 	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
 	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
 	mov_l_ri(srca, address + PC16off);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13667,7 +13667,7 @@ uae_u32 REGPARAM2 op_4cbb_0_comp_ff(uae_u32 opcode) {
 	mov_l_ri(pctmp, address);
 	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
 	release_scratch(pctmp);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13699,7 +13699,7 @@ uae_u32 REGPARAM2 op_4cd0_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13731,7 +13731,7 @@ uae_u32 REGPARAM2 op_4cd8_0_comp_ff(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13767,7 +13767,7 @@ uae_u32 REGPARAM2 op_4ce8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13800,7 +13800,7 @@ uae_u32 REGPARAM2 op_4cf0_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13832,7 +13832,7 @@ uae_u32 REGPARAM2 op_4cf8_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13864,7 +13864,7 @@ uae_u32 REGPARAM2 op_4cf9_0_comp_ff(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13899,7 +13899,7 @@ uae_u32 REGPARAM2 op_4cfa_0_comp_ff(uae_u32 opcode) {
 	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
 	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
 	mov_l_ri(srca, address + PC16off);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -13936,7 +13936,7 @@ uae_u32 REGPARAM2 op_4cfb_0_comp_ff(uae_u32 opcode) {
 	mov_l_ri(pctmp, address);
 	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
 	release_scratch(pctmp);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38745,7 +38745,7 @@ uae_u32 REGPARAM2 op_4890_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38777,7 +38777,7 @@ uae_u32 REGPARAM2 op_48a0_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem && !(mask & (1 << (7 - dstreg)))) {
+	if (!special_mem && !jit_n_addr_unsafe && !(mask & (1 << (7 - dstreg)))) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38815,7 +38815,7 @@ uae_u32 REGPARAM2 op_48a8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38848,7 +38848,7 @@ uae_u32 REGPARAM2 op_48b0_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38880,7 +38880,7 @@ uae_u32 REGPARAM2 op_48b8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38912,7 +38912,7 @@ uae_u32 REGPARAM2 op_48b9_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38956,7 +38956,7 @@ uae_u32 REGPARAM2 op_48d0_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -38988,7 +38988,7 @@ uae_u32 REGPARAM2 op_48e0_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem && !(mask & (1 << (7 - dstreg)))) {
+	if (!special_mem && !jit_n_addr_unsafe && !(mask & (1 << (7 - dstreg)))) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -39026,7 +39026,7 @@ uae_u32 REGPARAM2 op_48e8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -39059,7 +39059,7 @@ uae_u32 REGPARAM2 op_48f0_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -39091,7 +39091,7 @@ uae_u32 REGPARAM2 op_48f8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -39123,7 +39123,7 @@ uae_u32 REGPARAM2 op_48f9_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40532,7 +40532,7 @@ uae_u32 REGPARAM2 op_4c90_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40564,7 +40564,7 @@ uae_u32 REGPARAM2 op_4c98_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40600,7 +40600,7 @@ uae_u32 REGPARAM2 op_4ca8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40633,7 +40633,7 @@ uae_u32 REGPARAM2 op_4cb0_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40665,7 +40665,7 @@ uae_u32 REGPARAM2 op_4cb8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40697,7 +40697,7 @@ uae_u32 REGPARAM2 op_4cb9_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40732,7 +40732,7 @@ uae_u32 REGPARAM2 op_4cba_0_comp_nf(uae_u32 opcode) {
 	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
 	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
 	mov_l_ri(srca, address + PC16off);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40769,7 +40769,7 @@ uae_u32 REGPARAM2 op_4cbb_0_comp_nf(uae_u32 opcode) {
 	mov_l_ri(pctmp, address);
 	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
 	release_scratch(pctmp);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40801,7 +40801,7 @@ uae_u32 REGPARAM2 op_4cd0_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40833,7 +40833,7 @@ uae_u32 REGPARAM2 op_4cd8_0_comp_nf(uae_u32 opcode) {
 	int i;
 	signed char offset = 0;
 	int srca = dstreg + 8;
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40869,7 +40869,7 @@ uae_u32 REGPARAM2 op_4ce8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	lea_l_brr(srca, 8 + dstreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40902,7 +40902,7 @@ uae_u32 REGPARAM2 op_4cf0_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	calc_disp_ea_020(dstreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40934,7 +40934,7 @@ uae_u32 REGPARAM2 op_4cf8_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -40966,7 +40966,7 @@ uae_u32 REGPARAM2 op_4cf9_0_comp_nf(uae_u32 opcode) {
 	signed char offset = 0;
 	int srca = alloc_scratch();
 	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -41001,7 +41001,7 @@ uae_u32 REGPARAM2 op_4cfa_0_comp_nf(uae_u32 opcode) {
 	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
 	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
 	mov_l_ri(srca, address + PC16off);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {
@@ -41038,7 +41038,7 @@ uae_u32 REGPARAM2 op_4cfb_0_comp_nf(uae_u32 opcode) {
 	mov_l_ri(pctmp, address);
 	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
 	release_scratch(pctmp);
-	if (!special_mem) {
+	if (!special_mem && !jit_n_addr_unsafe) {
 		int native = alloc_scratch();
 		get_n_addr(srca, native);
 		for (i = 0; i < 16; i++) {

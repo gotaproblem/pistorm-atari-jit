@@ -27,17 +27,27 @@ const char *cpu_types[M68K_CPU_TYPES] = {
 const char *config_item_names[CONFITEM_NUM] = {
   "NONE",
   "cpu",
+  "jit",
   "fpu",
   "loopcycles",
   "vga",
   "fps",
   "ttram",
+  "addr32",
   "rtc",
   "rom",
   "ide",
   "hdd",
   "fdd",
-  "dma_sound"
+  "dma_sound",
+  "blitter",
+  "stram_cache",
+  "stram_direct",
+  "vga_render",
+  "native_hdmi",
+  "cpu_clock_multiplier",
+  "m68k_speed",
+  "jit_cache"
 };
 
 const char *graphics_card_types[GRAPHICS_CARD_TYPES] = {
@@ -102,43 +112,154 @@ unsigned int get_int(char *str) {
   if (strlen(str) == 0)
     return -1;
 
-  int ret_int = 0;
+  while (*str == ' ' || *str == '\t')
+    str++;
 
-  if (strlen(str) > 2 && str[0] == '0' && str[1] == 'x') {
-    for (int i = 2; i < (int)strlen(str); i++) {
-      if (str[i] >= '0' && str[i] <= '9') {
-        ret_int = (str[i] - '0') | (ret_int << 4);
-      }
-      else {
-        switch(str[i]) {
-          case 'A': ret_int = 0xA | (ret_int << 4); break;
-          case 'B': ret_int = 0xB | (ret_int << 4); break;
-          case 'C': ret_int = 0xC | (ret_int << 4); break;
-          case 'D': ret_int = 0xD | (ret_int << 4); break;
-          case 'E': ret_int = 0xE | (ret_int << 4); break;
-          case 'F': ret_int = 0xF | (ret_int << 4); break;
-          case 'K': ret_int = ret_int * SIZE_KILO; break;
-          case 'M': ret_int = ret_int * SIZE_MEGA; break;
-          case 'G': ret_int = ret_int * SIZE_GIGA; break;
-          default:
-            printf ("[CFG] Unknown character %c in hex value.\n", str[i]);
-            break;
-        }
-      }
+  char *end = NULL;
+  unsigned long ret_int = strtoul(str, &end, 0);
+
+  while (end && (*end == ' ' || *end == '\t'))
+    end++;
+
+  if (end && *end) {
+    switch (toupper((unsigned char)*end)) {
+      case 'K':
+        ret_int *= SIZE_KILO;
+        break;
+      case 'M':
+        ret_int *= SIZE_MEGA;
+        break;
+      case 'G':
+        ret_int *= SIZE_GIGA;
+        break;
+      default:
+        break;
     }
-    return ret_int;
   }
-  else {
-    ret_int = atoi(str);
-    if (str[strlen(str) - 1] == 'K')
-      ret_int = ret_int * SIZE_KILO;
-    else if (str[strlen(str) - 1] == 'M')
-      ret_int = ret_int * SIZE_MEGA;
-    else if (str[strlen(str) - 1] == 'G')
-      ret_int = ret_int * SIZE_GIGA;
 
-    return ret_int;
+  return (unsigned int)ret_int;
+}
+
+static int get_signed_int(char *str)
+{
+  while (*str == ' ' || *str == '\t')
+    str++;
+
+  if (*str == '\0')
+    return 0;
+
+  char value[32];
+  memset(value, 0, sizeof(value));
+  size_t n = 0;
+  while (str[n] && str[n] != ' ' && str[n] != '\t' && n + 1 < sizeof(value)) {
+    value[n] = (char)tolower((unsigned char)str[n]);
+    n++;
   }
+
+  if (strcmp(value, "max") == 0 ||
+      strcmp(value, "fast") == 0 ||
+      strcmp(value, "fastest") == 0 ||
+      strcmp(value, "turbo") == 0)
+    return -1;
+
+  return (int)strtol(str, NULL, 0);
+}
+
+static int get_size_kb(char *str)
+{
+  while (*str == ' ' || *str == '\t')
+    str++;
+
+  if (*str == '\0')
+    return 0;
+
+  char *end = NULL;
+  unsigned long value = strtoul(str, &end, 0);
+
+  while (end && (*end == ' ' || *end == '\t'))
+    end++;
+
+  if (end && *end) {
+    switch (toupper((unsigned char)*end)) {
+      case 'G':
+        value *= SIZE_MEGA;
+        break;
+      case 'M':
+        value *= SIZE_KILO;
+        break;
+      case 'K':
+      default:
+        break;
+    }
+  }
+
+  return (int)value;
+}
+
+static bool get_bool_default_true(char *str)
+{
+  while (*str == ' ' || *str == '\t')
+    str++;
+
+  if (*str == '\0')
+    return true;
+
+  char value[32];
+  memset(value, 0, sizeof(value));
+  size_t n = 0;
+  while (str[n] && str[n] != ' ' && str[n] != '\t' && n + 1 < sizeof(value)) {
+    value[n] = (char)tolower((unsigned char)str[n]);
+    n++;
+  }
+
+  return strcmp(value, "0") != 0 &&
+         strcmp(value, "off") != 0 &&
+         strcmp(value, "no") != 0 &&
+         strcmp(value, "false") != 0 &&
+         strcmp(value, "disabled") != 0 &&
+         strcmp(value, "disable") != 0;
+}
+
+static bool is_bool_false(char *str)
+{
+  while (*str == ' ' || *str == '\t')
+    str++;
+
+  char value[32];
+  memset(value, 0, sizeof(value));
+  size_t n = 0;
+  while (str[n] && str[n] != ' ' && str[n] != '\t' && n + 1 < sizeof(value)) {
+    value[n] = (char)tolower((unsigned char)str[n]);
+    n++;
+  }
+
+  return strcmp(value, "0") == 0 ||
+         strcmp(value, "off") == 0 ||
+         strcmp(value, "no") == 0 ||
+         strcmp(value, "false") == 0 ||
+         strcmp(value, "disabled") == 0 ||
+         strcmp(value, "disable") == 0;
+}
+
+static bool is_bool_true(char *str)
+{
+  while (*str == ' ' || *str == '\t')
+    str++;
+
+  char value[32];
+  memset(value, 0, sizeof(value));
+  size_t n = 0;
+  while (str[n] && str[n] != ' ' && str[n] != '\t' && n + 1 < sizeof(value)) {
+    value[n] = (char)tolower((unsigned char)str[n]);
+    n++;
+  }
+
+  return strcmp(value, "1") == 0 ||
+         strcmp(value, "on") == 0 ||
+         strcmp(value, "yes") == 0 ||
+         strcmp(value, "true") == 0 ||
+         strcmp(value, "enabled") == 0 ||
+         strcmp(value, "enable") == 0;
 }
 
 void get_next_string(char *str, char *str_out, int *strpos, char separator) {
@@ -215,7 +336,11 @@ struct emulator_config *load_config_file(char *filename) {
   }
 
   memset(cfg, 0x00, sizeof(struct emulator_config));
-  cfg->cpu_type = M68K_CPU_TYPE_68000;
+  cfg->cpu_type = M68K_CPU_TYPE_68000 - 1;
+  cfg->jit = true;
+  cfg->blitter = true;
+  cfg->vga_render = true;
+  cfg->native_hdmi = true;
   
   while (!feof(in)) 
   {
@@ -235,12 +360,14 @@ struct emulator_config *load_config_file(char *filename) {
       case CONFITEM_CPU:
         cfg->cpu_type = get_m68k_cpu_type(parse_line + str_pos) - 1;
         break;
+
+      case CONFITEM_JIT:
+        cfg->jit = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] JIT %s\n", cfg->jit ? "enabled" : "disabled");
+        break;
       
       case CONFITEM_FPU:
-        cfg->fpu = false;
-
-        if (cfg->cpu_type == M68K_CPU_TYPE_68020)
-          cfg->fpu = true;
+        cfg->fpu = get_bool_default_true(parse_line + str_pos);
         break;
 
       case CONFITEM_LOOPCYCLES:
@@ -286,10 +413,30 @@ struct emulator_config *load_config_file(char *filename) {
         break;
 
       case CONFITEM_TTRAM:
-        cfg->ttram = false;
-
-        if (cfg->cpu_type != M68K_CPU_TYPE_68000)
+        {
           cfg->ttram = true;
+          char *arg = parse_line + str_pos;
+          while (*arg == ' ' || *arg == '\t')
+            arg++;
+
+          if (*arg == '\0' || is_bool_true(arg))
+          {
+            cfg->ttram_size = 128u * SIZE_MEGA;
+          }
+          else if (is_bool_false(arg))
+          {
+            cfg->ttram = false;
+            cfg->ttram_size = 0;
+          }
+          else
+          {
+            cfg->ttram_size = get_int(arg);
+          }
+        }
+        break;
+
+      case CONFITEM_ADDR32:
+        cfg->addr32 = get_bool_default_true(parse_line + str_pos);
         break;
 
       case CONFITEM_RTC:
@@ -390,6 +537,49 @@ struct emulator_config *load_config_file(char *filename) {
         }
         break;
 
+      case CONFITEM_BLITTER:
+        cfg->blitter = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] Blitter %s\n", cfg->blitter ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_STRAM_CACHE:
+        cfg->stram_cache = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] ST-RAM cache %s\n", cfg->stram_cache ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_STRAM_DIRECT:
+        cfg->stram_direct = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] ST-RAM direct %s\n", cfg->stram_direct ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_VGA_RENDER:
+        cfg->vga_render = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] VGA render %s\n", cfg->vga_render ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_NATIVE_HDMI:
+        cfg->native_hdmi = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] Native HDMI %s\n", cfg->native_hdmi ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_CPU_CLOCK_MULTIPLIER:
+        cfg->cpu_clock_multiplier = (int)get_int(parse_line + str_pos);
+        cfg->cpu_clock_multiplier_set = true;
+        printf ("[CFG] CPU clock multiplier %d\n", cfg->cpu_clock_multiplier);
+        break;
+
+      case CONFITEM_M68K_SPEED:
+        cfg->m68k_speed = get_signed_int(parse_line + str_pos);
+        cfg->m68k_speed_set = true;
+        printf ("[CFG] m68k_speed %d\n", cfg->m68k_speed);
+        break;
+
+      case CONFITEM_JIT_CACHE:
+        cfg->jit_cache = get_size_kb(parse_line + str_pos);
+        cfg->jit_cache_set = true;
+        printf ("[CFG] JIT cache %dKB\n", cfg->jit_cache);
+        break;
+
       case CONFITEM_NONE:
       default:
         printf ("[CFG] Unknown config item %s on line %d.\n", cur_cmd, cur_line);
@@ -398,6 +588,40 @@ struct emulator_config *load_config_file(char *filename) {
 
   skip_line:
     cur_line++;
+  }
+
+  if (cfg->cpu_type < M68K_CPU_TYPE_68020 - 1)
+  {
+    if (cfg->fpu)
+      printf ("[CFG] FPU ignored: CPU does not support external FPU\n");
+    cfg->fpu = false;
+
+    if (cfg->ttram)
+      printf ("[CFG] TT-RAM ignored: CPU is 24-bit only\n");
+    cfg->ttram = false;
+    cfg->ttram_size = 0;
+
+    if (cfg->addr32)
+      printf ("[CFG] 32-bit address space ignored: CPU is 24-bit only\n");
+    cfg->addr32 = false;
+  }
+  else
+  {
+    if (cfg->fpu)
+      printf ("[CFG] FPU enabled\n");
+
+    if (cfg->ttram)
+    {
+      if (cfg->ttram_size == 0)
+        cfg->ttram_size = 128u * SIZE_MEGA;
+      if (cfg->ttram_size > 128u * SIZE_MEGA)
+        cfg->ttram_size = 128u * SIZE_MEGA;
+      cfg->addr32 = true;
+      printf ("[CFG] TT-RAM enabled - %uMB\n", cfg->ttram_size >> 20);
+    }
+
+    if (cfg->addr32)
+      printf ("[CFG] 32-bit address space enabled\n");
   }
   /*
   goto load_successful;
@@ -418,4 +642,3 @@ struct emulator_config *load_config_file(char *filename) {
 */
   return cfg;
 }
-

@@ -135,12 +135,11 @@
 #define KBLED_CAPSLOCKM (1 << KBLED_CAPSLOCKB)
 #define KBLED_SCROLLLOCKM (1 << KBLED_SCROLLLOCKB)
 
-#define AKS(A) AKS_ ## A,
 enum aks {
 	AKS_START = 0x1ff,
-#include "../aks.def"
+	AKS_ENTERGUI,
+	AKS_DUMMY = AKS_ENTERGUI
 };
-#undef AKS
 
 #define AKS_FIRST AKS_ENTERGUI
 

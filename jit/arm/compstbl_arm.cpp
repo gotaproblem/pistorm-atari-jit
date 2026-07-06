@@ -1827,8 +1827,8 @@ extern const struct comptbl op_smalltbl_0_comp_ff[] = { { op_0_0_comp_ff, 0, 0x0
 { NULL, 62074, 0x00000021 }, /* FTRAPcc */
 { NULL, 62075, 0x00000021 }, /* FTRAPcc */
 { NULL, 62076, 0x00000021 }, /* FTRAPcc */
-{ op_f280_0_comp_ff, 62080, 0x00000005 }, /* FBcc */
-{ op_f2c0_0_comp_ff, 62144, 0x00000005 }, /* FBcc */
+{ op_f280_0_comp_ff, 62080, 0x00000025 }, /* FBcc */
+{ op_f2c0_0_comp_ff, 62144, 0x00000025 }, /* FBcc */
 { NULL, 62224, 0x00000020 }, /* FSAVE */
 { NULL, 62240, 0x00000020 }, /* FSAVE */
 { NULL, 62248, 0x00000020 }, /* FSAVE */
@@ -3695,8 +3695,8 @@ extern const struct comptbl op_smalltbl_0_comp_nf[] = { { op_0_0_comp_nf, 0, 0x0
 { NULL, 62074, 0x00000021 }, /* FTRAPcc */
 { NULL, 62075, 0x00000021 }, /* FTRAPcc */
 { NULL, 62076, 0x00000021 }, /* FTRAPcc */
-{ op_f280_0_comp_nf, 62080, 0x00000005 }, /* FBcc */
-{ op_f2c0_0_comp_nf, 62144, 0x00000005 }, /* FBcc */
+{ op_f280_0_comp_nf, 62080, 0x00000025 }, /* FBcc */
+{ op_f2c0_0_comp_nf, 62144, 0x00000025 }, /* FBcc */
 { NULL, 62224, 0x00000020 }, /* FSAVE */
 { NULL, 62240, 0x00000020 }, /* FSAVE */
 { NULL, 62248, 0x00000020 }, /* FSAVE */

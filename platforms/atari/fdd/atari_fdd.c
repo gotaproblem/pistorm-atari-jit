@@ -61,7 +61,7 @@ static int      fdd_image_read(int drive, int track, int side,
 static int      fdd_image_write(int drive, int track, int side,
                                 int sector, int count, const uint8_t *buf);
 static off_t    sector_offset(fdd_drive_t *d, int track, int side,
-                              int sector, int num_sides);
+                              int sector);
 
 /* =========================================================================
  * DMA transfer to/from real Atari ST RAM via ps_protocol
@@ -122,6 +122,7 @@ void fdd_init(void)
     for (int i = 0; i < FDD_MAX_DRIVES; i++) {
         fdc.drives[i].fd            = -1;
         fdc.drives[i].current_track = 0;
+        fdc.drives[i].num_sides     = 2;
         motor_ticks[i]              = 0;
     }
 
@@ -182,6 +183,7 @@ int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
             sides >= 1 && sides <= 2 && total > 0) {
             drv->sectors_per_track = spt;
             drv->num_tracks        = total / (spt * sides);
+            drv->num_sides         = sides;
             drv->type = (spt > 9) ? FDD_TYPE_HD : FDD_TYPE_DD;
             bpb_ok = true;
 
@@ -214,18 +216,26 @@ int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
 
     if (!bpb_ok) {
         /* Fallback: detect from file size */
-        if (drv->image_size <= FDD_IMAGE_SIZE_DD) {
+        if (drv->image_size <= FDD_IMAGE_SIZE_SS) {
             drv->type              = FDD_TYPE_DD;
             drv->sectors_per_track = FDD_DD_SECTORS;
+            drv->num_sides         = 1;
+            drv->num_tracks        = drv->image_size / (FDD_SECTOR_SIZE * drv->sectors_per_track);
+            drv->reserved_sectors  = 1;
+        } else if (drv->image_size <= FDD_IMAGE_SIZE_DD) {
+            drv->type              = FDD_TYPE_DD;
+            drv->sectors_per_track = FDD_DD_SECTORS;
+            drv->num_sides         = 2;
             drv->num_tracks        = FDD_TRACKS_80;
             drv->reserved_sectors  = 1;
         } else {
             drv->type              = FDD_TYPE_HD;
             drv->sectors_per_track = FDD_HD_SECTORS;
+            drv->num_sides         = 2;
             drv->num_tracks        = FDD_TRACKS_80;
         }
-        FDD_LOG("Drive %c: size-based geometry: %d spt",
-                'A' + drive, drv->sectors_per_track);
+        FDD_LOG("Drive %c: size-based geometry: %d tracks %d spt %d sides",
+                'A' + drive, drv->num_tracks, drv->sectors_per_track, drv->num_sides);
     }
 
     drv->write_protected = write_protect;
@@ -233,10 +243,10 @@ int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
     drv->media_changed   = false;
     strncpy(drv->image_path, image_path, sizeof(drv->image_path) - 1);
 
-    FDD_LOG("Drive %c: mounted '%s' (%s, %d tracks, %d spt, %s)",
+    FDD_LOG("Drive %c: mounted '%s' (%s, %d tracks, %d spt, %d sides, %s)",
             'A' + drive, image_path,
             drv->type == FDD_TYPE_HD ? "HD" : "DD",
-            drv->num_tracks, drv->sectors_per_track,
+            drv->num_tracks, drv->sectors_per_track, drv->num_sides,
             write_protect ? "WP" : "RW");
 
     //pthread_mutex_unlock(&fdc.lock);
@@ -252,6 +262,7 @@ void fdd_eject_disk(int drive)
     drv->disk_inserted  = false;
     drv->media_changed  = true;
     drv->write_protected = false;
+    drv->num_sides = 2;
     FDD_LOG("Drive %c: ejected", 'A' + drive);
     //pthread_mutex_unlock(&fdc.lock);
 }
@@ -1067,8 +1078,10 @@ static void fdc_do_read_address(void)
  * ========================================================================= */
 
 static off_t sector_offset(fdd_drive_t *d, int track, int side,
-                            int sector, int num_sides)
+                            int sector)
 {
+    int num_sides = d->num_sides ? d->num_sides : 2;
+
     //int logical = ((track * num_sides) + side) * d->sectors_per_track
      //             + (sector - 1);
 
@@ -1091,6 +1104,7 @@ static int fdd_image_read(int drive, int track, int side,
                            int sector, int count, uint8_t *buf)
 {
     fdd_drive_t *d = &fdc.drives[drive];
+    int sides = d->num_sides ? d->num_sides : 2;
 
    // fprintf(stderr, "[IMG] request: T%d S%d sec=%d count=%d spt=%d\n",
     //    track, side, sector, count, d->sectors_per_track);
@@ -1102,14 +1116,14 @@ static int fdd_image_read(int drive, int track, int side,
     }
 
     if (track  < 0 || track  >= d->num_tracks        ||
-        side   < 0 || side   >= FDD_MAX_SIDES         ||
+        side   < 0 || side   >= sides                 ||
         sector < 1 || sector + count - 1 > d->sectors_per_track) {
-        FDD_LOG("Read: out of range T%d S%d Sec%d+%d (max %d tracks, %d spt)",
-                track, side, sector, count, d->num_tracks, d->sectors_per_track);
+        FDD_LOG("Read: out of range T%d S%d Sec%d+%d (max %d tracks, %d spt, %d sides)",
+                track, side, sector, count, d->num_tracks, d->sectors_per_track, sides);
         return -1;
     }
 
-    off_t off = sector_offset(d, track, side, sector, 2);
+    off_t off = sector_offset(d, track, side, sector);
 
     //fprintf(stderr, "[IMG] about to pread: fd=%d off=%ld count=%zu\n",
     //    d->fd, (long)off, (size_t)count * FDD_SECTOR_SIZE);
@@ -1132,6 +1146,7 @@ static int fdd_image_write(int drive, int track, int side,
                             int sector, int count, const uint8_t *buf)
 {
     fdd_drive_t *d = &fdc.drives[drive];
+    int sides = d->num_sides ? d->num_sides : 2;
 
     if (d->fd < 0 || !d->disk_inserted) return -1;
     if (d->write_protected) {
@@ -1140,14 +1155,14 @@ static int fdd_image_write(int drive, int track, int side,
     }
 
     if (track  < 0 || track  >= d->num_tracks        ||
-        side   < 0 || side   >= FDD_MAX_SIDES         ||
+        side   < 0 || side   >= sides                 ||
         sector < 1 || sector + count - 1 > d->sectors_per_track) {
-        FDD_LOG("Write: out of range T%d S%d Sec%d+%d",
-                track, side, sector, count);
+        FDD_LOG("Write: out of range T%d S%d Sec%d+%d (max %d tracks, %d spt, %d sides)",
+                track, side, sector, count, d->num_tracks, d->sectors_per_track, sides);
         return -1;
     }
 
-    off_t off = sector_offset(d, track, side, sector, 2);
+    off_t off = sector_offset(d, track, side, sector);
     ssize_t n = pwrite(d->fd, buf, (size_t)count * FDD_SECTOR_SIZE, off);
     if (n != (ssize_t)(count * FDD_SECTOR_SIZE)) {
         FDD_LOG("Write: pwrite failed at offset %ld: %s",

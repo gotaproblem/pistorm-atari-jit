@@ -33,17 +33,27 @@ enum
 typedef enum {
   CONFITEM_NONE,
   CONFITEM_CPU,
+  CONFITEM_JIT,
   CONFITEM_FPU,
   CONFITEM_LOOPCYCLES,
   CONFITEM_GRAPHICS_CARD,
   CONFITEM_FPS,
   CONFITEM_TTRAM,
+  CONFITEM_ADDR32,
   CONFITEM_RTC,
   CONFITEM_ROM,
   CONFITEM_IDE,
   CONFITEM_HDD,
   CONFITEM_FDD,
   CONFITEM_DMA_SOUND,
+  CONFITEM_BLITTER,
+  CONFITEM_STRAM_CACHE,
+  CONFITEM_STRAM_DIRECT,
+  CONFITEM_VGA_RENDER,
+  CONFITEM_NATIVE_HDMI,
+  CONFITEM_CPU_CLOCK_MULTIPLIER,
+  CONFITEM_M68K_SPEED,
+  CONFITEM_JIT_CACHE,
   CONFITEM_NUM,
 } config_items;
 
@@ -94,11 +104,14 @@ typedef struct VGA
 
 struct emulator_config {
   uint8_t cpu_type;
+  bool jit;
   int loop_cycles;
   bool fpu;
   VGA_s graphics;
   int fps;
   bool ttram;
+  uint32_t ttram_size;
+  bool addr32;
   bool rtc;
   ROM_s rom;//rom[2];
   //int rom_count;
@@ -106,6 +119,17 @@ struct emulator_config {
   HDD_s hdd [8];
   FDD_s fdd;
   bool dma_sound;
+  bool blitter;
+  bool stram_cache;
+  bool stram_direct;
+  bool vga_render;
+  bool native_hdmi;
+  bool cpu_clock_multiplier_set;
+  int cpu_clock_multiplier;
+  bool m68k_speed_set;
+  int m68k_speed;
+  bool jit_cache_set;
+  int jit_cache;
 };
 
 
@@ -123,4 +147,3 @@ void free_config_file(struct emulator_config *cfg);
 
 
 #endif /* _CONFIG_FILE_H */
-

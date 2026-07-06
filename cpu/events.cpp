@@ -341,8 +341,13 @@ void do_cycles_slow(int cycles_to_add)
 		if ((pissoff -= cycles_to_add) >= 0) {
 			return;
 		}
-		cycles_to_add = -pissoff;
-		pissoff = 0;
+		if (currprefs.cachesize && pissoff_value > 0) {
+			cycles_to_add = pissoff_value - pissoff;
+			pissoff = pissoff_value;
+		} else {
+			cycles_to_add = -pissoff;
+			pissoff = 0;
+		}
 	}
 	currcycle += cycles_to_add;     /* PiStorm: advance the clock, no event dispatch */
 #ifdef AMIGA_

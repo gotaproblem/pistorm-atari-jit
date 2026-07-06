@@ -126,7 +126,9 @@ typedef union
 } t_a32;
 
 uint8_t ps_read_8(uint32_t address);
+uint8_t ps_read_8_fc(uint32_t address, uint8_t fc_value, uint8_t *berr_out);
 uint16_t ps_read_16(uint32_t address);
+uint16_t ps_read_16_fc(uint32_t address, uint8_t fc_value, uint8_t *berr_out);
 uint32_t ps_read_32(uint32_t address);
 
 void ps_write_8(uint32_t address, uint16_t data);

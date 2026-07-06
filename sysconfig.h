@@ -42,6 +42,7 @@
 #define UAE             1   /* enables UAE paths; compemu defines USE_JIT under UAE */
 #define JIT             1   /* compile the recompiler */
 #define USE_JIT             /* empty, matching jit/arm/compemu_arm.h (all uses are #ifdef) */
+#define PISTORM_ATARI   1   /* Atari PiStorm build: real bus IACK, no Amiga custom IRQs */
 #define AMIBERRY        1   /* empty REGPARAM*, soft uae_p32 warning, inline atomics */
 /* Amiberry's sysdeps.h defines BOTH of these on aarch64 (its aarch64 branch
  * does "define CPU_arm 1" then CPU_AARCH64). CPU_arm gates the midfunc

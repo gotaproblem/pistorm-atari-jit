@@ -121,7 +121,7 @@ DEFS = -D_GNU_SOURCE
 # lives at ./threaddep/thread.h and -I. + -Ithreaddep cover both spellings).
 # ./include resolves uae/*, newcpu.h, memory.h, options.h; . resolves cputbl.h
 # and machdep/maccess.h; -Isoftfloat for the FPU sub-library headers.
-INCLUDES = -I. -Ithreaddep -Iinclude -Isoftfloat -Ijit -I/usr/include/libdrm -Ipcem
+INCLUDES = -I. -Igpio -Ithreaddep -Iinclude -Isoftfloat -Ijit -I/usr/include/libdrm -Ipcem
 
 # Optimization is a separate variable so the big generated files can be built
 # lean. -O level affects only emulation speed, not correctness or the aarch64
@@ -129,8 +129,8 @@ INCLUDES = -I. -Ithreaddep -Iinclude -Isoftfloat -Ijit -I/usr/include/libdrm -Ip
 # with no debug info to keep peak RAM down on a 4 GB Pi.
 #   Tune from the command line, e.g.:  make HEAVY_OPT=-O0   (least RAM/fastest build)
 #                                      make HEAVY_OPT=-O2   (fastest emulator, most RAM)
-OPT       ?= -O2
-HEAVY_OPT ?= -O3 #-fomit-frame-pointer -flto
+OPT       ?= -O3 -g1 -fno-omit-frame-pointer
+HEAVY_OPT ?= -O3 -g1 -fno-omit-frame-pointer
 
 COMMON_FLAGS = $(PIOPTS) $(OPT) -rdynamic -pthread $(PI) $(DEFS) $(INCLUDES) \
                -fno-strict-aliasing

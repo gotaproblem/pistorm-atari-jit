@@ -88,10 +88,16 @@ uae_u8 call_saved[] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1, 1,1,1,1, 1,1
 	 also saving those registers
    - Special registers (such like the stack pointer) should not be "preserved"
 	 by pushing, even though they are "saved" across function calls
-   - r19 - r26 not in use, so no need to preserve
+   - r19 - r26 are not allocated to generated code, but the dispatcher is
+     still called from optimized C/C++. The AArch64 ABI requires callees to
+     preserve x19-x28, and the compiler may keep live C++ state there across
+     the JIT call.
+   - d8-d15 are also callee-saved by the AArch64 ABI. The generated FPU code
+     uses them for guest FP state, so the dispatcher must save their low 64 bits
+     before returning to optimized C/C++.
    - if you change need_to_preserve, modify raw_push_regs_to_preserve() and raw_pop_preserved_regs()
 */
-static const uae_u8 need_to_preserve[] = {0,0,0,0, 0,0,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,0, 0,0,0,0, 0,0,0,1, 1,0,0,0};
+static const uae_u8 need_to_preserve[] = {0,0,0,0, 0,0,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1, 1,0,0,0};
 
 #include "codegen_arm64.h"
 
@@ -179,14 +185,40 @@ STATIC_INLINE void LOAD_U64(int r, uae_u64 val)
 }
 
 
-#define NUM_PUSH_CMDS 1
-#define NUM_POP_CMDS 1
+#define NUM_PUSH_CMDS 15
+#define NUM_POP_CMDS 15
 STATIC_INLINE void raw_push_regs_to_preserve(void) {
+	SUB_xxi(RSP_INDEX, RSP_INDEX, 64);
+	STR_dXi(8, RSP_INDEX, 0);
+	STR_dXi(9, RSP_INDEX, 8);
+	STR_dXi(10, RSP_INDEX, 16);
+	STR_dXi(11, RSP_INDEX, 24);
+	STR_dXi(12, RSP_INDEX, 32);
+	STR_dXi(13, RSP_INDEX, 40);
+	STR_dXi(14, RSP_INDEX, 48);
+	STR_dXi(15, RSP_INDEX, 56);
+	STP_xxXpre(19, 20, RSP_INDEX, -16);
+	STP_xxXpre(21, 22, RSP_INDEX, -16);
+	STP_xxXpre(23, 24, RSP_INDEX, -16);
+	STP_xxXpre(25, 26, RSP_INDEX, -16);
 	STP_xxXpre(27, 28, RSP_INDEX, -16);
 }
 
 STATIC_INLINE void raw_pop_preserved_regs(void) {
 	LDP_xxXpost(27, 28, RSP_INDEX, 16);
+	LDP_xxXpost(25, 26, RSP_INDEX, 16);
+	LDP_xxXpost(23, 24, RSP_INDEX, 16);
+	LDP_xxXpost(21, 22, RSP_INDEX, 16);
+	LDP_xxXpost(19, 20, RSP_INDEX, 16);
+	LDR_dXi(8, RSP_INDEX, 0);
+	LDR_dXi(9, RSP_INDEX, 8);
+	LDR_dXi(10, RSP_INDEX, 16);
+	LDR_dXi(11, RSP_INDEX, 24);
+	LDR_dXi(12, RSP_INDEX, 32);
+	LDR_dXi(13, RSP_INDEX, 40);
+	LDR_dXi(14, RSP_INDEX, 48);
+	LDR_dXi(15, RSP_INDEX, 56);
+	ADD_xxi(RSP_INDEX, RSP_INDEX, 64);
 }
 
 STATIC_INLINE void raw_flags_to_reg(int r)
@@ -515,6 +547,41 @@ STATIC_INLINE void compemu_raw_jmp_pc_tag(void)
 	idx = (uintptr)&regs.cache_tags - (uintptr)&regs;
 	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
 	LDR_xXxLSLi(REG_WORK1, REG_WORK2, REG_WORK1, 1);
+
+	/* cache_tags[cacheline(pc_p)].handler is data maintained by the C++ JIT
+	 * cache. If it is stale or corrupted, branching to it turns a guest-side
+	 * problem into a host SIGSEGV in anonymous memory. Only branch to known JIT
+	 * code ranges; otherwise fall back to popall_execute_normal so the block is
+	 * interpreted/recompiled through the normal cache-miss path. */
+	LOAD_U64(REG_WORK3, (uintptr)&popallspace);
+	LDR_xXi(REG_WORK3, REG_WORK3, 0);
+	CMP_xx(REG_WORK1, REG_WORK3);
+	uae_u32 *check_compiled_1 = (uae_u32 *)get_target();
+	BCC_i(0); /* handler < popallspace */
+	LOAD_U32(REG_WORK4, POPALLSPACE_SIZE);
+	ADD_xxx(REG_WORK4, REG_WORK3, REG_WORK4);
+	CMP_xx(REG_WORK1, REG_WORK4);
+	uae_u32 *ok_popall = (uae_u32 *)get_target();
+	BCC_i(0); /* handler < popallspace + POPALLSPACE_SIZE */
+
+	write_jmp_target(check_compiled_1, (uintptr)get_target());
+	LOAD_U64(REG_WORK3, (uintptr)&compiled_code);
+	LDR_xXi(REG_WORK3, REG_WORK3, 0);
+	CMP_xx(REG_WORK1, REG_WORK3);
+	uae_u32 *fallback_1 = (uae_u32 *)get_target();
+	BCC_i(0); /* handler < compiled_code */
+	LOAD_U64(REG_WORK4, (uintptr)&current_compile_p);
+	LDR_xXi(REG_WORK4, REG_WORK4, 0);
+	CMP_xx(REG_WORK1, REG_WORK4);
+	uae_u32 *ok_compiled = (uae_u32 *)get_target();
+	BCC_i(0); /* handler < current_compile_p */
+
+	write_jmp_target(fallback_1, (uintptr)get_target());
+	LOAD_U64(REG_WORK1, (uintptr)&popall_execute_normal);
+	LDR_xXi(REG_WORK1, REG_WORK1, 0);
+
+	write_jmp_target(ok_popall, (uintptr)get_target());
+	write_jmp_target(ok_compiled, (uintptr)get_target());
 	BR_x(REG_WORK1);
 }
 

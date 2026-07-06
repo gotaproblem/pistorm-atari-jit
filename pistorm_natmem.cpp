@@ -6,7 +6,7 @@
 //
 //   * RAM/ROM/TT-RAM are DIRECT-mapped  -> JIT bangs [x27 + addr], full speed
 //   * I/O (HW regs, IDE) are HANDLER-routed -> ps_* over the bus, never banged
-//   * ST-RAM reads are direct, writes are write-through-to-bus + SMC-invalidate
+//   * ST-RAM reads are direct; writes can be write-through or cached + SMC-invalidate
 //
 // Verified against BlitterStudio/amiberry master: natmem_offset (uae_u8*),
 // addrbank{lget..bput,baseaddr,flags,jit_read_flag,jit_write_flag,lgeti,wgeti},
@@ -27,17 +27,21 @@
 #include "platforms/atari/et4000/et4000.h"
 #include <sys/mman.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
 #include "platforms/atari/audio/dmasnd.h"
 
 extern "C"
 {
-    unsigned int m68k_read_memory_8(uint32_t);
-    unsigned int m68k_read_memory_16(uint32_t);
-    unsigned int m68k_read_memory_32(uint32_t);
-    void m68k_write_memory_8(uint32_t, unsigned int);
-    void m68k_write_memory_16(uint32_t, unsigned int);
-    void m68k_write_memory_32(uint32_t, unsigned int);
     extern volatile uint8_t fc; // CONFIRM type/name in your tree
+
+    unsigned int m68k_read_memory_8(unsigned int address);
+    unsigned int m68k_read_memory_16(unsigned int address);
+    unsigned int m68k_read_memory_32(unsigned int address);
+    void m68k_write_memory_8(unsigned int address, unsigned int value);
+    void m68k_write_memory_16(unsigned int address, unsigned int value);
+    void m68k_write_memory_32(unsigned int address, unsigned int value);
 
     uint8_t ps_read_8(uint32_t address);
     uint16_t ps_read_16(uint32_t address);
@@ -69,7 +73,94 @@ extern "C"
     void et4000_engine_vram_write8(uint32_t off, uint8_t v);
     void et4000_engine_vram_write16(uint32_t off, uint16_t v);
     void et4000_engine_vram_write32(uint32_t off, uint32_t v);
+    int et4000_engine_direct_vram_ok(void);
 }
+
+#define ATARI_VGA_BANK_PROFILE 0
+#define ATARI_BLITTER_TRACE 0
+#define ATARI_ACIA_TRACE 0
+
+#if ATARI_VGA_BANK_PROFILE
+typedef struct {
+    uint64_t calls;
+    uint64_t total_ns;
+    uint64_t max_ns;
+} pistorm_vga_prof_counter_t;
+
+enum {
+    VGA_BANK_PROF_VRAM_RD_DIRECT,
+    VGA_BANK_PROF_VRAM_WR_DIRECT,
+    VGA_BANK_PROF_VRAM_RD_ENGINE,
+    VGA_BANK_PROF_VRAM_WR_ENGINE,
+    VGA_BANK_PROF_IO_RD,
+    VGA_BANK_PROF_IO_WR,
+    VGA_BANK_PROF_COUNT
+};
+
+static pistorm_vga_prof_counter_t vga_bank_prof[VGA_BANK_PROF_COUNT];
+
+static int vga_bank_profile_enabled(void)
+{
+    return 1;
+}
+
+static uint64_t vga_bank_profile_now_ns(void)
+{
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_RAW
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void vga_bank_profile_add(unsigned idx, uint64_t ns)
+{
+    static uint64_t next_print_ns;
+    static const char *names[VGA_BANK_PROF_COUNT] = {
+        "bank_vram_rd_direct", "bank_vram_wr_direct",
+        "bank_vram_rd_engine", "bank_vram_wr_engine",
+        "bank_io_rd", "bank_io_wr"
+    };
+    uint64_t now;
+
+    if (!vga_bank_profile_enabled() || idx >= VGA_BANK_PROF_COUNT)
+        return;
+
+    vga_bank_prof[idx].calls++;
+    vga_bank_prof[idx].total_ns += ns;
+    if (ns > vga_bank_prof[idx].max_ns)
+        vga_bank_prof[idx].max_ns = ns;
+
+    now = vga_bank_profile_now_ns();
+    if (!next_print_ns)
+        next_print_ns = now + 1000000000ULL;
+    if (now < next_print_ns)
+        return;
+
+    fprintf(stderr, "[VGABANK/s]");
+    for (unsigned i = 0; i < VGA_BANK_PROF_COUNT; i++)
+    {
+        uint64_t calls = vga_bank_prof[i].calls;
+        if (!calls)
+            continue;
+        fprintf(stderr, " %s n=%llu avg=%lluns max=%lluns total=%lluus",
+                names[i],
+                (unsigned long long)calls,
+                (unsigned long long)(vga_bank_prof[i].total_ns / calls),
+                (unsigned long long)vga_bank_prof[i].max_ns,
+                (unsigned long long)(vga_bank_prof[i].total_ns / 1000ULL));
+        memset(&vga_bank_prof[i], 0, sizeof(vga_bank_prof[i]));
+    }
+    fprintf(stderr, "\n");
+    next_print_ns = now + 1000000000ULL;
+}
+#else
+#define vga_bank_profile_enabled() 0
+#define vga_bank_profile_now_ns() 0
+#define vga_bank_profile_add(idx, ns) ((void)0)
+#endif
 
 extern "C"
 {
@@ -87,7 +178,11 @@ extern "C"
     void     fdd_io_write     (uint32_t addr, uint32_t val, int size);
     bool     fdd_owns_address (uint32_t addr);
     uint8_t  fdd_gpip         (uint8_t other_gpip);
+    void     mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word);
 }
+extern bool FDD_enabled;
+
+#define MFP_GPIP            0x00FFFA01u
 
 void invalidate_block(blockinfo *); // verified in compemu_support_arm.cpp
 
@@ -120,15 +215,159 @@ extern uint32_t ROM_END;
 #define IO_HW_BASE (0x00FF8000u) //(0x00FF8000u)                  // shifter/DMA/PSG/MFP/ACIA
 #define IO_HW_SIZE (0x00008000u) //(0x00008000u)                // 0xFF8000..0xFFFFFF, abuts TT_RAM_BASE (do NOT round to 64KB: that overruns TT-RAM)
 #define VRAM_SIZE (0x00100000u)
-#define VGA_IO_SIZE (0x00010000u)
+#define VGA_IO_SIZE (0x00100000u)
 #define VGA_BASE_XVDI (0x00A00000u) // XVDI
 #define VGA_IO_BASE_XVDI (0x00B00000u)
 #define VGA_BASE_NOVA (0x00C00000u) // NOVA
 #define VGA_IO_BASE_NOVA (0x00D00000u)
 
+#define PISTORM_LEGACY_MEM_HOOKS 0
+
 #define GUEST_RESERVE (TT_RAM_BASE + TT_RAM_SIZE) // 0x01000000 + 0x08000000 = 16MB + 128MB
 
 uae_u8 *natmem_offset = NULL; // the one array; x27 in JIT
+extern bool STRAM_Cache_enabled;
+extern bool STRAM_Direct_enabled;
+extern bool Native_HDMI_enabled;
+extern rtg_s rtg;
+extern volatile uint16_t st_palette[16];
+
+#define STRAM_LOW_WRITE_THROUGH_SIZE 0x000005B4u
+#define STRAM_LOW_CONTROL_BANK_SIZE 0x00010000u
+#define STRAM_SCREEN_WRITE_THROUGH_SIZE 0x00020000u
+#define STRAM_DIRECT_START 0x00010000u
+#define STRAM_DIRECT_TOP_RESERVE 0x00080000u
+#define STRAM_DIRECT_END (ST_RAM_SIZE - STRAM_DIRECT_TOP_RESERVE)
+
+static inline uae_u32 stram_be32(uaecptr a)
+{
+    return ((uae_u32)natmem_offset[a] << 24) |
+           ((uae_u32)natmem_offset[a + 1] << 16) |
+           ((uae_u32)natmem_offset[a + 2] << 8) |
+           (uae_u32)natmem_offset[a + 3];
+}
+
+static inline uae_u16 stram_be16(uaecptr a)
+{
+    return ((uae_u16)natmem_offset[a] << 8) |
+           (uae_u16)natmem_offset[a + 1];
+}
+
+static inline void stram_refresh_physbase(void)
+{
+    if (natmem_offset)
+        rtg.vram_base = stram_be32(0x44e) & 0x00FFFFFEu;
+}
+
+static inline void stram_snoop_lowram(uaecptr a, int sz)
+{
+    a &= 0x00FFFFFFu;
+    uae_u32 end = (uae_u32)a + (uae_u32)sz;
+    if (!natmem_offset)
+        return;
+
+    if (a == 0x448u)
+        rtg.PAL = (uae_u8)stram_be16(0x448);
+    if (a == 0x44cu) {
+        uae_u8 mode = (uae_u8)stram_be16(0x44c);
+        if (rtg.shift_mode != mode) {
+            rtg.shift_mode = mode;
+            rtg.res_changed = 1;
+        }
+    }
+    if (a < 0x452u && end > 0x44eu)
+        stram_refresh_physbase();
+}
+
+static inline void st_video_snoop8(uint32_t address, uint8_t value)
+{
+    uint32_t a = address & 0x00FFFFFFu;
+
+    if (a == 0x00FF8201u)
+        rtg.high = value;
+    else if (a == 0x00FF8203u)
+        rtg.mid = value;
+    else if (a == 0x00FF820Du)
+        rtg.low = value;
+    else if (a == 0x00FF8260u)
+        rtg.shift_mode = value;
+}
+
+static inline void st_video_snoop16(uint32_t address, uint16_t value)
+{
+    uint32_t a = address & 0x00FFFFFFu;
+
+    if (a == 0x00FF8200u)
+        rtg.high = (uint8_t)value;
+    else if (a == 0x00FF8202u)
+        rtg.mid = (uint8_t)value;
+    else if (a == 0x00FF820Cu)
+        rtg.low = (uint8_t)value;
+    else if (a == 0x00FF8260u)
+        rtg.shift_mode = (uint8_t)(value >> 8);
+    else if (a >= 0x00FF8240u && a < 0x00FF8260u)
+        st_palette[(a - 0x00FF8240u) >> 1] = value;
+}
+
+static inline void st_video_snoop32(uint32_t address, uint32_t value)
+{
+    uint32_t a = address & 0x00FFFFFFu;
+
+    if (a == 0x00FF8200u) {
+        rtg.high = (uint8_t)(value >> 16);
+        rtg.mid = (uint8_t)value;
+    } else if (a == 0x00FF820Cu) {
+        rtg.low = (uint8_t)(value >> 16);
+    } else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
+        unsigned i = (a - 0x00FF8240u) >> 1;
+        st_palette[i] = (uint16_t)(value >> 16);
+        if (i + 1 < 16)
+            st_palette[i + 1] = (uint16_t)value;
+    }
+}
+
+static inline uae_u32 stram_screen_base(void)
+{
+    uae_u32 regbase = (((uae_u32)rtg.high) << 16) |
+                      (((uae_u32)rtg.mid) << 8) |
+                      ((uae_u32)rtg.low & 0xFEu);
+    if (regbase && regbase < ST_RAM_SIZE)
+        return regbase;
+
+    if (rtg.vram_base && rtg.vram_base < ST_RAM_SIZE)
+        return rtg.vram_base & 0x00FFFFFEu;
+
+    if (natmem_offset) {
+        uae_u32 physbase = stram_be32(0x44e) & 0x00FFFFFEu;
+        if (physbase && physbase < ST_RAM_SIZE)
+            return physbase;
+    }
+
+    return 0;
+}
+
+static inline int stram_range_overlaps(uaecptr a, int sz, uae_u32 start, uae_u32 len)
+{
+    uae_u32 end = (uae_u32)a + (uae_u32)sz;
+    uae_u32 win_end = start + len;
+    return a < win_end && end > start;
+}
+
+static inline int stram_needs_bus_write(uaecptr a, int sz)
+{
+    if (!STRAM_Cache_enabled)
+        return 1;
+
+    a &= 0x00FFFFFFu;
+    if (a < STRAM_LOW_WRITE_THROUGH_SIZE)
+        return 1;
+
+    uae_u32 screen = stram_screen_base();
+    if (screen && stram_range_overlaps(a, sz, screen, STRAM_SCREEN_WRITE_THROUGH_SIZE))
+        return 1;
+
+    return 0;
+}
 
 /* The bank map itself (memory.cpp is not compiled). get_mem_bank(addr) ==
  * *mem_banks[addr>>16]. Neither stubs nor this file defined it before — both
@@ -145,9 +384,10 @@ extern "C"
 #endif
 
     extern bool ET4K_enabled;
+    extern bool tt_ram_available;
+    extern uint32_t tt_ram_size;
     extern ET4KADDRESSES_s *et4k_addr_ptr;
     extern int ET4K_driver;
-    // extern ET4000State *g_et4000;
 
 #ifdef __cplusplus
 }
@@ -167,23 +407,32 @@ extern void pistorm_mark_code(uaecptr pc) // call from compile_block()
 
 static inline void pistorm_smc(uaecptr addr, int sz)
 {
+    uae_u32 first_page, last_page;
+
     if (addr >= GUEST_RESERVE)
         return;
-    if (code_page[addr >> PAGE_SHIFT] |
-        code_page[(addr + sz - 1) >> PAGE_SHIFT])
+
+    first_page = addr >> PAGE_SHIFT;
+    if (code_page[first_page]) {
+        cache_invalidate(); // coarse but correct; targeted later
+        return;
+    }
+
+    last_page = (addr + sz - 1) >> PAGE_SHIFT;
+    if (last_page != first_page && code_page[last_page])
         cache_invalidate(); // coarse but correct; targeted later
 }
 
 extern "C" void pistorm_dma_from_stram(uint32_t addr, uint8_t *dst, uint32_t n)
 {
-    if (addr + n < ST_RAM_SIZE)
+    if (addr < ST_RAM_SIZE && n <= ST_RAM_SIZE - addr)
         memcpy(dst, natmem_offset + addr, n);
 }
 
 /* DMA path (fdc.c) calls this so the mirror stays coherent with bus DMA-in */
 extern "C" void pistorm_dma_to_stram(uaecptr addr, const uint8_t *src, uint32_t n)
 {
-    if (addr + n < ST_RAM_SIZE)
+    if (addr < ST_RAM_SIZE && n <= ST_RAM_SIZE - addr)
         memcpy(natmem_offset + addr, src, n);
     pistorm_smc(addr, n);
 }
@@ -379,6 +628,219 @@ static inline void pistorm_buserr(uaecptr a, uae_u32 v, bool read, int size)
 #define DUMMY_LOG_LIMIT 256
 static int dummy_log_n = 0;
 static inline int dummy_log_ok(void) { return dummy_log_n < DUMMY_LOG_LIMIT ? (++dummy_log_n, 1) : 0; }
+static inline bool dm_bus_addr(uaecptr *a)
+{
+    if ((*a & 0xFF000000) == 0xFF000000)
+        *a &= 0x00FFFFFF;
+    return (*a & 0xFF000000) == 0;
+}
+
+static inline uae_u32 ps_bus_lget(uaecptr a)
+{
+    uae_u32 hi = ps_read_16(a);
+    uae_u32 lo = ps_read_16(a + 2);
+    return (hi << 16) | (lo & 0xffff);
+}
+
+static inline void ps_bus_lput(uaecptr a, uae_u32 v)
+{
+    ps_write_16(a, (uae_u16)(v >> 16));
+    ps_write_16(a + 2, (uae_u16)v);
+}
+
+static int pistorm_blitter_real_bus = 1;
+
+extern "C" void pistorm_set_blitter_enabled(int enabled)
+{
+    pistorm_blitter_real_bus = enabled ? 1 : 0;
+    fprintf(stderr, "[NATMEM] Blitter %s\n", pistorm_blitter_real_bus ? "enabled" : "disabled");
+}
+
+static inline int blitter_addr(uaecptr a)
+{
+    a &= 0x00FFFFFF;
+    return a >= 0x00FF8A00u && a < 0x00FF8C00u;
+}
+
+static inline int blitter_real_bus_enabled(void)
+{
+    return pistorm_blitter_real_bus;
+}
+
+static inline int blitter_hide_addr(uaecptr a)
+{
+    return blitter_addr(a) && !blitter_real_bus_enabled();
+}
+
+static inline uae_u32 blitter_absent_value(int size)
+{
+    return size == 1 ? 0xFFu : size == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+}
+
+static uae_u8 blitter_shadow[0x40];
+
+static inline uae_u16 blitter_shadow_w(unsigned off)
+{
+    return ((uae_u16)blitter_shadow[off] << 8) | blitter_shadow[off + 1];
+}
+
+static inline uae_u32 blitter_shadow_l(unsigned off)
+{
+    return ((uae_u32)blitter_shadow[off] << 24) |
+           ((uae_u32)blitter_shadow[off + 1] << 16) |
+           ((uae_u32)blitter_shadow[off + 2] << 8) |
+           blitter_shadow[off + 3];
+}
+
+static void blitter_shadow_write(uaecptr a, uae_u32 v, int size)
+{
+    unsigned off = (unsigned)(a & 0x3f);
+    if (!blitter_addr(a) || off + (unsigned)size > sizeof(blitter_shadow))
+        return;
+
+    if (size == 4)
+    {
+        blitter_shadow[off] = (uae_u8)(v >> 24);
+        blitter_shadow[off + 1] = (uae_u8)(v >> 16);
+        blitter_shadow[off + 2] = (uae_u8)(v >> 8);
+        blitter_shadow[off + 3] = (uae_u8)v;
+    }
+    else if (size == 2)
+    {
+        blitter_shadow[off] = (uae_u8)(v >> 8);
+        blitter_shadow[off + 1] = (uae_u8)v;
+    }
+    else
+    {
+        blitter_shadow[off] = (uae_u8)v;
+    }
+}
+
+static void blitter_sync_dest(void)
+{
+    uae_u32 dst = blitter_shadow_l(0x32) & 0x00FFFFFEu;
+    int dx = (int16_t)blitter_shadow_w(0x2e);
+    int dy = (int16_t)blitter_shadow_w(0x30);
+    uint32_t xcnt = blitter_shadow_w(0x36);
+    uint32_t ycnt = blitter_shadow_w(0x38);
+
+    if (!xcnt)
+        xcnt = 65536;
+    if (!ycnt)
+        ycnt = 65536;
+    if (!xcnt || !ycnt || xcnt > 4096 || ycnt > 4096)
+        return;
+
+    int64_t xlast = (int64_t)(xcnt - 1) * dx;
+    int64_t ylast = (int64_t)(ycnt - 1) * dy;
+    int64_t minoff = 0;
+    int64_t maxoff = 2;
+
+    if (xlast < minoff)
+        minoff = xlast;
+    if (xlast + 2 > maxoff)
+        maxoff = xlast + 2;
+    if (ylast < minoff)
+        minoff = ylast;
+    if (ylast + 2 > maxoff)
+        maxoff = ylast + 2;
+    if (xlast + ylast < minoff)
+        minoff = xlast + ylast;
+    if (xlast + ylast + 2 > maxoff)
+        maxoff = xlast + ylast + 2;
+
+    int64_t start64 = (int64_t)dst + minoff;
+    int64_t end64 = (int64_t)dst + maxoff;
+    if (end64 <= 0 || start64 >= ST_RAM_SIZE)
+        return;
+    if (start64 < 0)
+        start64 = 0;
+    if (end64 > ST_RAM_SIZE)
+        end64 = ST_RAM_SIZE;
+
+    uae_u32 start = (uae_u32)start64 & ~1u;
+    uae_u32 end = ((uae_u32)end64 + 1u) & ~1u;
+    if (end > ST_RAM_SIZE)
+        end = ST_RAM_SIZE;
+    if (end <= start)
+        return;
+
+    uint8_t old_fc = fc;
+    fc = 5;
+    for (uae_u32 p = start; p + 1 < end; p += 2)
+    {
+        g_buserr = 0;
+        uae_u16 w = ps_read_16(p);
+        if (g_buserr)
+        {
+            g_buserr = 0;
+            break;
+        }
+        natmem_offset[p] = (uae_u8)(w >> 8);
+        natmem_offset[p + 1] = (uae_u8)w;
+    }
+    fc = old_fc;
+    pistorm_smc(start, end - start);
+}
+
+static void blitter_after_write(uaecptr a, uae_u32 v, int size)
+{
+    blitter_shadow_write(a, v, size);
+    if (!blitter_addr(a))
+        return;
+
+    uae_u32 folded = a & 0x00FFFFFFu;
+    if (folded <= 0x00FF8A3Cu && folded + (uae_u32)size > 0x00FF8A3Cu && (blitter_shadow[0x3c] & 0x80))
+    {
+        uint8_t old_fc = fc;
+        fc = 5;
+        for (unsigned i = 0; i < 100000; i++)
+        {
+            g_buserr = 0;
+            if (!(ps_read_8(0x00FF8A3Cu) & 0x80) || g_buserr)
+                break;
+        }
+        g_buserr = 0;
+        fc = old_fc;
+        blitter_sync_dest();
+    }
+}
+
+#if ATARI_BLITTER_TRACE
+static inline void blitter_trace(const char *op, uaecptr a, uae_u32 v, int size)
+{
+    static unsigned count;
+    if (!blitter_addr(a) || count >= 64)
+        return;
+    count++;
+    fprintf(stderr, "[BLITTER] %s%d %06X %0*X berr=%u\n",
+            op, size * 8, (unsigned)(a & 0x00FFFFFFu),
+            size * 2, (unsigned)v, (unsigned)g_buserr);
+}
+#else
+#define blitter_trace(op, a, v, size) ((void)0)
+#endif
+
+#if ATARI_ACIA_TRACE
+static inline int acia_addr(uaecptr a)
+{
+    a &= 0x00FFFFFFu;
+    return a >= 0x00FFFC00u && a < 0x00FFFC08u;
+}
+
+static inline void acia_trace(const char *op, uaecptr a, uae_u32 v, int size)
+{
+    static unsigned count;
+    if (!acia_trace_enabled() || !acia_addr(a) || count >= 256000)
+        return;
+    count++;
+    fprintf(stderr, "[ACIA] %s%d %06X -> %0*X berr=%u fc=%u\n",
+            op, size * 8, (unsigned)(a & 0x00FFFFFFu),
+            size * 2, (unsigned)v, (unsigned)g_buserr, (unsigned)fc);
+}
+#else
+#define acia_trace(op, a, v, size) ((void)0)
+#endif
 /* reads: log the VALUE the bus returned, then raise BERR if undecoded */
 
 // static uae_u32 dm_lget(uaecptr a){ fc_data(); uae_u32 v=m68k_read_memory_32(a); if(dummy_log_ok()) fprintf(stderr,"[DUMMY] lget @0x%08x -> 0x%08x%s\n",a,v,g_buserr?" BERR":""); pistorm_buserr(a,0,true,sz_long); return v; }
@@ -392,26 +854,56 @@ static inline int dummy_log_ok(void) { return dummy_log_n < DUMMY_LOG_LIMIT ? (+
 static uae_u32 dm_lget(uaecptr a)
 {
     PROF_DUMMY_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
     uae_u32 v = m68k_read_memory_32(a);
     pistorm_buserr(a, 0, true, sz_long);
     return v;
+#else
+    g_buserr = 0;
+    fc_data();
+    if (!dm_bus_addr(&a))
+        return 0;
+    uae_u32 v = ps_bus_lget(a);
+    pistorm_buserr(a, 0, true, sz_long);
+    return v;
+#endif
 }
 static uae_u32 dm_wget(uaecptr a)
 {
     PROF_DUMMY_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
     uae_u32 v = m68k_read_memory_16(a);
     pistorm_buserr(a, 0, true, sz_word);
-    return (uint16_t)v;
+    return (uae_u16)v;
+#else
+    g_buserr = 0;
+    fc_data();
+    if (!dm_bus_addr(&a))
+        return 0;
+    uae_u16 v = ps_read_16(a);
+    pistorm_buserr(a, 0, true, sz_word);
+    return v;
+#endif
 }
 static uae_u32 dm_bget(uaecptr a)
 {
     PROF_DUMMY_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
     uae_u32 v = m68k_read_memory_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
-    return (uint8_t)v;
+    return (uae_u8)v;
+#else
+    g_buserr = 0;
+    fc_data();
+    if (!dm_bus_addr(&a))
+        return 0;
+    uae_u8 v = ps_read_8(a);
+    pistorm_buserr(a, 0, true, sz_byte);
+    return v;
+#endif
 }
 
 /*
@@ -423,23 +915,50 @@ static uae_u32 dm_bget(uaecptr a){ PROF_DUMMY_R(a); fc_data(); a &= 0x00FFFFFF; 
 static void dm_lput(uaecptr a, uae_u32 v)
 {
     PROF_DUMMY_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
     m68k_write_memory_32(a, v);
     pistorm_buserr(a, v, false, sz_long);
+#else
+    g_buserr = 0;
+    fc_data();
+    if (!dm_bus_addr(&a))
+        return;
+    ps_bus_lput(a, v);
+    pistorm_buserr(a, v, false, sz_long);
+#endif
 }
 static void dm_wput(uaecptr a, uae_u32 v)
 {
     PROF_DUMMY_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
-    m68k_write_memory_16(a, (uint16_t)v);
+    m68k_write_memory_16(a, v);
     pistorm_buserr(a, v, false, sz_word);
+#else
+    g_buserr = 0;
+    fc_data();
+    if (!dm_bus_addr(&a))
+        return;
+    ps_write_16(a, (uint16_t)v);
+    pistorm_buserr(a, v, false, sz_word);
+#endif
 }
 static void dm_bput(uaecptr a, uae_u32 v)
 {
     PROF_DUMMY_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
-    m68k_write_memory_8(a, (uint8_t)v);
+    m68k_write_memory_8(a, v);
     pistorm_buserr(a, v, false, sz_byte);
+#else
+    g_buserr = 0;
+    fc_data();
+    if (!dm_bus_addr(&a))
+        return;
+    ps_write_8(a, (uint8_t)v);
+    pistorm_buserr(a, v, false, sz_byte);
+#endif
 }
 
 /*
@@ -483,32 +1002,101 @@ static uae_u32 io_bget(uaecptr a){ PROF_IO_R(a); fc_data(); uae_u32 v=m68k_read_
 static uae_u32 io_lget(uaecptr a)
 {
     PROF_IO_R(a);
-    g_buserr = 0;
+#if PISTORM_LEGACY_MEM_HOOKS
     fc_data();
-    //a &= 0x00FFFFFF;
-    uae_u32 v = ps_read_32(a);
+    uae_u32 v = m68k_read_memory_32(a);
     pistorm_buserr(a, 0, true, sz_long);
     return v;
+#else
+    g_buserr = 0;
+    fc_data();
+    a &= 0x00FFFFFF;
+    if (blitter_hide_addr(a))
+    {
+        uae_u32 v = blitter_absent_value(4);
+        blitter_trace("H", a, v, 4);
+        return v;
+    }
+    if (FDD_enabled && fdd_owns_address(a))
+        return fdd_io_read(a, 4);
+    uae_u32 v = ps_bus_lget(a);
+    pistorm_buserr(a, 0, true, sz_long);
+    acia_trace("R", a, v, 4);
+    blitter_trace("R", a, v, 4);
+    return v;
+#endif
 }
 static uae_u32 io_wget(uaecptr a)
 {
     PROF_IO_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    fc_data();
+    uae_u32 v = m68k_read_memory_16(a);
+    pistorm_buserr(a, 0, true, sz_word);
+    return (uae_u16)v;
+#else
     g_buserr = 0;
     fc_data();
-    //a &= 0x00FFFFFF;
+    a &= 0x00FFFFFF;
+    if (blitter_hide_addr(a))
+    {
+        uae_u32 v = blitter_absent_value(2);
+        blitter_trace("H", a, v, 2);
+        return v;
+    }
+    if (FDD_enabled)
+    {
+        if (a == MFP_GPIP)
+        {
+            uae_u16 v = fdd_gpip(ps_read_8(a));
+            pistorm_buserr(a, 0, true, sz_word);
+            return v;
+        }
+        if (fdd_owns_address(a))
+            return (uae_u16)fdd_io_read(a, 2);
+    }
     uae_u16 v = ps_read_16(a);
     pistorm_buserr(a, 0, true, sz_word);
+    acia_trace("R", a, v, 2);
+    blitter_trace("R", a, v, 2);
     return v;
+#endif
 }
 static uae_u32 io_bget(uaecptr a)
 {
     PROF_IO_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    fc_data();
+    uae_u32 v = m68k_read_memory_8(a);
+    pistorm_buserr(a, 0, true, sz_byte);
+    return (uae_u8)v;
+#else
     g_buserr = 0;
     fc_data();
-    //a &= 0x00FFFFFF;
+    a &= 0x00FFFFFF;
+    if (blitter_hide_addr(a))
+    {
+        uae_u32 v = blitter_absent_value(1);
+        blitter_trace("H", a, v, 1);
+        return v;
+    }
+    if (FDD_enabled)
+    {
+        if (a == MFP_GPIP)
+        {
+            uae_u8 v = fdd_gpip(ps_read_8(a));
+            pistorm_buserr(a, 0, true, sz_byte);
+            return v;
+        }
+        if (fdd_owns_address(a))
+            return (uae_u8)fdd_io_read(a, 1);
+    }
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
+    acia_trace("R", a, v, 1);
+    blitter_trace("R", a, v, 1);
     return v;
+#endif
 }
 /*
 static void io_lput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); m68k_write_memory_32(a, v); pistorm_buserr(a,v,false,sz_long); }
@@ -519,34 +1107,98 @@ static void io_bput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); m68k_write_m
 static void io_lput(uaecptr a, uae_u32 v)
 {
     PROF_IO_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    fc_data();
+    m68k_write_memory_32(a, v);
+    pistorm_buserr(a, v, false, sz_long);
+#else
     g_buserr = 0;
     fc_data();
-    //a &= 0x00FFFFFF;
-    ps_write_32(a, v);
+    a &= 0x00FFFFFF;
+    st_video_snoop32(a, (uint32_t)v);
+    if (blitter_hide_addr(a))
+    {
+        blitter_trace("h", a, v, 4);
+        return;
+    }
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 4);
+        return;
+    }
+    dmasnd_snoop32(a, (uint32_t)v);
+    ps_bus_lput(a, v);
     pistorm_buserr(a, v, false, sz_long);
+    acia_trace("W", a, v, 4);
+    blitter_trace("W", a, v, 4);
+    if (blitter_addr(a))
+        blitter_after_write(a, v, 4);
+#endif
 }
 static void io_wput(uaecptr a, uae_u32 v)
 {
     PROF_IO_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    fc_data();
+    m68k_write_memory_16(a, v);
+    pistorm_buserr(a, v, false, sz_word);
+#else
     g_buserr = 0;
     fc_data();
-   // a &= 0x00FFFFFF;
+    a &= 0x00FFFFFF;
+    st_video_snoop16(a, (uint16_t)v);
+    if (blitter_hide_addr(a))
+    {
+        blitter_trace("h", a, v, 2);
+        return;
+    }
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 2);
+        return;
+    }
+    mfp_note_eoi_write(a, v, true);
+    dmasnd_snoop16(a, (uint16_t)v);
     ps_write_16(a, (uint16_t)v);
     pistorm_buserr(a, v, false, sz_word);
+    acia_trace("W", a, v, 2);
+    blitter_trace("W", a, v, 2);
+    if (blitter_addr(a))
+        blitter_after_write(a, v, 2);
+#endif
 }
 static void io_bput(uaecptr a, uae_u32 v)
 {
     PROF_IO_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    fc_data();
+    m68k_write_memory_8(a, v);
+    pistorm_buserr(a, v, false, sz_byte);
+#else
     g_buserr = 0;
     fc_data();
-    //a &= 0x00FFFFFF;
+    a &= 0x00FFFFFF;
+    st_video_snoop8(a, (uint8_t)v);
+    if (blitter_hide_addr(a))
+    {
+        blitter_trace("h", a, v, 1);
+        return;
+    }
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 1);
+        return;
+    }
+    mfp_note_eoi_write(a, v, false);
+    dmasnd_snoop8(a, (uint8_t)v);
     ps_write_8(a, (uint8_t)v);
     pistorm_buserr(a, v, false, sz_byte);
+    acia_trace("W", a, v, 1);
+    blitter_trace("W", a, v, 1);
+    if (blitter_addr(a))
+        blitter_after_write(a, v, 1);
+#endif
 }
-
-// static void io_lput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); a &= 0x00FFFFFF; dmasnd_snoop32(a,(uint32_t)v); ps_write_32(a, v);           pistorm_buserr(a,v,false,sz_long); }
-// static void io_wput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); a &= 0x00FFFFFF; dmasnd_snoop16(a,(uint16_t)v); ps_write_16(a, (uint16_t)v); pistorm_buserr(a,v,false,sz_word); }
-// static void io_bput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); a &= 0x00FFFFFF; dmasnd_snoop8 (a,(uint8_t)v);  ps_write_8 (a, (uint8_t)v);  pistorm_buserr(a,v,false,sz_byte); }
 
 static int io_check(uaecptr a, uae_u32 sz) { return 0; }//return (a >= IO_HW_BASE && a < (IO_HW_BASE + IO_HW_SIZE) - sz); }                 // not directly addressable
 static uae_u8 *io_xlate(uaecptr a) { return natmem_offset + a; } // never used (check=0)
@@ -673,8 +1325,6 @@ static addrbank pistorm_ide_bank = {
 /* FDD I/F bank — handler-routed                                      */
 /* ================================================================== */
 
-#define MFP_GPIP            0xFFFA01u
-
 //static inline uae_u32 fdd_fold(uaecptr a) { return a & 0x00FFFFFFu; }
 //static inline int fdd_in_regs(uae_u32 a) { return a >= IDE_REG_LO && a < IDE_REG_HI; }
 
@@ -686,7 +1336,7 @@ static uae_u32 fdd_lget(uaecptr a)
     g_buserr = 0;
     a &= 0x00FFFFFF;
    // printf ("fdd_lget 0x%X\n", a);
-    if (fdd_owns_address (a)) { printf ("fdd io rd32 0x%X\n", a);
+    if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io rd32 0x%X\n", a);
         return fdd_io_read (a, 4);
     }
     uint32_t v = ps_read_32 (a);
@@ -699,11 +1349,11 @@ static uae_u32 fdd_wget(uaecptr a)
     g_buserr = 0;
     a &= 0x00FFFFFF;
    // printf ("fdd_wget 0x%X\n", a);
-    if (a == MFP_GPIP) { printf ("fdd gpip rd16\n");
+    if (FDD_enabled && a == MFP_GPIP) { printf ("fdd gpip rd16\n");
         uint8_t gpip = fdd_gpip (ps_read_8 (a));
         return gpip;
     }
-    if (fdd_owns_address (a)) { printf ("fdd io rd16 0x%X\n", a);
+    if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io rd16 0x%X\n", a);
         return (uint16_t)fdd_io_read (a, 2);
     }
     uint16_t v = ps_read_16 (a);
@@ -716,12 +1366,12 @@ static uae_u32 fdd_bget(uaecptr a)
     g_buserr = 0;
     a &= 0x00FFFFFF;
    // printf ("fdd_bget 0x%X\n", a);
-    if (a == MFP_GPIP) { printf ("fdd gpip rd8\n");
+    if (FDD_enabled && a == MFP_GPIP) { printf ("fdd gpip rd8\n");
         uint8_t gpip = fdd_gpip (ps_read_8 (a));
         pistorm_buserr (a, 0, true, sz_byte);
         return gpip;
     }
-    if (fdd_owns_address (a)) { printf ("fdd io rd8 0x%X\n", a);
+    if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io rd8 0x%X\n", a);
         return (uint8_t)fdd_io_read (a, 1);
     }
     uint8_t v = ps_read_8 (a);
@@ -735,7 +1385,7 @@ static void fdd_lput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     a &= 0x00FFFFFF;
     //printf ("fdd_lput 0x%X\n", a);
-    if (fdd_owns_address (a)) { printf ("fdd io wr32 0x%X\n", a);
+    if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io wr32 0x%X\n", a);
         fdd_io_write (a, v, 4);
         return;
     }
@@ -748,7 +1398,7 @@ static void fdd_wput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     a &= 0x00FFFFFF;
    // printf ("fdd_wput 0x%X\n", a);
-    if (fdd_owns_address (a)) { printf ("fdd io wr16 0x%X\n", a);
+    if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io wr16 0x%X\n", a);
         fdd_io_write (a, v, 2);
         return;
     }
@@ -761,7 +1411,7 @@ static void fdd_bput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     a &= 0x00FFFFFF;
     //printf ("fdd_bput 0x%X\n", a);
-    if (fdd_owns_address (a)) { printf ("fdd io wr8 0x%X\n", a);
+    if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io wr8 0x%X\n", a);
         fdd_io_write (a, v, 1);
         return;
     }
@@ -769,7 +1419,7 @@ static void fdd_bput(uaecptr a, uae_u32 v)
     pistorm_buserr (a, v, false, sz_byte);
 }
 
-static int fdd_check (uaecptr a, uae_u32 sz) { return (a >= 0xFF8600u && a <= 0xFF860Fu) || (a >= 0xFF8800u && a <= 0xFF8803u) || a == MFP_GPIP; }     /* indirect: no direct host ptr */
+static int fdd_check (uaecptr a, uae_u32 sz) { return FDD_enabled && ((a >= 0xFF8600u && a <= 0xFF860Fu) || (a >= 0xFF8800u && a <= 0xFF8803u) || a == MFP_GPIP); }     /* indirect: no direct host ptr */
 static uae_u8 *fdd_xlate (uaecptr a) { return natmem_offset + a; } /* never used (check==0) */
 
 static addrbank pistorm_fdd_bank = {
@@ -782,24 +1432,602 @@ static addrbank pistorm_fdd_bank = {
     S_READ, S_WRITE};
 
 
+/* ================================================================== */
+/* Atari hardware I/O bank — one 64KB bank, narrow device dispatch       */
+/* ================================================================== */
+
+#define FPU_REG_BASE 0x00FFFA40u
+#define FPU_REG_TOP  0x00FFFA60u
+#define NOVA_IO_ALIAS_BASE 0x00FF83B0u
+#define NOVA_IO_ALIAS_TOP  0x00FF83E0u
+#define VGA_PORT_ALIAS_BASE 0x000003B0u
+#define HW_PAGE_VIDEO       0x00FF8200u
+#define HW_PAGE_FDD_DMA     0x00FF8600u
+#define HW_PAGE_PSG         0x00FF8800u
+#define HW_PAGE_DMASND      0x00FF8900u
+#define HW_PAGE_BLITTER_LO  0x00FF8A00u
+#define HW_PAGE_BLITTER_HI  0x00FF8B00u
+#define HW_PAGE_MFP         0x00FFFA00u
+#define HW_PAGE_ACIA        0x00FFFC00u
+
+static inline uaecptr hw_fold_addr(uaecptr a)
+{
+    return a & 0x00FFFFFFu;
+}
+
+static inline uaecptr hw_page_addr(uaecptr a)
+{
+    return a & 0x00FFFF00u;
+}
+
+static inline int fpu_in_regs(uaecptr a)
+{
+    uint32_t folded = hw_fold_addr(a);
+    return folded >= FPU_REG_BASE && folded < FPU_REG_TOP;
+}
+
+static inline int nova_io_alias_addr(uaecptr a)
+{
+    uint32_t folded = hw_fold_addr(a);
+    return ET4K_enabled && et4k_addr_ptr &&
+           folded >= NOVA_IO_ALIAS_BASE && folded < NOVA_IO_ALIAS_TOP;
+}
+
+static inline uint32_t nova_io_alias_card_addr(uaecptr a)
+{
+    uint32_t folded = hw_fold_addr(a);
+    return et4k_addr_ptr->io_base + VGA_PORT_ALIAS_BASE + (folded - NOVA_IO_ALIAS_BASE);
+}
+
+static inline int hw_mfp_addr(uaecptr a)
+{
+    return a >= HW_PAGE_MFP && a < FPU_REG_BASE;
+}
+
+static inline uae_u32 hw_bus_lget(uaecptr a)
+{
+    uae_u32 v = ps_bus_lget(a);
+    pistorm_buserr(a, 0, true, sz_long);
+    return v;
+}
+
+static inline uae_u32 hw_bus_wget(uaecptr a)
+{
+    uae_u16 v = ps_read_16(a);
+    pistorm_buserr(a, 0, true, sz_word);
+    return v;
+}
+
+static inline uae_u32 hw_bus_bget(uaecptr a)
+{
+    uae_u8 v = ps_read_8(a);
+    pistorm_buserr(a, 0, true, sz_byte);
+    return v;
+}
+
+static inline void hw_bus_lput(uaecptr a, uae_u32 v)
+{
+    ps_bus_lput(a, v);
+    pistorm_buserr(a, v, false, sz_long);
+}
+
+static inline void hw_bus_wput(uaecptr a, uae_u32 v)
+{
+    ps_write_16(a, (uae_u16)v);
+    pistorm_buserr(a, v, false, sz_word);
+}
+
+static inline void hw_bus_bput(uaecptr a, uae_u32 v)
+{
+    ps_write_8(a, (uae_u8)v);
+    pistorm_buserr(a, v, false, sz_byte);
+}
+
+static inline uae_u32 hw_blitter_lget(uaecptr a)
+{
+    if (blitter_hide_addr(a))
+    {
+        uae_u32 v = blitter_absent_value(4);
+        blitter_trace("H", a, v, 4);
+        return v;
+    }
+
+    uae_u32 v = hw_bus_lget(a);
+    blitter_trace("R", a, v, 4);
+    return v;
+}
+
+static inline uae_u32 hw_blitter_wget(uaecptr a)
+{
+    if (blitter_hide_addr(a))
+    {
+        uae_u32 v = blitter_absent_value(2);
+        blitter_trace("H", a, v, 2);
+        return v;
+    }
+
+    uae_u32 v = hw_bus_wget(a);
+    blitter_trace("R", a, v, 2);
+    return v;
+}
+
+static inline uae_u32 hw_blitter_bget(uaecptr a)
+{
+    if (blitter_hide_addr(a))
+    {
+        uae_u32 v = blitter_absent_value(1);
+        blitter_trace("H", a, v, 1);
+        return v;
+    }
+
+    uae_u32 v = hw_bus_bget(a);
+    blitter_trace("R", a, v, 1);
+    return v;
+}
+
+static inline void hw_blitter_lput(uaecptr a, uae_u32 v)
+{
+    if (blitter_hide_addr(a))
+    {
+        blitter_trace("h", a, v, 4);
+        return;
+    }
+
+    hw_bus_lput(a, v);
+    blitter_trace("W", a, v, 4);
+    blitter_after_write(a, v, 4);
+}
+
+static inline void hw_blitter_wput(uaecptr a, uae_u32 v)
+{
+    if (blitter_hide_addr(a))
+    {
+        blitter_trace("h", a, v, 2);
+        return;
+    }
+
+    hw_bus_wput(a, v);
+    blitter_trace("W", a, v, 2);
+    blitter_after_write(a, v, 2);
+}
+
+static inline void hw_blitter_bput(uaecptr a, uae_u32 v)
+{
+    if (blitter_hide_addr(a))
+    {
+        blitter_trace("h", a, v, 1);
+        return;
+    }
+
+    hw_bus_bput(a, v);
+    blitter_trace("W", a, v, 1);
+    blitter_after_write(a, v, 1);
+}
+
+static inline uae_u32 hw_mfp_wget(uaecptr a)
+{
+    if (FDD_enabled && a == MFP_GPIP)
+    {
+        uae_u16 v = fdd_gpip(ps_read_8(a));
+        pistorm_buserr(a, 0, true, sz_word);
+        return v;
+    }
+    return hw_bus_wget(a);
+}
+
+static inline uae_u32 hw_mfp_bget(uaecptr a)
+{
+    if (FDD_enabled && a == MFP_GPIP)
+    {
+        uae_u8 v = fdd_gpip(ps_read_8(a));
+        pistorm_buserr(a, 0, true, sz_byte);
+        return v;
+    }
+    return hw_bus_bget(a);
+}
+
+static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 4);
+        return;
+    }
+    hw_bus_lput(a, v);
+}
+
+static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 2);
+        return;
+    }
+    mfp_note_eoi_write(a, v, true);
+    hw_bus_wput(a, v);
+}
+
+static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 1);
+        return;
+    }
+    mfp_note_eoi_write(a, v, false);
+    hw_bus_bput(a, v);
+}
+
+static inline uae_u32 hw_fdd_lget(uaecptr a)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+        return fdd_io_read(a, 4);
+    return hw_bus_lget(a);
+}
+
+static inline uae_u32 hw_fdd_wget(uaecptr a)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+        return (uae_u16)fdd_io_read(a, 2);
+    return hw_bus_wget(a);
+}
+
+static inline uae_u32 hw_fdd_bget(uaecptr a)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+        return (uae_u8)fdd_io_read(a, 1);
+    return hw_bus_bget(a);
+}
+
+static inline void hw_fdd_lput(uaecptr a, uae_u32 v)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 4);
+        return;
+    }
+    hw_bus_lput(a, v);
+}
+
+static inline void hw_fdd_wput(uaecptr a, uae_u32 v)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 2);
+        return;
+    }
+    hw_bus_wput(a, v);
+}
+
+static inline void hw_fdd_bput(uaecptr a, uae_u32 v)
+{
+    if (FDD_enabled && fdd_owns_address(a))
+    {
+        fdd_io_write(a, v, 1);
+        return;
+    }
+    hw_bus_bput(a, v);
+}
+
+static uae_u32 hw_lget(uaecptr a)
+{
+    PROF_IO_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    return io_lget(a);
+#else
+    g_buserr = 0;
+    fc_data();
+    a = hw_fold_addr(a);
+
+    if (fpu_in_regs(a) || nova_io_alias_addr(a))
+        return 0;
+
+    switch (hw_page_addr(a))
+    {
+        case HW_PAGE_FDD_DMA:
+        case HW_PAGE_PSG:
+            return hw_fdd_lget(a);
+        case HW_PAGE_BLITTER_LO:
+        case HW_PAGE_BLITTER_HI:
+            return hw_blitter_lget(a);
+        case HW_PAGE_ACIA:
+        {
+            uae_u32 v = hw_bus_lget(a);
+            acia_trace("R", a, v, 4);
+            return v;
+        }
+        default:
+            return hw_bus_lget(a);
+    }
+#endif
+}
+
+static uae_u32 hw_wget(uaecptr a)
+{
+    PROF_IO_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    return io_wget(a);
+#else
+    g_buserr = 0;
+    fc_data();
+    a = hw_fold_addr(a);
+
+    if (fpu_in_regs(a))
+        return 0;
+    if (nova_io_alias_addr(a))
+        return et4000_io_read8(g_et4000, nova_io_alias_card_addr(a));
+    if (hw_mfp_addr(a))
+        return hw_mfp_wget(a);
+
+    switch (hw_page_addr(a))
+    {
+        case HW_PAGE_FDD_DMA:
+        case HW_PAGE_PSG:
+            return hw_fdd_wget(a);
+        case HW_PAGE_BLITTER_LO:
+        case HW_PAGE_BLITTER_HI:
+            return hw_blitter_wget(a);
+        case HW_PAGE_ACIA:
+        {
+            uae_u32 v = hw_bus_wget(a);
+            acia_trace("R", a, v, 2);
+            return v;
+        }
+        default:
+            return hw_bus_wget(a);
+    }
+#endif
+}
+
+static uae_u32 hw_bget(uaecptr a)
+{
+    PROF_IO_R(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    return io_bget(a);
+#else
+    g_buserr = 0;
+    fc_data();
+    a = hw_fold_addr(a);
+
+    if (fpu_in_regs(a))
+        return 0;
+    if (nova_io_alias_addr(a))
+        return et4000_io_read8(g_et4000, nova_io_alias_card_addr(a));
+    if (hw_mfp_addr(a))
+        return hw_mfp_bget(a);
+
+    switch (hw_page_addr(a))
+    {
+        case HW_PAGE_FDD_DMA:
+        case HW_PAGE_PSG:
+            return hw_fdd_bget(a);
+        case HW_PAGE_BLITTER_LO:
+        case HW_PAGE_BLITTER_HI:
+            return hw_blitter_bget(a);
+        case HW_PAGE_ACIA:
+        {
+            uae_u32 v = hw_bus_bget(a);
+            acia_trace("R", a, v, 1);
+            return v;
+        }
+        default:
+            return hw_bus_bget(a);
+    }
+#endif
+}
+
+static void hw_lput(uaecptr a, uae_u32 v)
+{
+    PROF_IO_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    io_lput(a, v);
+#else
+    g_buserr = 0;
+    fc_data();
+    a = hw_fold_addr(a);
+
+    if (fpu_in_regs(a) || nova_io_alias_addr(a))
+        return;
+
+    switch (hw_page_addr(a))
+    {
+        case HW_PAGE_VIDEO:
+            st_video_snoop32(a, (uint32_t)v);
+            hw_bus_lput(a, v);
+            break;
+        case HW_PAGE_FDD_DMA:
+        case HW_PAGE_PSG:
+            hw_fdd_lput(a, v);
+            break;
+        case HW_PAGE_DMASND:
+            dmasnd_snoop32(a, (uint32_t)v);
+            hw_bus_lput(a, v);
+            break;
+        case HW_PAGE_BLITTER_LO:
+        case HW_PAGE_BLITTER_HI:
+            hw_blitter_lput(a, v);
+            break;
+        case HW_PAGE_MFP:
+            if (hw_mfp_addr(a))
+                hw_mfp_lput(a, v);
+            else
+                hw_bus_lput(a, v);
+            break;
+        case HW_PAGE_ACIA:
+            hw_bus_lput(a, v);
+            acia_trace("W", a, v, 4);
+            break;
+        default:
+            hw_bus_lput(a, v);
+            break;
+    }
+#endif
+}
+
+static void hw_wput(uaecptr a, uae_u32 v)
+{
+    PROF_IO_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    io_wput(a, v);
+#else
+    g_buserr = 0;
+    fc_data();
+    a = hw_fold_addr(a);
+
+    if (fpu_in_regs(a))
+        return;
+    if (nova_io_alias_addr(a)) {
+        et4000_io_write8(g_et4000, nova_io_alias_card_addr(a), (uae_u8)v);
+        return;
+    }
+
+    switch (hw_page_addr(a))
+    {
+        case HW_PAGE_VIDEO:
+            st_video_snoop16(a, (uint16_t)v);
+            hw_bus_wput(a, v);
+            break;
+        case HW_PAGE_FDD_DMA:
+        case HW_PAGE_PSG:
+            hw_fdd_wput(a, v);
+            break;
+        case HW_PAGE_DMASND:
+            dmasnd_snoop16(a, (uint16_t)v);
+            hw_bus_wput(a, v);
+            break;
+        case HW_PAGE_BLITTER_LO:
+        case HW_PAGE_BLITTER_HI:
+            hw_blitter_wput(a, v);
+            break;
+        case HW_PAGE_MFP:
+            if (hw_mfp_addr(a))
+                hw_mfp_wput(a, v);
+            else
+                hw_bus_wput(a, v);
+            break;
+        case HW_PAGE_ACIA:
+            hw_bus_wput(a, v);
+            acia_trace("W", a, v, 2);
+            break;
+        default:
+            hw_bus_wput(a, v);
+            break;
+    }
+#endif
+}
+
+static void hw_bput(uaecptr a, uae_u32 v)
+{
+    PROF_IO_W(a);
+#if PISTORM_LEGACY_MEM_HOOKS
+    io_bput(a, v);
+#else
+    g_buserr = 0;
+    fc_data();
+    a = hw_fold_addr(a);
+
+    if (fpu_in_regs(a))
+        return;
+    if (nova_io_alias_addr(a)) {
+        et4000_io_write8(g_et4000, nova_io_alias_card_addr(a), (uae_u8)v);
+        return;
+    }
+
+    switch (hw_page_addr(a))
+    {
+        case HW_PAGE_VIDEO:
+            st_video_snoop8(a, (uint8_t)v);
+            hw_bus_bput(a, v);
+            break;
+        case HW_PAGE_FDD_DMA:
+        case HW_PAGE_PSG:
+            hw_fdd_bput(a, v);
+            break;
+        case HW_PAGE_DMASND:
+            dmasnd_snoop8(a, (uint8_t)v);
+            hw_bus_bput(a, v);
+            break;
+        case HW_PAGE_BLITTER_LO:
+        case HW_PAGE_BLITTER_HI:
+            hw_blitter_bput(a, v);
+            break;
+        case HW_PAGE_MFP:
+            if (hw_mfp_addr(a))
+                hw_mfp_bput(a, v);
+            else
+                hw_bus_bput(a, v);
+            break;
+        case HW_PAGE_ACIA:
+            hw_bus_bput(a, v);
+            acia_trace("W", a, v, 1);
+            break;
+        default:
+            hw_bus_bput(a, v);
+            break;
+    }
+#endif
+}
+
+static int hw_check(uaecptr a, uae_u32 sz) { return 0; }
+static uae_u8 *hw_xlate(uaecptr a) { return natmem_offset + a; }
+
+static addrbank pistorm_hw_bank = {
+    hw_lget, hw_wget, hw_bget,
+    hw_lput, hw_wput, hw_bput,
+    hw_xlate, hw_check, NULL, "pistorm HW I/O", "pistorm HW I/O",
+    hw_lget, hw_wget,
+    ABFLAG_IO | ABFLAG_INDIRECT,
+    S_READ, S_WRITE};
+
+
 /* ====================================================================== *
  * LOW-RAM bank — paste into pistorm_natmem.cpp next to pistorm_stram_bank.
  * --------------------------------------------------------------------- *
  * First 64KB of ST-RAM = exception vectors (0x000-0x3FF) + TOS/OS system
- * variables. The profiler showed 5.5M of 5.6M ST-RAM write-through bus
- * cycles land here. This region is CPU-only:
- *   - it is never the video framebuffer (top of ST-RAM, and your video is
- *     on the ET4000 anyway),
- *   - it is never a DMA buffer (BIOS/GEMDOS allocate those higher up),
- *   - nothing on the real Atari bus ever reads it.
- * So writes do NOT need write-through to ps_write. Keep them mirror-only.
- * Reads were already direct from the mirror. SMC-invalidate is retained in
- * case anything executes from low RAM (cheap no-op when it doesn't).
+ * variables. Match the working Musashi model: reads come from the mirror,
+ * writes update the mirror and write through to the real bus.
  * ====================================================================== */
 static uae_u32 lo_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)(natmem_offset + a)); }
 static uae_u32 lo_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)(natmem_offset + a)); }
 static uae_u32 lo_bget(uaecptr a) { return natmem_offset[a]; }
-
+#if (0)
+static void lo_lput(uaecptr a, uae_u32 v)
+{
+    do_put_mem_long((uae_u32 *)(natmem_offset + a), v);
+    if (a >= 8)
+    {
+        g_buserr = 0;
+        fc_data();
+        ps_write_32(a & 0x00FFFFFF, v);
+        pistorm_buserr(a, v, false, sz_long);
+    }
+    pistorm_smc(a, 4);
+}
+static void lo_wput(uaecptr a, uae_u32 v)
+{
+    do_put_mem_word((uae_u16 *)(natmem_offset + a), (uae_u16)v);
+    if (a >= 8)
+    {
+        g_buserr = 0;
+        fc_data();
+        ps_write_16(a & 0x00FFFFFF, (uint16_t)v);
+        pistorm_buserr(a, v, false, sz_word);
+    }
+    pistorm_smc(a, 2);
+}
+static void lo_bput(uaecptr a, uae_u32 v)
+{
+    natmem_offset[a] = (uae_u8)v;
+    if (a >= 8)
+    {
+        g_buserr = 0;
+        fc_data();
+        ps_write_8(a & 0x00FFFFFF, (uint8_t)v);
+        pistorm_buserr(a, v, false, sz_byte);
+    }
+    pistorm_smc(a, 1);
+}
+#else
 static void lo_lput(uaecptr a, uae_u32 v)
 {
     do_put_mem_long((uae_u32 *)(natmem_offset + a), v);
@@ -815,7 +2043,7 @@ static void lo_bput(uaecptr a, uae_u32 v)
     natmem_offset[a] = (uae_u8)v;
     pistorm_smc(a, 1);
 }
-
+#endif
 static uae_u8 *lo_xlate(uaecptr a) { return natmem_offset + a; }
 static int lo_check(uaecptr a, uae_u32 sz) { return 1; }
 
@@ -825,7 +2053,7 @@ static addrbank pistorm_lowram_bank = {
     lo_xlate, lo_check, NULL, "ST-RAM-LOW", "ST-RAM-LOW",
     lo_lget, lo_wget,
     ABFLAG_RAM | ABFLAG_DIRECTACCESS,
-    0, 0 /* reads AND writes direct — no bus */
+    0, 0 /* force JIT handler access for TOS system variables */
 };
 
 /* ---- in jit_mem_init(), in the baseaddr block (next to the others): ----
@@ -846,7 +2074,7 @@ static addrbank pistorm_lowram_bank = {
  * ---------------------------------------------------------------------- */
 
 /* ================================================================== */
-/* ST-RAM bank — read direct from mirror, write-through to bus + SMC    */
+/* ST-RAM bank — read direct from mirror, optional write-through + SMC  */
 /* ================================================================== */
 
 static uae_u32 sr_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)(natmem_offset + a)); }
@@ -861,34 +2089,40 @@ static uae_u32 sr_bget(uaecptr a){ fc_data(); a &= 0x00FFFFFF; uae_u32 v=ps_read
 static void sr_lput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
+    g_buserr = 0;
     do_put_mem_long((uae_u32 *)(natmem_offset + a), v); // update mirror (BE)
-    fc_data();
-    a &= 0x00FFFFFF;
-    ps_write_32(a, v); // write-through to bus
-    // m68k_write_memory_32(a, v);
-    // pistorm_buserr(a, v, false, sz_long);
+    stram_snoop_lowram(a, 4);
+    if (stram_needs_bus_write(a, 4)) {
+        uae_u32 bus_a = a & 0x00FFFFFF;
+        fc_data();
+        ps_write_32(bus_a, v); // write-through to bus
+    }
     pistorm_smc(a, 4);
 }
 static void sr_wput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
+    g_buserr = 0;
     do_put_mem_word((uae_u16 *)(natmem_offset + a), (uae_u16)v);
-    fc_data();
-    a &= 0x00FFFFFF;
-    ps_write_16(a, (uint16_t)v);
-    // m68k_write_memory_16(a, (uae_u16)v);
-    // pistorm_buserr(a, v, false, sz_word);
+    stram_snoop_lowram(a, 2);
+    if (stram_needs_bus_write(a, 2)) {
+        uae_u32 bus_a = a & 0x00FFFFFF;
+        fc_data();
+        ps_write_16(bus_a, (uint16_t)v);
+    }
     pistorm_smc(a, 2);
 }
 static void sr_bput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
+    g_buserr = 0;
     natmem_offset[a] = (uae_u8)v;
-    fc_data();
-    a &= 0x00FFFFFF;
-    ps_write_8(a, (uint8_t)v);
-    // m68k_write_memory_8(a, (uae_u8)v);
-    // pistorm_buserr(a, v, false, sz_byte);
+    stram_snoop_lowram(a, 1);
+    if (stram_needs_bus_write(a, 1)) {
+        uae_u32 bus_a = a & 0x00FFFFFF;
+        fc_data();
+        ps_write_8(bus_a, (uint8_t)v);
+    }
     pistorm_smc(a, 1);
 }
 static uae_u8 *sr_xlate(uaecptr a) { return natmem_offset + a; }
@@ -938,7 +2172,7 @@ static void tt_lput(uaecptr a, uae_u32 v) { do_put_mem_long((uae_u32 *)(natmem_o
 static void tt_wput(uaecptr a, uae_u32 v) { do_put_mem_word((uae_u16 *)(natmem_offset + a), (uae_u16)v); }
 static void tt_bput(uaecptr a, uae_u32 v) { natmem_offset[a] = (uae_u8)v; }
 static uae_u8 *tt_xlate(uaecptr a) { return natmem_offset + a; }
-static int tt_check(uaecptr a, uae_u32 sz) { return (a >= TT_RAM_BASE) && a < (TT_RAM_BASE + TT_RAM_SIZE); }
+static int tt_check(uaecptr a, uae_u32 sz) { return (a >= TT_RAM_BASE) && a < (TT_RAM_BASE + tt_ram_size); }
 
 static addrbank pistorm_ttram_bank = {
     tt_lget, tt_wget, tt_bget,
@@ -947,7 +2181,10 @@ static addrbank pistorm_ttram_bank = {
     tt_lget, tt_wget,
     ABFLAG_RAM | ABFLAG_DIRECTACCESS | ABFLAG_CACHE_ENABLE_ALL,
     0, 0};
-#if (0)
+
+extern "C" uint8_t *et4000_engine_vram_ptr(void);
+
+#if (1)
 /* ================================================================== */
 /* FB-GUARD bank — Amiga-faithful scratch just below the framebuffer.   */
 /* On Amiga the RTG framebuffer is plain mapped RAM and never faults.    */
@@ -961,41 +2198,103 @@ static addrbank pistorm_ttram_bank = {
 /* unaffected. Pure direct R/W: never reaches the bus, so g_buserr never */
 /* fires here and the JIT bus-error recovery path is never entered.      */
 /* ================================================================== */
-/* GUARD_BASE is now derived at run time from the ACTIVE aperture, not the
- * XVDI aperture: the 1MB immediately below et4k_addr_ptr->vram_base. For NOVA
- * (vram_base 0xC00000) that is 0xB00000..0xBFFFFF, which is where a save-under
- * under-run actually lands (e.g. the 0xBFFFFE bus error). Only GUARD_SIZE is a
- * compile-time constant. */
-#define GUARD_SIZE (0x00200000u) /* 1MB */
+/* GUARD_BASE is derived at run time from the active aperture. This models the
+ * scratch/save-under area some Atari SVGA drivers use immediately below the
+ * framebuffer aperture. It is intentionally host scratch RAM, not visible VRAM.
+ * Observed XVDI access: 0x009DFFFC, four bytes below a 128K guard. */
+#define GUARD_SIZE (0x00040000u)
 #define GUARD_BASE (et4k_addr_ptr->vram_base - GUARD_SIZE)
 
-static uae_u32 gd_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)(natmem_offset + a)); }
-static uae_u32 gd_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)(natmem_offset + a)); }
-static uae_u32 gd_bget(uaecptr a) { return natmem_offset[a]; }
+static inline uae_u8 gd_read_byte(uaecptr a)
+{
+    if (a >= et4k_addr_ptr->vram_base && a < et4k_addr_ptr->vram_base + VRAM_SIZE)
+        return et4000_engine_vram_read8(a);
+    return natmem_offset[a];
+}
 
-static void gd_lput(uaecptr a, uae_u32 v) { do_put_mem_long((uae_u32 *)(natmem_offset + a), v); }
-static void gd_wput(uaecptr a, uae_u32 v) { do_put_mem_word((uae_u16 *)(natmem_offset + a), (uae_u16)v); }
-static void gd_bput(uaecptr a, uae_u32 v) { natmem_offset[a] = (uae_u8)v; }
+static inline void gd_write_byte(uaecptr a, uae_u8 v)
+{
+    if (a >= et4k_addr_ptr->vram_base && a < et4k_addr_ptr->vram_base + VRAM_SIZE) {
+        et4000_engine_vram_write8(a, v);
+        return;
+    }
+    natmem_offset[a] = v;
+}
+
+static uae_u32 gd_lget(uaecptr a)
+{
+    return ((uae_u32)gd_read_byte(a) << 24) |
+           ((uae_u32)gd_read_byte(a + 1) << 16) |
+           ((uae_u32)gd_read_byte(a + 2) << 8) |
+           gd_read_byte(a + 3);
+}
+
+static uae_u32 gd_wget(uaecptr a)
+{
+    return ((uae_u32)gd_read_byte(a) << 8) | gd_read_byte(a + 1);
+}
+
+static uae_u32 gd_bget(uaecptr a) { return gd_read_byte(a); }
+
+static void gd_lput(uaecptr a, uae_u32 v)
+{
+    gd_write_byte(a, (uae_u8)(v >> 24));
+    gd_write_byte(a + 1, (uae_u8)(v >> 16));
+    gd_write_byte(a + 2, (uae_u8)(v >> 8));
+    gd_write_byte(a + 3, (uae_u8)v);
+}
+
+static void gd_wput(uaecptr a, uae_u32 v)
+{
+    gd_write_byte(a, (uae_u8)(v >> 8));
+    gd_write_byte(a + 1, (uae_u8)v);
+}
+
+static void gd_bput(uaecptr a, uae_u32 v) { gd_write_byte(a, (uae_u8)v); }
 
 static uae_u8 *gd_xlate(uaecptr a) { return natmem_offset + a; }
-static int gd_check(uaecptr a, uae_u32 sz) { return (a >= GUARD_BASE && a < et4k_addr_ptr->vram_base - sz); }
+static int gd_check(uaecptr a, uae_u32 sz) { return 0; }
 
 static addrbank pistorm_guard_bank = {
     gd_lget, gd_wget, gd_bget,
     gd_lput, gd_wput, gd_bput,
     gd_xlate, gd_check, NULL, "FB-GUARD", "FB-GUARD",
     gd_lget, gd_wget,
-    ABFLAG_RAM,
-    0, 0 // fully direct, no special
+    ABFLAG_IO | ABFLAG_INDIRECT,
+    S_READ, S_WRITE
 };
 #endif
 
-/* VGA-VRAM bank — pure host, direct R/W, native (mprotect) SMC like stock fast RAM */
-// static uae_u32 vga_lget(uaecptr a){ return do_get_mem_long((uae_u32*)(natmem_offset+a)); }
-// static uae_u32 vga_wget(uaecptr a){ return do_get_mem_word((uae_u16*)(natmem_offset+a)); }
-// static uae_u32 vga_bget(uaecptr a){ return natmem_offset[a]; }
+/* VGA-VRAM bank — framebuffer style storage.
+ *
+ * ET4000 register I/O still goes through PCem, but CPU reads/writes to the
+ * NOVA/XVDI VRAM aperture are just framebuffer bytes. Calling PCem's
+ * svga_*_linear helpers for every byte/word/long adds a lot of hot-path work
+ * and is unnecessary for the packed/linear SVGA modes GEM uses here.
+ */
+#define ET4K_VRAM_MASK 0x000FFFFFu
 
-extern "C" uint8_t *et4000_engine_vram_ptr(void);
+static inline uae_u8 *vga_vram_ptr(uaecptr a)
+{
+    return et4000_engine_vram_ptr() + (a & ET4K_VRAM_MASK);
+}
+
+static int vga_vram_mode(void)
+{
+    return 2;
+}
+
+static inline int vga_direct_ok(void)
+{
+    int mode = vga_vram_mode();
+    if (mode == 2)
+        return 0;
+    if (!et4000_engine_vram_ptr())
+        return 0;
+    if (mode == 1)
+        return 1;
+    return et4000_engine_direct_vram_ok();
+}
 
 /*
 static uae_u32 vga_lget(uaecptr a){ uae_u32 v=m68k_read_memory_32(a); return v; }
@@ -1016,26 +2315,123 @@ static void vga_bput(uaecptr a, uae_u32 v){ et4000_vram_write8(g_et4000, a, (uae
 
 static uae_u32 vga_lget(uaecptr a)
 {
-    uae_u32 v = et4000_engine_vram_read32(a);
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    uae_u32 v;
+    if (!vga_direct_ok())
+    {
+        v = et4000_engine_vram_read32(a);
+        if (t0)
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0);
+        return v;
+    }
+
+    uae_u8 *p = vga_vram_ptr(a);
+    v = ((uae_u32)p[0] << 24) | ((uae_u32)p[1] << 16) |
+        ((uae_u32)p[2] << 8) | p[3];
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0);
     return v;
 }
+
 static uae_u32 vga_wget(uaecptr a)
 {
-    uae_u32 v = et4000_engine_vram_read16(a);
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    uae_u32 v;
+    if (!vga_direct_ok())
+    {
+        v = et4000_engine_vram_read16(a);
+        if (t0)
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0);
+        return v;
+    }
+
+    uae_u8 *p = vga_vram_ptr(a);
+    v = ((uae_u32)p[0] << 8) | p[1];
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0);
     return v;
 }
+
 static uae_u32 vga_bget(uaecptr a)
 {
-    uae_u32 v = et4000_engine_vram_read8(a);
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    uae_u32 v;
+    if (!vga_direct_ok())
+    {
+        v = et4000_engine_vram_read8(a);
+        if (t0)
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0);
+        return v;
+    }
+
+    v = *vga_vram_ptr(a);
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0);
     return v;
 }
-static void vga_lput(uaecptr a, uae_u32 v) { et4000_engine_vram_write32(a, v); }
-static void vga_wput(uaecptr a, uae_u32 v) { et4000_engine_vram_write16(a, (uae_u16)v); }
-static void vga_bput(uaecptr a, uae_u32 v) { et4000_engine_vram_write8(a, (uae_u8)v); }
 
-// static uae_u8 *vga_xlate(uaecptr a){ return NULL; }
+static void vga_lput(uaecptr a, uae_u32 v)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    if (!vga_direct_ok())
+    {
+        et4000_engine_vram_write32(a, v);
+        if (t0)
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0);
+        return;
+    }
+
+    uae_u8 *p = vga_vram_ptr(a);
+    p[0] = (uae_u8)(v >> 24);
+    p[1] = (uae_u8)(v >> 16);
+    p[2] = (uae_u8)(v >> 8);
+    p[3] = (uae_u8)v;
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0);
+}
+
+static void vga_wput(uaecptr a, uae_u32 v)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    if (!vga_direct_ok())
+    {
+        et4000_engine_vram_write16(a, (uae_u16)v);
+        if (t0)
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0);
+        return;
+    }
+
+    uae_u8 *p = vga_vram_ptr(a);
+    p[0] = (uae_u8)(v >> 8);
+    p[1] = (uae_u8)v;
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0);
+}
+
+static void vga_bput(uaecptr a, uae_u32 v)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    if (!vga_direct_ok())
+    {
+        et4000_engine_vram_write8(a, (uae_u8)v);
+        if (t0)
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0);
+        return;
+    }
+
+    *vga_vram_ptr(a) = (uae_u8)v;
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0);
+}
+
+// Keep ET4000 VRAM marked as a special bank, but still return a valid pointer:
+// ARM64 get_n_addr_old() calls xlateaddr even for special memory. Returning
+// NULL makes generated code dereference NULL +/- displacement.
+static uae_u8 *vga_xlate(uaecptr a)
+{
+    return vga_vram_ptr(a);
+}
 // static uae_u8 *vga_xlate(uaecptr a){ return natmem_offset + a; }
-static uae_u8 *vga_xlate(uaecptr a) { return et4000_engine_vram_ptr() + (a & (VRAM_SIZE - 1)); }
 static int vga_check(uaecptr a, uae_u32 sz)
 {
     // return (a >= et4k_addr_ptr->vram_base && a < ((et4k_addr_ptr->vram_base + VRAM_SIZE) - sz));
@@ -1047,26 +2443,82 @@ static addrbank pistorm_vga_vram = {
     vga_lput, vga_wput, vga_bput,
     vga_xlate, vga_check, NULL, "VGA-VRAM", "VGA-VRAM",
     vga_lget, vga_wget,
-    ABFLAG_RAM | ABFLAG_DIRECTACCESS,
+    ABFLAG_IO | ABFLAG_INDIRECT,
     S_READ, S_WRITE};
 
 void et4000_engine_io_write(uint16_t port, uint8_t val);
 uint8_t et4000_engine_io_read(uint16_t port);
 
-static uae_u32 vga_io_lget(uaecptr a) { return 0xFF; } // uae_u32 v=(et4000_io_read16(g_et4000, a+1) | (et4000_io_read16(g_et4000, a) << 16)); return v; }
+static int vga_io_strict_width(void)
+{
+    return 0;
+}
+
+static uae_u32 vga_io_lget(uaecptr a)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    uae_u32 v;
+
+    if (vga_io_strict_width())
+        v = ((uae_u32)et4000_io_read8(g_et4000, a) << 24) |
+            ((uae_u32)et4000_io_read8(g_et4000, a + 1) << 16) |
+            ((uae_u32)et4000_io_read8(g_et4000, a + 2) << 8) |
+            et4000_io_read8(g_et4000, a + 3);
+    else
+        v = 0;
+
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0);
+    return v;
+}
 static uae_u32 vga_io_wget(uaecptr a)
 {
-    uae_u32 v = et4000_io_read16(g_et4000, a);
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    uae_u32 v;
+
+    if (vga_io_strict_width())
+        v = ((uae_u32)et4000_io_read8(g_et4000, a) << 8) |
+            et4000_io_read8(g_et4000, a + 1);
+    else
+        v = et4000_io_read8(g_et4000, a);
+
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0);
     return v;
 }
 static uae_u32 vga_io_bget(uaecptr a)
 {
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
     uae_u32 v = et4000_io_read8(g_et4000, a);
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0);
     return v;
 }
-static void vga_io_lput(uaecptr a, uae_u32 v) { et4000_io_write32(g_et4000, a, v); }
-static void vga_io_wput(uaecptr a, uae_u32 v) { et4000_io_write16(g_et4000, a, (uae_u16)v); }
-static void vga_io_bput(uaecptr a, uae_u32 v) { et4000_io_write8(g_et4000, a, (uae_u8)v); }
+static void vga_io_lput(uaecptr a, uae_u32 v)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    if (vga_io_strict_width())
+        et4000_io_write32(g_et4000, a, v);
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0);
+}
+static void vga_io_wput(uaecptr a, uae_u32 v)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    if (vga_io_strict_width())
+        et4000_io_write16(g_et4000, a, (uae_u16)v);
+    else
+        et4000_io_write8(g_et4000, a, (uae_u8)v);
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0);
+}
+static void vga_io_bput(uaecptr a, uae_u32 v)
+{
+    uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
+    et4000_io_write8(g_et4000, a, (uae_u8)v);
+    if (t0)
+        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0);
+}
 
 /*
 static uae_u32 vga_io_lget(uaecptr a){ uae_u32 v=et4000_engine_io_read (a); return v; }
@@ -1148,17 +2600,13 @@ extern "C" void jit_mem_init(void)
 //usleep(1000);
     if (ET4K_enabled)
     {
-        /* Fault loudly only if the JIT ever direct-bangs the ACTIVE aperture's
-         * handler region (VRAM lives in the engine's own buffer; IO is pure
-         * handler). Do NOT blanket-protect the inactive aperture or the guard:
-         * the FB-GUARD below now backs the 1MB directly under the active
-         * framebuffer (0xB00000 for NOVA) and MUST stay writable host RAM, or
-         * the guard's own gd_* accesses would SIGSEGV. */
-        mprotect(natmem_offset + 0x00A00000, 0x00100000, PROT_NONE);
-        mprotect(natmem_offset + 0x00B00000, 0x00100000, PROT_NONE);
+        /* Do not blanket-protect the inactive 0xA/0xB apertures here. For NOVA,
+         * the FB-GUARD immediately below 0xC00000 lives inside 0xB00000..0xBFFFFF
+         * and must stay writable host scratch RAM. The addrbank map below owns
+         * routing/protection for the real active aperture and I/O window. */
         mprotect(natmem_offset + et4k_addr_ptr->vram_base, VRAM_SIZE, PROT_NONE);
         mprotect(natmem_offset + et4k_addr_ptr->io_base, VGA_IO_SIZE, PROT_NONE);
-        pistorm_vga_vram.baseaddr = natmem_offset + et4k_addr_ptr->vram_base;
+        pistorm_vga_vram.baseaddr = NULL;
         pistorm_vga_io.baseaddr = natmem_offset + et4k_addr_ptr->io_base;
     }
 
@@ -1167,10 +2615,14 @@ extern "C" void jit_mem_init(void)
     pistorm_stram_bank.baseaddr = natmem_offset + 0;
     //pistorm_fdd_bank.baseaddr = natmem_offset + 0x00FF0000;
     pistorm_rom_bank.baseaddr = natmem_offset + ROM_BASE;
-    // pistorm_guard_bank.baseaddr = natmem_offset + GUARD_BASE;
     pistorm_ide_bank.baseaddr = natmem_offset + IO_IDE_BASE;
     pistorm_io_bank.baseaddr = natmem_offset + IO_HW_BASE;
+    pistorm_hw_bank.baseaddr = natmem_offset + 0x00FF0000;
     pistorm_ttram_bank.baseaddr = natmem_offset + TT_RAM_BASE;
+#if (1)
+    if (ET4K_enabled)
+        pistorm_guard_bank.baseaddr = natmem_offset + GUARD_BASE;
+#endif
 
     /* ROM size from the loaded image, rounded up to a 64KB bank and clamped so
      * a 1MB EmuTOS at 0xE00000 abuts IDE at 0xF00000 without overlapping. */
@@ -1202,25 +2654,31 @@ extern "C" void jit_mem_init(void)
     // map_region(0,           0x01000000,       &pistorm_dummy_bank);
     map_region(0, GUEST_RESERVE, &pistorm_dummy_bank); //&pistorm_io_bank);
     map_region(0, ST_RAM_SIZE, &pistorm_stram_bank);
-    map_region(0, 0x400000, &pistorm_lowram_bank); // overlay low 64KB: mirror-only
+    if (STRAM_Direct_enabled) {
+        /* Fast mirror-only RAM is deliberately separate from stram_cache.
+         * stram_cache still uses the ST-RAM handler so it can write through
+         * the live physical screen area for the real Atari shifter. */
+       // map_region(STRAM_DIRECT_START, STRAM_DIRECT_END - STRAM_DIRECT_START, &pistorm_lowram_bank);
+        map_region(0, 0x00400000, &pistorm_lowram_bank);
+    }
     
     if (ET4K_enabled) {
+        map_region(GUARD_BASE, GUARD_SIZE, &pistorm_guard_bank);
         map_region(et4k_addr_ptr->vram_base, VRAM_SIZE, &pistorm_vga_vram);
         map_region(et4k_addr_ptr->io_base, VGA_IO_SIZE, &pistorm_vga_io);
     }
 
     map_region(ROM_BASE, pistorm_rom_size, &pistorm_rom_bank);
-    //map_region(0x00FF8000u, 0x08000, &pistorm_io_bank);  // HW I/O  alias 0xFFFF8xxx
-    //map_region(0xFFFF8000u, 0x08000, &pistorm_io_bank);  // HW I/O  alias 0xFFFF8xxx
+    map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases
+    map_region(0xFFFF0000u, 0x10000, &pistorm_hw_bank); // 32-bit alias
     map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
     map_region(0xFFF00000u, 0x00100, &pistorm_ide_bank); // IDE 32-bit alias (the hot one)
 
     //map_region(0x00FF0000u, 0x10000, &pistorm_fdd_bank);  // 24-bit HW I/O alias
    // map_region(0xFFFF0000u, 0x10000, &pistorm_fdd_bank);  // 32-bit alias (the hot one)
 
-    map_region(TT_RAM_BASE, TT_RAM_SIZE, &pistorm_ttram_bank);
-    // map_region(GUARD_BASE,  GUARD_SIZE,       &pistorm_guard_bank);
-
+    if (tt_ram_available)
+        map_region(TT_RAM_BASE, tt_ram_size, &pistorm_ttram_bank);
     // pistorm_bank_profile_init ();
 
     /* Force full-distrust off for direct regions, on for I/O via the bank

@@ -24,6 +24,7 @@
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
 #include "sysdeps.h"
+#include "threaddep/thread.h"
 
 /* JIT bridge entry points (jit_glue.cpp) */
 #ifdef __cplusplus
@@ -32,16 +33,22 @@ extern "C"
 #endif
 
   extern void jit_mem_init(void);
-  extern void jit_cpu_init(int cpu_level);
+  extern void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
+                                       int m68k_speed, int m68k_speed_set,
+                                       int jit_cache, int jit_cache_set);
+  extern void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit);
   extern void jit_cpu_reset(void);
   extern void jit_cpu_execute(void);
-  extern void jit_set_irq(int level);
+  extern void pistorm_set_blitter_enabled(int enabled);
 
 #ifdef __cplusplus
 }
 #endif
 
 extern int quit_program;
+#ifdef WITH_THREADED_CPU
+extern uae_sem_t cpu_wakeup_sema;
+#endif
 #include "platforms/atari/et4000/et4000.h"
 #include "platforms/atari/IDE.h"
 #include "platforms/atari/idedriver.h"
@@ -87,6 +94,9 @@ bool tt_ram_available;
 /* FDD setup */
 extern "C" void *fdd_vbl_thread(void *arg);
 bool FDD_enabled;
+bool Blitter_enabled = true;
+bool STRAM_Cache_enabled;
+bool STRAM_Direct_enabled;
 
 /* ATARI RAM cache setup */
 //#define ADDR_MFP_GPIP 0x00FFFA01 // MFP General Purpose I/O
@@ -99,36 +109,38 @@ uint8_t *st_ram_cache;
 
 /* ET4K setup */
 bool ET4K_enabled;
-int ET4K_driver; // 0 = NOVA, 1 = XVDI, 2 = NVDI, 3 = FVDI
+int ET4K_driver; // graphics_driver enum: 0 = NONE, 1 = NOVA, 2 = XVDI, 3 = NVDI, 4 = FVDI
 bool ET4K_emutos_vga;
+bool Native_HDMI_enabled = true;
+extern volatile int et4000_thread_ready;
 
-ET4KADDRESSES_s et4kaddresses[GRAPHICS_CARD_TYPES] =
+#ifdef __cplusplus
+extern "C"
 {
-  {0x00D00000, 0x00D10000, 0x00C00000, 0x00D00000}, // NOVA
-  {0x00B00000, 0x00B10000, 0x00A00000, 0x00B00000}, // XVDI
-  {0x00D00000, 0x00D10000, 0x00C00000, 0x00D00000}, // NVDI
-  {0x00D00000, 0x00D10000, 0x00C00000, 0x00D00000}  // FVDI
+#endif
+  extern uint8_t *et4000_engine_vram_ptr(void);
+#ifdef __cplusplus
+}
+#endif
+
+ET4KADDRESSES_s et4kaddresses[GRAPHICS_DRIVERS] =
+{
+  {0x00000000, 0x00000000, 0x00000000, 0x00000000}, // NONE
+  {0x00D00000, 0x00E00000, 0x00C00000, 0x00D00000}, // NOVA
+  {0x00B00000, 0x00C00000, 0x00A00000, 0x00B00000}, // XVDI
+  {0x00D00000, 0x00E00000, 0x00C00000, 0x00D00000}, // NVDI
+  {0x00D00000, 0x00E00000, 0x00C00000, 0x00D00000}  // FVDI
 };
 
 ET4KADDRESSES_s *et4k_addr_ptr;
 
 rtg_s rtg;
-#if (0)
-/* The XVDI/NOVA driver's edge-of-screen block moves (cursor save/restore,
- * clipped blits) step a few bytes below the framebuffer base when the pointer
- * is at the extreme top-left or off the left edge — e.g. base-4 = 0x009FFFFC.
- * Those used to miss the aperture and fall through to the unmapped bus -> BERR.
- * Fold a small guard band below the aperture into the card; et4000.c masks the
- * offset with (VRAM_SIZE-1), so the under-run wraps to the top of unused VRAM. */
-#define ET4K_VRAM_GUARD 0x10000u /* 64 KB; must stay inside the gap below the card */
-
 static inline int in_et4k_vram(uint32_t a)
 {
   uint32_t base = et4kaddresses[ET4K_driver].vram_base;
   uint32_t top = et4kaddresses[ET4K_driver].vram_top;
-  return a >= base - ET4K_VRAM_GUARD && a < top;
+  return a >= base && a < top;
 }
-#endif
 
 #ifdef __cplusplus
 extern "C"
@@ -136,6 +148,8 @@ extern "C"
 #endif
 
   extern void *render_frame(void *);
+  extern void pistorm_cpu_irqwatch_dump(uint32_t raw6, uint32_t latched6, uint32_t raw4, uint32_t latched4);
+  extern void jit_request_cpu_exit(void);
 
 #ifdef __cplusplus
 }
@@ -147,10 +161,122 @@ struct emulator_config *cfg = NULL;
 
 extern uint8_t fc;
 volatile uint8_t g_irq = 0;
+volatile uint8_t g_ipl = 0;
 uint32_t tt_ram_size = 0;
 
 volatile uint8_t g_irq_mask;
 extern volatile uint8_t g_buserr;
+
+static inline void cpu_data_fc(void)
+{
+  fc = 5; /* supervisor data */
+}
+
+static inline bool blitter_disabled_addr(uint32_t address)
+{
+  if ((address & 0xFF000000u) == 0xFF000000u)
+    address &= 0x00FFFFFFu;
+  address &= 0x00FFFFFFu;
+  return !Blitter_enabled && address >= 0x00FF8A00u && address < 0x00FF8C00u;
+}
+
+static uint32_t mfp_eoi8_writes;
+static uint32_t mfp_eoi16_writes;
+static uint32_t mfp_eoi_last_addr;
+static uint32_t mfp_eoi_last_value;
+static uint8_t mfp_eoi_last_fc;
+static uint8_t mfp_write_shadow[0x30];
+static uint64_t mfp_write_valid;
+static uint32_t mfp_write_total;
+struct mfp_write_log_s {
+  uint32_t addr;
+  uint32_t value;
+  uint8_t word;
+  uint8_t fc;
+};
+static mfp_write_log_s mfp_write_log[8];
+static uint8_t mfp_write_log_pos;
+extern "C" volatile uint32_t pistorm_mfp_iack_counts[16];
+extern "C" volatile uint8_t pistorm_mfp_last_iack_vector;
+
+#define MFP_WRITE_TRACKING 0
+#define MFP_DIAG_BUS_SNAPSHOT 0
+#define MFP_DIAG_MISSING_SUMMARY 0
+#define ATARI_IRQ_RAW_DIAG 0
+#define ATARI_IRQ_MISSING_DIAG 0
+#define PISTORM_SERIAL_IRQ 0
+
+static inline bool mfp_eoi_addr(uint32_t addr)
+{
+  uint32_t folded = addr & 0x00FFFFFFu;
+  return folded == 0x00FFFA0Fu || folded == 0x00FFFA11u;
+}
+
+static inline bool mfp_reg_addr(uint32_t addr)
+{
+  uint32_t folded = addr & 0x00FFFFFFu;
+  return folded >= 0x00FFFA00u && folded < 0x00FFFA30u;
+}
+
+static inline void mfp_shadow_byte(uint32_t addr, uint8_t value)
+{
+  uint32_t folded = addr & 0x00FFFFFFu;
+  if (folded >= 0x00FFFA00u && folded < 0x00FFFA30u)
+  {
+    uint32_t index = folded - 0x00FFFA00u;
+    mfp_write_shadow[index] = value;
+    mfp_write_valid |= (1ULL << index);
+  }
+}
+
+extern "C" void mfp_note_write(uint32_t addr, uint32_t value, bool word)
+{
+#if !MFP_WRITE_TRACKING
+  (void)addr;
+  (void)value;
+  (void)word;
+  return;
+#endif
+
+  if (!mfp_reg_addr(addr))
+    return;
+
+  uint32_t folded = addr & 0x00FFFFFFu;
+  mfp_write_log[mfp_write_log_pos].addr = folded;
+  mfp_write_log[mfp_write_log_pos].value = word ? (value & 0xFFFFu) : (value & 0xFFu);
+  mfp_write_log[mfp_write_log_pos].word = word ? 1 : 0;
+  mfp_write_log[mfp_write_log_pos].fc = fc;
+  mfp_write_log_pos = (uint8_t)((mfp_write_log_pos + 1) & 7);
+  mfp_write_total++;
+
+  if (word)
+  {
+    mfp_shadow_byte(folded, (uint8_t)(value >> 8));
+    mfp_shadow_byte(folded + 1, (uint8_t)value);
+  }
+  else
+  {
+    mfp_shadow_byte(folded, (uint8_t)value);
+  }
+
+  if (mfp_eoi_addr(addr))
+  {
+    if (word)
+      mfp_eoi16_writes++;
+    else
+      mfp_eoi8_writes++;
+
+    mfp_eoi_last_addr = folded;
+    mfp_eoi_last_value = word ? (value & 0xFFFFu) : (value & 0xFFu);
+    mfp_eoi_last_fc = fc;
+  }
+
+}
+
+extern "C" void mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word)
+{
+  mfp_note_write(addr, value, word);
+}
 
 #if MYWTC
 
@@ -193,8 +319,8 @@ void wait_ns(uint64_t nanoseconds)
 
     // Inline assembly "no-operation" instruction
     // Prevents the compiler (-O3) from optimizing away this empty loop
-    __asm__ volatile("nop");
-
+    asm volatile ("nop");
+    asm volatile ("yield" ::: "memory");
   } while (current_ns < target_ns);
 }
 
@@ -209,16 +335,90 @@ uint64_t get_time_us()
   return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
 }
 
+static uint32_t mfp_diag_buserr_mask;
+
+static uint8_t mfp_diag_read8(uint32_t addr, unsigned bit)
+{
+  uint8_t old_fc = fc;
+  uint8_t value;
+
+  fc = 5; /* supervisor data */
+  g_buserr = 0;
+  value = ps_read_8(addr);
+  if (g_buserr)
+    mfp_diag_buserr_mask |= (1u << bit);
+  g_buserr = 0;
+  fc = old_fc;
+  return value;
+}
+
+static void mfp_diag_dump(const char *why)
+{
+#if !MFP_DIAG_BUS_SNAPSHOT && !MFP_DIAG_MISSING_SUMMARY
+  (void)why;
+  return;
+#endif
+#if MFP_DIAG_BUS_SNAPSHOT
+  mfp_diag_buserr_mask = 0;
+  uint8_t gpip  = mfp_diag_read8(0x00FFFA01, 0);
+  uint8_t aer   = mfp_diag_read8(0x00FFFA03, 1);
+  uint8_t ddr   = mfp_diag_read8(0x00FFFA05, 2);
+  uint8_t iera  = mfp_diag_read8(0x00FFFA07, 3);
+  uint8_t ierb  = mfp_diag_read8(0x00FFFA09, 4);
+  uint8_t ipra  = mfp_diag_read8(0x00FFFA0B, 5);
+  uint8_t iprb  = mfp_diag_read8(0x00FFFA0D, 6);
+  uint8_t isra  = mfp_diag_read8(0x00FFFA0F, 7);
+  uint8_t isrb  = mfp_diag_read8(0x00FFFA11, 8);
+  uint8_t imra  = mfp_diag_read8(0x00FFFA13, 9);
+  uint8_t imrb  = mfp_diag_read8(0x00FFFA15, 10);
+  uint8_t vr    = mfp_diag_read8(0x00FFFA17, 11);
+  uint8_t tcdcr = mfp_diag_read8(0x00FFFA1D, 12);
+  uint8_t tcdr  = mfp_diag_read8(0x00FFFA23, 13);
+  uint8_t tddr  = mfp_diag_read8(0x00FFFA25, 14);
+
+  fprintf(stderr,
+          "[MFPDUMP] %s berr=%04X GPIP=%02X AER=%02X DDR=%02X IER=%02X/%02X IPR=%02X/%02X ISR=%02X/%02X IMR=%02X/%02X VR=%02X TCDCR=%02X TDRC/D=%02X/%02X EOI8=%u last=%06X:%04X fc=%u IACKlast=%02X IACK45=%u IACK46=%u\n",
+          why, mfp_diag_buserr_mask, gpip, aer, ddr, iera, ierb, ipra, iprb, isra, isrb, imra, imrb,
+          vr, tcdcr, tcdr, tddr,
+          mfp_eoi8_writes, mfp_eoi_last_addr,
+          mfp_eoi_last_value, mfp_eoi_last_fc, pistorm_mfp_last_iack_vector,
+          pistorm_mfp_iack_counts[5], pistorm_mfp_iack_counts[6]);
+#else
+#define MFP_SHADOW(off) ((mfp_write_valid & (1ULL << (off))) ? mfp_write_shadow[(off)] : 0xFF)
+  fprintf(stderr,
+          "[MFPMISS] %s writes=%u IER=%02X/%02X IPR=%02X/%02X ISR=%02X/%02X IMR=%02X/%02X EOI8=%u last=%06X:%04X fc=%u IACKlast=%02X IACK45=%u IACK46=%u\n",
+          why, mfp_write_total,
+          MFP_SHADOW(0x07), MFP_SHADOW(0x09),
+          MFP_SHADOW(0x0B), MFP_SHADOW(0x0D),
+          MFP_SHADOW(0x0F), MFP_SHADOW(0x11),
+          MFP_SHADOW(0x13), MFP_SHADOW(0x15),
+          mfp_eoi8_writes,
+          mfp_eoi_last_addr, mfp_eoi_last_value, mfp_eoi_last_fc,
+          pistorm_mfp_last_iack_vector,
+          pistorm_mfp_iack_counts[5], pistorm_mfp_iack_counts[6]);
+#undef MFP_SHADOW
+#endif
+}
+
+//#define ATARI_IRQ_RATE_PROFILE
 static void *ipl_task(void *)
 {
   cpu_set_t cpuset;
   pthread_t thread;
-  struct sched_param param;
   uint16_t status;
   uint8_t ipl;
-  uint64_t ipl2_cooldown_until = 0;
-  uint64_t ipl4_cooldown_until = 0;
-  uint64_t ipl6_cooldown_until = 0;
+  uint64_t irq_diag_next = 0;
+  uint64_t irq_watch_next = 0;
+  uint32_t raw_ipl0 = 0, raw_ipl2 = 0, raw_ipl4 = 0, raw_ipl6 = 0, raw_other = 0;
+  uint32_t latched_ipl2 = 0, latched_ipl4 = 0, latched_ipl6 = 0;
+  bool seen_ipl6 = false;
+  unsigned no_ipl6_seconds = 0;
+#ifdef ATARI_IRQ_RATE_PROFILE
+  uint64_t irq_profile_next = 0;
+  uint32_t irq_profile_ipl2 = 0;
+  uint32_t irq_profile_ipl4 = 0;
+  uint32_t irq_profile_ipl6 = 0;
+#endif
 
   /* anchor this task to cpu3 */
   CPU_ZERO (&cpuset);
@@ -226,9 +426,8 @@ static void *ipl_task(void *)
   thread = pthread_self();
   pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset);
 
-  /* set real-time priority for this task */
-  param.sched_priority = 99; // Highest possible priority
-  sched_setscheduler(0, SCHED_FIFO, &param);
+  /* Keep the sampler under the normal scheduler. Running it as SCHED_FIFO at
+   * priority 99 can starve the CPU/render paths when ET4000 is active. */
  
 
   while (!cpu_emulation_running);
@@ -249,47 +448,22 @@ static void *ipl_task(void *)
      * gpio 5 & 6 = ipl 1 & 2
      * Assumes CPLD has already inverted active-low to active-high binary values
      * ipl results in: 0, 2, 4, or 6 (ipl = xx0)
-     */
+    */
     ipl = (status & 0x60) >> 4;
 
-    uint64_t current_time = get_time_us();
-
-    //printf ("ipl = %d, g_irq = %d, g_irq_mask = %d\n", ipl, g_irq, g_irq_mask );
-    /*
-     * Only flag a new IRQ if:
-     * 1. The JIT has cleared the previous one (g_irq == 0)
-     * 2. The sampled IPL is higher than the current CPU Status Register mask
-     * 3. The specific IPL level is not currently in a hardware cooldown period
-     */
-    if (g_irq == 0 && ipl > g_irq_mask)
+    g_ipl = ipl;
+    if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask)
     {
-      bool trigger_irq = false;
-
-      if (ipl == 2 && current_time >= ipl2_cooldown_until)
-      {
-        // HBLANK pulse duration cooldown (~15 us)
-        ipl2_cooldown_until = current_time + 15;
-        trigger_irq = true;
-      }
-      else if (ipl == 4 && current_time >= ipl4_cooldown_until)
-      {
-        // VBLANK pulse duration cooldown (~200 us is typical for GLUE to drop the line,
-        ipl4_cooldown_until = current_time + 200;//20000;
-        trigger_irq = true;
-      }
-      else if (ipl == 6 && current_time >= ipl6_cooldown_until)
-      {
-        // MFP pulse duration cooldown (~50 us)
-        // actually , is cooldown on MFP to be used ? iack is real on the bus
-        ipl6_cooldown_until = current_time + 50;//1000;
-        trigger_irq = true;
-      }
-
-      if (trigger_irq)
-      {
-        g_irq = ipl; // Safely notify JIT engine of a new valid IRQ assertion
-      }
+      g_irq = ipl;
+      jit_request_cpu_exit();
     }
+    /*
+     * IPL pulses are short enough that scheduler sleep jitter can miss them,
+     * especially under MiNT/ET4000 load. Keep this as a short busy wait on the
+     * dedicated IPL core; the CPU side still owns the actual acknowledge/frame.
+     */
+    wait_ns (15000);
+
   }
 
   return (void*) NULL;
@@ -303,16 +477,167 @@ extern void logo(void);
 #include <string.h>
 #include <unistd.h>
 #include <execinfo.h>
+#include <dlfcn.h>
+#if defined(__linux__)
+#include <ucontext.h>
+#endif
+
+#define PISTORM_NATMEM_LIMIT ((uintptr_t)0x09000000u)
+
+static void crash_dump_host_context(void *uctx)
+{
+#if defined(__linux__) && defined(__aarch64__)
+  ucontext_t *uc = (ucontext_t *)uctx;
+  fprintf(stderr, "       pc=%016llX lr=%016llX sp=%016llX\n",
+          (unsigned long long)uc->uc_mcontext.pc,
+          (unsigned long long)uc->uc_mcontext.regs[30],
+          (unsigned long long)uc->uc_mcontext.sp);
+  fprintf(stderr,
+          "       x0=%016llX x1=%016llX x2=%016llX x3=%016llX x4=%016llX x5=%016llX x6=%016llX x7=%016llX\n",
+          (unsigned long long)uc->uc_mcontext.regs[0],
+          (unsigned long long)uc->uc_mcontext.regs[1],
+          (unsigned long long)uc->uc_mcontext.regs[2],
+          (unsigned long long)uc->uc_mcontext.regs[3],
+          (unsigned long long)uc->uc_mcontext.regs[4],
+          (unsigned long long)uc->uc_mcontext.regs[5],
+          (unsigned long long)uc->uc_mcontext.regs[6],
+          (unsigned long long)uc->uc_mcontext.regs[7]);
+#elif defined(__linux__) && defined(__x86_64__)
+  ucontext_t *uc = (ucontext_t *)uctx;
+  fprintf(stderr, "       rip=%016llX rsp=%016llX\n",
+          (unsigned long long)uc->uc_mcontext.gregs[REG_RIP],
+          (unsigned long long)uc->uc_mcontext.gregs[REG_RSP]);
+#else
+  (void)uctx;
+#endif
+}
+
+static void crash_dump_symbol(const char *label, uintptr_t addr)
+{
+  Dl_info info;
+  memset(&info, 0, sizeof info);
+  if (addr && dladdr((void *)addr, &info) && info.dli_sname)
+  {
+    fprintf(stderr, "[SYM] %s=%p %s+0x%llx (%s)\n",
+            label, (void *)addr, info.dli_sname,
+            (unsigned long long)(addr - (uintptr_t)info.dli_saddr),
+            info.dli_fname ? info.dli_fname : "?");
+  }
+}
+
+static void crash_dump_mapping(const char *label, uintptr_t addr)
+{
+#if defined(__linux__)
+  FILE *f = fopen("/proc/self/maps", "r");
+  char line[512];
+
+  if (!addr)
+    return;
+  if (!f)
+  {
+    fprintf(stderr, "[MAP] %s=%p maps unavailable\n", label, (void *)addr);
+    return;
+  }
+
+  while (fgets(line, sizeof line, f))
+  {
+    unsigned long long lo, hi;
+    char perms[8];
+    if (sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) == 3 &&
+        addr >= (uintptr_t)lo && addr < (uintptr_t)hi)
+    {
+      size_t len = strlen(line);
+      if (len && line[len - 1] == '\n')
+        line[len - 1] = 0;
+      fprintf(stderr, "[MAP] %s=%p in %s +0x%llx\n",
+              label, (void *)addr, line, (unsigned long long)(addr - (uintptr_t)lo));
+      fclose(f);
+      return;
+    }
+  }
+
+  fclose(f);
+  fprintf(stderr, "[MAP] %s=%p <unmapped>\n", label, (void *)addr);
+#else
+  (void)label;
+  (void)addr;
+#endif
+}
 
 static void crash_handler(int sig, siginfo_t *si, void *uctx)
 {
   extern void *pushall_call_handler;
-  // extern uae_u8 *natmem_offset;
-  long guest = (char *)si->si_addr - (char *)natmem_offset;
+  extern unsigned char *compiled_code;
+  extern unsigned char *current_compile_p;
+  extern unsigned char *popallspace;
+  extern const int POPALLSPACE_SIZE;
+  uintptr_t host = (uintptr_t)si->si_addr;
+  uintptr_t base = (uintptr_t)natmem_offset;
+  uintptr_t guest = host - base;
+  uintptr_t pc = 0, lr = 0, sp = 0;
+  uintptr_t et4k_vram = (uintptr_t)et4000_engine_vram_ptr();
 
-  fprintf(stderr, "[%s] host=%p natmem=%p guest_addr=0x%lx\n",
+  fprintf(stderr, "[%s] host=%p natmem=%p",
           sig == SIGILL ? "SIGILL" : "SIGSEGV",
-          si->si_addr, (void *)natmem_offset, guest);
+          si->si_addr, (void *)natmem_offset);
+  if (natmem_offset && host >= base && guest < PISTORM_NATMEM_LIMIT)
+    fprintf(stderr, " guest_addr=0x%08lX\n", (unsigned long)guest);
+  else
+    fprintf(stderr, " guest_addr=<outside-natmem>\n");
+
+  crash_dump_host_context(uctx);
+
+#if defined(__linux__) && defined(__aarch64__)
+  {
+    ucontext_t *uc = (ucontext_t *)uctx;
+    pc = (uintptr_t)uc->uc_mcontext.pc;
+    lr = (uintptr_t)uc->uc_mcontext.regs[30];
+    sp = (uintptr_t)uc->uc_mcontext.sp;
+  }
+#elif defined(__linux__) && defined(__x86_64__)
+  {
+    ucontext_t *uc = (ucontext_t *)uctx;
+    pc = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    sp = (uintptr_t)uc->uc_mcontext.gregs[REG_RSP];
+  }
+#endif
+
+  crash_dump_mapping("fault", host);
+  crash_dump_mapping("pc", pc);
+  crash_dump_mapping("lr", lr);
+  crash_dump_mapping("sp", sp);
+  crash_dump_mapping("natmem", base);
+  crash_dump_mapping("et4k_vram", et4k_vram);
+  crash_dump_symbol("pc", pc);
+  crash_dump_symbol("lr", lr);
+  if (lr >= 16)
+  {
+    const uint32_t *lr_code = (const uint32_t *)(lr - 16);
+    fprintf(stderr, "[LRCODE] %08X %08X %08X %08X\n",
+            lr_code[0], lr_code[1], lr_code[2], lr_code[3]);
+  }
+  if (popallspace || compiled_code)
+  {
+    uintptr_t popall_start = (uintptr_t)popallspace;
+    uintptr_t popall_end = popall_start + (uintptr_t)POPALLSPACE_SIZE;
+    uintptr_t jit_start = (uintptr_t)compiled_code;
+    uintptr_t jit_end = (uintptr_t)current_compile_p;
+
+    fprintf(stderr,
+            "[JITRANGE] popall=%p-%p compiled=%p-%p pushall=%p pc_in_popall=%d pc_in_compiled=%d fault_in_compiled=%d\n",
+            (void *)popall_start, (void *)popall_end,
+            (void *)jit_start, (void *)jit_end,
+            pushall_call_handler,
+            popall_start && pc >= popall_start && pc < popall_end,
+            jit_start && pc >= jit_start && pc < jit_end,
+            jit_start && host >= jit_start && host < jit_end);
+  }
+  if (et4k_vram)
+  {
+    fprintf(stderr, "[DELTA] fault-et4k_vram=%lld pc-et4k_vram=%lld\n",
+            (long long)(host - et4k_vram),
+            (long long)(pc - et4k_vram));
+  }
 
   if (sig == SIGILL)
   {
@@ -323,9 +648,10 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
 
   if (sig == SIGSEGV)
   {
-    /* in the SIGSEGV/bus-error handler, before converting to guest vec-2 */
-    fprintf(stderr, "[SEGV] si_addr=%p  guest=%08lX\n",
-            si->si_addr, (unsigned long)((uae_u8 *)si->si_addr - natmem_offset));
+    void *bt[32];
+    int n = backtrace(bt, 32);
+    fprintf(stderr, "[SEGV] si_addr=%p backtrace=%d\n", si->si_addr, n);
+    backtrace_symbols_fd(bt, n, STDERR_FILENO);
   }
 
   _exit(42);
@@ -503,6 +829,8 @@ int main(int argc, char *argv[])
    */
   printf("[CFG] Loading from %s\n", config_file);
   cfg = load_config_file(config_file);
+  Blitter_enabled = cfg->blitter;
+  pistorm_set_blitter_enabled(Blitter_enabled ? 1 : 0);
 
   /*
    * initialise emulator with config file parameters
@@ -557,7 +885,10 @@ int main(int argc, char *argv[])
   if (cfg->ttram)
   {
     tt_ram_available = true;
-    printf("[INIT] TT-RAM allocated - %dMB\n", (TT_RAM_SIZE - 0x01000000) >> 20);
+    tt_ram_size = cfg->ttram_size ? cfg->ttram_size : (128u * 1024u * 1024u);
+    if (tt_ram_size > 128u * 1024u * 1024u)
+      tt_ram_size = 128u * 1024u * 1024u;
+    printf("[INIT] TT-RAM allocated - %uMB\n", tt_ram_size >> 20);
   }
 
   /*
@@ -565,7 +896,16 @@ int main(int argc, char *argv[])
    */
   
   ET4K_enabled = cfg->graphics.card;
-  ET4K_driver = cfg->graphics.driver; // 1, 2, 3, 4 / NOVA, XVDI, NVDI, FVDI
+  ET4K_driver = cfg->graphics.driver;
+  Native_HDMI_enabled = cfg->native_hdmi;
+  STRAM_Cache_enabled = cfg->stram_cache;
+  STRAM_Direct_enabled = cfg->stram_direct;
+  if (STRAM_Cache_enabled)
+    printf("[INIT] ST-RAM cache enabled\n");
+  if (STRAM_Direct_enabled)
+    printf("[INIT] ST-RAM direct enabled\n");
+  if (!Native_HDMI_enabled)
+    printf("[INIT] Native ST HDMI disabled\n");
 
   if (ET4K_enabled)
   {
@@ -611,7 +951,7 @@ int main(int argc, char *argv[])
     pthread_setname_np(cpu_tid, "pistorm: cpu");
     printf("[MAIN] CPU thread created successfully\n");
   }
-
+#if !PISTORM_SERIAL_IRQ
   err = pthread_create(&ipl_tid, NULL, &ipl_task, NULL);
 
   if (err != 0)
@@ -622,7 +962,9 @@ int main(int argc, char *argv[])
     pthread_setname_np(ipl_tid, "pistorm: ipl");
     printf("[MAIN] IPL thread created successfully\n");
   }
-
+#else
+  printf("[MAIN] IPL thread disabled; CPU path polls IPL serially\n");
+#endif
   /* start JIT Engine */
   /* Initialise JIT memory mapping (must be after tt_ram is allocated) */
   jit_mem_init();
@@ -641,6 +983,14 @@ int main(int argc, char *argv[])
     {
       pthread_setname_np (e4k_tid, "pistorm: et4000");
       printf("[MAIN] ET4000 thread created successfully\n");
+
+      while (et4000_thread_ready == 0)
+        usleep(1000);
+      if (et4000_thread_ready < 0)
+      {
+        fprintf(stderr, "[ERROR] ET4000 thread failed to initialise\n");
+        return 1;
+      }
     }
   }
   
@@ -673,7 +1023,21 @@ int main(int argc, char *argv[])
   printf("\n");
 
   /* Initialise JIT CPU core */
-  jit_cpu_init (cpu_type); /* cpu_type: 0=68000 1=010 2=020 3=030 4=040 */
+  fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
+  fflush(stderr);
+  jit_cpu_set_perf_options(cfg->cpu_clock_multiplier,
+                           cfg->cpu_clock_multiplier_set ? 1 : 0,
+                           cfg->m68k_speed,
+                           cfg->m68k_speed_set ? 1 : 0,
+                           cfg->jit_cache,
+                           cfg->jit_cache_set ? 1 : 0);
+  jit_cpu_init (cpu_type,
+                cfg->fpu ? 1 : 0,
+                cfg->ttram ? 1 : 0,
+                cfg->addr32 ? 1 : 0,
+                cfg->jit ? 1 : 0); /* cpu_type: 0=68000 1=010 2=020 3=030 4=040 */
+  fprintf(stderr, "[MAIN] jit_cpu_init returned\n");
+  fflush(stderr);
 
   /* Start Emulation */
   cpu_emulation_running = 1; /* start the threads running - up until now, they are just waiting/looping  */
@@ -896,6 +1260,53 @@ static inline uint32_t check_ff_st(uint32_t add)
   return add;
 }
 
+static inline void st_video_snoop8(uint32_t address, uint8_t value)
+{
+  uint32_t a = address & 0x00FFFFFFu;
+
+  if (a == 0x00FF8201)
+    rtg.high = value;
+  else if (a == 0x00FF8203)
+    rtg.mid = value;
+  else if (a == 0x00FF820D)
+    rtg.low = value;
+  else if (a == 0x00FF8260)
+    rtg.shift_mode = value;
+}
+
+static inline void st_video_snoop16(uint32_t address, uint16_t value)
+{
+  uint32_t a = address & 0x00FFFFFFu;
+
+  if (a == 0x00FF8200)
+    rtg.high = (uint8_t)value;
+  else if (a == 0x00FF8202)
+    rtg.mid = (uint8_t)value;
+  else if (a == 0x00FF820C)
+    rtg.low = (uint8_t)value;
+  else if (a == 0x00FF8260)
+    rtg.shift_mode = (uint8_t)(value >> 8);
+  else if (a >= 0x00FF8240 && a < 0x00FF8260)
+    st_palette[(a - 0x00FF8240) >> 1] = value;
+}
+
+static inline void st_video_snoop32(uint32_t address, uint32_t value)
+{
+  uint32_t a = address & 0x00FFFFFFu;
+
+  if (a == 0x00FF8200) {
+    rtg.high = (uint8_t)(value >> 16);
+    rtg.mid = (uint8_t)value;
+  } else if (a == 0x00FF820C) {
+    rtg.low = (uint8_t)(value >> 16);
+  } else if (a >= 0x00FF8240 && a < 0x00FF8260) {
+    unsigned i = (a - 0x00FF8240) >> 1;
+    st_palette[i] = (uint16_t)(value >> 16);
+    if (i + 1 < 16)
+      st_palette[i + 1] = (uint16_t)value;
+  }
+}
+
 /* FDD */
 //extern "C" {
 //extern "C" uint32_t  fdd_io_read  (uint32_t addr, int size);
@@ -918,8 +1329,11 @@ extern "C"
      * main r/w io for emulation - JIT Enigine uses these too
      * seperate 32bit transfers and 24bit transfers
      * Note: g_buserr is cleared at the top of each r/w to avoid any malingerers
-     */
-    g_buserr = 0;
+	    */
+	    g_buserr = 0;
+
+	    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size), 1))
+	      return natmem_offset[address];
 
 #if (NOT_OBSOLETE)
     // if (address < et4kaddresses [ET4K_driver].vram_base && address >= et4kaddresses [ET4K_driver].vram_top)
@@ -947,7 +1361,7 @@ extern "C"
     if (__builtin_expect(address >= ROM_START && address < ROM_END, 1))
       return natmem_offset[address];
 
-    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < TT_RAM_SIZE), 1))
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size), 1))
       return natmem_offset[address];
 
     if (IDE_enabled)
@@ -959,7 +1373,7 @@ extern "C"
 
     if (ET4K_enabled)
     {
-      if (address >= et4kaddresses[ET4K_driver].vram_base && address < et4kaddresses[ET4K_driver].vram_top)
+      if (in_et4k_vram(address))
         return et4000_vram_read8(g_et4000, address);
 
       else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top)
@@ -974,24 +1388,29 @@ extern "C"
     if (address & 0xFF000000)
       return 0;
 
-    /* BLITTER disable */
-    // if (address >= 0xFF8A00 && address < 0xFF8C00)
-    //   return 0xFF;
+    if (blitter_disabled_addr(address))
+      return 0xFF;
     /* FDD */
     if (FDD_enabled) {
-      if (address == MFP_GPIP)
+      if (address == MFP_GPIP) {
+        cpu_data_fc();
         return fdd_gpip (ps_read_8 (address));
+      }
 
       if (fdd_owns_address (address))
         return fdd_io_read (address, 1);
-    }
+	    }
 
-    return ps_read_8(address);
+	    cpu_data_fc();
+	    return ps_read_8(address);
   }
 
-  unsigned int m68k_read_memory_16(unsigned int address)
-  {
-    g_buserr = 0;
+	  unsigned int m68k_read_memory_16(unsigned int address)
+	  {
+	    g_buserr = 0;
+
+	    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 2), 1))
+	      return __builtin_bswap16(*(uint16_t *)&natmem_offset[address]);
 
 #if (NOT_OBSOLETE)
     // if (address < et4kaddresses [ET4K_driver].vram_base && address >= et4kaddresses [ET4K_driver].vram_top - 2)
@@ -1020,7 +1439,7 @@ extern "C"
     if (__builtin_expect(address >= ROM_START && address < ROM_END, 1))
       return __builtin_bswap16(*(uint16_t *)&natmem_offset[address]);
 
-    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < TT_RAM_SIZE - 2), 1))
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 2), 1))
       return __builtin_bswap16(*(uint16_t *)&natmem_offset[address]);
 
     if (IDE_enabled)
@@ -1034,7 +1453,7 @@ extern "C"
 
     if (ET4K_enabled)
     {
-      if (address >= et4kaddresses[ET4K_driver].vram_base && address < et4kaddresses[ET4K_driver].vram_top - 2)
+      if (in_et4k_vram(address))
         return et4000_vram_read16(g_et4000, address);
 
       else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top - 2)
@@ -1050,13 +1469,13 @@ extern "C"
     if (address & 0xFF000000)
       return 0;
 
-    /* BLITTER disable */
-    // if (address >= 0xFF8A00 && address < 0xFF8C00)
-    //   return 0xFFFF;
+    if (blitter_disabled_addr(address))
+      return 0xFFFF;
     /* FDD */
     if (FDD_enabled)
     {
       if (address == MFP_GPIP) {
+        cpu_data_fc();
         uint8_t gpip = ps_read_16 (address);
         return fdd_gpip (gpip);
       }
@@ -1065,12 +1484,16 @@ extern "C"
           return fdd_io_read (address, 2);
     }
 
-    return ps_read_16(address);
+	    cpu_data_fc();
+	    return ps_read_16(address);
   }
 
-  unsigned int m68k_read_memory_32(unsigned int address)
-  {
-    g_buserr = 0;
+	  unsigned int m68k_read_memory_32(unsigned int address)
+	  {
+	    g_buserr = 0;
+
+	    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 4), 1))
+	      return __builtin_bswap32(*(uint32_t *)&natmem_offset[address]);
 
 #if (NOT_OBSOLETE)
     // if (address < et4kaddresses [ET4K_driver].vram_base && address >= et4kaddresses [ET4K_driver].vram_top - 4)
@@ -1098,7 +1521,7 @@ extern "C"
     if (__builtin_expect(address >= ROM_START && address < ROM_END, 1))
       return __builtin_bswap32(*(uint32_t *)&natmem_offset[address]);
 
-    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < TT_RAM_SIZE - 4), 1))
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 4), 1))
       return __builtin_bswap32(*(uint32_t *)&natmem_offset[address]);
 
     if (IDE_enabled)
@@ -1112,7 +1535,7 @@ extern "C"
 
     if (ET4K_enabled)
     {
-      if (address >= et4kaddresses[ET4K_driver].vram_base && address < et4kaddresses[ET4K_driver].vram_top - 4)
+      if (in_et4k_vram(address))
         return et4000_vram_read32(g_et4000, address);
 
       /* xVDI reads this address to see if card is present */
@@ -1129,9 +1552,8 @@ extern "C"
     if (address & 0xFF000000)
       return 0;
 
-    /* BLITTER disable */
-    // if (address >= 0xFF8A00 && address < 0xFF8C00)
-    //   return 0xFFFFFFFF;
+    if (blitter_disabled_addr(address))
+      return 0xFFFFFFFF;
      /* FDD */
     if (FDD_enabled)
     {
@@ -1139,6 +1561,7 @@ extern "C"
           return fdd_io_read (address, 4);
     }
 
+    cpu_data_fc();
     return ps_read_32(address);
   }
 
@@ -1148,14 +1571,13 @@ extern "C"
   {
     g_buserr = 0;
 
-    if (address == 0xFFFF8201)
-      rtg.high = (uint8_t)value;
-    if (address == 0xFFFF8203)
-      rtg.mid = (uint8_t)value;
-    if (address == 0xFFFF820D)
-      rtg.low = (uint8_t)value;
-    if (address == 0xFFFF8260)
-      rtg.shift_mode = (uint8_t)value;
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size), 1))
+    {
+      natmem_offset[address] = value;
+      return;
+    }
+
+    st_video_snoop8(address, (uint8_t)value);
 
     if (DMA_Sound_enabled)
       dmasnd_snoop8 (address, (uint8_t)value); /* snoop STE sound regs */
@@ -1166,11 +1588,12 @@ extern "C"
 
       st_ram_cache[address] = value;
       /* Immediately sync to physical motherboard so MFP/PSG/Video chips stay current */
+      cpu_data_fc();
       ps_write_8(address, value);
       return;
     }
 
-    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < TT_RAM_SIZE), 1))
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size), 1))
     {
       natmem_offset[address] = value; // max 16 MB
       return;
@@ -1190,7 +1613,7 @@ extern "C"
     {
       if (address >= 0x00D00300 && address < 0x00D00400)
         printf("emulator ET4000 0x%X\n", address);
-      if (address >= et4kaddresses[ET4K_driver].vram_base && address < et4kaddresses[ET4K_driver].vram_top)
+      if (in_et4k_vram(address))
       {
         et4000_vram_write8(g_et4000, address, (uint8_t)value);
         return;
@@ -1211,6 +1634,9 @@ extern "C"
     if (address & 0xFF000000)
       return;
 
+    if (blitter_disabled_addr(address))
+      return;
+
     /* FDD */
     if (FDD_enabled)
     {
@@ -1220,6 +1646,8 @@ extern "C"
       }
     }
 
+    cpu_data_fc();
+    mfp_note_eoi_write(address, value, false);
     ps_write_8 (address, (uint8_t)value);
   }
 
@@ -1246,9 +1674,14 @@ extern "C"
   {
     g_buserr = 0;
 
-    if (address >= 0xFFFF8240 && address < 0xFFFF8260) {
-      st_palette[(address - 0xFFFF8240) >> 1] = (uint16_t)value;
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 2), 1))
+    {
+      uint16_t *ptr = (uint16_t *)(&natmem_offset[address]);
+      *ptr = __builtin_bswap16(value);
+      return;
     }
+
+    st_video_snoop16(address, (uint16_t)value);
 
     if (DMA_Sound_enabled)
       dmasnd_snoop16 (address, (uint16_t)value);
@@ -1265,11 +1698,12 @@ extern "C"
     if (__builtin_expect(RAM_CACHE_enabled && (address < STRAM_MAX_ADDR - 2), 1))
     {
       *(uint16_t *)(st_ram_cache + address) = __builtin_bswap16(value);
+      cpu_data_fc();
       ps_write_16(address, value);
       return;
     }
 
-    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < TT_RAM_SIZE - 2), 1))
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 2), 1))
     {
       uint16_t *ptr = (uint16_t *)(&natmem_offset[address]);
       *ptr = __builtin_bswap16(value);
@@ -1288,7 +1722,7 @@ extern "C"
 
     if (ET4K_enabled)
     {
-      if (address >= et4kaddresses[ET4K_driver].vram_base && address < et4kaddresses[ET4K_driver].vram_top - 2)
+      if (in_et4k_vram(address))
       {
         et4000_vram_write16(g_et4000, address, (uint16_t)value);
         return;
@@ -1310,6 +1744,9 @@ extern "C"
     if (address & 0xFF000000)
       return;
 
+    if (blitter_disabled_addr(address))
+      return;
+
     /* FDD */
     if (FDD_enabled)
     {
@@ -1324,12 +1761,23 @@ extern "C"
       //}
     }
 
+    cpu_data_fc();
+    mfp_note_eoi_write(address, value, true);
     ps_write_16 (address, (uint16_t)value);
   }
 
   void m68k_write_memory_32 (unsigned int address, unsigned int value)
   {
     g_buserr = 0;
+
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < (0x01000000u + tt_ram_size - 4)), 1))
+    {
+      uint32_t *ptr = (uint32_t *)(&natmem_offset[address]);
+      *ptr = __builtin_bswap32(value);
+      return;
+    }
+
+    st_video_snoop32(address, (uint32_t)value);
 
     if (DMA_Sound_enabled)
       dmasnd_snoop32 (address, (uint32_t)value);
@@ -1354,11 +1802,12 @@ extern "C"
     if (__builtin_expect(RAM_CACHE_enabled && (address < STRAM_MAX_ADDR - 4), 1))
     {
       *(uint32_t *)(st_ram_cache + address) = __builtin_bswap32(value);
+      cpu_data_fc();
       ps_write_32(address, value);
       return;
     }
 
-    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < (TT_RAM_SIZE - 4)), 1))
+    if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < (0x01000000u + tt_ram_size - 4)), 1))
     {
       uint32_t *ptr = (uint32_t *)(&natmem_offset[address]);
       *ptr = __builtin_bswap32(value);
@@ -1377,7 +1826,7 @@ extern "C"
 
     if (ET4K_enabled)
     {
-      if (address >= et4kaddresses[ET4K_driver].vram_base && address < et4kaddresses[ET4K_driver].vram_top - 4)
+      if (in_et4k_vram(address))
       {
         et4000_vram_write32(g_et4000, address, value);
         return;
@@ -1398,6 +1847,9 @@ extern "C"
     if (address & 0xFF000000)
       return;
 
+    if (blitter_disabled_addr(address))
+      return;
+
     if ( FDD_enabled )
     {
       if (fdd_owns_address (address)) {
@@ -1406,8 +1858,8 @@ extern "C"
       }
     }
 
+    cpu_data_fc();
     ps_write_32 (address, value);
   }
 
 } // end extern "C"
-

@@ -64,6 +64,12 @@ void hwTest ( void );
 void devTest ( int rw );
 void atariReset ( void );
 void atariHalt ( void );
+void arbTest ( void );
+
+#define ARB_SOURCE_NONE    0
+#define ARB_SOURCE_BLITTER 1
+#define ARB_BLIT_FILL      0
+#define ARB_BLIT_COPY      1
 
 int VERBOSE = 0;
 int doReads;
@@ -89,6 +95,14 @@ int cmdDevTest = 0;
 int rwtest = 0;
 int cmdRESET = 0;
 int cmdHALT = 0;
+int cmdArbTest = 0;
+int arbSeconds = 5;
+int arbHammer = 0;
+int arbSource = ARB_SOURCE_NONE;
+int arbBlitOp = ARB_BLIT_FILL;
+uint32_t arbBlitEveryMs = 20;
+uint32_t arbBlitQuietMs = 250;
+uint32_t arbAddress = 0x000600;
 uint32_t ROMsize = 192;
 uint32_t ROMaddress = 0x00e00000;
 uint16_t clrPattern = 0x0000;
@@ -424,6 +438,11 @@ test_loop:
         {
             atariHalt ();
         }
+
+        if ( cmdArbTest )
+        {
+            arbTest ();
+        }
     }
 
     else
@@ -450,6 +469,8 @@ test_loop:
                  "--init <size=xxx>\n"
                  "     configures ATARI MMU for the specified size.\n"
                  "     <size> 512 to 4096. If not supplied, 512 is used\n"
+                 "--arbtest <seconds=n> <hammer=yes> <address=xxxxxx> <source=blitter> <op=fill|copy> <blitms=n> <quietms=n>\n"
+                 "     polls CPLD arbitration status bit and optionally hammers RAM or starts real blits\n"
         );
 
         exit (0);
@@ -2033,6 +2054,82 @@ int parser ( int argc, char **argv )
             valid = 1;
         }
 
+        if ( strcmp ( cmdptr, "arbtest" ) == 0 )
+        {
+            valid = 1;
+            substring = strtok_r ( NULL, " ", &strSave );
+
+            for ( ; substring != NULL; substring = strtok_r ( NULL, " ", &strSave ) )
+            {
+                aptr = strtok ( substring, "=" );
+
+                if ( strcmp ( aptr, "seconds" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    arbSeconds = atoi ( tptr );
+                    if ( arbSeconds < 1 )
+                        arbSeconds = 1;
+                }
+
+                else if ( strcmp ( aptr, "hammer" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        arbHammer = 1;
+                }
+
+                else if ( strcmp ( aptr, "address" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    sscanf ( tptr, "%x", &arbAddress );
+                }
+
+                else if ( strcmp ( aptr, "source" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "blitter" ) == 0 )
+                        arbSource = ARB_SOURCE_BLITTER;
+                    else if ( strcmp ( tptr, "none" ) == 0 )
+                        arbSource = ARB_SOURCE_NONE;
+                    else
+                        valid = 0;
+                }
+
+                else if ( strcmp ( aptr, "op" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "fill" ) == 0 )
+                        arbBlitOp = ARB_BLIT_FILL;
+                    else if ( strcmp ( tptr, "copy" ) == 0 )
+                        arbBlitOp = ARB_BLIT_COPY;
+                    else
+                        valid = 0;
+                }
+
+                else if ( strcmp ( aptr, "blitms" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    arbBlitEveryMs = (uint32_t)atoi ( tptr );
+                    if ( arbBlitEveryMs < 1 )
+                        arbBlitEveryMs = 1;
+                }
+
+                else if ( strcmp ( aptr, "quietms" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    arbBlitQuietMs = (uint32_t)atoi ( tptr );
+                    if ( arbBlitQuietMs < 1 )
+                        arbBlitQuietMs = 1;
+                }
+
+                else
+                    valid = 0;
+            }
+
+            if ( valid )
+                cmdArbTest = 1;
+        }
+
         if ( strcmp ( cmdptr, "dev" ) == 0 )
         {
             valid = 1; 
@@ -2086,6 +2183,336 @@ void atariHalt ( void )
 {
     ps_pulse_halt ();
     ps_reset_state_machine ();
+}
+
+#define ARB_STATUS_BUSY_RAW  (1u << 19)
+#define BLITTER_BASE        0x00FF8A00u
+#define BLITTER_SRC         0x00020000u
+#define BLITTER_DST         0x00030000u
+#define BLITTER_XWORDS      160u
+#define BLITTER_LINES       200u
+#define BLITTER_SAMPLE_WORDS 16u
+
+static uint32_t read32_split ( uint32_t address )
+{
+    return ( (uint32_t)read16 ( address ) << 16 ) | read16 ( address + 2 );
+}
+
+static void write32_split ( uint32_t address, uint32_t value )
+{
+    write16 ( address, (uint16_t)( value >> 16 ) );
+    write16 ( address + 2, (uint16_t)value );
+}
+
+static uint64_t monotonic_ms ( void )
+{
+    struct timespec ts;
+
+    clock_gettime ( CLOCK_MONOTONIC, &ts );
+
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+static int arb_blitter_busy ( void )
+{
+    g_buserr = 0;
+    return ( read8 ( BLITTER_BASE + 0x3c ) & 0x80 ) && !g_buserr;
+}
+
+static uint32_t arb_blitter_dst_sample ( void )
+{
+    uint32_t sum = 0;
+
+    g_buserr = 0;
+
+    for ( uint32_t i = 0; i < BLITTER_SAMPLE_WORDS; i++ )
+        sum = ( sum << 1 ) ^ read16 ( BLITTER_DST + i * 2u );
+
+    return sum;
+}
+
+static void arb_blitter_dump_once ( void )
+{
+    static int dumped = 0;
+
+    if ( dumped )
+        return;
+
+    dumped = 1;
+    g_buserr = 0;
+
+    printf ( "[BLTREG] ctrl8=%02X ctrl16=%04X src=%06X dst=%06X x=%04X y=%04X hop=%02X lop=%02X skew=%02X berr=%u\n",
+             read8 ( BLITTER_BASE + 0x3c ),
+             read16 ( BLITTER_BASE + 0x3c ),
+             read32_split ( BLITTER_BASE + 0x24 ) & 0x00ffffffu,
+             read32_split ( BLITTER_BASE + 0x32 ) & 0x00ffffffu,
+             read16 ( BLITTER_BASE + 0x36 ),
+             read16 ( BLITTER_BASE + 0x38 ),
+             read8 ( BLITTER_BASE + 0x3a ),
+             read8 ( BLITTER_BASE + 0x3b ),
+             read8 ( BLITTER_BASE + 0x3d ),
+             g_buserr );
+}
+
+static int arb_start_blitter ( void )
+{
+    static int prepared = 0;
+    static uint16_t fill = 0x1111;
+    uint32_t words = BLITTER_XWORDS * BLITTER_LINES;
+    uint16_t yinc = (uint16_t)( BLITTER_XWORDS * 2u );
+
+    if ( !prepared )
+    {
+        for ( uint32_t i = 0; i < words; i++ )
+        {
+            write16 ( BLITTER_SRC + i * 2u, (uint16_t)( 0x4000u + i ) );
+            write16 ( BLITTER_DST + i * 2u, 0 );
+        }
+        prepared = 1;
+    }
+
+    g_buserr = 0;
+    write16 ( BLITTER_BASE + 0x3c, 0x0000 );  /* clear stale control/busy */
+
+    for ( uint32_t i = 0; i < 16; i++ )
+        write16 ( BLITTER_BASE + i * 2u, fill );
+
+    if ( arbBlitOp == ARB_BLIT_COPY )
+    {
+        for ( uint32_t i = 0; i < BLITTER_SAMPLE_WORDS; i++ )
+            write16 ( BLITTER_SRC + i * 2u, fill + (uint16_t)i );
+    }
+
+    for ( uint32_t i = 0; i < BLITTER_SAMPLE_WORDS; i++ )
+        write16 ( BLITTER_DST + i * 2u, 0 );
+
+    write16 ( BLITTER_BASE + 0x20, 2 );       /* source X increment */
+    write16 ( BLITTER_BASE + 0x22, yinc );    /* source Y increment */
+    write32_split ( BLITTER_BASE + 0x24, BLITTER_SRC );
+    write16 ( BLITTER_BASE + 0x28, 0xffff );
+    write16 ( BLITTER_BASE + 0x2a, 0xffff );
+    write16 ( BLITTER_BASE + 0x2c, 0xffff );
+    write16 ( BLITTER_BASE + 0x2e, 2 );       /* destination X increment */
+    write16 ( BLITTER_BASE + 0x30, yinc );    /* destination Y increment */
+    write32_split ( BLITTER_BASE + 0x32, BLITTER_DST );
+    write16 ( BLITTER_BASE + 0x36, BLITTER_XWORDS );
+    write16 ( BLITTER_BASE + 0x38, BLITTER_LINES );
+    write8  ( BLITTER_BASE + 0x3a, arbBlitOp == ARB_BLIT_COPY ? 2 : 1 );
+    write8  ( BLITTER_BASE + 0x3b, 3 );       /* LOP: replace destination */
+    write8  ( BLITTER_BASE + 0x3d, 0 );       /* skew */
+
+    arb_blitter_dump_once ();
+    write16 ( BLITTER_BASE + 0x3c, 0xc000 );  /* start, hog mode */
+    fill += 0x1111;
+
+    return g_buserr ? 0 : 1;
+}
+
+void arbTest ( void )
+{
+    uint8_t saved_fc = fc;
+    uint64_t start = monotonic_ms ();
+    uint64_t next = start + 1000;
+    uint64_t end = start + (uint64_t)arbSeconds * 1000ULL;
+    uint64_t next_blit = start;
+    uint64_t quiet_until = 0;
+    uint64_t blit_start = 0;
+    uint64_t samples = 0;
+    uint64_t arb_seen = 0;
+    uint64_t transitions = 0;
+    uint64_t source_inflight = 0;
+    uint64_t source_triggers = 0;
+    uint64_t source_started_busy = 0;
+    uint64_t source_changed = 0;
+    uint64_t blit_done = 0;
+    uint64_t blit_total_ms = 0;
+    uint64_t blit_max_ms = 0;
+    uint64_t sec_arb_seen = 0;
+    uint64_t sec_samples = 0;
+    uint64_t sec_transitions = 0;
+    uint64_t sec_source_inflight = 0;
+    uint64_t sec_source_triggers = 0;
+    uint64_t sec_source_started_busy = 0;
+    uint64_t sec_source_changed = 0;
+    uint64_t sec_blit_done = 0;
+    uint64_t sec_blit_total_ms = 0;
+    uint64_t sec_blit_max_ms = 0;
+    uint64_t hammer_ops = 0;
+    uint64_t hammer_berr = 0;
+    uint64_t sec_hammer_ops = 0;
+    uint64_t sec_hammer_berr = 0;
+    uint32_t last_busy = 0xffffffffu;
+    uint32_t blit_before = 0;
+    uint32_t blit_last = 0;
+    int blit_inflight = 0;
+    uint16_t pattern = 0x1234;
+
+    fc = 5; /* Supervisor data space for RAM and MMIO cycles. */
+
+    printf ( "\nATARITEST arbitration monitor\n" );
+    printf ( "seconds=%d hammer=%s address=$%06X source=%s op=%s blitms=%u quietms=%u\n",
+             arbSeconds, arbHammer ? "yes" : "no", arbAddress,
+             arbSource == ARB_SOURCE_BLITTER ? "blitter" : "none",
+             arbBlitOp == ARB_BLIT_COPY ? "copy" : "fill",
+             arbBlitEveryMs, arbBlitQuietMs );
+    printf ( "Arbitration status: raw19=BGACK. PISTORM_ARB_WAIT=force enables slow diagnostic pre-cycle polling.\n\n" );
+
+    while ( monotonic_ms () < end )
+    {
+        uint64_t now = monotonic_ms ();
+        uint32_t status = ps_read_status_reg ();
+        uint32_t is_arb = ( status & ARB_STATUS_BUSY_RAW ) ? 1u : 0u;
+        int blitter_busy = 0;
+
+        samples++;
+        sec_samples++;
+
+        if ( is_arb )
+        {
+            arb_seen++;
+            sec_arb_seen++;
+        }
+
+        if ( last_busy != 0xffffffffu && last_busy != is_arb )
+        {
+            transitions++;
+            sec_transitions++;
+        }
+
+        last_busy = is_arb;
+
+        if ( arbSource == ARB_SOURCE_BLITTER )
+        {
+            if ( blit_inflight )
+            {
+                source_inflight++;
+                sec_source_inflight++;
+
+                if ( now >= quiet_until )
+                {
+                    uint32_t blit_after = arb_blitter_dst_sample ();
+                    blitter_busy = arb_blitter_busy ();
+
+                    if ( blit_after != blit_last )
+                    {
+                        source_changed++;
+                        sec_source_changed++;
+                        blit_last = blit_after;
+                    }
+
+                    if ( blitter_busy )
+                    {
+                        quiet_until = now + arbBlitQuietMs;
+                    }
+                    else
+                    {
+                        uint64_t elapsed = now - blit_start;
+
+                        blit_done++;
+                        blit_total_ms += elapsed;
+                        if ( elapsed > blit_max_ms )
+                            blit_max_ms = elapsed;
+
+                        sec_blit_done++;
+                        sec_blit_total_ms += elapsed;
+                        if ( elapsed > sec_blit_max_ms )
+                            sec_blit_max_ms = elapsed;
+
+                        blit_inflight = 0;
+                        next_blit = now + arbBlitEveryMs;
+                    }
+                }
+            }
+
+            if ( !blit_inflight && now >= next_blit )
+            {
+                blit_before = arb_blitter_dst_sample ();
+                blit_last = blit_before;
+                if ( arb_start_blitter () )
+                {
+                    source_triggers++;
+                    sec_source_triggers++;
+                    source_started_busy++;
+                    sec_source_started_busy++;
+                    blit_inflight = 1;
+                    blit_start = now;
+                    quiet_until = now + arbBlitQuietMs;
+                }
+            }
+        }
+
+        if ( arbHammer && !blit_inflight )
+        {
+            g_buserr = 0;
+            write16 ( arbAddress, pattern );
+            if ( g_buserr )
+            {
+                hammer_berr++;
+                sec_hammer_berr++;
+                g_buserr = 0;
+            }
+
+            g_buserr = 0;
+            (void)read16 ( arbAddress );
+            if ( g_buserr )
+            {
+                hammer_berr++;
+                sec_hammer_berr++;
+                g_buserr = 0;
+            }
+
+            pattern += 0x1111;
+            hammer_ops += 2;
+            sec_hammer_ops += 2;
+        }
+
+        if ( monotonic_ms () >= next )
+        {
+            printf ( "[ARB/s] samples=%llu arb=%llu arb_trans=%llu inflight=%llu srctrigger=%llu startok=%llu dstchange=%llu blitdone=%llu blitavg=%llums blitmax=%llums hammer=%llu berr=%llu\n",
+                     (unsigned long long)sec_samples,
+                     (unsigned long long)sec_arb_seen,
+                     (unsigned long long)sec_transitions,
+                     (unsigned long long)sec_source_inflight,
+                     (unsigned long long)sec_source_triggers,
+                     (unsigned long long)sec_source_started_busy,
+                     (unsigned long long)sec_source_changed,
+                     (unsigned long long)sec_blit_done,
+                     (unsigned long long)(sec_blit_done ? sec_blit_total_ms / sec_blit_done : 0),
+                     (unsigned long long)sec_blit_max_ms,
+                     (unsigned long long)sec_hammer_ops,
+                     (unsigned long long)sec_hammer_berr );
+
+            sec_samples = 0;
+            sec_arb_seen = 0;
+            sec_transitions = 0;
+            sec_source_inflight = 0;
+            sec_source_triggers = 0;
+            sec_source_started_busy = 0;
+            sec_source_changed = 0;
+            sec_blit_done = 0;
+            sec_blit_total_ms = 0;
+            sec_blit_max_ms = 0;
+            sec_hammer_ops = 0;
+            sec_hammer_berr = 0;
+            next += 1000;
+        }
+    }
+
+    printf ( "\n[ARB] total samples=%llu arb=%llu arb_trans=%llu inflight=%llu srctrigger=%llu startok=%llu dstchange=%llu blitdone=%llu blitavg=%llums blitmax=%llums hammer=%llu berr=%llu\n",
+             (unsigned long long)samples,
+             (unsigned long long)arb_seen,
+             (unsigned long long)transitions,
+             (unsigned long long)source_inflight,
+             (unsigned long long)source_triggers,
+             (unsigned long long)source_started_busy,
+             (unsigned long long)source_changed,
+             (unsigned long long)blit_done,
+             (unsigned long long)(blit_done ? blit_total_ms / blit_done : 0),
+             (unsigned long long)blit_max_ms,
+             (unsigned long long)hammer_ops,
+             (unsigned long long)hammer_berr );
+
+    fc = saved_fc;
 }
 
 

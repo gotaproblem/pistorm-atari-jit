@@ -53,6 +53,25 @@ volatile uint32_t *clk_div;
 uint8_t fc;
 volatile uint32_t g_buserr_addr = 0;
 
+static atomic_flag ps_txn_lock = ATOMIC_FLAG_INIT;
+
+static inline void ps_lock_bus(void)
+{
+  while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
+    asm volatile ("yield" ::: "memory");
+}
+
+static inline void ps_unlock_bus(void)
+{
+  atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
+}
+
+static inline void ps_wait_idle(void)
+{
+  while (*ioread & PI_TXN_IN_PROGRESS)
+    asm volatile ("yield" ::: "memory");
+}
+
 
 static 
 void create_dev_mem_mapping () 
@@ -230,10 +249,10 @@ void ps_write ( ps_io_t *ps_io )
 {
   register uint32_t status;
 
+  //ps_lock_bus();
   asm volatile ("dmb sy" : : : "memory");
 
-  //while (*ioread & PI_TXN_IN_PROGRESS)
-  //  asm volatile ("yield" ::: "memory");
+  //ps_wait_idle();
 
   //*(gpio + 0) = GPFSEL0_OUTPUT;
   //*(gpio + 1) = GPFSEL1_OUTPUT;
@@ -269,6 +288,7 @@ void ps_write ( ps_io_t *ps_io )
     asm volatile ("yield" ::: "memory");
 
   ps_io->berr = CHECK_BERR (status);
+  //ps_unlock_bus();
 }
 
 
@@ -322,10 +342,10 @@ void ps_read (ps_io_t *ps_io)
 {
   register uint32_t status;
 
+  //ps_lock_bus();
   asm volatile ("dmb sy" : : : "memory");
 
-  //while (*ioread & PI_TXN_IN_PROGRESS)
-  //  asm volatile ("yield" ::: "memory");
+  //ps_wait_idle();
 
   //*(gpio + 0) = GPFSEL0_OUTPUT;
   //*(gpio + 1) = GPFSEL1_OUTPUT;
@@ -347,11 +367,11 @@ void ps_read (ps_io_t *ps_io)
   while ((status = *ioread) & PI_TXN_IN_PROGRESS)
     asm volatile ("yield" ::: "memory");
 
-  status = *ioread;
  	*ioclr = TXN_END;
 
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
+  //ps_unlock_bus();
 }
 
 inline
@@ -365,6 +385,28 @@ uint16_t ps_read_16 (uint32_t addr)
   ps_io.io_type = READ_WORD;
 
   ps_read (&ps_io);
+
+  if (ps_io.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr;
+  }
+
+  return ps_io.data;
+}
+
+uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
+{
+  ps_io_t ps_io;
+
+  ps_io.data = 0;
+  ps_io.addr = addr;
+  ps_io.fc = fc_value;
+  ps_io.io_type = READ_WORD;
+
+  ps_read (&ps_io);
+
+  if (berr_out)
+    *berr_out = ps_io.berr;
 
   if (ps_io.berr) {
     g_buserr = 1;
@@ -412,6 +454,30 @@ uint8_t ps_read_8 (uint32_t addr)
     return (uint8_t)ps_io.data;
 }
 
+uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
+{
+  ps_io_t ps_io;
+
+  ps_io.data = 0;
+  ps_io.addr = addr;
+  ps_io.fc = fc_value;
+  ps_io.io_type = READ_BYTE;
+
+  ps_read (&ps_io);
+
+  if (berr_out)
+    *berr_out = ps_io.berr;
+
+  if (ps_io.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr;
+  }
+
+  if ((addr & 1) == 0)
+    return (uint8_t)(ps_io.data >> 8);
+  return (uint8_t)ps_io.data;
+}
+
 
 uint32_t ps_read_32 (uint32_t addr) 
 {
@@ -425,10 +491,11 @@ void ps_write_status_reg ( uint16_t value )
   static int timeout;
   
   timeout = 1000000;
+  ps_lock_bus();
 
   /* make sure no IO in progress */
-  //while ( __builtin_expect ((*ioread & PI_TXN_IN_PROGRESS) && timeout--, 1 ))
-  //  asm volatile ("yield" ::: "memory");
+  while ( __builtin_expect ((*ioread & PI_TXN_IN_PROGRESS) && timeout--, 1 ))
+    asm volatile ("yield" ::: "memory");
   
   *ioset = (value << 8) | REG_STATUS;
   txn_go ();
@@ -437,6 +504,7 @@ void ps_write_status_reg ( uint16_t value )
     printf ( "ps_write_status_reg () timed-out\n" );
 
   /* when writing status, there isn't a PI_TXN_IN_PROGRESS */
+  ps_unlock_bus();
 }
 
 
@@ -445,6 +513,7 @@ uint32_t ps_read_status_reg ()
   uint32_t status;
   //int timeout = 1000000;
 
+  ps_lock_bus();
   asm volatile ("dmb sy" : : : "memory");
 
   /* make sure no IO in progress */
@@ -468,6 +537,7 @@ uint32_t ps_read_status_reg ()
   //  printf ( "ps_read_status_reg () timed-out\n" );
 
   /* return all 32 bits */
+  ps_unlock_bus();
   return status;
 }
 

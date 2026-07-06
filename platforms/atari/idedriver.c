@@ -26,8 +26,6 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <time.h>
-//#include <arpa/inet.h>  /* removed: htons/ntohs no longer used */
-//#include <endian.h>
 #include <fcntl.h>
 
 #include "config_file/config_file.h"
@@ -164,7 +162,7 @@ static void ready(struct ide_taskfile *tf)
   tf->status &= ~(ST_BSY|ST_DRQ);
   tf->status |= ST_DRDY;
   tf->drive->state = IDE_IDLE;
-  usleep(1000);
+  //usleep(1000);
 }
 
 /* Return to idle state, completing a command */
