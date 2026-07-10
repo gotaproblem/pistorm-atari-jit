@@ -45,10 +45,6 @@ static atomic_int   g_enabled = 0;
 static atomic_uint  g_gen     = 0;
 static atomic_int   g_repeat  = 0;   /* current $FF8901 repeat bit */
 
-/* debug */
-static atomic_uint  dbg_writes = 0, dbg_frames = 0, dbg_commits = 0;
-static uint32_t     dbg_cs = 0, dbg_ce = 0;
-
 static pthread_t    pump_tid;
 static atomic_int   pump_run = 0;
 
@@ -57,6 +53,12 @@ static uint32_t start_addr(void)
 static uint32_t end_addr(void)
 { return (((uint32_t)reg[0x0F]<<16)|((uint32_t)reg[0x11]<<8)|reg[0x13]) & ADDR_MASK; }
 
+static void dmasnd_commit(const char *why)
+{
+    (void)why;
+    atomic_fetch_add(&g_gen, 1);
+}
+
 /* =================== snoop (cpu_task thread) =========================== */
 
 void dmasnd_snoop8(uint32_t addr, uint8_t val)
@@ -64,21 +66,20 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
     uint32_t a = addr & 0x00FFFFFFu;
     if (a < SND_BASE || a > SND_TOP) return;
     uint32_t off = a - SND_BASE;
-    uint8_t  prev = reg[0x01];
     reg[off] = val;
-    atomic_fetch_add(&dbg_writes, 1);
 
-    if (off == 0x01) {
+    if (off == 0x00 || off == 0x01) {
+        int was_enabled = atomic_load(&g_enabled);
         atomic_store(&g_repeat, (val & 0x02) ? 1 : 0);
-        if (!(prev & 1) && (val & 1)) { atomic_store(&g_enabled, 1);
-                                        atomic_fetch_add(&dbg_commits, 1);
-                                        atomic_fetch_add(&g_gen, 1); }
-        else if ((prev & 1) && !(val & 1)) atomic_store(&g_enabled, 0);
-    } else if (off == 0x00 && val == 0) {
-        atomic_store(&g_enabled, 0);
-    } else if (off == 0x13 && atomic_load(&g_enabled) && (reg[0x01] & 0x02)) {
-        atomic_fetch_add(&dbg_commits, 1);
-        atomic_fetch_add(&g_gen, 1);
+        if (val & 0x01) {
+            atomic_store(&g_enabled, 1);
+            if (!was_enabled)
+                dmasnd_commit(off == 0x00 ? "ctrl0-enable" : "ctrl1-enable");
+        } else if (was_enabled) {
+            atomic_store(&g_enabled, 0);
+        }
+    } else if (off == 0x13 && atomic_load(&g_enabled)) {
+        dmasnd_commit(atomic_load(&g_repeat) ? "repeat-end" : "end-low");
     }
 }
 
@@ -126,8 +127,6 @@ static void *pump_thread(void *arg)
                     }
                     dmasnd_note_frame_len(e - s);
                     dmasnd_write_bytes(&natmem_offset[s], e - s);
-                    dbg_cs = s; dbg_ce = e;
-                    atomic_fetch_add(&dbg_frames, 1);
                 }
             }
         }
@@ -191,5 +190,5 @@ void dmasnd_capture_reset(void)
     atomic_store(&g_enabled, 0);
     atomic_store(&g_gen, 0);
     atomic_store(&g_repeat, 0);
-    dbg_cs = dbg_ce = 0;
+    dmasnd_output_reset();
 }

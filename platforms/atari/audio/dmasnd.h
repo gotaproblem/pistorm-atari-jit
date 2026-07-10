@@ -22,6 +22,7 @@ void     dmasnd_write_bytes(const void *src, unsigned n);
 unsigned dmasnd_ring_used(void);
 unsigned dmasnd_xruns(void);
 void dmasnd_note_frame_len(unsigned bytes);
+void dmasnd_output_reset(void);
 int  dmasnd_is_repeat(void);
 
 /* ---- capture (dmasnd_capture.c) ---- */

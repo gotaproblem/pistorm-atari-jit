@@ -23,7 +23,6 @@
 #include <unistd.h>
 #include <stdatomic.h>
 #include "ps_protocol.h"
-//#include "../m68k.h"
 
 
 
@@ -86,11 +85,11 @@ void create_dev_mem_mapping ()
 
   void *gpio_map = mmap (
       NULL,                    // Any adddress in our space will do
-      BCM2708_PERI_SIZE,//(4*1024),		             // Map length
+      BCM2708_PERI_SIZE,       // Map length
       PROT_READ | PROT_WRITE,  // Enable reading & writting to mapped memory
       MAP_SHARED,              // Shared with other processes
       fd,                      // File to map
-      BCM2708_PERI_BASE//0			                   // Offset to GPIO peripheral
+      BCM2708_PERI_BASE        // Offset to GPIO peripheral
   );
 
   close(fd);
@@ -217,9 +216,6 @@ void ps_setup_protocol ( void )
   gpio [2] = GPFSEL2_OUTPUT;
 
   *ioclr = TXN_END;
-
-  //printf ("SEL0 INPUT 0x%X\n", GPFSEL0_INPUT);
-  //printf ("SEL0 OUTPUT 0x%X\n", GPFSEL0_OUTPUT);
 }
 
 typedef struct {
@@ -249,14 +245,10 @@ void ps_write ( ps_io_t *ps_io )
 {
   register uint32_t status;
 
-  //ps_lock_bus();
+  ps_lock_bus ();
   asm volatile ("dmb sy" : : : "memory");
 
-  //ps_wait_idle();
-
-  //*(gpio + 0) = GPFSEL0_OUTPUT;
-  //*(gpio + 1) = GPFSEL1_OUTPUT;
-  //*(gpio + 2) = GPFSEL2_OUTPUT;
+  //ps_wait_idle ();
 
   *ioset = (ps_io->data << 8) | REG_DATA;
   txn_go ();
@@ -280,15 +272,11 @@ void ps_write ( ps_io_t *ps_io )
   *ioset = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI;
   txn_go ();
 
-  //*(gpio + 0) = GPFSEL0_INPUT;
-  //*(gpio + 1) = GPFSEL1_INPUT;
-  //*(gpio + 2) = GPFSEL2_INPUT;
-
   while (( status = *ioread ) & PI_TXN_IN_PROGRESS)
     asm volatile ("yield" ::: "memory");
 
   ps_io->berr = CHECK_BERR (status);
-  //ps_unlock_bus();
+  ps_unlock_bus();
 }
 
 
@@ -342,14 +330,10 @@ void ps_read (ps_io_t *ps_io)
 {
   register uint32_t status;
 
-  //ps_lock_bus();
+  ps_lock_bus ();
   asm volatile ("dmb sy" : : : "memory");
 
-  //ps_wait_idle();
-
-  //*(gpio + 0) = GPFSEL0_OUTPUT;
-  //*(gpio + 1) = GPFSEL1_OUTPUT;
-  //*(gpio + 2) = GPFSEL2_OUTPUT;
+  //ps_wait_idle ();
 
   *ioset = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
   txn_go ();
@@ -357,21 +341,18 @@ void ps_read (ps_io_t *ps_io)
   *ioset = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
   txn_go ();
 
-  //*(gpio + 0) = GPFSEL0_INPUT;
-  //*(gpio + 1) = GPFSEL1_INPUT;
-  //*(gpio + 2) = GPFSEL2_INPUT;
-
-  *ioset = REG_DATA;
+  *ioset = REG_DATA;// | PIN_RD;
   *ioset = PIN_RD;
 
   while ((status = *ioread) & PI_TXN_IN_PROGRESS)
     asm volatile ("yield" ::: "memory");
 
+  //status = *ioread;
  	*ioclr = TXN_END;
 
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
-  //ps_unlock_bus();
+  ps_unlock_bus();
 }
 
 inline

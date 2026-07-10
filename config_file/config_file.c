@@ -14,6 +14,50 @@
 extern void set_hard_drive_image_file_atari ( uint8_t, char* );
 
 
+typedef enum {
+  CONFITEM_NONE,
+  CONFITEM_CPU,
+  CONFITEM_JIT,
+  CONFITEM_FPU,
+  CONFITEM_LOOPCYCLES,
+  CONFITEM_GRAPHICS_CARD,
+  CONFITEM_FPS,
+  CONFITEM_TTRAM,
+  CONFITEM_ADDR32,
+  CONFITEM_RTC,
+  CONFITEM_ROM,
+  CONFITEM_IDE,
+  CONFITEM_HDD,
+  CONFITEM_FDD,
+  CONFITEM_DMA_SOUND,
+  CONFITEM_BLITTER,
+  CONFITEM_STRAM_CACHE,
+  CONFITEM_STRAM_DIRECT,
+  CONFITEM_VGA_RENDER,
+  CONFITEM_NATIVE_HDMI,
+  CONFITEM_CPU_CLOCK_MULTIPLIER,
+  CONFITEM_M68K_SPEED,
+  CONFITEM_JIT_CACHE,
+  CONFITEM_NETWORK,
+  CONFITEM_NETWORK_BACKEND,
+  CONFITEM_NETWORK_TAP,
+  CONFITEM_NETWORK_BASE,
+  CONFITEM_NETWORK_MAC,
+  CONFITEM_NETWORK_IRQ,
+  CONFITEM_NETWORK_HOST_IP,
+  CONFITEM_NETWORK_ATARI_IP,
+  CONFITEM_NETWORK_NETMASK,
+  CONFITEM_NETWORK_DEBUG,
+  CONFITEM_HOSTFS,
+} config_item;
+
+typedef struct {
+  const char *name;
+  config_item item;
+} config_switch_def;
+
+static const struct emulator_config *current_config;
+
 const char *cpu_types[M68K_CPU_TYPES] = {
   "NONE",
   "68000",
@@ -24,30 +68,40 @@ const char *cpu_types[M68K_CPU_TYPES] = {
   "68060"
 };
 
-const char *config_item_names[CONFITEM_NUM] = {
-  "NONE",
-  "cpu",
-  "jit",
-  "fpu",
-  "loopcycles",
-  "vga",
-  "fps",
-  "ttram",
-  "addr32",
-  "rtc",
-  "rom",
-  "ide",
-  "hdd",
-  "fdd",
-  "dma_sound",
-  "blitter",
-  "stram_cache",
-  "stram_direct",
-  "vga_render",
-  "native_hdmi",
-  "cpu_clock_multiplier",
-  "m68k_speed",
-  "jit_cache"
+static const config_switch_def config_switches[] = {
+  { "cpu", CONFITEM_CPU },
+  { "jit", CONFITEM_JIT },
+  { "fpu", CONFITEM_FPU },
+  { "loopcycles", CONFITEM_LOOPCYCLES },
+  { "vga", CONFITEM_GRAPHICS_CARD },
+  { "fps", CONFITEM_FPS },
+  { "ttram", CONFITEM_TTRAM },
+  { "addr32", CONFITEM_ADDR32 },
+  { "rtc", CONFITEM_RTC },
+  { "rom", CONFITEM_ROM },
+  { "ide", CONFITEM_IDE },
+  { "hdd", CONFITEM_HDD },
+  { "fdd", CONFITEM_FDD },
+  { "dma_sound", CONFITEM_DMA_SOUND },
+  { "blitter", CONFITEM_BLITTER },
+  { "stram_cache", CONFITEM_STRAM_CACHE },
+  { "stram_direct", CONFITEM_STRAM_DIRECT },
+  { "vga_render", CONFITEM_VGA_RENDER },
+  { "native_hdmi", CONFITEM_NATIVE_HDMI },
+  { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
+  { "m68k_speed", CONFITEM_M68K_SPEED },
+  { "jit_cache", CONFITEM_JIT_CACHE },
+  { "network", CONFITEM_NETWORK },
+  { "network_backend", CONFITEM_NETWORK_BACKEND },
+  { "network_tap", CONFITEM_NETWORK_TAP },
+  { "network_base", CONFITEM_NETWORK_BASE },
+  { "network_mac", CONFITEM_NETWORK_MAC },
+  { "network_irq", CONFITEM_NETWORK_IRQ },
+  { "network_host_ip", CONFITEM_NETWORK_HOST_IP },
+  { "network_atari_ip", CONFITEM_NETWORK_ATARI_IP },
+  { "network_netmask", CONFITEM_NETWORK_NETMASK },
+  { "network_debug", CONFITEM_NETWORK_DEBUG },
+  { "hostfs", CONFITEM_HOSTFS },
 };
 
 const char *graphics_card_types[GRAPHICS_CARD_TYPES] = {
@@ -67,14 +121,78 @@ const char *graphics_card_drivers[GRAPHICS_DRIVERS] = {
 
 char cfg_filename[256];
 
-int get_config_item_type(char *cmd) {
-  for (int i = 0; i < CONFITEM_NUM; i++) {
-    if (strcmp(cmd, config_item_names[i]) == 0) {
-      return i;
+static config_item get_config_item_type(char *cmd) {
+  for (size_t i = 0; i < sizeof(config_switches) / sizeof(config_switches[0]); i++) {
+    if (strcmp(cmd, config_switches[i].name) == 0) {
+      return config_switches[i].item;
     }
   }
 
   return CONFITEM_NONE;
+}
+
+void emulator_config_set_current(const struct emulator_config *cfg)
+{
+  current_config = cfg;
+}
+
+const struct emulator_config *emulator_config_current(void)
+{
+  return current_config;
+}
+
+bool emulator_config_blitter_enabled(void)
+{
+  return current_config ? current_config->blitter : true;
+}
+
+bool emulator_config_stram_cache_enabled(void)
+{
+  return current_config ? current_config->stram_cache : false;
+}
+
+bool emulator_config_stram_direct_enabled(void)
+{
+  return current_config ? current_config->stram_direct : false;
+}
+
+bool emulator_config_native_hdmi_enabled(void)
+{
+  return current_config ? current_config->native_hdmi : true;
+}
+
+bool emulator_config_display_enabled(void)
+{
+  return current_config ? current_config->graphics.card != NO_GRAPHICS_CARD : false;
+}
+
+bool emulator_config_et4k_enabled(void)
+{
+  return current_config &&
+         current_config->graphics.card == ET4000AX &&
+         current_config->graphics.driver != FVDI;
+}
+
+bool emulator_config_fvdi_enabled(void)
+{
+  return current_config &&
+         current_config->graphics.card != NO_GRAPHICS_CARD &&
+         current_config->graphics.driver == FVDI;
+}
+
+int emulator_config_graphics_driver(void)
+{
+  if (!current_config)
+    return NO_GRAPHICS_DRIVER;
+  return current_config->graphics.driver;
+}
+
+int emulator_config_fps(void)
+{
+  int fps = current_config ? current_config->fps : 0;
+  if (fps < 10 || fps > 60)
+    fps = 25;
+  return fps;
 }
 
 char *uppercase ( char *str )
@@ -218,6 +336,16 @@ static bool get_bool_default_true(char *str)
          strcmp(value, "false") != 0 &&
          strcmp(value, "disabled") != 0 &&
          strcmp(value, "disable") != 0;
+}
+
+static int hostfs_drive_index(char drive)
+{
+  drive = (char)toupper((unsigned char)drive);
+  if (drive >= 'A' && drive <= 'Z')
+    return drive - 'A';
+  if (drive >= '0' && drive <= '5')
+    return 26 + drive - '0';
+  return -1;
 }
 
 static bool is_bool_false(char *str)
@@ -365,11 +493,12 @@ struct emulator_config *load_config_file(char *filename) {
         cfg->jit = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] JIT %s\n", cfg->jit ? "enabled" : "disabled");
         break;
-      
+
       case CONFITEM_FPU:
         cfg->fpu = get_bool_default_true(parse_line + str_pos);
         break;
 
+      // depricated
       case CONFITEM_LOOPCYCLES:
         cfg->loop_cycles = get_int(parse_line + str_pos);
         break;
@@ -410,11 +539,17 @@ struct emulator_config *load_config_file(char *filename) {
 
       case CONFITEM_FPS:
         cfg->fps = get_int (parse_line + str_pos);
+        /* valid frame rates are 50, 60, 70 */
+        if (cfg->fps < 50 || cfg->fps > 120)
+          cfg->fps = 50;
+        printf ("[CFG] Set VGA FPS to %d Hz\n", cfg->fps);
         break;
 
       case CONFITEM_TTRAM:
-        {
-          cfg->ttram = true;
+        
+        cfg->ttram = get_bool_default_true(parse_line + str_pos);
+        if (cfg->ttram) {
+          
           char *arg = parse_line + str_pos;
           while (*arg == ' ' || *arg == '\t')
             arg++;
@@ -433,26 +568,21 @@ struct emulator_config *load_config_file(char *filename) {
             cfg->ttram_size = get_int(arg);
           }
         }
+        
         break;
 
       case CONFITEM_ADDR32:
         cfg->addr32 = get_bool_default_true(parse_line + str_pos);
         break;
 
+      // depricated
       case CONFITEM_RTC:
         cfg->rtc = true;
         break;
 
       case CONFITEM_ROM:
         {
-          //static int rom_count = 0;
           FILE *fp;
-
-          //if (rom_count == 2)
-          //{
-          //  printf ("[CFG] too many ROMs requested\n");
-          //  break;
-          //}
 
           /* open file */
           strcpy (cfg->rom.rom_path, parse_line + str_pos);
@@ -471,13 +601,7 @@ struct emulator_config *load_config_file(char *filename) {
 
           if (cfg->rom.rom_size >= 256 * 1024)
             cfg->rom.rom_address = 0x00E00000;
-/*
-          else if (cfg->rom[rom_count].rom_size == 192 * 1024)
-            cfg->rom[rom_count].rom_address = 0x00FC0000;
 
-          else if (cfg->rom[rom_count].rom_size <= 128 * 1024)
-            cfg->rom[rom_count].rom_address = 0x00FA0000;
-*/
           else
           {
             printf ("[CFG] unexpected ROM size %d - can not load\n", cfg->rom.rom_size);
@@ -497,22 +621,11 @@ struct emulator_config *load_config_file(char *filename) {
           fclose (fp);
           printf ("[CFG] %dK ROM image %s loaded\n", 
             cfg->rom.rom_size / 1024, cfg->rom.rom_path);
-
-         // rom_count++;
-         // cfg->rom_count = rom_count;
-         /*
-         for (int n = 0; n < 0x30; n++) {
-              printf ("0x%02X ", cfg->rom.rom_ptr[n]);
-              if (n % 16 == 0)
-                  printf ("\n");
-          }
-          printf ("\n");
-          */
         }
         break;
 
       case CONFITEM_IDE:
-        cfg->ide = true; //get_int (parse_line + str_pos) + 1;
+        cfg->ide = get_bool_default_true(parse_line + str_pos);
         break;
 
       case CONFITEM_HDD:
@@ -532,9 +645,7 @@ struct emulator_config *load_config_file(char *filename) {
         break;
 
       case CONFITEM_DMA_SOUND:
-        {
-          cfg->dma_sound = true;
-        }
+        cfg->dma_sound = get_bool_default_true(parse_line + str_pos);;
         break;
 
       case CONFITEM_BLITTER:
@@ -578,6 +689,110 @@ struct emulator_config *load_config_file(char *filename) {
         cfg->jit_cache = get_size_kb(parse_line + str_pos);
         cfg->jit_cache_set = true;
         printf ("[CFG] JIT cache %dKB\n", cfg->jit_cache);
+        break;
+
+      case CONFITEM_NETWORK:
+        cfg->network_enabled = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] Network %s\n", cfg->network_enabled ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_NETWORK_BACKEND:
+        get_next_string(parse_line, cfg->network_backend, &str_pos, ' ');
+        printf ("[CFG] Network backend %s\n", cfg->network_backend);
+        break;
+
+      case CONFITEM_NETWORK_TAP:
+        get_next_string(parse_line, cfg->network_tap, &str_pos, ' ');
+        printf ("[CFG] Network TAP %s\n", cfg->network_tap);
+        break;
+
+      case CONFITEM_NETWORK_BASE:
+        cfg->network_base = get_int(parse_line + str_pos);
+        printf ("[CFG] Network base 0x%06X\n", cfg->network_base);
+        break;
+
+      case CONFITEM_NETWORK_MAC:
+        get_next_string(parse_line, cfg->network_mac, &str_pos, ' ');
+        printf ("[CFG] Network MAC %s\n", cfg->network_mac);
+        break;
+
+      case CONFITEM_NETWORK_IRQ:
+        cfg->network_irq_level = (uint8_t)get_int(parse_line + str_pos);
+        printf ("[CFG] Network IRQ IPL%u\n", cfg->network_irq_level);
+        break;
+
+      case CONFITEM_NETWORK_HOST_IP:
+        get_next_string(parse_line, cfg->network_host_ip, &str_pos, ' ');
+        printf ("[CFG] Network host IP %s\n", cfg->network_host_ip);
+        break;
+
+      case CONFITEM_NETWORK_ATARI_IP:
+        get_next_string(parse_line, cfg->network_atari_ip, &str_pos, ' ');
+        printf ("[CFG] Network Atari IP %s\n", cfg->network_atari_ip);
+        break;
+
+      case CONFITEM_NETWORK_NETMASK:
+        get_next_string(parse_line, cfg->network_netmask, &str_pos, ' ');
+        printf ("[CFG] Network netmask %s\n", cfg->network_netmask);
+        break;
+
+      case CONFITEM_NETWORK_DEBUG:
+        cfg->network_debug = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] Network debug %s\n", cfg->network_debug ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_HOSTFS:
+        {
+          char drive[8];
+          char option[32];
+          int idx;
+
+          memset(drive, 0, sizeof(drive));
+          memset(option, 0, sizeof(option));
+          get_next_string(parse_line, drive, &str_pos, ' ');
+          idx = drive[0] ? hostfs_drive_index(drive[0]) : -1;
+          if (idx < 0) {
+            printf ("[CFG] Invalid hostfs drive '%s' on line %d.\n", drive, cur_line);
+            break;
+          }
+
+          while (parse_line[str_pos] == ' ' || parse_line[str_pos] == '\t')
+            str_pos++;
+
+          if (parse_line[str_pos] == '\0') {
+            printf ("[CFG] Missing hostfs path for drive %c on line %d.\n",
+                    (char)toupper((unsigned char)drive[0]), cur_line);
+            break;
+          }
+
+          strncpy(cfg->hostfs[idx].path, parse_line + str_pos,
+                  sizeof(cfg->hostfs[idx].path) - 1);
+          cfg->hostfs[idx].path[sizeof(cfg->hostfs[idx].path) - 1] = '\0';
+          trim_whitespace(cfg->hostfs[idx].path);
+
+          char *last_space = strrchr(cfg->hostfs[idx].path, ' ');
+          if (last_space) {
+            strncpy(option, last_space + 1, sizeof(option) - 1);
+            for (char *p = option; *p; p++)
+              *p = (char)tolower((unsigned char)*p);
+            if (strcmp(option, "readonly") == 0 || strcmp(option, "ro") == 0) {
+              *last_space = '\0';
+              trim_whitespace(cfg->hostfs[idx].path);
+              cfg->hostfs[idx].readonly = true;
+            } else if (strcmp(option, "readwrite") == 0 || strcmp(option, "rw") == 0) {
+              *last_space = '\0';
+              trim_whitespace(cfg->hostfs[idx].path);
+              cfg->hostfs[idx].readonly = false;
+            }
+          }
+
+          cfg->hostfs[idx].enabled = true;
+          cfg->hostfs[idx].drive = (char)toupper((unsigned char)drive[0]);
+          printf ("[CFG] HostFS %c: %s%s\n",
+                  cfg->hostfs[idx].drive,
+                  cfg->hostfs[idx].path,
+                  cfg->hostfs[idx].readonly ? " readonly" : "");
+        }
         break;
 
       case CONFITEM_NONE:

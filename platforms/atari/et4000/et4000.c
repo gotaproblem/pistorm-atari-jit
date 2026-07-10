@@ -36,6 +36,7 @@
  */
 
 #include "et4000.h"
+#include "../../../config_file/config_file.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -49,6 +50,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
 #include <linux/fb.h>
@@ -61,6 +63,12 @@ extern "C" {
 #endif
 extern volatile uint8_t g_irq;
 extern volatile uint8_t g_irq_mask;
+uint8_t *pistorm_fvdi_fb_ptr(void);
+uint32_t pistorm_fvdi_width(void);
+uint32_t pistorm_fvdi_height(void);
+uint32_t pistorm_fvdi_bpp(void);
+int pistorm_fvdi_is_active(void);
+uint64_t pistorm_fvdi_write_count(void);
 #ifdef __cplusplus
 }
 #endif
@@ -93,9 +101,9 @@ static int g_sdl_tex_has_frame = 0;
 /* Native-resolution staging: the blits decode 1:1 into g_logical at the
  * mode's source resolution; the texture is sized to match; the GPU does the
  * upscale + aspect-correct letterbox to the HDMI output via the renderer's
- * logical size. Sized for the largest mode we support (1024x768). */
-#define ET4K_MAX_LW 1280
-#define ET4K_MAX_LH 1024
+ * logical size. */
+#define ET4K_MAX_LW 1920
+#define ET4K_MAX_LH 1200
 #define ET4K_ROW_PAD 64
 #define ET4K_STAGE_PITCH (ET4K_MAX_LW + ET4K_ROW_PAD * 2)
 static uint32_t *g_logical = NULL;          /* padded ET4K_STAGE_PITCH * ET4K_MAX_LH XRGB */
@@ -112,6 +120,13 @@ static uint32_t g_fbdev_w = 0, g_fbdev_h = 0, g_fbdev_stride = 0;
  * (inside sdl_present, between RenderCopy and RenderPresent) so the readback
  * is valid and SDL is only touched from its owning thread. */
 static volatile int g_screendump_req = 0;
+static volatile int g_screenrecord_req = 0;
+static int g_screenrecord_active = 0;
+static uint64_t g_screenrecord_end_us = 0;
+static unsigned g_screenrecord_frame = 0;
+static char g_screenrecord_dir[512];
+static int write_png_rgb(const char *path, const uint32_t *pixels,
+                        uint32_t w, uint32_t h, uint32_t stride_px);
 static int save_png_rgb(const char *path, const uint32_t *pixels,
                         uint32_t w, uint32_t h, uint32_t stride_px);
 
@@ -120,11 +135,11 @@ static int save_png_rgb(const char *path, const uint32_t *pixels,
 static void et4000_configure_render_thread(void)
 {
     cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset);
-    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+    CPU_ZERO (&cpuset);
+    CPU_SET (0, &cpuset);
+    pthread_setaffinity_np (pthread_self (), sizeof(cpuset), &cpuset);
 
-    setpriority(PRIO_PROCESS, 0, 19);
+    setpriority (PRIO_PROCESS, 0, 19);
 #ifdef SCHED_IDLE
     struct sched_param param;
     memset(&param, 0, sizeof(param));
@@ -132,17 +147,9 @@ static void et4000_configure_render_thread(void)
 #endif
 }
 
-static int et4000_frame_interval_us(void)
+static int et4000_frame_interval_us (void)
 {
-    int fps = 25;
-    const char *env = getenv("PISTORM_VGA_FPS");
-    if (env && *env)
-    {
-        int requested = atoi(env);
-        if (requested >= 10 && requested <= 60)
-            fps = requested;
-    }
-    return 1000000 / fps;
+    return 1000000 / emulator_config_fps();
 }
 
 static int et4000_present_divisor(void)
@@ -287,21 +294,21 @@ static int fbdev_open_output(const char *dev)
     g_fbdev_fd = open(path, O_RDWR);
     if (g_fbdev_fd < 0)
     {
-        fprintf(stderr, "et4000: cannot open %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "[ET4000] cannot open %s: %s\n", path, strerror(errno));
         return -1;
     }
 
     if (ioctl(g_fbdev_fd, FBIOGET_VSCREENINFO, &vinfo) < 0 ||
         ioctl(g_fbdev_fd, FBIOGET_FSCREENINFO, &finfo) < 0)
     {
-        fprintf(stderr, "et4000: fbdev ioctl failed: %s\n", strerror(errno));
+        fprintf(stderr, "[ET4000] fbdev ioctl failed: %s\n", strerror(errno));
         close(g_fbdev_fd);
         g_fbdev_fd = -1;
         return -1;
     }
 
     if (vinfo.bits_per_pixel != 32)
-        fprintf(stderr, "et4000: fbdev is %ubpp, expected 32bpp\n", vinfo.bits_per_pixel);
+        fprintf(stderr, "[ET4000] fbdev is %ubpp, expected 32bpp\n", vinfo.bits_per_pixel);
 
     g_fbdev_w = vinfo.xres;
     g_fbdev_h = vinfo.yres;
@@ -309,7 +316,7 @@ static int fbdev_open_output(const char *dev)
     g_fbdev_size = finfo.smem_len;
     if (g_fbdev_stride == 0 || g_fbdev_w == 0 || g_fbdev_h == 0)
     {
-        fprintf(stderr, "et4000: invalid fbdev geometry %ux%u stride=%u\n",
+        fprintf(stderr, "[ET4000] invalid fbdev geometry %ux%u stride=%u\n",
                 g_fbdev_w, g_fbdev_h, g_fbdev_stride);
         close(g_fbdev_fd);
         g_fbdev_fd = -1;
@@ -321,13 +328,13 @@ static int fbdev_open_output(const char *dev)
     uint32_t mapped_h = (uint32_t)(g_fbdev_size / g_fbdev_stride);
     if (mapped_h < g_fbdev_h)
     {
-        fprintf(stderr, "et4000: fbdev mapped height clamped %u->%u size=%zu stride=%u\n",
+        fprintf(stderr, "[ET4000] fbdev mapped height clamped %u->%u size=%zu stride=%u\n",
                 g_fbdev_h, mapped_h, g_fbdev_size, g_fbdev_stride);
         g_fbdev_h = mapped_h;
     }
     if (g_fbdev_h == 0)
     {
-        fprintf(stderr, "et4000: fbdev mapping too small size=%zu stride=%u\n",
+        fprintf(stderr, "[ET4000] fbdev mapping too small size=%zu stride=%u\n",
                 g_fbdev_size, g_fbdev_stride);
         close(g_fbdev_fd);
         g_fbdev_fd = -1;
@@ -337,7 +344,7 @@ static int fbdev_open_output(const char *dev)
                                   MAP_SHARED, g_fbdev_fd, 0);
     if (g_fbdev_mem == MAP_FAILED)
     {
-        fprintf(stderr, "et4000: fbdev mmap failed: %s\n", strerror(errno));
+        fprintf(stderr, "[ET4000] fbdev mmap failed: %s\n", strerror(errno));
         g_fbdev_mem = NULL;
         close(g_fbdev_fd);
         g_fbdev_fd = -1;
@@ -345,7 +352,7 @@ static int fbdev_open_output(const char *dev)
     }
 
     memset(g_fbdev_mem, 0, g_fbdev_size);
-    fprintf(stderr, "et4000: fbdev output %ux%u stride=%u bpp=%u\n",
+    fprintf(stderr, "[ET4000] fbdev output %ux%u stride=%u bpp=%u\n",
             g_fbdev_w, g_fbdev_h, g_fbdev_stride, vinfo.bits_per_pixel);
     return 0;
 }
@@ -447,7 +454,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
         g_logical = (uint32_t *)calloc((size_t)ET4K_STAGE_PITCH * ET4K_MAX_LH, 4);
         if (!g_logical)
         {
-            fprintf(stderr, "et4000: staging buffer alloc failed\n");
+            fprintf(stderr, "[ET4000] staging buffer alloc failed\n");
             fbdev_close_output();
             return -1;
         }
@@ -459,7 +466,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
         s->fb_stride = 0;
         s->fb_bpp = 32;
         s->fb_fd = -1;
-        fprintf(stderr, "et4000: SDL bypassed, using fbdev output\n");
+        fprintf(stderr, "[ET4000] SDL bypassed, using fbdev output\n");
         return 0;
     }
 
@@ -478,7 +485,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
     {
-        fprintf(stderr, "et4000: SDL_Init failed: %s\n", SDL_GetError());
+        fprintf(stderr, "[ET4000] SDL_Init failed: %s\n", SDL_GetError());
         return -1;
     }
 
@@ -496,7 +503,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
                                  SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP);
     if (!g_sdl_win)
     {
-        fprintf(stderr, "et4000: SDL_CreateWindow failed: %s\n", SDL_GetError());
+        fprintf(stderr, "[ET4000] SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
         return -1;
     }
@@ -508,7 +515,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
         g_sdl_ren = SDL_CreateRenderer(g_sdl_win, -1, SDL_RENDERER_SOFTWARE);
     if (!g_sdl_ren)
     {
-        fprintf(stderr, "et4000: SDL_CreateRenderer failed: %s\n", SDL_GetError());
+        fprintf(stderr, "[ET4000] SDL_CreateRenderer failed: %s\n", SDL_GetError());
         SDL_DestroyWindow(g_sdl_win);
         SDL_Quit();
         return -1;
@@ -530,7 +537,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
     g_logical = (uint32_t *)calloc((size_t)ET4K_STAGE_PITCH * ET4K_MAX_LH, 4);
     if (!g_logical)
     {
-        fprintf(stderr, "et4000: staging buffer alloc failed\n");
+        fprintf(stderr, "[ET4000] staging buffer alloc failed\n");
         return -1;
     }
     s->fb_mem = (uint8_t *)(g_logical + ET4K_ROW_PAD);
@@ -544,7 +551,7 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
     SDL_RendererInfo rinfo;
     memset(&rinfo, 0, sizeof(rinfo));
     SDL_GetRendererInfo(g_sdl_ren, &rinfo);
-    fprintf(stderr, "et4000: SDL output %dx%d (video=%s renderer=%s)\n",
+    fprintf(stderr, "[ET4000] SDL output %dx%d (video=%s renderer=%s)\n",
             ow, oh, SDL_GetCurrentVideoDriver(),
             rinfo.name ? rinfo.name : "unknown");
     return 0;
@@ -593,9 +600,86 @@ static void sdl_set_logical(ET4000State *s, uint32_t w, uint32_t h,
     }
 }
 
-/* Upload the native staging buffer and present; the GPU scales it up. Called
- * once per frame from the render thread. */
-static void sdl_present(ET4000State *s)
+static uint64_t et4000_wall_us(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000u + (uint64_t)tv.tv_usec;
+}
+
+static int et4000_make_capture_dir(char *out, size_t out_sz)
+{
+    const char *base = "../screendumps";
+
+    if (mkdir(base, 0775) != 0 && errno != EEXIST)
+        return -1;
+
+    for (unsigned i = 0; i < 10000; i++)
+    {
+        snprintf(out, out_sz, "%s/capture%04u", base, i);
+        if (mkdir(out, 0775) == 0)
+            return 0;
+        if (errno != EEXIST)
+            return -1;
+    }
+
+    return -1;
+}
+
+static void et4000_start_screenrecord(int seconds)
+{
+    if (seconds <= 0)
+        seconds = 10;
+
+    if (et4000_make_capture_dir(g_screenrecord_dir,
+                                sizeof(g_screenrecord_dir)) != 0)
+    {
+        fprintf(stderr, "[ET4000] cannot create capture dir: %s\n",
+                strerror(errno));
+        return;
+    }
+
+    g_screenrecord_frame = 0;
+    g_screenrecord_end_us = et4000_wall_us() + (uint64_t)seconds * 1000000u;
+    g_screenrecord_active = 1;
+    printf("[ET4K] Recording %d seconds -> %s\n", seconds, g_screenrecord_dir);
+}
+
+static void et4000_record_frame(ET4000State *s)
+{
+    if (!g_screenrecord_active)
+        return;
+
+    if (!s->fb_mem || !s->fb_width || !s->fb_height || !s->fb_stride)
+        return;
+
+    char path[640];
+    snprintf(path, sizeof(path), "%s/frame_%04u.png",
+             g_screenrecord_dir, g_screenrecord_frame++);
+
+    if (write_png_rgb(path, (const uint32_t *)s->fb_mem,
+                      s->fb_width, s->fb_height, s->fb_stride / 4) != 0)
+    {
+        fprintf(stderr, "[ET4000] capture frame write failed: %s\n", path);
+        g_screenrecord_active = 0;
+        return;
+    }
+
+    if (et4000_wall_us() >= g_screenrecord_end_us)
+    {
+        printf("[ET4K] Recording complete: %u frames -> %s\n",
+               g_screenrecord_frame, g_screenrecord_dir);
+        printf("[ET4K] Encode: ffmpeg -framerate 25 -i %s/frame_%%04d.png -pix_fmt yuv420p %s/capture.mp4\n",
+               g_screenrecord_dir, g_screenrecord_dir);
+        g_screenrecord_active = 0;
+    }
+}
+
+/* 
+ * Upload the native staging buffer and present; the GPU scales it up. Called
+ * once per frame from the render thread. 
+ */
+static void sdl_present (ET4000State *s)
 {
     static uint32_t present_count = 0;
     static int present_divisor = 0;
@@ -606,18 +690,38 @@ static void sdl_present(ET4000State *s)
     if (++present_count % (uint32_t)present_divisor)
         return;
 
+    if (g_screenrecord_req)
+    {
+        et4000_start_screenrecord (g_screenrecord_req);
+        g_screenrecord_req = 0;
+    }
+
     if (g_fbdev_mode)
     {
+        if (g_screendump_req)
+        {
+            g_screendump_req = 0;
+            if (s->fb_mem && s->fb_width && s->fb_height && s->fb_stride &&
+                save_png_rgb("screendump.png", (const uint32_t *)s->fb_mem,
+                             s->fb_width, s->fb_height, s->fb_stride / 4) == 0)
+                printf("[DISPLAY] Screendump %ux%u -> screendump.png\n",
+                       s->fb_width, s->fb_height);
+            else
+                fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
+        }
+        et4000_record_frame(s);
         fbdev_present(s);
         return;
     }
 
     if (!g_sdl_ren || !g_sdl_tex || ((!s->fb_mem || s->fb_stride == 0) && !g_sdl_tex_has_frame))
         return;
+
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     if (!g_sdl_tex_has_frame)
     {
-        SDL_UpdateTexture(g_sdl_tex, NULL, s->fb_mem, (int)s->fb_stride);
+        if (SDL_UpdateTexture(g_sdl_tex, NULL, s->fb_mem, (int)s->fb_stride) == 0)
+            g_sdl_tex_has_frame = 1;
         if (t0)
             et4000_profile_add(ET4K_PROF_SDL_UPDATE, et4000_profile_now_ns() - t0);
     }
@@ -656,17 +760,19 @@ static void sdl_present(ET4000State *s)
                                      (uint32_t)ow, (uint32_t)oh, (uint32_t)ow) == 0)
                         printf("[ET4K] Screendump %dx%d -> screendump.png\n", ow, oh);
                     else
-                        fprintf(stderr, "et4000: PNG screendump failed\n");
+                        fprintf(stderr, "[ET4000] PNG screendump failed\n");
                 }
                 else
                 {
-                    fprintf(stderr, "et4000: RenderReadPixels failed: %s\n",
+                    fprintf(stderr, "[ET4000] RenderReadPixels failed: %s\n",
                             SDL_GetError());
                 }
                 free(buf);
             }
         }
     }
+
+    et4000_record_frame(s);
 
     t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     SDL_RenderPresent(g_sdl_ren);
@@ -751,7 +857,13 @@ int et4000_decode_mode(ET4000State *s)
 #define ET4K_XVDI_VRAM 0x00A00000u
 #define ET4K_VRAM_BYTES 0x00100000u /* 1 MB */
 
-void et4000_update_display(ET4000State *s)
+static inline int et4000_addr_is_vram_aperture(uint32_t addr)
+{
+    return (addr >= ET4K_NOVA_VRAM && addr < ET4K_NOVA_VRAM + ET4K_VRAM_BYTES) ||
+           (addr >= ET4K_XVDI_VRAM && addr < ET4K_XVDI_VRAM + ET4K_VRAM_BYTES);
+}
+
+void et4000_update_display (ET4000State *s)
 {
     if (!s->fb_mem)
         return;
@@ -1068,25 +1180,29 @@ int et4000_io_write32(ET4000State *s, uint32_t port, uint32_t val)
     return 1;
 }
 
-int et4000_init(ET4000State *s, const char *fb_device)
+int et4000_init (ET4000State *s, const char *fb_device)
 {
     memset(s, 0, sizeof(*s));
     s->vram_size = ET4000_VRAM_SIZE; /* informational; engine owns real VRAM */
 
-    if (sdl_open(s, fb_device) < 0)
+    if (sdl_open (s, fb_device) < 0)
         return -1;
-
-    et4000_engine_init(); /* PCem ET4000 + 2MB VRAM */
 
     g_et4000 = s;
     fb_ptr = s->fb_mem;
-    vram_ptr = et4000_engine_vram_ptr();
 
-    printf("et4000: init complete (PCem engine), fb=%ux%u\n", s->fb_width, s->fb_height);
+    if (emulator_config_et4k_enabled()) {
+        et4000_engine_init (); /* PCem ET4000 + 1MB VRAM */
+        vram_ptr = et4000_engine_vram_ptr ();
+        printf ("[ET4000] init complete (PCem engine), fb=%ux%u\n", s->fb_width, s->fb_height);
+    } else {
+        vram_ptr = NULL;
+        printf ("[DISPLAY] init complete (no ET4000 engine), fb=%ux%u\n", s->fb_width, s->fb_height);
+    }
     return 0;
 }
 
-void et4000_shutdown(ET4000State *s)
+void et4000_shutdown (ET4000State *s)
 {
     if (!s)
         return;
@@ -1101,11 +1217,17 @@ void et4000_shutdown(ET4000State *s)
 #include <sys/time.h>
 
 int kbhit(void);
-void screenDump(int, int);
+//void screenDump(int, int);
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern void pistorm_vga_bank_profile_poll(void);
+#ifdef __cplusplus
+}
+#endif
 
 extern volatile int cpu_emulation_running;
 extern bool screenGrab;
-extern bool Native_HDMI_enabled;
 
 ET4000State et4000_s;
 extern volatile uint16_t st_palette[16];
@@ -1135,7 +1257,7 @@ static void png_write_chunk(FILE *f, const char *type,
     png_write_u32(f, (uint32_t)crc);
 }
 
-static int save_png_rgb(const char *path, const uint32_t *pixels,
+static int write_png_rgb(const char *path, const uint32_t *pixels,
                         uint32_t w, uint32_t h, uint32_t stride_px)
 {
     size_t row_bytes = 1 + (size_t)w * 3; /* filter byte + RGB */
@@ -1196,19 +1318,27 @@ static int save_png_rgb(const char *path, const uint32_t *pixels,
     fclose(f);
     free(comp);
 
-    system("bash ./screendump.sh");
     return 0;
 }
 
-void screenDump(int w, int h)
+static int save_png_rgb(const char *path, const uint32_t *pixels,
+                        uint32_t w, uint32_t h, uint32_t stride_px)
 {
-    (void)w;
-    (void)h;
+    int rc = write_png_rgb(path, pixels, w, h, stride_px);
+    if (rc == 0)
+        system("bash ./screendump.sh");
+    return rc;
+}
+
+//void screenDump(int w, int h)
+//{
+ //   (void)w;
+ //   (void)h;
     /* Request a capture; the render thread services it in sdl_present, reading
      * the full HDMI frame and writing screendump.png. Safe to call from any
      * thread (no SDL access here). */
-    g_screendump_req = 1;
-}
+ //   g_screendump_req = 1;
+//}
 
 /* terminal IO */
 int kbhit(void)
@@ -1221,20 +1351,23 @@ int kbhit(void)
     }
     return 0;
 }
+
 #define HZ50 20000
 #define HZ60 16667
 #define HZ72 14045 // Monochrome actually 71.2Hz
 
 /* ST palette: 16 words at $FF8240. STF = 3 bits/gun (0RRR0GGG0BBB). */
-static void st_load_palette(uint32_t pal[16])
+static void st_load_palette (uint32_t pal[16])
 {
     for (int i = 0; i < 16; i++)
     {
-        uint16_t w = st_palette[i]; /* STF: 0RRR0GGG0BBB */
+        uint16_t w = st_palette[i];
+
         uint8_t r3 = (w >> 8) & 7, g3 = (w >> 4) & 7, b3 = w & 7;
         uint8_t r = (r3 << 5) | (r3 << 2) | (r3 >> 1);
         uint8_t g = (g3 << 5) | (g3 << 2) | (g3 >> 1);
         uint8_t b = (b3 << 5) | (b3 << 2) | (b3 >> 1);
+
         pal[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
     }
 }
@@ -1247,11 +1380,11 @@ static void st_load_palette(uint32_t pal[16])
  *   Green : bits  7..4  (bit  7 = LSB)
  *   Blue  : bits  3..0  (bit  3 = LSB)
  */
-static void ste_load_palette(uint32_t pal[16])
+static void ste_load_palette (uint32_t pal[16])
 {
     for (int i = 0; i < 16; i++)
     {
-        uint16_t w = st_palette[i]; //ste_palette[i];
+        uint16_t w = st_palette[i];
 
         /* rebuild each 4-bit gun: high 3 bits from ST position, LSB from extra bit */
         uint8_t r4 = (((w >> 8) & 7) << 1) | ((w >> 11) & 1);
@@ -1358,8 +1491,8 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
         pal[1] = 0xFF000000u;
     }
     else
-        //st_load_palette(pal);
-        ste_load_palette(pal);
+        //st_load_palette (pal);
+        ste_load_palette (pal);
 
     uint8_t idx[640];
 
@@ -1382,6 +1515,83 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
     }
 }
 
+static bool blit_fvdi_linear(ET4000State *s, bool *updated)
+{
+    static uint64_t last_write_count = UINT64_MAX;
+    static uint32_t last_w;
+    static uint32_t last_h;
+    static uint32_t last_bpp;
+    uint8_t *src = pistorm_fvdi_fb_ptr();
+    uint32_t w = pistorm_fvdi_width();
+    uint32_t h = pistorm_fvdi_height();
+    uint32_t bpp = pistorm_fvdi_bpp();
+    uint64_t write_count;
+
+    if (updated)
+        *updated = false;
+
+    if (!pistorm_fvdi_is_active() || !src || w == 0 || h == 0)
+        return false;
+    if (w > ET4K_MAX_LW || h > ET4K_MAX_LH)
+        return false;
+    if (bpp != 16 && bpp != 32)
+        return false;
+
+    sdl_set_logical(s, w, h, w, h);
+
+    write_count = pistorm_fvdi_write_count();
+    if (write_count == last_write_count && w == last_w && h == last_h && bpp == last_bpp)
+        return true;
+
+    last_write_count = write_count;
+    last_w = w;
+    last_h = h;
+    last_bpp = bpp;
+    if (updated)
+        *updated = true;
+
+    uint32_t *dst = (uint32_t *)s->fb_mem;
+    uint32_t dst_pitch = s->fb_stride ? (uint32_t)(s->fb_stride / 4) : w;
+
+    if (bpp == 32)
+    {
+        for (uint32_t y = 0; y < h; y++)
+        {
+            const uint8_t *row = src + (size_t)y * w * 4;
+            uint32_t *out = dst + (size_t)y * dst_pitch;
+            for (uint32_t x = 0; x < w; x++)
+            {
+                const uint8_t *p = row + x * 4;
+                out[x] = 0xff000000u |
+                         ((uint32_t)p[1] << 16) |
+                         ((uint32_t)p[2] << 8) |
+                         (uint32_t)p[3];
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t y = 0; y < h; y++)
+        {
+            const uint8_t *row = src + (size_t)y * w * 2;
+            uint32_t *out = dst + (size_t)y * dst_pitch;
+            for (uint32_t x = 0; x < w; x++)
+            {
+                uint16_t p = ((uint16_t)row[x * 2] << 8) | row[x * 2 + 1];
+                uint32_t r = (p >> 11) & 0x1f;
+                uint32_t g = (p >> 5) & 0x3f;
+                uint32_t b = p & 0x1f;
+                out[x] = 0xff000000u |
+                         ((r << 19) | (r << 14)) |
+                         ((g << 10) | (g << 4)) |
+                         ((b << 3) | (b >> 2));
+            }
+        }
+    }
+
+    return true;
+}
+
 /*
  * Render to chosen frame rate
  * Need to read Atari env variables to decide this
@@ -1391,15 +1601,15 @@ void *render_frame(void *vptr)
     extern rtg_s rtg;
     int took;
     struct timeval stop, start;
-    int FRAME_RATE = et4000_frame_interval_us();
+    int FRAME_RATE = et4000_frame_interval_us ();
     int no_render = et4000_no_render();
     int irq_backoff = et4000_irq_backoff_enabled();
     int8_t prev_shift_mode = -1;
     static int64_t frames = 1;
 
-    et4000_configure_render_thread();
+    et4000_configure_render_thread ();
 
-    if (et4000_init(&et4000_s, NULL) < 0)
+    if (et4000_init (&et4000_s, NULL) < 0)
     {
         et4000_thread_ready = -1;
         return NULL;
@@ -1411,6 +1621,7 @@ void *render_frame(void *vptr)
 
     while (cpu_emulation_running)
     {
+        const char *render_source = "none";
         uint32_t shifter_base = ((uint32_t)rtg.high << 16) |
                                 ((uint32_t)rtg.mid << 8) |
                                 ((uint32_t)rtg.low & 0xFEu);
@@ -1422,49 +1633,14 @@ void *render_frame(void *vptr)
             if (physbase)
                 rtg.vram_base = physbase;
         }
-        /*
-                if (rtg.vram_base) {
-                    g_et4000->video_subsystem = 0x01;
-
-                    if (rtg.shift_mode != prev_shift_mode) {
-                        printf ("setting new res @ 0x%X\n", rtg.vram_base);
-                        //printf ("render_frame natmem %p\n", rtg.natmem);
-                        prev_shift_mode = rtg.shift_mode;
-
-                        switch (rtg.shift_mode & 0x03) {
-                            case 0: // 320x200 ST-LOW 16-colour
-                                g_et4000->crtc[0x01] = 39; // hdisplay 320
-                                g_et4000->crtc[0x07] = 0;
-                                g_et4000->crtc[0x0C] = 0;
-                                g_et4000->crtc[0x0D] = 0;
-                                g_et4000->crtc[0x12] = 199; // vdisplay 200
-                                g_et4000->crtc[0x13] = 80; // bytes per row?
-                                g_et4000->seq[4]     = 0;
-                                g_et4000->seq[2]     = 0x0F;
-                                g_et4000->gc[6]      = 0x01;
-                            break;
-                            case 1: // 640x200 ST-MEDIUM 4-colour
-                            break;
-                            case 2: // 640x400 ST-HIGH Monochrome
-                                g_et4000->seq[4] = 0;
-                                g_et4000->seq[2] = 0x01;
-                            break;
-                        }
-
-                    }
-                    else {
-
-                        memcpy ((void*)(rtg.natmem + 0xC00000), (void*)(rtg.natmem + rtg.vram_base), 0x8000 );
-                    }
-                }
-        */
+        
         sdl_pump();
 
         gettimeofday(&start, NULL);
 
         _VSYNC = 0;
 
-        if (!no_render && !(irq_backoff && et4000_irq_pending_for_cpu()))
+        if (!no_render && !(irq_backoff && et4000_irq_pending_for_cpu ()))
         {
             static bool rtg_seen_live = false;
             bool video_enabled = (g_et4000->video_subsystem & 0x01) != 0;
@@ -1479,27 +1655,39 @@ void *render_frame(void *vptr)
                 show_rtg = true;
             else
             {
-                show_rtg = et4000_engine_visible_nonzero();
+                show_rtg = et4000_engine_visible_nonzero ();
                 if (show_rtg)
                     rtg_seen_live = true;
             }
 
-            if (show_rtg) {
-                et4000_update_display(g_et4000); /* aperture has pixels -> show RTG */
+            bool fvdi_updated = false;
+            if (blit_fvdi_linear(g_et4000, &fvdi_updated)) {
+                if (fvdi_updated)
+                    g_sdl_tex_has_frame = 0;
+                render_source = "fvdi";
                 rendered = true;
             }
 
-            else if (Native_HDMI_enabled && rtg.vram_base && rtg.vram_base + 0x8000 < 0xE00000)
+            else if (show_rtg) {
+                et4000_update_display (g_et4000); /* aperture has pixels -> show RTG */
+                render_source = "et4000";
+                rendered = true;
+            }
+
+            else if (emulator_config_native_hdmi_enabled() && rtg.vram_base &&
+                     !et4000_addr_is_vram_aperture(rtg.vram_base) &&
+                     rtg.vram_base + 0x8000 < 0xE00000)
             {
                 g_sdl_tex_has_frame = 0;
                 blit_st_native(g_et4000,
                                st_native_frame_source(rtg.vram_base, rtg.natmem + rtg.vram_base),
                                rtg.shift_mode); /* Native ST screen, including real blitter DMA writes. */
+                render_source = "st";
                 rendered = true;
             }
 
             if (t_build)
-                et4000_profile_add(ET4K_PROF_RENDER_BUILD, et4000_profile_now_ns() - t_build);
+                et4000_profile_add (ET4K_PROF_RENDER_BUILD, et4000_profile_now_ns() - t_build);
 
             if (rendered)
             {
@@ -1514,12 +1702,28 @@ void *render_frame(void *vptr)
 
         do
         {
+            /* 
+             * test for user input
+             * this could easily be expanded to allow for more commands, 
+             * but for now just allow screen dumps and recording
+             */
             if (screenGrab && kbhit())
             {
                 int c = getchar();
 
+                /* screen grab */
                 if (c == 's' || c == 'S')
-                    screenDump(g_et4000->fb_width, g_et4000->fb_height);
+                    g_screendump_req = 1;
+
+                /* 
+                 * screen record for n seconds 
+                 * at the moment this will generate a series of PNG files, which can be stitched 
+                 * together into a video later
+                 * see how this goes, but for now this is just a proof of concept, and not 
+                 * intended to be a full featured screen recording solution
+                 */
+                else if (c == 'r' || c == 'R')
+                    g_screenrecord_req = 30; 
             }
 
             gettimeofday(&stop, NULL);
@@ -1527,18 +1731,23 @@ void *render_frame(void *vptr)
 
             int remaining = FRAME_RATE - took;
             if (remaining > 1000)
-                usleep(remaining > 2000 ? 1000 : remaining / 2);
+                usleep (remaining > 2000 ? 1000 : remaining / 2);
             else
-                asm volatile("yield" ::: "memory");
-        } while (took < FRAME_RATE);
+                asm volatile ("yield" ::: "memory");
+        } 
+        while (took < FRAME_RATE);
 
+        /* check for overruns - is this really needed? */
         if (took > FRAME_RATE)
         {
             if (took - FRAME_RATE > 2000)
-                printf("render_frame: overrun %dms\n", took / 1000);
+                printf("[DISPLAY] render overrun source=%s took=%dms budget=%dms\n",
+                       render_source, took / 1000, FRAME_RATE / 1000);
         }
 
+        /* frame counter - currently unused */
         frames++;
+        pistorm_vga_bank_profile_poll();
     }
 
     return NULL;

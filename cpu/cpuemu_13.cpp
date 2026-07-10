@@ -55725,6 +55725,8 @@ void REGPARAM2 op_6fff_13_ff(uae_u32 opcode)
 /* MOVEQ.L #<data>,Dn */
 void REGPARAM2 op_7000_13_ff(uae_u32 opcode)
 {
+	if (atari_natfeat_handle_opcode(opcode, NULL))
+		return;
 	uae_u32 real_opcode = opcode;
 	uae_u32 srcreg = (uae_s32)(uae_s8)(real_opcode & 255);
 	uae_u32 dstreg = (real_opcode >> 9) & 7;
@@ -135897,6 +135899,8 @@ void REGPARAM2 op_6fff_14_ff(uae_u32 opcode)
 /* MOVEQ.L #<data>,Dn */
 void REGPARAM2 op_7000_14_ff(uae_u32 opcode)
 {
+	if (atari_natfeat_handle_opcode(opcode, NULL))
+		return;
 	uae_u32 real_opcode = opcode;
 	uae_u32 srcreg = (uae_s32)(uae_s8)(real_opcode & 255);
 	uae_u32 dstreg = (real_opcode >> 9) & 7;

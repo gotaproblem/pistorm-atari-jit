@@ -11,7 +11,7 @@ There is a lot of potential with performance.
 - [ ] Direct access needs developing; with that will come huge performance increases. 
 
 Then add-ons can be developed, such as 
-- [ ] WiFi networking
+- [x] WiFi networking
 - [x] DMA Sound
 - [x] FDD Emulation
 - [ ] Additional SVGA Cards
@@ -27,7 +27,7 @@ You need a PiSTorm board (Amiga A500) for DIL 68pin CPUs or a custom designed ST
 Development used Raspberry Pi OS Lite - Trixie build 64bit AARCH64
 #### Building
 For those interested in looking at the source, building and developing, fill your boots...
-The JIT engine is a clone of the amiberry project, chosen because it was developed for ARM 64bit and included hardware FPU. I did look at aranym; got the JIT interpreter running, but could not get the compiler running.
+The JIT engine is a clone of the amiberry project, chosen because it was developed for ARM 64bit and included hardware FPU. I did look at aranym; got the JIT interpreter running, but could not get the compiler running. However I have used NatFeats from Aranym.
 
 As is always the case, you must install a bunch of packages and libraries to build the binaries.
 >sudo apt install build-essential git libsdl2-dev libzstd-dev libcurl4-openssl-dev libdrm-dev libasound2-dev

@@ -23810,6 +23810,9 @@ uae_u32 REGPARAM2 op_6fff_40_ff(uae_u32 opcode)
 /* MOVEQ.L #<data>,Dn */
 uae_u32 REGPARAM2 op_7000_40_ff(uae_u32 opcode)
 {
+	uae_u32 natfeat_cycles = 0;
+	if (atari_natfeat_handle_opcode(opcode, &natfeat_cycles))
+		return natfeat_cycles;
 	uae_u32 real_opcode = opcode;
 	uae_u32 srcreg = (uae_s32)(uae_s8)(real_opcode & 255);
 	uae_u32 dstreg = (real_opcode >> 9) & 7;

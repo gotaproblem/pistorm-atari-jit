@@ -54,6 +54,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/idedriver.h"
 #include "platforms/atari/fdd/atari_fdd.h"
 #include "platforms/atari/fdd/platform_atari_fdd.h"
+#include "platforms/atari/network/platform_atari_network.h"
 
 #define IDEBASEADDR 0x00F00000
 #define IDETOPADDR 0x00F00100
@@ -94,9 +95,6 @@ bool tt_ram_available;
 /* FDD setup */
 extern "C" void *fdd_vbl_thread(void *arg);
 bool FDD_enabled;
-bool Blitter_enabled = true;
-bool STRAM_Cache_enabled;
-bool STRAM_Direct_enabled;
 
 /* ATARI RAM cache setup */
 //#define ADDR_MFP_GPIP 0x00FFFA01 // MFP General Purpose I/O
@@ -108,10 +106,7 @@ uint8_t *st_ram_cache;
 /* IDE setup */
 
 /* ET4K setup */
-bool ET4K_enabled;
-int ET4K_driver; // graphics_driver enum: 0 = NONE, 1 = NOVA, 2 = XVDI, 3 = NVDI, 4 = FVDI
 bool ET4K_emutos_vga;
-bool Native_HDMI_enabled = true;
 extern volatile int et4000_thread_ready;
 
 #ifdef __cplusplus
@@ -135,10 +130,25 @@ ET4KADDRESSES_s et4kaddresses[GRAPHICS_DRIVERS] =
 ET4KADDRESSES_s *et4k_addr_ptr;
 
 rtg_s rtg;
+static inline bool et4k_enabled(void)
+{
+  return emulator_config_et4k_enabled();
+}
+
+static inline bool display_enabled(void)
+{
+  return emulator_config_display_enabled();
+}
+
+static inline int et4k_driver(void)
+{
+  return emulator_config_graphics_driver();
+}
+
 static inline int in_et4k_vram(uint32_t a)
 {
-  uint32_t base = et4kaddresses[ET4K_driver].vram_base;
-  uint32_t top = et4kaddresses[ET4K_driver].vram_top;
+  uint32_t base = et4kaddresses[et4k_driver()].vram_base;
+  uint32_t top = et4kaddresses[et4k_driver()].vram_top;
   return a >= base && a < top;
 }
 
@@ -157,7 +167,6 @@ extern "C"
 
 /* Emulator setup */
 unsigned int cpu_type;
-struct emulator_config *cfg = NULL;
 
 extern uint8_t fc;
 volatile uint8_t g_irq = 0;
@@ -177,7 +186,7 @@ static inline bool blitter_disabled_addr(uint32_t address)
   if ((address & 0xFF000000u) == 0xFF000000u)
     address &= 0x00FFFFFFu;
   address &= 0x00FFFFFFu;
-  return !Blitter_enabled && address >= 0x00FF8A00u && address < 0x00FF8C00u;
+  return !emulator_config_blitter_enabled() && address >= 0x00FF8A00u && address < 0x00FF8C00u;
 }
 
 static uint32_t mfp_eoi8_writes;
@@ -320,7 +329,7 @@ void wait_ns(uint64_t nanoseconds)
     // Inline assembly "no-operation" instruction
     // Prevents the compiler (-O3) from optimizing away this empty loop
     asm volatile ("nop");
-    asm volatile ("yield" ::: "memory");
+    //asm volatile ("yield" ::: "memory");
   } while (current_ns < target_ns);
 }
 
@@ -441,6 +450,7 @@ static void *ipl_task(void *)
     {
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
       asm volatile("yield" ::: "memory");
+      //wait_ns (250);
       continue;
     }
 
@@ -727,9 +737,9 @@ void *cpu_task(void *)
 }
 
 
-int main(int argc, char *argv[])
+int main (int argc, char *argv[])
 {
-  struct emulator_config *cfg;
+  struct emulator_config *config;
   int g;
   int err;
   pthread_t rtg_tid, e4k_tid, cpu_tid, flush_tid, ipl_tid, vbl_id;
@@ -782,8 +792,6 @@ int main(int argc, char *argv[])
   pistorm_rom_start = 0;
   pistorm_rom_end = 0;
   pistorm_rom_mask = 0;
-  ET4K_enabled = false;
-  ET4K_driver = 0;
   et4k_addr_ptr = NULL;
   screenGrab = false;
 
@@ -828,31 +836,36 @@ int main(int argc, char *argv[])
    * load the config 
    */
   printf("[CFG] Loading from %s\n", config_file);
-  cfg = load_config_file(config_file);
-  Blitter_enabled = cfg->blitter;
-  pistorm_set_blitter_enabled(Blitter_enabled ? 1 : 0);
+  config = load_config_file(config_file);
+  if (!config)
+  {
+    fprintf(stderr, "[CFG] Failed to load config %s\n", config_file);
+    return 1;
+  }
+  emulator_config_set_current(config);
+  pistorm_set_blitter_enabled(emulator_config_blitter_enabled() ? 1 : 0);
 
   /*
    * initialise emulator with config file parameters
    */
-  if (cfg->cpu_type)
-    cpu_type = cfg->cpu_type;
+  if (config->cpu_type)
+    cpu_type = config->cpu_type;
 
   /*
    * point to rom image
    */
   //for (int ix = 0; ix < cfg->rom_count; ix++)
   //{
-    if (cfg->rom.rom_size != 0)
+    if (config->rom.rom_size != 0)
     {
       // ATARI STe ROM
-      if (cfg->rom.rom_size >= (256 * 1024))
+      if (config->rom.rom_size >= (256 * 1024))
       {
         ROM_START = 0x00E00000;
-        ROM_END = ROM_START + cfg->rom.rom_size; // 0x00F00000;
-        ROM_MASK = cfg->rom.rom_size - 1;        // 0x000FFFFF;
+        ROM_END = ROM_START + config->rom.rom_size; // 0x00F00000;
+        ROM_MASK = config->rom.rom_size - 1;        // 0x000FFFFF;
        
-        pistorm_rom_ptr = cfg->rom.rom_ptr;
+        pistorm_rom_ptr = config->rom.rom_ptr;
         pistorm_rom_start = ROM_START;
         pistorm_rom_end = ROM_END;
         pistorm_rom_mask = ROM_MASK;
@@ -882,10 +895,10 @@ int main(int argc, char *argv[])
    * NOTE JIT configures the memory map, so local allocation has been removed
    * configure memory for TT-RAM if > 68000
    */
-  if (cfg->ttram)
+  if (config->ttram)
   {
     tt_ram_available = true;
-    tt_ram_size = cfg->ttram_size ? cfg->ttram_size : (128u * 1024u * 1024u);
+    tt_ram_size = config->ttram_size ? config->ttram_size : (128u * 1024u * 1024u);
     if (tt_ram_size > 128u * 1024u * 1024u)
       tt_ram_size = 128u * 1024u * 1024u;
     printf("[INIT] TT-RAM allocated - %uMB\n", tt_ram_size >> 20);
@@ -894,35 +907,42 @@ int main(int argc, char *argv[])
   /*
    * Configure emulator interfaces
    */
-  
-  ET4K_enabled = cfg->graphics.card;
-  ET4K_driver = cfg->graphics.driver;
-  Native_HDMI_enabled = cfg->native_hdmi;
-  STRAM_Cache_enabled = cfg->stram_cache;
-  STRAM_Direct_enabled = cfg->stram_direct;
-  if (STRAM_Cache_enabled)
+
+  if (emulator_config_stram_cache_enabled())
     printf("[INIT] ST-RAM cache enabled\n");
-  if (STRAM_Direct_enabled)
+  if (emulator_config_stram_direct_enabled())
     printf("[INIT] ST-RAM direct enabled\n");
-  if (!Native_HDMI_enabled)
+  if (!emulator_config_native_hdmi_enabled())
     printf("[INIT] Native ST HDMI disabled\n");
 
-  if (ET4K_enabled)
-  {
-    et4k_addr_ptr = &et4kaddresses[ET4K_driver];
+  if (display_enabled())
     screenGrab = true;
+
+  if (et4k_enabled())
+  {
+    et4k_addr_ptr = &et4kaddresses[et4k_driver()];
   }
 
-  if (cfg->ide)
+  if (config->ide)
     InitIDE();
 
-  if (cfg->fdd.enabled)
+  /* Initialise JIT memory mapping before any emulation thread exists. The
+   * bank table depends on the config-driven flags above, and cpu_task enters
+   * the JIT path once cpu_emulation_running is raised below. */
+  jit_mem_init();
+  rtg.natmem = natmem_offset;
+  // printf ("main: natmem_offset %p\n", natmem_offset);
+
+  if (config->fdd.enabled)
   {
     FDD_enabled = true;
 
-    platform_fdd_init (cfg->fdd.img_path);
+    platform_fdd_init (config->fdd.img_path);
     //printf ("[INIT] FDD Image Attached %s\n", cfg->fdd.img_path);
   }
+
+  if (platform_network_init_from_config(config) != 0)
+    fprintf(stderr, "[NET] network init failed; continuing without network backend\n");
 
   /* --------------------------- */
 
@@ -931,13 +951,16 @@ int main(int argc, char *argv[])
   /* --------------------------- */
 
   /* Initialise DMA Sound -> HDMI (STe only) */
-  if (cfg->dma_sound) {
-    DMA_Sound_enabled = true;
-
-    dmasnd_init ("plughw:vc4hdmi0");
-    dmasnd_capture_start(); /* runs the pump on its own thread */
-
-    printf ("[INIT] DMA Sound -> HDMI enabled\n");
+  if (config->dma_sound) {
+    if (dmasnd_init (NULL) == 0 && dmasnd_capture_start() == 0) {
+      DMA_Sound_enabled = true;
+      printf ("[INIT] DMA Sound enabled\n");
+    } else {
+      DMA_Sound_enabled = false;
+      fprintf(stderr, "[INIT] DMA Sound failed to start\n");
+    }
+  } else {
+    printf ("[INIT] DMA Sound disabled\n");
   }
 
   /* start threads */
@@ -965,30 +988,24 @@ int main(int argc, char *argv[])
 #else
   printf("[MAIN] IPL thread disabled; CPU path polls IPL serially\n");
 #endif
-  /* start JIT Engine */
-  /* Initialise JIT memory mapping (must be after tt_ram is allocated) */
-  jit_mem_init();
 
-  rtg.natmem = natmem_offset;
-  // printf ("main: natmem_offset %p\n", natmem_offset);
-
-  if (ET4K_enabled)
+  if (display_enabled())
   {
     err = pthread_create(&e4k_tid, NULL, &render_frame, NULL);
 
     if (err != 0)
-      printf("[ERROR] Cannot create ET4000 thread: [%s]", strerror(err));
+      printf("[ERROR] Cannot create display thread: [%s]", strerror(err));
 
     else
     {
-      pthread_setname_np (e4k_tid, "pistorm: et4000");
-      printf("[MAIN] ET4000 thread created successfully\n");
+      pthread_setname_np (e4k_tid, "pistorm: display");
+      printf("[MAIN] Display thread created successfully\n");
 
       while (et4000_thread_ready == 0)
         usleep(1000);
       if (et4000_thread_ready < 0)
       {
-        fprintf(stderr, "[ERROR] ET4000 thread failed to initialise\n");
+        fprintf(stderr, "[ERROR] Display thread failed to initialise\n");
         return 1;
       }
     }
@@ -1025,17 +1042,17 @@ int main(int argc, char *argv[])
   /* Initialise JIT CPU core */
   fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
-  jit_cpu_set_perf_options(cfg->cpu_clock_multiplier,
-                           cfg->cpu_clock_multiplier_set ? 1 : 0,
-                           cfg->m68k_speed,
-                           cfg->m68k_speed_set ? 1 : 0,
-                           cfg->jit_cache,
-                           cfg->jit_cache_set ? 1 : 0);
+  jit_cpu_set_perf_options(config->cpu_clock_multiplier,
+                           config->cpu_clock_multiplier_set ? 1 : 0,
+                           config->m68k_speed,
+                           config->m68k_speed_set ? 1 : 0,
+                           config->jit_cache,
+                           config->jit_cache_set ? 1 : 0);
   jit_cpu_init (cpu_type,
-                cfg->fpu ? 1 : 0,
-                cfg->ttram ? 1 : 0,
-                cfg->addr32 ? 1 : 0,
-                cfg->jit ? 1 : 0); /* cpu_type: 0=68000 1=010 2=020 3=030 4=040 */
+                config->fpu ? 1 : 0,
+                config->ttram ? 1 : 0,
+                config->addr32 ? 1 : 0,
+                config->jit ? 1 : 0); /* cpu_type: 0=68000 1=010 2=020 3=030 4=040 */
   fprintf(stderr, "[MAIN] jit_cpu_init returned\n");
   fflush(stderr);
 
@@ -1045,6 +1062,7 @@ int main(int argc, char *argv[])
   pthread_join(cpu_tid, NULL);
 
   printf("[MAIN] Emulation Ended\n");
+  platform_network_shutdown();
 
   return 0;
 }
@@ -1060,6 +1078,8 @@ void cpu_pulse_reset(void)
 
   printf("[RESET] soft CPU RST\n");
   ps_pulse_reset();
+  if (DMA_Sound_enabled)
+    dmasnd_capture_reset();
 
   pulse_reset_inprogress = 0;
 }
@@ -1076,6 +1096,9 @@ void atari_hard_reset(void)
 
   ps_reset_state_machine(); /* resync CPLD bus engine, clear any wedged S-state */
   ps_pulse_reset();         /* pulse Atari RESET: MFP / GLUE / DMA / FDC / PSG */
+  if (DMA_Sound_enabled)
+    dmasnd_capture_reset();
+  pistorm_net_reset();
 
   jit_cpu_reset(); /* drop stale translations before re-fetch */
   m68k_reset();    /* reload SSP from (0), PC from (4) */
@@ -1307,6 +1330,9 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
   }
 }
 
+/* musashi hooks follow */
+/* musashi should no longer be used - jit needs address banks for performance */
+#if (0)
 /* FDD */
 //extern "C" {
 //extern "C" uint32_t  fdd_io_read  (uint32_t addr, int size);
@@ -1371,12 +1397,12 @@ extern "C"
         return readIDEB(add);
     }
 
-    if (ET4K_enabled)
+    if (et4k_enabled())
     {
       if (in_et4k_vram(address))
         return et4000_vram_read8(g_et4000, address);
 
-      else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top)
+      else if (address >= et4kaddresses[et4k_driver()].io_base && address < et4kaddresses[et4k_driver()].io_top)
         return et4000_io_read8(g_et4000, address);
     }
 #endif
@@ -1451,12 +1477,12 @@ extern "C"
       }
     }
 
-    if (ET4K_enabled)
+    if (et4k_enabled())
     {
       if (in_et4k_vram(address))
         return et4000_vram_read16(g_et4000, address);
 
-      else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top - 2)
+      else if (address >= et4kaddresses[et4k_driver()].io_base && address < et4kaddresses[et4k_driver()].io_top - 2)
         return et4000_io_read16(g_et4000, address);
     }
 #endif
@@ -1533,13 +1559,13 @@ extern "C"
       }
     }
 
-    if (ET4K_enabled)
+    if (et4k_enabled())
     {
       if (in_et4k_vram(address))
         return et4000_vram_read32(g_et4000, address);
 
       /* xVDI reads this address to see if card is present */
-      else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top - 4)
+      else if (address >= et4kaddresses[et4k_driver()].io_base && address < et4kaddresses[et4k_driver()].io_top - 4)
         return 0x00000000;
     }
 #endif
@@ -1609,7 +1635,7 @@ extern "C"
       }
     }
 
-    if (ET4K_enabled)
+    if (et4k_enabled())
     {
       if (address >= 0x00D00300 && address < 0x00D00400)
         printf("emulator ET4000 0x%X\n", address);
@@ -1619,7 +1645,7 @@ extern "C"
         return;
       }
 
-      else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top)
+      else if (address >= et4kaddresses[et4k_driver()].io_base && address < et4kaddresses[et4k_driver()].io_top)
       {
         et4000_io_write8(g_et4000, address, (uint8_t)value);
         return;
@@ -1720,7 +1746,7 @@ extern "C"
       }
     }
 
-    if (ET4K_enabled)
+    if (et4k_enabled())
     {
       if (in_et4k_vram(address))
       {
@@ -1728,7 +1754,7 @@ extern "C"
         return;
       }
 
-      else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top - 2)
+      else if (address >= et4kaddresses[et4k_driver()].io_base && address < et4kaddresses[et4k_driver()].io_top - 2)
       {
         {
           et4000_io_write16(g_et4000, address, (uint16_t)value);
@@ -1824,7 +1850,7 @@ extern "C"
       }
     }
 
-    if (ET4K_enabled)
+    if (et4k_enabled())
     {
       if (in_et4k_vram(address))
       {
@@ -1832,7 +1858,7 @@ extern "C"
         return;
       }
 
-      else if (address >= et4kaddresses[ET4K_driver].io_base && address < et4kaddresses[ET4K_driver].io_top - 4)
+      else if (address >= et4kaddresses[et4k_driver()].io_base && address < et4kaddresses[et4k_driver()].io_top - 4)
       {
         et4000_io_write32(g_et4000, address, value);
         return;
@@ -1863,3 +1889,5 @@ extern "C"
   }
 
 } // end extern "C"
+
+#endif

@@ -25,6 +25,7 @@
 #include "newcpu.h"
 #include "jit/compemu.h"
 #include "platforms/atari/et4000/et4000.h"
+#include "config_file/config_file.h"
 #include <sys/mman.h>
 #include <string.h>
 #include <stdlib.h>
@@ -76,13 +77,16 @@ extern "C"
     int et4000_engine_direct_vram_ok(void);
 }
 
+#ifndef ATARI_VGA_BANK_PROFILE
 #define ATARI_VGA_BANK_PROFILE 0
+#endif
 #define ATARI_BLITTER_TRACE 0
 #define ATARI_ACIA_TRACE 0
 
 #if ATARI_VGA_BANK_PROFILE
 typedef struct {
     uint64_t calls;
+    uint64_t bytes;
     uint64_t total_ns;
     uint64_t max_ns;
 } pistorm_vga_prof_counter_t;
@@ -98,6 +102,10 @@ enum {
 };
 
 static pistorm_vga_prof_counter_t vga_bank_prof[VGA_BANK_PROF_COUNT];
+static uint64_t vga_bank_prof_window_start_ns;
+static uint64_t vga_bank_prof_next_print_ns;
+static double vga_bank_prof_peak_read_mb_s;
+static double vga_bank_prof_peak_write_mb_s;
 
 static int vga_bank_profile_enabled(void)
 {
@@ -115,51 +123,76 @@ static uint64_t vga_bank_profile_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static void vga_bank_profile_add(unsigned idx, uint64_t ns)
+static void vga_bank_profile_init_window(uint64_t now)
 {
-    static uint64_t next_print_ns;
-    static const char *names[VGA_BANK_PROF_COUNT] = {
-        "bank_vram_rd_direct", "bank_vram_wr_direct",
-        "bank_vram_rd_engine", "bank_vram_wr_engine",
-        "bank_io_rd", "bank_io_wr"
-    };
-    uint64_t now;
+    if (vga_bank_prof_next_print_ns)
+        return;
+    vga_bank_prof_window_start_ns = now;
+    vga_bank_prof_next_print_ns = now + 5000000000ULL;
+}
 
+static uint64_t vga_bank_profile_bytes(unsigned a, unsigned b, unsigned c)
+{
+    return vga_bank_prof[a].bytes + vga_bank_prof[b].bytes + vga_bank_prof[c].bytes;
+}
+
+extern "C" void pistorm_vga_bank_profile_poll(void)
+{
+    uint64_t now = vga_bank_profile_now_ns();
+
+    if (!vga_bank_profile_enabled())
+        return;
+
+    vga_bank_profile_init_window(now);
+    if (now < vga_bank_prof_next_print_ns)
+        return;
+
+    double window_s = (double)(now - vga_bank_prof_window_start_ns) / 1000000000.0;
+    if (window_s <= 0.0)
+        window_s = 1.0;
+
+    uint64_t read_bytes = vga_bank_profile_bytes(VGA_BANK_PROF_VRAM_RD_DIRECT,
+                                                 VGA_BANK_PROF_VRAM_RD_ENGINE,
+                                                 VGA_BANK_PROF_IO_RD);
+    uint64_t write_bytes = vga_bank_profile_bytes(VGA_BANK_PROF_VRAM_WR_DIRECT,
+                                                  VGA_BANK_PROF_VRAM_WR_ENGINE,
+                                                  VGA_BANK_PROF_IO_WR);
+    double read_mb_s = ((double)read_bytes / 1000000.0) / window_s;
+    double write_mb_s = ((double)write_bytes / 1000000.0) / window_s;
+
+    if (read_mb_s > vga_bank_prof_peak_read_mb_s)
+        vga_bank_prof_peak_read_mb_s = read_mb_s;
+    if (write_mb_s > vga_bank_prof_peak_write_mb_s)
+        vga_bank_prof_peak_write_mb_s = write_mb_s;
+
+    fprintf(stderr, "[VGABANK/5s] read MB/s=%.2f peak=%.2f\n",
+            read_mb_s, vga_bank_prof_peak_read_mb_s);
+    fprintf(stderr, "[VGABANK/5s] write MB/s=%.2f peak=%.2f\n",
+            write_mb_s, vga_bank_prof_peak_write_mb_s);
+
+    memset(vga_bank_prof, 0, sizeof(vga_bank_prof));
+    vga_bank_prof_window_start_ns = now;
+    vga_bank_prof_next_print_ns = now + 5000000000ULL;
+}
+
+static void vga_bank_profile_add(unsigned idx, uint64_t ns, unsigned bytes)
+{
     if (!vga_bank_profile_enabled() || idx >= VGA_BANK_PROF_COUNT)
         return;
 
+    vga_bank_profile_init_window(vga_bank_profile_now_ns());
+
     vga_bank_prof[idx].calls++;
+    vga_bank_prof[idx].bytes += bytes;
     vga_bank_prof[idx].total_ns += ns;
     if (ns > vga_bank_prof[idx].max_ns)
         vga_bank_prof[idx].max_ns = ns;
-
-    now = vga_bank_profile_now_ns();
-    if (!next_print_ns)
-        next_print_ns = now + 1000000000ULL;
-    if (now < next_print_ns)
-        return;
-
-    fprintf(stderr, "[VGABANK/s]");
-    for (unsigned i = 0; i < VGA_BANK_PROF_COUNT; i++)
-    {
-        uint64_t calls = vga_bank_prof[i].calls;
-        if (!calls)
-            continue;
-        fprintf(stderr, " %s n=%llu avg=%lluns max=%lluns total=%lluus",
-                names[i],
-                (unsigned long long)calls,
-                (unsigned long long)(vga_bank_prof[i].total_ns / calls),
-                (unsigned long long)vga_bank_prof[i].max_ns,
-                (unsigned long long)(vga_bank_prof[i].total_ns / 1000ULL));
-        memset(&vga_bank_prof[i], 0, sizeof(vga_bank_prof[i]));
-    }
-    fprintf(stderr, "\n");
-    next_print_ns = now + 1000000000ULL;
 }
 #else
 #define vga_bank_profile_enabled() 0
 #define vga_bank_profile_now_ns() 0
-#define vga_bank_profile_add(idx, ns) ((void)0)
+#define vga_bank_profile_add(idx, ns, bytes) ((void)0)
+extern "C" void pistorm_vga_bank_profile_poll(void) {}
 #endif
 
 extern "C"
@@ -220,15 +253,14 @@ extern uint32_t ROM_END;
 #define VGA_IO_BASE_XVDI (0x00B00000u)
 #define VGA_BASE_NOVA (0x00C00000u) // NOVA
 #define VGA_IO_BASE_NOVA (0x00D00000u)
+#define FVDI_FB_BASE (0x20000000u)
+#define FVDI_FB_MAX_BYTES (0x01000000u)
 
 #define PISTORM_LEGACY_MEM_HOOKS 0
 
 #define GUEST_RESERVE (TT_RAM_BASE + TT_RAM_SIZE) // 0x01000000 + 0x08000000 = 16MB + 128MB
 
 uae_u8 *natmem_offset = NULL; // the one array; x27 in JIT
-extern bool STRAM_Cache_enabled;
-extern bool STRAM_Direct_enabled;
-extern bool Native_HDMI_enabled;
 extern rtg_s rtg;
 extern volatile uint16_t st_palette[16];
 
@@ -355,7 +387,7 @@ static inline int stram_range_overlaps(uaecptr a, int sz, uae_u32 start, uae_u32
 
 static inline int stram_needs_bus_write(uaecptr a, int sz)
 {
-    if (!STRAM_Cache_enabled)
+    if (!emulator_config_stram_cache_enabled())
         return 1;
 
     a &= 0x00FFFFFFu;
@@ -383,11 +415,9 @@ extern "C"
 {
 #endif
 
-    extern bool ET4K_enabled;
     extern bool tt_ram_available;
     extern uint32_t tt_ram_size;
     extern ET4KADDRESSES_s *et4k_addr_ptr;
-    extern int ET4K_driver;
 
 #ifdef __cplusplus
 }
@@ -653,7 +683,7 @@ static int pistorm_blitter_real_bus = 1;
 extern "C" void pistorm_set_blitter_enabled(int enabled)
 {
     pistorm_blitter_real_bus = enabled ? 1 : 0;
-    fprintf(stderr, "[NATMEM] Blitter %s\n", pistorm_blitter_real_bus ? "enabled" : "disabled");
+    //fprintf(stderr, "[NATMEM] Blitter %s\n", pistorm_blitter_real_bus ? "enabled" : "disabled");
 }
 
 static inline int blitter_addr(uaecptr a)
@@ -1469,7 +1499,7 @@ static inline int fpu_in_regs(uaecptr a)
 static inline int nova_io_alias_addr(uaecptr a)
 {
     uint32_t folded = hw_fold_addr(a);
-    return ET4K_enabled && et4k_addr_ptr &&
+    return emulator_config_et4k_enabled() && et4k_addr_ptr &&
            folded >= NOVA_IO_ALIAS_BASE && folded < NOVA_IO_ALIAS_TOP;
 }
 
@@ -2184,6 +2214,194 @@ static addrbank pistorm_ttram_bank = {
 
 extern "C" uint8_t *et4000_engine_vram_ptr(void);
 
+static uint8_t *pistorm_fvdi_fb;
+static uint32_t pistorm_fvdi_mode_width = 640;
+static uint32_t pistorm_fvdi_mode_height = 480;
+static uint32_t pistorm_fvdi_mode_bpp = 32;
+static int pistorm_fvdi_active;
+static volatile uint64_t pistorm_fvdi_write_count_state;
+static volatile uint64_t pistorm_fvdi_write_bytes_state;
+static uint32_t pistorm_fvdi_first_write_state = 0xffffffffu;
+static uint32_t pistorm_fvdi_last_write_state;
+
+extern "C" uint32_t pistorm_fvdi_fb_base(void)
+{
+    return FVDI_FB_BASE;
+}
+
+extern "C" uint32_t pistorm_fvdi_fb_size(void)
+{
+    return FVDI_FB_MAX_BYTES;
+}
+
+extern "C" uint8_t *pistorm_fvdi_fb_ptr(void)
+{
+    return pistorm_fvdi_fb;
+}
+
+extern "C" uint32_t pistorm_fvdi_width(void)
+{
+    return pistorm_fvdi_mode_width;
+}
+
+extern "C" uint32_t pistorm_fvdi_height(void)
+{
+    return pistorm_fvdi_mode_height;
+}
+
+extern "C" uint32_t pistorm_fvdi_bpp(void)
+{
+    return pistorm_fvdi_mode_bpp;
+}
+
+extern "C" int pistorm_fvdi_is_active(void)
+{
+    return pistorm_fvdi_active;
+}
+
+extern "C" uint64_t pistorm_fvdi_write_count(void)
+{
+    return pistorm_fvdi_write_count_state;
+}
+
+extern "C" uint64_t pistorm_fvdi_write_bytes(void)
+{
+    return pistorm_fvdi_write_bytes_state;
+}
+
+extern "C" uint32_t pistorm_fvdi_first_write(void)
+{
+    return pistorm_fvdi_first_write_state;
+}
+
+extern "C" uint32_t pistorm_fvdi_last_write(void)
+{
+    return pistorm_fvdi_last_write_state;
+}
+
+extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t bpp)
+{
+    uint64_t bytes;
+
+    if (!pistorm_fvdi_fb || width == 0 || height == 0)
+        return 0;
+    if (bpp != 16 && bpp != 32)
+        return 0;
+
+    bytes = (uint64_t)width * height * (bpp / 8);
+    if (bytes == 0 || bytes > FVDI_FB_MAX_BYTES)
+        return 0;
+
+    pistorm_fvdi_mode_width = width;
+    pistorm_fvdi_mode_height = height;
+    pistorm_fvdi_mode_bpp = bpp;
+    pistorm_fvdi_active = 1;
+    pistorm_fvdi_write_count_state = 0;
+    pistorm_fvdi_write_bytes_state = 0;
+    pistorm_fvdi_first_write_state = 0xffffffffu;
+    pistorm_fvdi_last_write_state = 0;
+    memset(pistorm_fvdi_fb, 0, (size_t)bytes);
+    return 1;
+}
+
+static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
+{
+    pistorm_fvdi_write_count_state++;
+    pistorm_fvdi_write_bytes_state += bytes;
+    if (o < pistorm_fvdi_first_write_state)
+        pistorm_fvdi_first_write_state = o;
+    pistorm_fvdi_last_write_state = o;
+}
+
+extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes)
+{
+    fvdi_note_write(o, bytes);
+}
+
+static inline uint32_t fvdi_off(uaecptr a)
+{
+    return (uint32_t)(a - FVDI_FB_BASE);
+}
+
+static uae_u32 fvdi_lget(uaecptr a)
+{
+    uint32_t o = fvdi_off(a);
+    if (!pistorm_fvdi_fb || o + 3 >= FVDI_FB_MAX_BYTES)
+        return 0;
+    return ((uae_u32)pistorm_fvdi_fb[o] << 24) |
+           ((uae_u32)pistorm_fvdi_fb[o + 1] << 16) |
+           ((uae_u32)pistorm_fvdi_fb[o + 2] << 8) |
+           pistorm_fvdi_fb[o + 3];
+}
+
+static uae_u32 fvdi_wget(uaecptr a)
+{
+    uint32_t o = fvdi_off(a);
+    if (!pistorm_fvdi_fb || o + 1 >= FVDI_FB_MAX_BYTES)
+        return 0;
+    return ((uae_u32)pistorm_fvdi_fb[o] << 8) | pistorm_fvdi_fb[o + 1];
+}
+
+static uae_u32 fvdi_bget(uaecptr a)
+{
+    uint32_t o = fvdi_off(a);
+    if (!pistorm_fvdi_fb || o >= FVDI_FB_MAX_BYTES)
+        return 0;
+    return pistorm_fvdi_fb[o];
+}
+
+static void fvdi_lput(uaecptr a, uae_u32 v)
+{
+    uint32_t o = fvdi_off(a);
+    if (!pistorm_fvdi_fb || o + 3 >= FVDI_FB_MAX_BYTES)
+        return;
+    pistorm_fvdi_fb[o] = (uae_u8)(v >> 24);
+    pistorm_fvdi_fb[o + 1] = (uae_u8)(v >> 16);
+    pistorm_fvdi_fb[o + 2] = (uae_u8)(v >> 8);
+    pistorm_fvdi_fb[o + 3] = (uae_u8)v;
+    fvdi_note_write(o, 4);
+}
+
+static void fvdi_wput(uaecptr a, uae_u32 v)
+{
+    uint32_t o = fvdi_off(a);
+    if (!pistorm_fvdi_fb || o + 1 >= FVDI_FB_MAX_BYTES)
+        return;
+    pistorm_fvdi_fb[o] = (uae_u8)(v >> 8);
+    pistorm_fvdi_fb[o + 1] = (uae_u8)v;
+    fvdi_note_write(o, 2);
+}
+
+static void fvdi_bput(uaecptr a, uae_u32 v)
+{
+    uint32_t o = fvdi_off(a);
+    if (!pistorm_fvdi_fb || o >= FVDI_FB_MAX_BYTES)
+        return;
+    pistorm_fvdi_fb[o] = (uae_u8)v;
+    fvdi_note_write(o, 1);
+}
+
+static uae_u8 *fvdi_xlate(uaecptr a)
+{
+    return pistorm_fvdi_fb ? pistorm_fvdi_fb + fvdi_off(a) : NULL;
+}
+
+static int fvdi_check(uaecptr a, uae_u32 sz)
+{
+    return pistorm_fvdi_fb &&
+           a >= FVDI_FB_BASE &&
+           sz <= FVDI_FB_MAX_BYTES &&
+           a - FVDI_FB_BASE <= FVDI_FB_MAX_BYTES - sz;
+}
+
+static addrbank pistorm_fvdi_bank = {
+    fvdi_lget, fvdi_wget, fvdi_bget,
+    fvdi_lput, fvdi_wput, fvdi_bput,
+    fvdi_xlate, fvdi_check, NULL, "fVDI-FB", "fVDI-FB",
+    fvdi_lget, fvdi_wget,
+    ABFLAG_IO | ABFLAG_INDIRECT,
+    S_READ, S_WRITE};
+
 #if (1)
 /* ================================================================== */
 /* FB-GUARD bank — Amiga-faithful scratch just below the framebuffer.   */
@@ -2321,7 +2539,7 @@ static uae_u32 vga_lget(uaecptr a)
     {
         v = et4000_engine_vram_read32(a);
         if (t0)
-            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0);
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0, 4);
         return v;
     }
 
@@ -2329,7 +2547,7 @@ static uae_u32 vga_lget(uaecptr a)
     v = ((uae_u32)p[0] << 24) | ((uae_u32)p[1] << 16) |
         ((uae_u32)p[2] << 8) | p[3];
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0, 4);
     return v;
 }
 
@@ -2341,14 +2559,14 @@ static uae_u32 vga_wget(uaecptr a)
     {
         v = et4000_engine_vram_read16(a);
         if (t0)
-            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0);
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0, 2);
         return v;
     }
 
     uae_u8 *p = vga_vram_ptr(a);
     v = ((uae_u32)p[0] << 8) | p[1];
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0, 2);
     return v;
 }
 
@@ -2360,13 +2578,13 @@ static uae_u32 vga_bget(uaecptr a)
     {
         v = et4000_engine_vram_read8(a);
         if (t0)
-            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0);
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_ENGINE, vga_bank_profile_now_ns() - t0, 1);
         return v;
     }
 
     v = *vga_vram_ptr(a);
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_RD_DIRECT, vga_bank_profile_now_ns() - t0, 1);
     return v;
 }
 
@@ -2377,7 +2595,7 @@ static void vga_lput(uaecptr a, uae_u32 v)
     {
         et4000_engine_vram_write32(a, v);
         if (t0)
-            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0);
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0, 4);
         return;
     }
 
@@ -2387,7 +2605,7 @@ static void vga_lput(uaecptr a, uae_u32 v)
     p[2] = (uae_u8)(v >> 8);
     p[3] = (uae_u8)v;
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0, 4);
 }
 
 static void vga_wput(uaecptr a, uae_u32 v)
@@ -2397,7 +2615,7 @@ static void vga_wput(uaecptr a, uae_u32 v)
     {
         et4000_engine_vram_write16(a, (uae_u16)v);
         if (t0)
-            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0);
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0, 2);
         return;
     }
 
@@ -2405,7 +2623,7 @@ static void vga_wput(uaecptr a, uae_u32 v)
     p[0] = (uae_u8)(v >> 8);
     p[1] = (uae_u8)v;
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0, 2);
 }
 
 static void vga_bput(uaecptr a, uae_u32 v)
@@ -2415,13 +2633,13 @@ static void vga_bput(uaecptr a, uae_u32 v)
     {
         et4000_engine_vram_write8(a, (uae_u8)v);
         if (t0)
-            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0);
+            vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_ENGINE, vga_bank_profile_now_ns() - t0, 1);
         return;
     }
 
     *vga_vram_ptr(a) = (uae_u8)v;
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_VRAM_WR_DIRECT, vga_bank_profile_now_ns() - t0, 1);
 }
 
 // Keep ET4000 VRAM marked as a special bank, but still return a valid pointer:
@@ -2468,7 +2686,7 @@ static uae_u32 vga_io_lget(uaecptr a)
         v = 0;
 
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0, vga_io_strict_width() ? 4 : 0);
     return v;
 }
 static uae_u32 vga_io_wget(uaecptr a)
@@ -2483,7 +2701,7 @@ static uae_u32 vga_io_wget(uaecptr a)
         v = et4000_io_read8(g_et4000, a);
 
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0, vga_io_strict_width() ? 2 : 1);
     return v;
 }
 static uae_u32 vga_io_bget(uaecptr a)
@@ -2491,7 +2709,7 @@ static uae_u32 vga_io_bget(uaecptr a)
     uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
     uae_u32 v = et4000_io_read8(g_et4000, a);
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_IO_RD, vga_bank_profile_now_ns() - t0, 1);
     return v;
 }
 static void vga_io_lput(uaecptr a, uae_u32 v)
@@ -2500,7 +2718,7 @@ static void vga_io_lput(uaecptr a, uae_u32 v)
     if (vga_io_strict_width())
         et4000_io_write32(g_et4000, a, v);
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0, vga_io_strict_width() ? 4 : 0);
 }
 static void vga_io_wput(uaecptr a, uae_u32 v)
 {
@@ -2510,14 +2728,14 @@ static void vga_io_wput(uaecptr a, uae_u32 v)
     else
         et4000_io_write8(g_et4000, a, (uae_u8)v);
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0, vga_io_strict_width() ? 2 : 1);
 }
 static void vga_io_bput(uaecptr a, uae_u32 v)
 {
     uint64_t t0 = vga_bank_profile_enabled() ? vga_bank_profile_now_ns() : 0;
     et4000_io_write8(g_et4000, a, (uae_u8)v);
     if (t0)
-        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0);
+        vga_bank_profile_add(VGA_BANK_PROF_IO_WR, vga_bank_profile_now_ns() - t0, 1);
 }
 
 /*
@@ -2546,20 +2764,7 @@ static addrbank pistorm_vga_io = {
 /* ------------------------------------------------------------------ */
 /* map one 64KB-aligned region into the bank table (mirrors map_banks) */
 /* ------------------------------------------------------------------ */
-/*
-static void map_region(uaecptr start, uint32_t len, addrbank *b)
-{
-    for (uint32_t a = start; a < start + len; a += 0x10000)
-    {
-        unsigned page = bankindex(a);
-        mem_banks[page] = b;
-        if (b->baseaddr)
-            baseaddr[page] = b->baseaddr - start; // host = baseaddr[page] + addr
-        else
-            baseaddr[page] = (uae_u8 *)(((uae_u8 *)b) + 1); // tagged non-null => special
-    }
-}
-*/
+
 static void map_region(uaecptr start, uint32_t len, addrbank *b)
 {
     uint64_t end = (uint64_t)start + len;
@@ -2589,6 +2794,16 @@ extern "C" void jit_mem_init(void)
         abort();
     }
 
+    pistorm_fvdi_fb = (uint8_t *)mmap(NULL, FVDI_FB_MAX_BYTES,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+                                      -1, 0);
+    if (pistorm_fvdi_fb == MAP_FAILED)
+    {
+        perror("fVDI framebuffer mmap");
+        abort();
+    }
+
     //printf ("Jit_mem_init: natmem_offset %p\n", natmem_offset);
 
     /* Safety net: fault loudly if the JIT ever direct-bangs an I/O hole. */
@@ -2598,7 +2813,7 @@ extern "C" void jit_mem_init(void)
     //printf ("ET4K_enabled %d, vram base %p, vgaio base %p\n", 
      //   ET4K_enabled, 0, 0);//et4k_addr_ptr->vram_base, et4k_addr_ptr->io_base);
 //usleep(1000);
-    if (ET4K_enabled)
+    if (emulator_config_et4k_enabled())
     {
         /* Do not blanket-protect the inactive 0xA/0xB apertures here. For NOVA,
          * the FB-GUARD immediately below 0xC00000 lives inside 0xB00000..0xBFFFFF
@@ -2620,7 +2835,7 @@ extern "C" void jit_mem_init(void)
     pistorm_hw_bank.baseaddr = natmem_offset + 0x00FF0000;
     pistorm_ttram_bank.baseaddr = natmem_offset + TT_RAM_BASE;
 #if (1)
-    if (ET4K_enabled)
+    if (emulator_config_et4k_enabled())
         pistorm_guard_bank.baseaddr = natmem_offset + GUARD_BASE;
 #endif
 
@@ -2654,19 +2869,21 @@ extern "C" void jit_mem_init(void)
     // map_region(0,           0x01000000,       &pistorm_dummy_bank);
     map_region(0, GUEST_RESERVE, &pistorm_dummy_bank); //&pistorm_io_bank);
     map_region(0, ST_RAM_SIZE, &pistorm_stram_bank);
-    if (STRAM_Direct_enabled) {
+    if (emulator_config_stram_direct_enabled()) {
         /* Fast mirror-only RAM is deliberately separate from stram_cache.
          * stram_cache still uses the ST-RAM handler so it can write through
          * the live physical screen area for the real Atari shifter. */
-       // map_region(STRAM_DIRECT_START, STRAM_DIRECT_END - STRAM_DIRECT_START, &pistorm_lowram_bank);
-        map_region(0, 0x00400000, &pistorm_lowram_bank);
+       map_region(STRAM_DIRECT_START, STRAM_DIRECT_END - STRAM_DIRECT_START, &pistorm_lowram_bank);
+        //map_region(0, 0x00400000, &pistorm_lowram_bank);
     }
     
-    if (ET4K_enabled) {
+    if (emulator_config_et4k_enabled()) {
         map_region(GUARD_BASE, GUARD_SIZE, &pistorm_guard_bank);
         map_region(et4k_addr_ptr->vram_base, VRAM_SIZE, &pistorm_vga_vram);
         map_region(et4k_addr_ptr->io_base, VGA_IO_SIZE, &pistorm_vga_io);
     }
+
+    map_region(FVDI_FB_BASE, FVDI_FB_MAX_BYTES, &pistorm_fvdi_bank);
 
     map_region(ROM_BASE, pistorm_rom_size, &pistorm_rom_bank);
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases

@@ -64,6 +64,9 @@
 #include "x86.h"
 #endif
 #include "devices.h"
+
+extern void warpmode(int mode);
+
 #ifdef WITH_DRACO
 #include "draco.h"
 #endif
@@ -2827,6 +2830,18 @@ extern "C" void pistorm_cpu_irqwatch_dump(uint32_t raw6, uint32_t latched6, uint
 #endif
 }
 
+void atari_request_irq_level(uae_u8 level)
+{
+	if (level == 0 || level > 7)
+		return;
+
+	if (level > g_irq)
+		g_irq = level;
+	regs.ipl_pin = g_irq;
+	regs.ipl[0] = g_irq;
+	set_special(SPCFLAG_BRK);
+}
+
 static void MakeFromSR_x(int t0trace)
 {
 
@@ -5004,6 +5019,13 @@ uae_u32 REGPARAM2 op_illg(uae_u32 opcode)
 	}
 #endif
 
+	if (opcode == 0x7300 || opcode == 0x7301)
+	{
+		uae_u32 cycles = 4;
+		if (atari_natfeat_handle_opcode(opcode, &cycles))
+			return cycles;
+	}
+
 	if (cloanto_rom && (opcode & 0xF100) == 0x7100)
 	{
 		m68k_dreg(regs, (opcode >> 9) & 7) = static_cast<uae_s8>(opcode & 0xFF);
@@ -5074,6 +5096,14 @@ uae_u32 REGPARAM2 op_illg(uae_u32 opcode)
 		Exception(0xA);
 		// activate_debugger_new();
 		return 4;
+	}
+	if ((opcode & 0xFF00) == 0x7100)
+	{
+		write_log(_T("ARAnyM EMULOP %04X at %08X -> illegal instruction (no EMULOP handler)\n"), opcode, pc);
+	}
+	else if (opcode == 0x7300 || opcode == 0x7301)
+	{
+		write_log(_T("ARAnyM NatFeat opcode %04X reached illegal handler at %08X\n"), opcode, pc);
 	}
 	if (warned < 20)
 	{

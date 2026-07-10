@@ -154,8 +154,8 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     const bool disable_fpu = !enable_fpu;
     const char *mode = disable_jit ? "interpreter requested" : "JIT enabled";
     const int jit_cache = (perf_jit_cache_set && perf_jit_cache > 0) ? perf_jit_cache : 8192;
-    const int cpu_clock_multiplier = perf_cpu_clock_multiplier_set ? perf_cpu_clock_multiplier : 2;
-    const int m68k_speed = perf_m68k_speed_set ? perf_m68k_speed : -1;
+    int cpu_clock_multiplier = perf_cpu_clock_multiplier_set ? perf_cpu_clock_multiplier : 0;
+    int m68k_speed = perf_m68k_speed_set ? perf_m68k_speed : -1;
 
 
     /* cpu_level 0..5 -> 68000/010/020/030/040/060. 68000 is a valid Atari
@@ -204,11 +204,20 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     pissoff_value = currprefs.cachesize ? (64 * CYCLE_UNIT) : 0;
     pissoff_nojit_value = 0;
     pissoff = currprefs.cachesize ? pissoff_value : 0;
+    jit_n_addr_unsafe = 1;
 
     if (disable_fpu)
         currprefs.fpu_mode = changed_prefs.fpu_mode = 0;
 
-    fprintf(stderr, "[JITGLUE] %s cachesize=%d fpu_model=%d compfpu=%d clockmul=%d m68k_speed=%d cfg_jit=%d cfg_fpu=%d cfg_ttram=%d cfg_addr32=%d addr24=%d jit_env=%s jit_file=%d fpu_off=%d\n",
+    if (cpu_clock_multiplier < 0)
+        cpu_clock_multiplier = 0;
+    if (cpu_clock_multiplier != 0 && m68k_speed < 0) {
+        fprintf(stderr, "[JITGLUE] cpu_clock_multiplier=%d needs timed CPU scheduling; overriding m68k_speed=max to m68k_speed=0\n",
+                cpu_clock_multiplier);
+        m68k_speed = 0;
+    }
+
+    fprintf(stderr, "[JITGLUE] %s cachesize=%d fpu_model=%d compfpu=%d clockmul=%d m68k_speed=%d cfg_jit=%d cfg_fpu=%d cfg_ttram=%d cfg_addr32=%d addr24=%d jit_n_addr_unsafe=%d jit_env=%s jit_file=%d fpu_off=%d\n",
             mode, currprefs.cachesize, currprefs.fpu_model,
             currprefs.compfpu ? 1 : 0,
             cpu_clock_multiplier,
@@ -218,6 +227,7 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
             enable_ttram ? 1 : 0,
             enable_addr32 ? 1 : 0,
             currprefs.address_space_24 ? 1 : 0,
+            jit_n_addr_unsafe,
             getenv("PISTORM_JIT") ? getenv("PISTORM_JIT") : "<unset>",
             access("/tmp/pistorm_jit_off", F_OK) == 0 ? 1 : 0,
             disable_fpu ? 1 : 0);
@@ -233,14 +243,14 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
 
     /* needed for Atari to obviscate Amiga code */
     currprefs.reset_delay = changed_prefs.reset_delay = 0;
-    currprefs.cpu_clock_multiplier = changed_prefs.cpu_clock_multiplier = 0;//cpu_clock_multiplier; // default 0, increases cpu cycleunit 2 is good
+    currprefs.cpu_clock_multiplier = changed_prefs.cpu_clock_multiplier = cpu_clock_multiplier; // default 0, increases cpu cycleunit 2 is good
     currprefs.cpu_frequency = changed_prefs.cpu_frequency = 0;
 
     /* cryptodad optimisations */
     currprefs.turbo_emulation = changed_prefs.turbo_emulation = 0;
-    currprefs.m68k_speed = changed_prefs.m68k_speed = -1;//m68k_speed;
-    currprefs.compnf = changed_prefs.compnf = 0;//!disable_jit;                 // compile without condition-code flag tracking where safe
-    currprefs.comp_constjump = changed_prefs.comp_constjump = 0;//!disable_jit; // follow constant branches during translation
+    currprefs.m68k_speed = changed_prefs.m68k_speed = m68k_speed;
+    currprefs.compnf = changed_prefs.compnf = 1;//!disable_jit;                 // compile without condition-code flag tracking where safe
+    currprefs.comp_constjump = changed_prefs.comp_constjump = 1;//!disable_jit; // follow constant branches during translation
 
     init_m68k(); // prefs_changed_cpu(), init_table68k()
     // NOTE: build_cpufunctbl() is static inside newcpu.cpp and is invoked by

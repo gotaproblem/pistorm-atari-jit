@@ -105,6 +105,8 @@ extern void REGPARAM3 op_illg_noret(uae_u32) REGPARAM;
 void REGPARAM3 op_illg_1_noret(uae_u32 opcode) REGPARAM;
 extern void REGPARAM3 op_unimpl(uae_u32) REGPARAM;
 void REGPARAM3 op_unimpl_1_noret(uae_u32 opcode) REGPARAM;
+extern bool atari_natfeat_handle_opcode(uae_u32 opcode, uae_u32 *cycles);
+extern void atari_request_irq_level(uae_u8 level);
 
 typedef uae_u8 flagtype;
 

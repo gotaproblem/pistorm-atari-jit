@@ -1,8 +1,9 @@
 #
 # atari-pistorm — Amiberry AArch64 JIT edition
 #
-#   make            -> Pi 4 (cortex-a72), 64-bit
-#   make PIMODEL=PI3 -> Pi 3 (cortex-a53), 64-bit
+#   make                    -> Pi 4 (cortex-a72), 64-bit
+#   make PIMODEL=PI3        -> Pi 3 (cortex-a53), 64-bit
+#   make PIMODEL=PI02W      -> Pi Zero 2 W (cortex-a53), 64-bit
 #
 # REQUIRES a 64-bit Raspberry Pi OS + aarch64 g++. The Amiberry JIT backend we
 # use is AArch64-only (R_MEMSTART = x27, N_REGS = 18, 64-bit natmem_offset).
@@ -30,6 +31,10 @@ CFILES = config_file/config_file.c \
          platforms/atari/idedriver.c \
          platforms/atari/fdd/atari_fdd.c \
          platforms/atari/fdd/platform_atari_fdd.c \
+         platforms/atari/network/pistorm_net.c \
+         platforms/atari/network/pistorm_net_tap.c \
+         platforms/atari/network/pistorm_net_slirp.c \
+         platforms/atari/network/platform_atari_network.c \
          platforms/atari/audio/dmasnd_hdmi.c \
          platforms/atari/audio/dmasnd_capture.c
 
@@ -48,6 +53,7 @@ PISTORM_CPP = emulator.c \
               platforms/atari/et4000/pcem/vid_unk_ramdac.c \
               platforms/atari/et4000/pcem/pcem_shim.c \
               platforms/atari/et4000/pcem/et4000_engine.c \
+              platforms/atari/network/atari_natfeat.cpp \
               jit_glue.cpp \
               pistorm_natmem.cpp \
               pistorm_stubs.cpp
@@ -100,20 +106,33 @@ CXX = g++
 # SDL2 (ET4000 display backend). sdl2-config ships with libsdl2-dev.
 SDL_CFLAGS = $(shell sdl2-config --cflags)
 SDL_LIBS   = $(shell sdl2-config --libs)
+SLIRP_CFLAGS = $(shell pkg-config --cflags libslirp 2>/dev/null || pkg-config --cflags slirp 2>/dev/null)
+SLIRP_LIBS   = $(shell pkg-config --libs libslirp 2>/dev/null || pkg-config --libs slirp 2>/dev/null)
 
-ifeq ($(PIMODEL),PI3)
-	PIOPTS = -mcpu=cortex-a53
-	PI     = -DPI3
-else
+PIMODEL ?= PI4
+PIMODEL_CANON := $(shell printf '%s' '$(PIMODEL)' | tr '[:lower:]' '[:upper:]')
+
+ifeq ($(filter $(PIMODEL_CANON),PI4 RPI4 RASPI4),$(PIMODEL_CANON))
 	PIOPTS = -mcpu=cortex-a72 -march=armv8-a+crc+simd
 	PI     = -DPI4
+else ifeq ($(filter $(PIMODEL_CANON),PI3 RPI3 RASPI3),$(PIMODEL_CANON))
+	PIOPTS = -mcpu=cortex-a53 -march=armv8-a+crc+simd
+	PI     = -DPI3
+else ifeq ($(filter $(PIMODEL_CANON),PI02W PI0W2 ZERO2W ZERO2 PI_ZERO2W PIZERO2W),$(PIMODEL_CANON))
+	PIOPTS = -mcpu=cortex-a53 -march=armv8-a+crc+simd
+	PI     = -DPI3 -DPI02W
+else
+$(error Unknown PIMODEL '$(PIMODEL)'; use PI4, PI3, or PI02W)
 endif
 
 # Feature/target defines all live in sysconfig.h (UAE, JIT, USE_JIT, AMIBERRY,
 # CPU_AARCH64, CPU_64_BIT, WITH_SOFTFLOAT, the CPUEMU_* set, ...). Every C++ TU
 # includes sysconfig.h first, so we do NOT repeat them here (doing so triggers
 # redefinition warnings). Only _GNU_SOURCE, which sysconfig.h doesn't set.
-DEFS = -D_GNU_SOURCE 
+DEFS = -D_GNU_SOURCE
+ifneq ($(strip $(SLIRP_LIBS)),)
+DEFS += -DHAVE_LIBSLIRP
+endif
 
 # Include order is critical: our dir (.) FIRST so our sysconfig.h / sysdeps.h
 # win over Amiberry's. -Ithreaddep makes our pthread thread.h win over the SDL
@@ -121,7 +140,7 @@ DEFS = -D_GNU_SOURCE
 # lives at ./threaddep/thread.h and -I. + -Ithreaddep cover both spellings).
 # ./include resolves uae/*, newcpu.h, memory.h, options.h; . resolves cputbl.h
 # and machdep/maccess.h; -Isoftfloat for the FPU sub-library headers.
-INCLUDES = -I. -Igpio -Ithreaddep -Iinclude -Isoftfloat -Ijit -I/usr/include/libdrm -Ipcem
+INCLUDES = -I. -Igpio -Ithreaddep -Iinclude -Isoftfloat -Ijit -I/usr/include/libdrm -Ipcem $(SLIRP_CFLAGS)
 
 # Optimization is a separate variable so the big generated files can be built
 # lean. -O level affects only emulation speed, not correctness or the aarch64
@@ -165,7 +184,7 @@ DELETEFILES = $(COBJS) $(CPPOBJS) $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d) \
 all: $(TARGET) ataritest
 
 $(TARGET): $(COBJS) $(CPPOBJS)
-	$(CXX) -o $@ $^ $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SDL_LIBS) -lz -lasound
+	$(CXX) -o $@ $^ $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SDL_LIBS) $(SLIRP_LIBS) -lz -lasound
 
 # emulator.c built as C++
 emulator.o: emulator.c

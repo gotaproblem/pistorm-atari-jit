@@ -46,7 +46,7 @@ static atomic_uint  a_rate   = 0;
 static atomic_int   a_stereo = 0;
 
 static snd_pcm_t   *pcm = NULL;
-static char         dev_name[64] = "plughw:vc4hdmi0";
+static char         dev_name[64] = "default";
 static pthread_t    thr;
 static atomic_int   running = 0;
 static atomic_uint  xruns   = 0;
@@ -72,6 +72,16 @@ void dmasnd_write_bytes(const void *src, unsigned n)
 }
 
 unsigned dmasnd_xruns(void) { return atomic_load(&xruns); }
+
+void dmasnd_output_reset(void)
+{
+    atomic_store_explicit(&r_head, 0, memory_order_release);
+    atomic_store_explicit(&r_tail, 0, memory_order_release);
+    atomic_store(&g_frame_len, 0);
+    atomic_store(&g_last_commit_us, 0);
+    atomic_store(&a_rate, 0);
+    atomic_store(&a_stereo, 0);
+}
 
 unsigned dmasnd_ring_used(void)
 {
@@ -210,9 +220,8 @@ int dmasnd_init(const char *device)
         strncpy(dev_name, device, sizeof dev_name - 1);
         dev_name[sizeof dev_name - 1] = 0;
     }
+    dmasnd_output_reset();
     atomic_store(&running, 1);
-    atomic_store(&r_head, 0);
-    atomic_store(&r_tail, 0);
     if (pthread_create(&thr, NULL, audio_thread, NULL) != 0) {
         atomic_store(&running, 0);
         return -1;

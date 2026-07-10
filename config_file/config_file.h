@@ -16,6 +16,8 @@
 #define SIZE_GIGA (1024 * 1024 * 1024)
 
 #define M68K_CPU_TYPES 7
+#define HOSTFS_MAX_DRIVES 32
+#define HOSTFS_PATH_MAX 256
 
 
 /* CPU types for use in m68k_set_cpu_type() */
@@ -29,33 +31,6 @@ enum
 	M68K_CPU_TYPE_68040,
   M68K_CPU_TYPE_68060
 };
-
-typedef enum {
-  CONFITEM_NONE,
-  CONFITEM_CPU,
-  CONFITEM_JIT,
-  CONFITEM_FPU,
-  CONFITEM_LOOPCYCLES,
-  CONFITEM_GRAPHICS_CARD,
-  CONFITEM_FPS,
-  CONFITEM_TTRAM,
-  CONFITEM_ADDR32,
-  CONFITEM_RTC,
-  CONFITEM_ROM,
-  CONFITEM_IDE,
-  CONFITEM_HDD,
-  CONFITEM_FDD,
-  CONFITEM_DMA_SOUND,
-  CONFITEM_BLITTER,
-  CONFITEM_STRAM_CACHE,
-  CONFITEM_STRAM_DIRECT,
-  CONFITEM_VGA_RENDER,
-  CONFITEM_NATIVE_HDMI,
-  CONFITEM_CPU_CLOCK_MULTIPLIER,
-  CONFITEM_M68K_SPEED,
-  CONFITEM_JIT_CACHE,
-  CONFITEM_NUM,
-} config_items;
 
 typedef enum {
   NO_GRAPHICS_CARD,
@@ -96,6 +71,14 @@ typedef struct FDD
   char img_path [256];
 } FDD_s;
 
+typedef struct HOSTFS
+{
+  bool enabled;
+  char drive;
+  char path[HOSTFS_PATH_MAX];
+  bool readonly;
+} HOSTFS_s;
+
 typedef struct VGA
 {
   graphics_card card;
@@ -130,6 +113,17 @@ struct emulator_config {
   int m68k_speed;
   bool jit_cache_set;
   int jit_cache;
+  bool network_enabled;
+  char network_backend[16];
+  char network_tap[64];
+  uint32_t network_base;
+  char network_mac[32];
+  uint8_t network_irq_level;
+  char network_host_ip[32];
+  char network_atari_ip[32];
+  char network_netmask[32];
+  bool network_debug;
+  HOSTFS_s hostfs[HOSTFS_MAX_DRIVES];
 };
 
 
@@ -138,12 +132,24 @@ unsigned int get_m68k_cpu_type(char *name);
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 struct emulator_config *load_config_file(char *filename);
+void free_config_file(struct emulator_config *cfg);
+
+void emulator_config_set_current(const struct emulator_config *cfg);
+const struct emulator_config *emulator_config_current(void);
+bool emulator_config_blitter_enabled(void);
+bool emulator_config_stram_cache_enabled(void);
+bool emulator_config_stram_direct_enabled(void);
+bool emulator_config_native_hdmi_enabled(void);
+bool emulator_config_display_enabled(void);
+bool emulator_config_et4k_enabled(void);
+bool emulator_config_fvdi_enabled(void);
+int emulator_config_graphics_driver(void);
+int emulator_config_fps(void);
+
 #ifdef __cplusplus
 }
 #endif
-
-void free_config_file(struct emulator_config *cfg);
-
 
 #endif /* _CONFIG_FILE_H */
