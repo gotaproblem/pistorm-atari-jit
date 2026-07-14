@@ -54,7 +54,7 @@ temp_limit=80
 
 # --- CRITICAL: Driver Compatibility ---
 # PiSTorm JIT needs this
-dtoverlay=vc4-fkms-v3d
+dtoverlay=vc4-kms-v3d
 
 # --- GPU Memory ---
 # Ensure enough memory for the 1080p buffer
