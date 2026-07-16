@@ -248,7 +248,7 @@ void ps_write ( ps_io_t *ps_io )
   ps_lock_bus ();
   asm volatile ("dmb sy" : : : "memory");
 
-  //ps_wait_idle ();
+  ps_wait_idle ();
 
   *ioset = (ps_io->data << 8) | REG_DATA;
   txn_go ();
@@ -333,7 +333,7 @@ void ps_read (ps_io_t *ps_io)
   ps_lock_bus ();
   asm volatile ("dmb sy" : : : "memory");
 
-  //ps_wait_idle ();
+  ps_wait_idle ();
 
   *ioset = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
   txn_go ();
@@ -347,7 +347,7 @@ void ps_read (ps_io_t *ps_io)
   while ((status = *ioread) & PI_TXN_IN_PROGRESS)
     asm volatile ("yield" ::: "memory");
 
-  //status = *ioread;
+  status = *ioread;
  	*ioclr = TXN_END;
 
   ps_io->berr = CHECK_BERR (status);
