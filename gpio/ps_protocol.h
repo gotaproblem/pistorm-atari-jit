@@ -144,7 +144,7 @@ void ps_pulse_reset ( void );
 void ps_pulse_halt ( void );
 void ps_write_latchtype ( uint16_t );
 //uint16_t ps_fw_rd ( void );
-uint8_t ps_read_ipl ( void );
+void ps_read_ipl ( uint8_t* );
 void ps_get_firmware_revision ( void );
 
 
