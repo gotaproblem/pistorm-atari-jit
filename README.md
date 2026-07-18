@@ -11,85 +11,77 @@ There is a lot of potential with performance.
 - [ ] Direct access needs developing; with that will come huge performance increases. 
 
 Then add-ons can be developed, such as 
-- [x] WiFi networking
-- [x] DMA Sound
-- [x] FDD Emulation
+- [x] WiFi networking [implemented]
+- [x] DMA Sound [implemented]
+- [x] FDD Emulation [implemented]
 - [ ] Additional SVGA Cards
 ## Requirements
-This is not for newbies, a good amount of linux development knowledge is needed
+This is not for newbies, a good amount of linux development knowledge is needed.
+At some point I will include binaries for those technically challanged ;)
 
 ### Hardware
-Development has been done on a Raspberry Pi4 with 2GB. 
+Development has been done on a Raspberry Pi4 with 2GB and various ATARI platforms - STfm, STe, MST 
 
-In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried.
-You need a PiSTorm board (Amiga A500) for DIL 68pin CPUs or a custom designed STe board available online or from Discord pistorm atari channel Users.
+In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried. ***Update Pi3A+ and Pi02w only have 512MB RAM. As things are, this build will not work on either of these parts. I may get around to looking in to it, but cannot say when.***
+You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
 ### Software
-Development used Raspberry Pi OS Lite - Trixie build 64bit AARCH64
+Development used Raspberry Pi OS Lite - Trixie build 64bit AARCH64. This is mandatory for JIT.
 #### Building
 For those interested in looking at the source, building and developing, fill your boots...
-The JIT engine is a clone of the amiberry project, chosen because it was developed for ARM 64bit and included hardware FPU. I did look at aranym; got the JIT interpreter running, but could not get the compiler running. However I have used NatFeats from Aranym.
+The JIT engine is a clone of the amiberry project, chosen because it was developed for ARM 64bit and included hardware FPU. I did look at aranym; got the JIT interpreter running, but could not get the compiler running. However, I am using NatFeats from Aranym.
+
+##### Preperation
+Before starting the process in earnest, make sure your O/S is current.
+>sudo apt update
+sudo apt upgrade
 
 As is always the case, you must install a bunch of packages and libraries to build the binaries.
->sudo apt install build-essential git libsdl2-dev libzstd-dev libcurl4-openssl-dev libdrm-dev libasound2-dev
+>sudo apt install build-essential git libsdl2-dev libzstd-dev libcurl4-openssl-dev libdrm-dev libasound2-dev ffmpeg
 
+##### Clone
+Everything is ready to clone this repository
+>cd ~
+>git clone https://github.com/gotaproblem/pistorm-atari-jit.git
 
+This creates the **pistorm-atari-jit/** directory.
+
+##### Build
 To build, simply make. Be warned first build from clean will take over 20 minutes!
 >make clean
-make
+make PIMODEL=PI4
 
+PIMODEL isn't actually needed for PI4, but it's included for clarity if and when PI3 builds start
 ## Configuring
-You should have your home directory looking like this
-```
-pistorm-atari-jit/
-    ataritest
-    emulator
-configs/
-    atari.cfg
-    master.cfg
-dkimages/
-    drive0.img
-roms/
-    etos512uk-14.rom
-screendumps/
-```
-Populate the above directories with the relevent files before running the emulator. 
-
-There are two linux system files that will need ammending before you run the emulator for the first time.
-In the **pistorm-atari-jit/configs/** directory you will find **config.txt**.
-This file must be copied to **/boot/firmware/**
->cd pistorm-atari-jit
-sudo cp configs/config.txt /boot/firmware/
-
-The next file, also located in **pistorm-atari-jit/configs/** is **cmdline.txt**
-**NOTE YOU MUST NOT delete or overwrite the file in /boot/firmware/** 
-Make a backup of this system file before editing.
->cd /boot/firmware
-sudo cp cmdline.txt cmdline-ori.txt
-
-Open **pistorm-atari-jit/configs/cmdline.txt** and copy the contents. Then open for editing **/boot/firmware/cmdline.txt**
-**NOTE If you accidently delete or overwrite parts of this line, you will not be able to boot your OS.**
-
-Append the contents of pistorms cmdline.txt to the **end of the line** (not a new line - it must be one long continuous line) in /boot/firmware/cmdline.txt
-
-With these two system files modified, you must reboot
+Run the install.sh script to build the file tree and to copy files in to place
+>bash install.sh
+Reboot at this point
 
 ## Running
-You must take the time to read the default emulator config file - **atari.cfg**
-There is also a **master.cfg** which you should use as a template to create additional configurations. The files are annotated to help you on your way, it should be much simpler now.
-
 >cd pistorm-atari-jit
 
+### Step 1
 A good starting point for your confidence is to make sure the PiSTorm hardware is talking between the Pi and Atari
 >sudo ./ataritest --reset
 sudo ./ataritest --memory tests=rw
 
-If the tests fail then there is no point in contiuing until the hardware issues are resolved.
+If the tests fail then there is no point in continuing until the hardware issues are resolved.
 
-So the tests pass, run the emulator Note: *you must have **atari.cfg** in your configs/ directory*
+### Step 2
+You should take some time to read the default emulator config file - **atari.cfg**. There is also a **master.cfg** which you can use as a template to create additional configurations. The files are annotated to help you on your way, it should be much simpler now.
+
+### Step 3
+So the tests pass and you have edited your configuration file, run the emulator Note: *you must have **atari.cfg** in your configs/ directory*
 >sudo ./emulator
+
+You are not restricted to using just the **atari.cfg** config file. You can create how ever many you desire; in which case, supply the emulator command with --config *\<your-cfg-name>*
 
 And that is pretty much it... Over to you to enjoy
 
-## Current limitations
-68000, 68010 are not supported
-GEM based games can not be played, they will likely run, but you will not see a meaningful native Atari screen output
+## TODO
+### configuration switches
+
+## Known Issues
+~~68000, 68010 are not supported~~
+~~GEM based games can not be played, they will likely run, but you will not see a meaningful native Atari screen output~~
+Bus Arbitration is not working so Blitter, FDD, external ACSI bus devices will not work at the moment.
+The high performance in a Mint environemnt may result in keyboard beeping - press the INSERT key to stop it
