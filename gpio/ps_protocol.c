@@ -248,7 +248,7 @@ void ps_write ( ps_io_t *ps_io )
   ps_lock_bus ();
   asm volatile ("dmb sy" : : : "memory");
 
-  //ps_wait_idle ();
+  ps_wait_idle ();
 
   *ioset = (ps_io->data << 8) | REG_DATA;
   txn_go ();
@@ -272,16 +272,17 @@ void ps_write ( ps_io_t *ps_io )
   *ioset = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI;
   txn_go ();
 
-  while (( status = *ioread ) & PI_TXN_IN_PROGRESS)
-    asm volatile ("yield" ::: "memory");
+  //while (( status = *ioread ) & PI_TXN_IN_PROGRESS)
+  //  asm volatile ("yield" ::: "memory");
+  ps_wait_idle ();
 
+  status = *ioread;
   ps_io->berr = CHECK_BERR (status);
   ps_unlock_bus();
 }
 
 
-inline
-void ps_write_8 (uint32_t addr, uint16_t data) 
+inline void ps_write_8 (uint32_t addr, uint16_t data) 
 {
   ps_io_t ps_io;
 
@@ -298,8 +299,7 @@ void ps_write_8 (uint32_t addr, uint16_t data)
   }
 }
 
-inline
-void ps_write_16 (uint32_t addr, uint16_t data) 
+inline void ps_write_16 (uint32_t addr, uint16_t data) 
 {
   ps_io_t ps_io;
 
@@ -316,8 +316,7 @@ void ps_write_16 (uint32_t addr, uint16_t data)
   }
 }
 
-inline
-void ps_write_32 (uint32_t addr, uint32_t data) 
+inline void ps_write_32 (uint32_t addr, uint32_t data) 
 {
   ps_write_16 (addr, (uint16_t)(data >> 16));
   ps_write_16 (addr + 2, (uint16_t)data);
@@ -332,8 +331,7 @@ void ps_read (ps_io_t *ps_io)
 
   ps_lock_bus ();
   asm volatile ("dmb sy" : : : "memory");
-
-  //ps_wait_idle ();
+  ps_wait_idle ();
 
   *ioset = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
   txn_go ();
@@ -341,22 +339,21 @@ void ps_read (ps_io_t *ps_io)
   *ioset = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
   txn_go ();
 
-  *ioset = REG_DATA;// | PIN_RD;
+  *ioset = REG_DATA;
   *ioset = PIN_RD;
 
-  while ((status = *ioread) & PI_TXN_IN_PROGRESS)
-    asm volatile ("yield" ::: "memory");
+  //while ((status = *ioread) & PI_TXN_IN_PROGRESS)
+  //  asm volatile ("yield" ::: "memory");
+  ps_wait_idle ();
 
-  //status = *ioread;
+  status = *ioread;
  	*ioclr = TXN_END;
-
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
   ps_unlock_bus();
 }
 
-inline
-uint16_t ps_read_16 (uint32_t addr) 
+inline uint16_t ps_read_16 (uint32_t addr) 
 {
   ps_io_t ps_io;
 
@@ -375,7 +372,7 @@ uint16_t ps_read_16 (uint32_t addr)
   return ps_io.data;
 }
 
-uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
+inline uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 {
   ps_io_t ps_io;
 
@@ -397,9 +394,7 @@ uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
   return ps_io.data;
 }
 
-
-inline
-uint8_t ps_read_8 (uint32_t addr) 
+inline uint8_t ps_read_8 (uint32_t addr) 
 {
   ps_io_t ps_io;
   uint32_t l;
@@ -435,7 +430,7 @@ uint8_t ps_read_8 (uint32_t addr)
     return (uint8_t)ps_io.data;
 }
 
-uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
+inline uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 {
   ps_io_t ps_io;
 
@@ -459,8 +454,7 @@ uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
   return (uint8_t)ps_io.data;
 }
 
-
-uint32_t ps_read_32 (uint32_t addr) 
+inline uint32_t ps_read_32 (uint32_t addr) 
 {
   return (ps_read_16 (addr) << 16) | ps_read_16 (addr + 2);
 }
@@ -492,30 +486,20 @@ void ps_write_status_reg ( uint16_t value )
 uint32_t ps_read_status_reg () 
 {
   uint32_t status;
-  //int timeout = 1000000;
 
   ps_lock_bus();
   asm volatile ("dmb sy" : : : "memory");
 
   /* make sure no IO in progress */
-  while (*ioread & PI_TXN_IN_PROGRESS)
-    asm volatile ("yield" ::: "memory");
-
-  //*(gpio + 0) = GPFSEL0_INPUT;
-  //*(gpio + 1) = GPFSEL1_INPUT;
-  //*(gpio + 2) = GPFSEL2_INPUT;
+  ps_wait_idle ();
   
   *ioset = REG_STATUS;
   *ioset = PIN_RD;
 
-  while (*ioread & PI_TXN_IN_PROGRESS)
-    asm volatile ("yield" ::: "memory");
+  ps_wait_idle ();
 
   status = *ioread;
  	*ioclr = TXN_END;
-
-  //if ( timeout <= 0 )
-  //  printf ( "ps_read_status_reg () timed-out\n" );
 
   /* return all 32 bits */
   ps_unlock_bus();
@@ -529,7 +513,6 @@ void ps_reset_state_machine ()
   ps_write_status_reg ( STATUS_BIT_INIT );
   usleep ( 1000 );
   ps_write_status_reg ( 0 );
-  //usleep ( 1000 );
 }
 
 /* toggle HALT signal */
@@ -538,7 +521,6 @@ void ps_pulse_halt ()
   ps_write_status_reg ( STATUS_BIT_HALT );
   usleep ( 1000 );
   ps_write_status_reg ( 0 );
-  //usleep ( 1000 );
 }
 
 /* hold reset low for 250ms - Atari ST needs min 100ms */
@@ -547,20 +529,7 @@ void ps_pulse_reset ()
   ps_write_status_reg ( STATUS_BIT_RESET );
   usleep ( 15 );
   ps_write_status_reg ( 0 );
-  //usleep ( 15 );
 }
-
-/* read CPLD firmware revision */
-/*
-uint16_t ps_fw_rd ()
-{
-  uint16_t fw;
-
-  fw = ps_read_status_reg ();
- 
-  return fw;//(fw >> 2);// & 0x3FF;
-}
-*/
 
 /* 
  * write PiSTorm latch type 
@@ -593,33 +562,15 @@ void ps_write_latchtype ( uint16_t latchtype )
 }
 
 /* read GPIO pins 0-7 - check that an IO is not running first */
-uint8_t ps_read_ipl ()
+void ps_read_ipl (uint8_t *ipl)
 {
-#if (0)
-  static uint32_t l;
-  static int timeout;
+  ps_lock_bus();
+  asm volatile ("dmb sy" : : : "memory");
+  ps_wait_idle ();
 
-  timeout = 1000000;
+  *ipl = (*ioread & 0x60) >> 4; // GPIO5 & GPIO6 = IPL1 & IPL2
 
-  while ( ( ( l = *ioread ) & PI_TXN_IN_PROGRESS ) && timeout-- )
-    ;
-
-  if ( timeout <= 0 )
-  {
-    printf ( "ps_read_ipl () timed out\n" );
-
-    //while ( *ioread & PI_TXN_IN_PROGRESS ) 
-    /* if we are here then PI_TXN_IN_PROGRESS check has failed which means the firmware state machine needs reseting */
-    //ps_reset_state_machine ();
-    //return 0;
-    //*ioclr = TXN_END;
-  }
-
-  /* RESET (0x40), BERR (0x20), IPL_ZERO (0x02) & PI_TXN_IN_PROGRESS (0x01) */
-  return l;
-#else
-  return *ioread;
-#endif
+  ps_unlock_bus();
 }
 
 /* 

@@ -1,1 +1,1 @@
-fsck.repair=yes rootwait ds=nocloud;i=rpi-imager-1780461806005 cfg80211.ieee80211_regdom=GB isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3 irqaffinity=0,1
+ isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3 irqaffinity=0,1

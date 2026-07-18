@@ -1,6 +1,5 @@
 #
 # PiStorm-Atari
-# /boot/config.txt
 # /boot/firmware/config.txt
 #
 # cryptodad
@@ -16,9 +15,9 @@ gpu_mem=16
 
 [pi3]
 #overvoltage=6
-#arm_freq=1400
-#core_freq=500
-gpu_mem=16
+arm_freq=1500
+core_freq=500
+gpu_mem=32
 
 
 [pi4]
@@ -27,7 +26,7 @@ arm_freq=1500
 gpu_freq=500
 core_freq=500
 sdram_freq=3200
-#gpu_mem=16
+gpu_mem=32
 
 
 [all]
@@ -54,11 +53,7 @@ temp_limit=80
 
 # --- CRITICAL: Driver Compatibility ---
 # PiSTorm JIT needs this
-dtoverlay=vc4-fkms-v3d
-
-# --- GPU Memory ---
-# Ensure enough memory for the 1080p buffer
-gpu_mem=128
+dtoverlay=vc4-kms-v3d
 
 # --- Visual Clean-up ---
 disable_splash=1
