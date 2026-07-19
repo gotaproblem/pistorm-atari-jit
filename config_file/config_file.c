@@ -539,10 +539,20 @@ struct emulator_config *load_config_file(char *filename) {
 
       case CONFITEM_FPS:
         cfg->fps = get_int (parse_line + str_pos);
-        /* valid frame rates are 50, 60, 70 */
-        if (cfg->fps < 50 || cfg->fps > 120)
-          cfg->fps = 50;
-        printf ("[CFG] Set VGA FPS to %d Hz\n", cfg->fps);
+        /* Host render cadence only (et4000 frame upload budget =
+         * 1000000/fps). Guest timing is untouched: VBL comes from real
+         * GLUE hardware and no interrupt/input path reads this. Clamp to
+         * the same 10..60 range emulator_config_fps() accepts - the old
+         * 50..120 parser clamp silently forced lower values back to 50,
+         * which is why cfg fps changes never reached the render loop.
+         * Lower values trade display smoothness for memory bandwidth
+         * (full 1080p32 uploads are ~8MB each). */
+        if (cfg->fps < 10)
+          cfg->fps = 10;
+        else if (cfg->fps > 60)
+          cfg->fps = 60;
+        printf ("[CFG] Set VGA FPS to %d Hz (render budget %d ms)\n",
+                cfg->fps, 1000 / cfg->fps);
         break;
 
       case CONFITEM_TTRAM:
