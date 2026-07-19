@@ -226,6 +226,8 @@ void invalidate_block(blockinfo *); // verified in compemu_support_arm.cpp
  * init; guard against the pre-init NULL. */
 void cache_invalidate(void)
 {
+    extern uint32_t g_jp_smc;   /* attribution counter, newcpu.cpp */
+    g_jp_smc++;
     if (flush_icache)
         flush_icache(0);
 }
@@ -2304,6 +2306,14 @@ extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t b
     return 1;
 }
 
+/* Dirty byte extent since the render thread last fetched it. Single writer
+ * (CPU thread), single reader (render thread, fetch-and-reset). A torn
+ * min/max pair across the two exchanges is detected by the reader
+ * (max <= min) and answered with a full-frame render, so no update can be
+ * lost - at worst one frame renders more rows than needed. */
+static uint32_t pistorm_fvdi_dirty_min = 0xffffffffu;
+static uint32_t pistorm_fvdi_dirty_max = 0;
+
 static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
 {
     pistorm_fvdi_write_count_state++;
@@ -2311,6 +2321,16 @@ static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
     if (o < pistorm_fvdi_first_write_state)
         pistorm_fvdi_first_write_state = o;
     pistorm_fvdi_last_write_state = o;
+    if (o < pistorm_fvdi_dirty_min)
+        pistorm_fvdi_dirty_min = o;
+    if (o + bytes > pistorm_fvdi_dirty_max)
+        pistorm_fvdi_dirty_max = o + bytes;
+}
+
+extern "C" void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx)
+{
+    *mn = __atomic_exchange_n(&pistorm_fvdi_dirty_min, 0xffffffffu, __ATOMIC_ACQ_REL);
+    *mx = __atomic_exchange_n(&pistorm_fvdi_dirty_max, 0u, __ATOMIC_ACQ_REL);
 }
 
 extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes)

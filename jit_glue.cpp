@@ -100,8 +100,8 @@ static void install_crash_handler(void)
 
 extern "C"
 {
-    /* ps_protocol.c */
-    uint8_t ps_read_ipl(void);
+    /* ps_protocol.c (pointer convention - see gpio/ps_protocol.h) */
+    void ps_read_ipl(uint8_t *);
     uint8_t ps_read_8_fc(uint32_t, uint8_t, uint8_t *);
     uint16_t ps_read_16_fc(uint32_t, uint8_t, uint8_t *);
 
@@ -181,7 +181,12 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
 #define HW_FPU_ON 1
 #if HW_FPU_ON
     currprefs.fpu_mode = changed_prefs.fpu_mode = 0;  // deafult 1 softfloat, 0 hardware fpu for double the performance
-    currprefs.compfpu = changed_prefs.compfpu = 0;//!disable_jit && !disable_fpu; // false;   // default true Pi must emulate the FPU, false if using hw fpu
+    /* compfpu=1 + USE_JIT_FPU (sysconfig.h): the JIT compiles FPU ops to
+     * native AArch64 FP instructions. With compfpu=0 every F-line op was an
+     * interpretive fpuop_arithmetic() call even in "hardware" mode - the
+     * measured 3-vs-6 score gap was just softfloat-vs-double inside the
+     * same interpreter. */
+    currprefs.compfpu = changed_prefs.compfpu = !disable_jit && !disable_fpu;
 #else
     currprefs.fpu_mode = changed_prefs.fpu_mode = 1;  // deafult 1 softfloat, 0 hardware fpu for double the performance
     currprefs.compfpu = changed_prefs.compfpu = !disable_jit && !disable_fpu; // default true Pi must emulate the FPU, false if using hw fpu

@@ -134,6 +134,12 @@ ifneq ($(strip $(SLIRP_LIBS)),)
 DEFS += -DHAVE_LIBSLIRP
 endif
 
+# Latency diagnostics (LAT/STALLW/JIT/FVDI instrumentation).
+# Off by default; enable with:  make DIAG=1
+ifeq ($(DIAG),1)
+DEFS += -DATARI_LAT_DIAG
+endif
+
 # Include order is critical: our dir (.) FIRST so our sysconfig.h / sysdeps.h
 # win over Amiberry's. -Ithreaddep makes our pthread thread.h win over the SDL
 # one (newcpu.cpp includes both "thread.h" and "threaddep/thread.h", so our copy

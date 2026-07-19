@@ -345,6 +345,12 @@ static size_t arm64_jit_page_size(void)
 #endif
 
 void* pushall_call_handler = NULL;
+/* ---- stall attribution (defined in newcpu.cpp, printed by intlev) ---- */
+extern uint32_t g_jp_lazy, g_jp_lazy_maxus, g_jp_hard;
+extern uint32_t g_jp_comp, g_jp_comp_us, g_jp_comp_maxus;
+extern uint32_t g_jp_chk,  g_jp_chk_us,  g_jp_chk_maxus;
+uint64_t get_time_us(void);            /* emulator.c (built as C++) */
+
 static void* popall_do_nothing = NULL;
 static void* popall_exec_nostats = NULL;
 static void* popall_execute_normal = NULL;
@@ -2860,6 +2866,9 @@ void alloc_cache(void)
 
 static void calc_checksum(blockinfo* bi, uae_u32* c1, uae_u32* c2)
 {
+#ifdef ATARI_LAT_DIAG
+    const uint64_t _ck_t0 = get_time_us();
+#endif
     uae_u32 k1 = 0;
     uae_u32 k2 = 0;
 
@@ -2888,6 +2897,15 @@ static void calc_checksum(blockinfo* bi, uae_u32* c1, uae_u32* c2)
 
     *c1 = k1;
     *c2 = k2;
+
+#ifdef ATARI_LAT_DIAG
+    {
+        const uint32_t _d = (uint32_t)(get_time_us() - _ck_t0);
+        g_jp_chk++;
+        g_jp_chk_us += _d;
+        if (_d > g_jp_chk_maxus) g_jp_chk_maxus = _d;
+    }
+#endif
 }
 
 int check_for_cache_miss(void)
@@ -3414,6 +3432,9 @@ static void flush_icache_none(int v)
 void flush_icache_hard(int n)
 {
     blockinfo* bi, * dbi;
+#ifdef ATARI_LAT_DIAG
+    g_jp_hard++;
+#endif
 
     bi = active;
     while (bi) {
@@ -3455,6 +3476,9 @@ static inline void flush_icache_lazy(int v)
 
     if (!active)
         return;
+#ifdef ATARI_LAT_DIAG
+    const uint64_t _lz_t0 = get_time_us();
+#endif
 
     bi = active;
     while (bi) {
@@ -3483,6 +3507,14 @@ static inline void flush_icache_lazy(int v)
     dormant = active;
     active->prev_p = &dormant;
     active = NULL;
+
+#ifdef ATARI_LAT_DIAG
+    {
+        const uint32_t _d = (uint32_t)(get_time_us() - _lz_t0);
+        g_jp_lazy++;
+        if (_d > g_jp_lazy_maxus) g_jp_lazy_maxus = _d;
+    }
+#endif
 }
 
 int failure;
@@ -3497,6 +3529,9 @@ void compile_block(cpu_history* pc_hist, int blocklen, int totcycles)
 {
     if (cache_enabled && compiled_code && currprefs.cpu_model >= 68020) {
 		jit_begin_write_window();
+#ifdef ATARI_LAT_DIAG
+		const uint64_t _cb_t0 = get_time_us();
+#endif
 #ifdef PROFILE_COMPILE_TIME
         compile_count++;
         clock_t start_time = clock();
@@ -3891,6 +3926,14 @@ void compile_block(cpu_history* pc_hist, int blocklen, int totcycles)
         /* Account for compilation time */
         do_extra_cycles(totcycles);
 		jit_end_write_window();
+#ifdef ATARI_LAT_DIAG
+		{
+			const uint32_t _d = (uint32_t)(get_time_us() - _cb_t0);
+			g_jp_comp++;
+			g_jp_comp_us += _d;
+			if (_d > g_jp_comp_maxus) g_jp_comp_maxus = _d;
+		}
+#endif
     }
 }
 

@@ -1631,8 +1631,26 @@ static uae_u32 fvdi_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
     return 1;
 
   if (!pattern && (mode == 1 || mode == 2)) {
-    for (int32_t yy = 0; yy < h; yy++)
-      fvdi_fill_solid_span(x, y + yy, w, fg);
+    /* Solid fill via row replication: build the first row once, memcpy the
+     * rest (a full-screen 1080p32 fill through the span loop was 7-11ms). */
+    fvdi_fill_solid_span(x, y, w, fg);
+    const uint8_t *first = fvdi_screen_span_ptr(x, y, w);
+    const uint32_t fbytes = fvdi_bytes_per_pixel();
+    if (first && fbytes) {
+      const size_t frow = (size_t)w * fbytes;
+      for (int32_t yy = 1; yy < h; yy++) {
+        uint8_t *dst = fvdi_screen_span_ptr(x, y + yy, w);
+        if (dst) {
+          memcpy(dst, first, frow);
+          fvdi_note_screen_span(x, y + yy, w);
+        } else {
+          fvdi_fill_solid_span(x, y + yy, w, fg);
+        }
+      }
+    } else {
+      for (int32_t yy = 1; yy < h; yy++)
+        fvdi_fill_solid_span(x, y + yy, w, fg);
+    }
     return 1;
   }
 
@@ -1646,19 +1664,49 @@ static uae_u32 fvdi_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
       fvdi_fill_solid_span(x, y + yy, w, bg);
       continue;
     }
-    for (int32_t xx = 0; xx < w; xx++) {
-      int32_t px = x + xx;
-      int32_t py = y + yy;
-      uint32_t dst = fvdi_get_raw_pixel(px, py);
-      fvdi_put_raw_pixel_marked(px, py,
-                                fvdi_apply_logic(dst, fg, bg, pat, px, mode),
-                                false);
+    /* Row fast path (latency work, phase 2): patterned fills used to run
+     * per-pixel through fvdi_get/put_raw_pixel, each call re-deriving
+     * fb_ptr/width/bounds -> ~80ns/px, so a ~300x300 dithered fill was a
+     * 4-14ms uninterruptible natfeat op (the Boing saturation signature).
+     * Same logic on a hoisted row pointer is ~20x faster; per-pixel loop
+     * kept below as the fallback. */
+    uint8_t *rp = fvdi_screen_span_ptr(x, y + yy, w);
+    uint32_t rbytes = fvdi_bytes_per_pixel();
+    if (rp && (rbytes == 2 || rbytes == 4)) {
+      for (int32_t xx = 0; xx < w; xx++) {
+        uint8_t *pp = rp + (size_t)xx * rbytes;
+        uint32_t dst = (rbytes == 2)
+          ? (((uint32_t)pp[0] << 8) | pp[1])
+          : (((uint32_t)pp[0] << 24) | ((uint32_t)pp[1] << 16) |
+             ((uint32_t)pp[2] << 8) | pp[3]);
+        uint32_t v = fvdi_apply_logic(dst, fg, bg, pat, x + xx, mode);
+        if (rbytes == 2) {
+          pp[0] = (uint8_t)(v >> 8);  pp[1] = (uint8_t)v;
+        } else {
+          pp[0] = (uint8_t)(v >> 24); pp[1] = (uint8_t)(v >> 16);
+          pp[2] = (uint8_t)(v >> 8);  pp[3] = (uint8_t)v;
+        }
+      }
+    } else {
+      for (int32_t xx = 0; xx < w; xx++) {
+        int32_t px = x + xx;
+        int32_t py = y + yy;
+        uint32_t dst = fvdi_get_raw_pixel(px, py);
+        fvdi_put_raw_pixel_marked(px, py,
+                                  fvdi_apply_logic(dst, fg, bg, pat, px, mode),
+                                  false);
+      }
     }
     fvdi_note_screen_span(x, y + yy, w);
   }
 
   return 1;
 }
+
+uint64_t get_time_us(void);
+static void fvdi_dump_mfdb_miss(const char *tag, unsigned op,
+                                uaecptr src_mfdb, uaecptr dst_mfdb,
+                                int32_t w, int32_t h);
 
 static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
                                 int32_t src_x, int32_t src_y,
@@ -1727,25 +1775,82 @@ static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
 
   uaecptr data = data_base + (uaecptr)src_y * pitch;
 
+  /* Row fast path (latency work, phase 3): mono expand is the ball/text op
+   * (vrt_cpyfm). Per-pixel get/put through the target dispatchers cost
+   * 4-14ms per ~256x256 expand -- the Boing saturation residue after the
+   * fill fix. Screen-destination rows run on a hoisted pointer instead;
+   * per-pixel loop kept as fallback for offscreen destinations. */
+  const bool exp_dst_screen = fvdi_mfdb_is_screen(dst_mfdb);
+  const uint32_t exp_bytes = fvdi_bytes_per_pixel();
+
+  /* (diagnostic moved into the per-row fallback below so it only fires
+   * when the row fast path genuinely declined) */
+
   for (int32_t yy = 0; yy < h; yy++) {
     uint16_t word = 0;
     int32_t word_base = -1;
-    for (int32_t xx = 0; xx < w; xx++) {
-      int32_t sx = src_x + xx;
-      int32_t base = sx & ~15;
-      if (base != word_base) {
-        word_base = base;
-        word = nf_read_word(data + (uaecptr)yy * pitch + (uaecptr)((sx >> 3) & ~1));
+    uint8_t *rp = NULL;
+    uint32_t rb = exp_bytes;
+    if (exp_dst_screen) {
+      rp = fvdi_screen_span_ptr(dst_x, dst_y + yy, w);
+    } else {
+      /* offscreen dst (phase 4): TT-RAM MFDBs are host-direct, so expand
+       * rows there too; ST-RAM destinations keep the per-pixel fallback. */
+      const uint32_t mb = fvdi_mfdb_pixel_bytes(dst_mfdb);
+      if ((mb == 2 || mb == 4) && fvdi_mfdb_supported_direct(dst_mfdb)) {
+        const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
+        const uaecptr de = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x + w - 1, dst_y + yy);
+        uae_u8 *p;
+        if (da && de && de == da + (uaecptr)(w - 1) * mb &&
+            da >= NF_ST_RAM_SIZE &&
+            nf_host_ram_ptr(da, (uint32_t)((size_t)w * mb), &p)) {
+          rp = p;
+          rb = mb;
+        }
       }
-      uint16_t bit_pattern = ((word >> (15 - (sx & 0x0f))) & 1u) ? 0xffffu : 0x0000u;
-      int32_t px = dst_x + xx;
-      int32_t py = dst_y + yy;
-      uint32_t dst = fvdi_target_get_pixel(dst_mfdb, px, py);
-      fvdi_target_put_pixel(dst_mfdb, px, py,
-                            fvdi_apply_mono_logic(dst, fg, bg, bit_pattern, mode),
-                            false);
     }
-    if (fvdi_mfdb_is_screen(dst_mfdb))
+    if (rp && (rb == 2 || rb == 4)) {
+      for (int32_t xx = 0; xx < w; xx++) {
+        int32_t sx = src_x + xx;
+        int32_t base = sx & ~15;
+        if (base != word_base) {
+          word_base = base;
+          word = nf_read_word(data + (uaecptr)yy * pitch + (uaecptr)((sx >> 3) & ~1));
+        }
+        uint16_t bit_pattern = ((word >> (15 - (sx & 0x0f))) & 1u) ? 0xffffu : 0x0000u;
+        uint8_t *pp = rp + (size_t)xx * rb;
+        uint32_t dst = (rb == 2)
+          ? (((uint32_t)pp[0] << 8) | pp[1])
+          : (((uint32_t)pp[0] << 24) | ((uint32_t)pp[1] << 16) |
+             ((uint32_t)pp[2] << 8) | pp[3]);
+        uint32_t v = fvdi_apply_mono_logic(dst, fg, bg, bit_pattern, mode);
+        if (rb == 2) {
+          pp[0] = (uint8_t)(v >> 8);  pp[1] = (uint8_t)v;
+        } else {
+          pp[0] = (uint8_t)(v >> 24); pp[1] = (uint8_t)(v >> 16);
+          pp[2] = (uint8_t)(v >> 8);  pp[3] = (uint8_t)v;
+        }
+      }
+    } else {
+      if (yy == 0 && (int64_t)w * (int64_t)h >= 4096)
+        fvdi_dump_mfdb_miss("expand", mode, src, dst_mfdb, w, h);
+      for (int32_t xx = 0; xx < w; xx++) {
+        int32_t sx = src_x + xx;
+        int32_t base = sx & ~15;
+        if (base != word_base) {
+          word_base = base;
+          word = nf_read_word(data + (uaecptr)yy * pitch + (uaecptr)((sx >> 3) & ~1));
+        }
+        uint16_t bit_pattern = ((word >> (15 - (sx & 0x0f))) & 1u) ? 0xffffu : 0x0000u;
+        int32_t px = dst_x + xx;
+        int32_t py = dst_y + yy;
+        uint32_t dst = fvdi_target_get_pixel(dst_mfdb, px, py);
+        fvdi_target_put_pixel(dst_mfdb, px, py,
+                              fvdi_apply_mono_logic(dst, fg, bg, bit_pattern, mode),
+                              false);
+      }
+    }
+    if (exp_dst_screen)
       fvdi_note_screen_span(dst_x, dst_y + yy, w);
   }
 
@@ -2146,6 +2251,368 @@ static uint32_t fvdi_apply_raster_op(uint32_t src, uint32_t dst, unsigned op)
   return src;
 }
 
+/* ------------------------------------------------------------------
+ * Generic row-copy fast path for op==3 (S_ONLY copy), any combination
+ * of screen and directly-addressable offscreen MFDBs.
+ *
+ * WHY (root cause of the level-6 latency stalls): the per-pixel loop
+ * below costs ~40ns/pixel; a large offscreen->screen blit (the standard
+ * AES redraw) is ~1M pixels = 30-160ms executed synchronously on the
+ * CPU thread as ONE guest instruction, during which no interrupt can
+ * be delivered. The ACIA tolerates ~2.56ms -> IKBD bytes lost ->
+ * keyboard beeping / erratic mouse under load. Row memcpy brings a
+ * full-screen blit under ~1ms, meeting the <1ms level-6 requirement
+ * without touching any interrupt machinery.
+ *
+ * Correctness notes:
+ *  - op 3 is a raw copy; both surfaces store big-endian byte streams,
+ *    so a byte copy is exact for 16/24/32bpp when depths match.
+ *  - offscreen dst in ST-RAM goes through pistorm_dma_to_stram per row
+ *    (same primitive the per-pixel path used per pixel).
+ *  - a row buffer makes same-surface horizontal overlap safe; vertical
+ *    overlap is handled by row order (bottom-up when dst_y > src_y).
+ *  - any precondition failure returns false and the caller falls back
+ *    to the existing per-pixel loop (copy is idempotent, so a partial
+ *    fast-path pass followed by the slow path is still correct).
+ */
+/* Diagnostic (measurement only): when a big op falls back to the per-pixel
+ * path, print the parameters once per second so we can see exactly which
+ * fast-path precondition declined. */
+static void fvdi_dump_mfdb_miss(const char *tag, unsigned op,
+                                uaecptr src_mfdb, uaecptr dst_mfdb,
+                                int32_t w, int32_t h)
+{
+#ifndef ATARI_LAT_DIAG
+  (void)tag; (void)op; (void)src_mfdb; (void)dst_mfdb; (void)w; (void)h;
+  return;
+#else
+  static uint64_t last;
+  const uint64_t now = get_time_us();
+  if (now - last < 1000000)
+    return;
+  last = now;
+  char buf[320];
+  int len = snprintf(buf, sizeof buf, "[FVDI-MISS] %s op=%u w=%d h=%d", tag, op, w, h);
+  const uaecptr m[2] = { src_mfdb, dst_mfdb };
+  const char *nm[2] = { "src", "dst" };
+  for (int i = 0; i < 2; i++) {
+    if (fvdi_mfdb_is_screen(m[i])) {
+      len += snprintf(buf + len, sizeof buf - (size_t)len, " %s=SCREEN", nm[i]);
+    } else {
+      len += snprintf(buf + len, sizeof buf - (size_t)len,
+                      " %s=%08X(base=%08X w=%u h=%u wdw=%u stand=%u bpp=%u)",
+                      nm[i], (unsigned)m[i],
+                      (unsigned)nf_read_long(m[i] + 0),
+                      (unsigned)nf_read_word(m[i] + 4),
+                      (unsigned)nf_read_word(m[i] + 6),
+                      (unsigned)nf_read_word(m[i] + 8),
+                      (unsigned)nf_read_word(m[i] + 10),
+                      (unsigned)nf_read_word(m[i] + 12));
+    }
+    if (len > (int)sizeof buf - 8) break;
+  }
+  fprintf(stderr, "%s\n", buf);
+#endif /* ATARI_LAT_DIAG */
+}
+
+static bool fvdi_copy_rows_generic(uaecptr src_mfdb, uaecptr dst_mfdb,
+                                   int32_t src_x, int32_t src_y,
+                                   int32_t dst_x, int32_t dst_y,
+                                   int32_t w, int32_t h)
+{
+  const bool src_scr = fvdi_mfdb_is_screen(src_mfdb);
+  const bool dst_scr = fvdi_mfdb_is_screen(dst_mfdb);
+
+  if (src_scr && dst_scr)
+    return fvdi_screen_copy_rows(src_x, src_y, dst_x, dst_y, w, h);
+
+  const uint32_t sbytes = src_scr ? fvdi_bytes_per_pixel()
+                                  : fvdi_mfdb_pixel_bytes(src_mfdb);
+  const uint32_t dbytes = dst_scr ? fvdi_bytes_per_pixel()
+                                  : fvdi_mfdb_pixel_bytes(dst_mfdb);
+  if (!sbytes || sbytes != dbytes)
+    return false;
+  if (!src_scr && !fvdi_mfdb_supported_direct(src_mfdb))
+    return false;
+  if (!dst_scr && !fvdi_mfdb_supported_direct(dst_mfdb))
+    return false;
+
+  static uae_u8 rowbuf[FVDI_MAX_ACCEL_SPAN * 4];
+  const size_t row_bytes = (size_t)w * sbytes;
+  if (row_bytes == 0 || row_bytes > sizeof rowbuf)
+    return false;
+
+  const bool cp_no_overlap = (src_scr != dst_scr) ||
+                             (!src_scr && !dst_scr && src_mfdb != dst_mfdb);
+
+  int32_t yy = 0, yy_end = h, step = 1;
+  if (dst_y > src_y) { yy = h - 1; yy_end = -1; step = -1; }
+
+  for (; yy != yy_end; yy += step) {
+    if (cp_no_overlap) {
+      /* different surfaces: one direct pass, no staging (lever 1) */
+      const uae_u8 *sp;
+      if (src_scr) {
+        sp = fvdi_screen_span_ptr(src_x, src_y + yy, w);
+        if (!sp) return false;
+      } else {
+        const uaecptr sa = fvdi_mfdb_pixel_addr(src_mfdb, src_x, src_y + yy);
+        const uaecptr se = fvdi_mfdb_pixel_addr(src_mfdb, src_x + w - 1, src_y + yy);
+        uae_u8 *q;
+        if (!sa || !se || se != sa + (uaecptr)(w - 1) * sbytes ||
+            !nf_host_ram_ptr(sa, (uint32_t)row_bytes, &q))
+          return false;
+        sp = q;
+      }
+      if (dst_scr) {
+        uae_u8 *dp = fvdi_screen_span_ptr(dst_x, dst_y + yy, w);
+        if (!dp) return false;
+        memcpy(dp, sp, row_bytes);
+        fvdi_note_screen_span(dst_x, dst_y + yy, w);
+      } else {
+        const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
+        const uaecptr de = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x + w - 1, dst_y + yy);
+        uae_u8 *dp;
+        if (!da || !de || de != da + (uaecptr)(w - 1) * sbytes)
+          return false;
+        if (da < NF_ST_RAM_SIZE) {
+          if (row_bytes > NF_ST_RAM_SIZE - da)
+            return false;
+          pistorm_dma_to_stram(da, sp, (uint32_t)row_bytes);
+        } else if (nf_host_ram_ptr(da, (uint32_t)row_bytes, &dp)) {
+          memcpy(dp, sp, row_bytes);
+        } else {
+          return false;
+        }
+      }
+      continue;
+    }
+    /* source row -> rowbuf */
+    if (src_scr) {
+      const uint8_t *sp = fvdi_screen_span_ptr(src_x, src_y + yy, w);
+      if (!sp)
+        return false;
+      memcpy(rowbuf, sp, row_bytes);
+    } else {
+      const uaecptr sa = fvdi_mfdb_pixel_addr(src_mfdb, src_x, src_y + yy);
+      const uaecptr se = fvdi_mfdb_pixel_addr(src_mfdb, src_x + w - 1, src_y + yy);
+      uae_u8 *sp;
+      if (!sa || !se || se != sa + (uaecptr)(w - 1) * sbytes)
+        return false;                      /* non-contiguous or out of bounds */
+      if (!nf_host_ram_ptr(sa, (uint32_t)row_bytes, &sp))
+        return false;
+      memcpy(rowbuf, sp, row_bytes);
+    }
+
+    /* rowbuf -> destination row */
+    if (dst_scr) {
+      uint8_t *dp = fvdi_screen_span_ptr(dst_x, dst_y + yy, w);
+      if (!dp)
+        return false;
+      memcpy(dp, rowbuf, row_bytes);
+      fvdi_note_screen_span(dst_x, dst_y + yy, w);
+    } else {
+      const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
+      const uaecptr de = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x + w - 1, dst_y + yy);
+      uae_u8 *dp;
+      if (!da || !de || de != da + (uaecptr)(w - 1) * dbytes)
+        return false;
+      if (da < NF_ST_RAM_SIZE && row_bytes <= NF_ST_RAM_SIZE - da) {
+        pistorm_dma_to_stram(da, rowbuf, (uint32_t)row_bytes);
+      } else if (nf_host_ram_ptr(da, (uint32_t)row_bytes, &dp)) {
+        memcpy(dp, rowbuf, row_bytes);
+      } else {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+/* Row fast path for ALL raster ops (latency work, phase 4).
+ * [FVDI-MISS] showed Boing compositing with op 7 (S OR D) into an offscreen
+ * 32bpp TT-RAM buffer; the per-pixel fallback made each blit a 5-15ms
+ * uninterruptible natfeat op. Every VDI rop is a pure bitwise function of
+ * S and D, and bitwise ops are byte-order agnostic, so they apply bytewise
+ * on host row pointers for any depth as long as src/dst depths match.
+ * Two passes: rows are validated (addresses resolvable, contiguous) BEFORE
+ * any write, so a decline can never leave a partially-combined surface. */
+static bool fvdi_blit_rows_rop(uaecptr src_mfdb, uaecptr dst_mfdb,
+                               int32_t src_x, int32_t src_y,
+                               int32_t dst_x, int32_t dst_y,
+                               int32_t w, int32_t h, unsigned op)
+{
+  op &= 15u;
+  if (op == 5)                    /* D only: destination unchanged */
+    return true;
+
+  const bool src_scr = fvdi_mfdb_is_screen(src_mfdb);
+  const bool dst_scr = fvdi_mfdb_is_screen(dst_mfdb);
+  const bool src_needed = !(op == 0 || op == 10 || op == 15);
+  const uint32_t sbytes = src_scr ? fvdi_bytes_per_pixel()
+                                  : fvdi_mfdb_pixel_bytes(src_mfdb);
+  const uint32_t dbytes = dst_scr ? fvdi_bytes_per_pixel()
+                                  : fvdi_mfdb_pixel_bytes(dst_mfdb);
+  if (!dbytes)
+    return false;
+  if (src_needed && (!sbytes || sbytes != dbytes))
+    return false;
+  if (src_needed && !src_scr && !fvdi_mfdb_supported_direct(src_mfdb))
+    return false;
+  if (!dst_scr && !fvdi_mfdb_supported_direct(dst_mfdb))
+    return false;
+
+  static uae_u8 ropsrc[FVDI_MAX_ACCEL_SPAN * 4];
+  static uae_u8 ropdst[FVDI_MAX_ACCEL_SPAN * 4];
+  const size_t row_bytes = (size_t)w * dbytes;
+  if (row_bytes == 0 || row_bytes > sizeof ropdst)
+    return false;
+
+  /* pass 1: validate every row before touching anything */
+  for (int32_t yy = 0; yy < h; yy++) {
+    if (src_needed) {
+      if (src_scr) {
+        if (!fvdi_screen_span_ptr(src_x, src_y + yy, w))
+          return false;
+      } else {
+        const uaecptr sa = fvdi_mfdb_pixel_addr(src_mfdb, src_x, src_y + yy);
+        const uaecptr se = fvdi_mfdb_pixel_addr(src_mfdb, src_x + w - 1, src_y + yy);
+        uae_u8 *sp;
+        if (!sa || !se || se != sa + (uaecptr)(w - 1) * sbytes ||
+            !nf_host_ram_ptr(sa, (uint32_t)row_bytes, &sp))
+          return false;
+      }
+    }
+    if (dst_scr) {
+      if (!fvdi_screen_span_ptr(dst_x, dst_y + yy, w))
+        return false;
+    } else {
+      const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
+      const uaecptr de = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x + w - 1, dst_y + yy);
+      uae_u8 *dp;
+      if (!da || !de || de != da + (uaecptr)(w - 1) * dbytes ||
+          !nf_host_ram_ptr(da, (uint32_t)row_bytes, &dp))
+        return false;
+      if (da < NF_ST_RAM_SIZE && row_bytes > NF_ST_RAM_SIZE - da)
+        return false;
+    }
+  }
+
+  /* Different surfaces cannot overlap, so skip the staging copies and do a
+   * single read + read-modify-write pass on host pointers (lever 1: halves
+   * memory traffic; matters at 1920x1080x32 where a full frame is 8.3MB). */
+  const bool no_overlap = (src_scr != dst_scr) ||
+                          (!src_scr && !dst_scr && src_mfdb != dst_mfdb);
+
+  /* pass 2: execute */
+  int32_t yy = 0, yy_end = h, step = 1;
+  if (dst_y > src_y) { yy = h - 1; yy_end = -1; step = -1; }
+
+  for (; yy != yy_end; yy += step) {
+    if (no_overlap) {
+      /* resolve host pointers directly */
+      const uae_u8 *sp = NULL;
+      if (src_needed) {
+        if (src_scr) {
+          sp = fvdi_screen_span_ptr(src_x, src_y + yy, w);
+        } else {
+          uae_u8 *q;
+          nf_host_ram_ptr(fvdi_mfdb_pixel_addr(src_mfdb, src_x, src_y + yy),
+                          (uint32_t)row_bytes, &q);
+          sp = q;
+        }
+      }
+      uae_u8 *dp2 = NULL;
+      uaecptr da2 = 0;
+      if (dst_scr) {
+        dp2 = fvdi_screen_span_ptr(dst_x, dst_y + yy, w);
+      } else {
+        da2 = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
+        uae_u8 *q;
+        nf_host_ram_ptr(da2, (uint32_t)row_bytes, &q);
+        dp2 = (da2 < NF_ST_RAM_SIZE) ? NULL : q;
+      }
+      if (dp2) {
+        switch (op) {
+          case 0:  memset(dp2, 0x00, row_bytes); break;
+          case 1:  for (size_t i = 0; i < row_bytes; i++) dp2[i] &= sp[i]; break;
+          case 2:  for (size_t i = 0; i < row_bytes; i++) dp2[i] = sp[i] & (uae_u8)~dp2[i]; break;
+          case 3:  memcpy(dp2, sp, row_bytes); break;
+          case 4:  for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~sp[i] & dp2[i]; break;
+          case 6:  for (size_t i = 0; i < row_bytes; i++) dp2[i] ^= sp[i]; break;
+          case 7:  for (size_t i = 0; i < row_bytes; i++) dp2[i] |= sp[i]; break;
+          case 8:  for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~(sp[i] | dp2[i]); break;
+          case 9:  for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~(sp[i] ^ dp2[i]); break;
+          case 10: for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~dp2[i]; break;
+          case 11: for (size_t i = 0; i < row_bytes; i++) dp2[i] = sp[i] | (uae_u8)~dp2[i]; break;
+          case 12: for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~sp[i]; break;
+          case 13: for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~sp[i] | dp2[i]; break;
+          case 14: for (size_t i = 0; i < row_bytes; i++) dp2[i] = (uae_u8)~(sp[i] & dp2[i]); break;
+          case 15: memset(dp2, 0xFF, row_bytes); break;
+        }
+        if (dst_scr)
+          fvdi_note_screen_span(dst_x, dst_y + yy, w);
+        continue;
+      }
+      /* ST-RAM destination: fall through to the staged path below */
+    }
+    if (src_needed) {
+      if (src_scr) {
+        memcpy(ropsrc, fvdi_screen_span_ptr(src_x, src_y + yy, w), row_bytes);
+      } else {
+        uae_u8 *sp;
+        const uaecptr sa = fvdi_mfdb_pixel_addr(src_mfdb, src_x, src_y + yy);
+        nf_host_ram_ptr(sa, (uint32_t)row_bytes, &sp);
+        memcpy(ropsrc, sp, row_bytes);
+      }
+    }
+
+    uae_u8 *dp = NULL;
+    uaecptr da = 0;
+    if (dst_scr) {
+      dp = fvdi_screen_span_ptr(dst_x, dst_y + yy, w);
+    } else {
+      da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
+      uae_u8 *p;
+      nf_host_ram_ptr(da, (uint32_t)row_bytes, &p);
+      dp = (da < NF_ST_RAM_SIZE) ? NULL : p;   /* ST-RAM writes go via DMA */
+      if (!dp)
+        memcpy(ropdst, p, row_bytes);          /* mirror read is valid */
+    }
+    if (dp)
+      memcpy(ropdst, dp, row_bytes);
+
+    switch (op) {
+      case 0:  memset(ropdst, 0x00, row_bytes); break;
+      case 1:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] = ropsrc[i] & ropdst[i]; break;
+      case 2:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] = ropsrc[i] & (uae_u8)~ropdst[i]; break;
+      case 3:  memcpy(ropdst, ropsrc, row_bytes); break;
+      case 4:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~ropsrc[i] & ropdst[i]; break;
+      case 6:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] ^= ropsrc[i]; break;
+      case 7:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] |= ropsrc[i]; break;
+      case 8:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~(ropsrc[i] | ropdst[i]); break;
+      case 9:  for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~(ropsrc[i] ^ ropdst[i]); break;
+      case 10: for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~ropdst[i]; break;
+      case 11: for (size_t i = 0; i < row_bytes; i++) ropdst[i] = ropsrc[i] | (uae_u8)~ropdst[i]; break;
+      case 12: for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~ropsrc[i]; break;
+      case 13: for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~ropsrc[i] | ropdst[i]; break;
+      case 14: for (size_t i = 0; i < row_bytes; i++) ropdst[i] = (uae_u8)~(ropsrc[i] & ropdst[i]); break;
+      case 15: memset(ropdst, 0xFF, row_bytes); break;
+    }
+
+    if (dp) {
+      memcpy(dp, ropdst, row_bytes);
+      if (dst_scr)
+        fvdi_note_screen_span(dst_x, dst_y + yy, w);
+    } else {
+      pistorm_dma_to_stram(da, ropdst, (uint32_t)row_bytes);
+    }
+  }
+
+  return true;
+}
+
 static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
                               int32_t src_x, int32_t src_y,
                               int32_t dst_x, int32_t dst_y,
@@ -2205,6 +2672,19 @@ static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
   if (op == 3 && fvdi_mfdb_is_screen(src_mfdb) && fvdi_mfdb_is_screen(dst_mfdb) &&
       fvdi_screen_copy_rows(src_x, src_y, dst_x, dst_y, w, h))
     return 1;
+
+  /* Fast path for plain copies between any direct surfaces (see above). */
+  if (op == 3 &&
+      fvdi_copy_rows_generic(src_mfdb, dst_mfdb, src_x, src_y,
+                             dst_x, dst_y, w, h))
+    return 1;
+
+  if (fvdi_blit_rows_rop(src_mfdb, dst_mfdb, src_x, src_y,
+                         dst_x, dst_y, w, h, op))
+    return 1;
+
+  if ((int64_t)w * (int64_t)h >= 4096)
+    fvdi_dump_mfdb_miss("blit", op, src_mfdb, dst_mfdb, w, h);
 
   int y_start = 0;
   int y_end = h;
@@ -2380,7 +2860,56 @@ static uae_u32 fvdi_fill_table(uaecptr table, int32_t n, uaecptr pattern,
   return 1;
 }
 
+/* Per-op timing (measurement only): names the op that stalls level-6
+ * delivery, instead of inferring it from stripped symbol offsets. Printed
+ * once per second as an [FVDI] line for ops that consumed time. */
+static struct { uint32_t n; uint32_t us; uint32_t maxus; } g_fvdi_prof[32];
+
+static void fvdi_prof_flush(uint64_t now)
+{
+  static uint64_t win;
+  if (now - win < 1000000)
+    return;
+  win = now;
+  char line[256];
+  int len = 0;
+  for (unsigned i = 0; i < 32; i++) {
+    if (!g_fvdi_prof[i].n)
+      continue;
+    len += snprintf(line + len, sizeof line - (size_t)len,
+                    " op%u:n=%u,us=%u,max=%u", i,
+                    g_fvdi_prof[i].n, g_fvdi_prof[i].us, g_fvdi_prof[i].maxus);
+    g_fvdi_prof[i].n = g_fvdi_prof[i].us = g_fvdi_prof[i].maxus = 0;
+    if (len > (int)sizeof line - 40)
+      break;
+  }
+  if (len)
+    fprintf(stderr, "[FVDI]%s\n", line);
+}
+
+static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params);
+
 static uae_u32 nf_call_fvdi(uae_u32 subid, uaecptr params)
+{
+#ifndef ATARI_LAT_DIAG
+  return nf_call_fvdi_inner(subid, params);
+#else
+  const uint64_t t0 = get_time_us();
+  uae_u32 r = nf_call_fvdi_inner(subid, params);
+  const uint64_t t1 = get_time_us();
+  if (subid < 32) {
+    const uint32_t d = (uint32_t)(t1 - t0);
+    g_fvdi_prof[subid].n++;
+    g_fvdi_prof[subid].us += d;
+    if (d > g_fvdi_prof[subid].maxus)
+      g_fvdi_prof[subid].maxus = d;
+  }
+  fvdi_prof_flush(t1);
+  return r;
+#endif /* ATARI_LAT_DIAG */
+}
+
+static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
 {
   switch (subid) {
     case FVDI_GET_VERSION:

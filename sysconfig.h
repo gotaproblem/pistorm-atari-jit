@@ -91,6 +91,16 @@
 #define FPUEMU
 #define WITH_SOFTFLOAT  /* fpdata.fpx (floatx80); newcpu.h then pulls softfloat.h */
 #define MMUEMU
+/* JIT-compiled FPU (comp_fpp_opp in jit/arm/compemu_fpp_arm.cpp): FMOVE/FADD/
+ * FMUL/FDIV/FSQRT/FCMP etc. compile to native AArch64 FP instructions instead
+ * of interpretive fpuop_arithmetic() calls (transcendentals still fall back
+ * per-op). Without this define avoid_fpu is hard-true in
+ * compemu_support_arm.cpp and EVERY F-line op is interpreted regardless of
+ * compfpu - both "hardware" and "software" FPU modes were interpretive, only
+ * the arithmetic backend differed. Requires currprefs.compfpu=1 (jit_glue.cpp)
+ * and fpu_mode=0 (fptype=double matches the AArch64 FP registers). Changes no
+ * struct layouts, so mixed old/new objects still link. */
+#define USE_JIT_FPU
 
 /* JIT-internal config from the replaced osdep/sysconfig.h:
  *  - NOFLAGS_SUPPORT_GENCOMP gates nfctbl/nfcpufunctbl in compemu_support_arm.cpp

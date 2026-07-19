@@ -31,6 +31,22 @@
 #include "config_file/config_file.h"
 #include "idedriver.h"
 
+/* Data-port byte order (must be defined before any user below).
+ * 0 (legacy): first sector byte in the LOW half of the word. EmuTOS
+ *   detects the swapped MBR signature and software-swaps EVERY word of
+ *   EVERY transfer on the 68k side ("enabling byteswap" boot message).
+ * 1 (native ST/Falcon order): first byte in the HIGH half; EmuTOS's
+ *   detection finds a normal signature and stops swapping entirely.
+ * On-disk image bytes are IDENTICAL under both settings (the legacy
+ * order + EmuTOS compensation nets out to native order on disk), so
+ * existing images carry over unchanged. The synthesized IDENTIFY block
+ * is pre-swapped at generation to stay consistent (see
+ * cmd_identify_complete). Preserving the user's test setting: 1. */
+#ifndef IDE_NATIVE_BYTEORDER
+#define IDE_NATIVE_BYTEORDER 1
+#endif
+
+
 #define IDE_IDLE	0
 #define IDE_CMD		1
 #define IDE_DATA_IN	2
@@ -271,6 +287,22 @@ static void cmd_identify_complete(struct ide_taskfile *tf)
 {
   struct ide_drive *d = tf->drive;
   memcpy(d->data, d->identify, 512);
+#if IDE_NATIVE_BYTEORDER
+  /* The identify block is synthesized HOST-side in the legacy per-word
+   * layout. With the native data-port byte order the wire flips every
+   * word, so pre-swap the copy once here: the guest then receives
+   * byte-for-byte what the legacy order delivered (correct geometry,
+   * capacity and strings). Sector data needs no such treatment - disk
+   * image bytes are stored native. */
+  {
+    unsigned i;
+    for (i = 0; i < 512; i += 2) {
+      uint8_t t = d->data[i];
+      d->data[i] = d->data[i + 1];
+      d->data[i + 1] = t;
+    }
+  }
+#endif
   data_in_state(tf);
   /* Arrange to copy just the identify buffer */
   d->dptr = d->data;
@@ -464,6 +496,7 @@ static int ide_read_sector(struct ide_drive *d)
 {
   int len;
 
+  ide_stats.sectors_read++;
   d->dptr = d->data;
   if ((len = read(d->fd, d->data, 512)) != 512) {
     //perror("ide_read_sector");
@@ -482,6 +515,7 @@ static int ide_write_sector(struct ide_drive *d)
 {
   int len;
 
+  ide_stats.sectors_written++;
   d->dptr = d->data;
   if ((len = write(d->fd, d->data, 512)) != 512) {
     d->taskfile.status |= ST_ERR;
@@ -494,6 +528,9 @@ static int ide_write_sector(struct ide_drive *d)
   return 0;
 }
 
+
+/* transfer statistics (dumped by ide_dump_stats) */
+struct ide_stats_s ide_stats;
 
 static uint16_t ide_data_in(struct ide_drive *d, int len)
 {
@@ -515,9 +552,14 @@ static uint16_t ide_data_in(struct ide_drive *d, int len)
 
     v = *d->dptr;
     if (!d->eightbit) {
-      if (len == 2)
+      if (len == 2) {
+#if IDE_NATIVE_BYTEORDER
+        v = (uint16_t)((v << 8) | d->dptr[1]);   /* first byte on D8-15 */
+#else
         v |= (d->dptr[1] << 8);
-        //v = v << 8 | d->dptr[1]; // cryptodad byte swapped or not?
+        //v = v << 8 | d->dptr[1]; // cryptodad byte swapped or not? -> resolved: see IDE_NATIVE_BYTEORDER
+#endif
+      }
       d->dptr+=2;
     } else
       d->dptr++;
@@ -549,12 +591,23 @@ static void ide_data_out(struct ide_drive *d, uint16_t v, int len)
   } else {
     if (d->eightbit)
       v &= 0xFF;
+#if IDE_NATIVE_BYTEORDER
+    if (!d->eightbit) {
+      *d->dptr++ = (uint8_t)(v >> 8);            /* symmetric with reads */
+      *d->dptr++ = (uint8_t)v;
+      d->taskfile.data = v;
+    } else {
+      *d->dptr++ = (uint8_t)v;
+      d->taskfile.data = v;
+    }
+#else
     *d->dptr++ = v;
     d->taskfile.data = v;
     if (!d->eightbit) {
       *d->dptr++ = v >> 8;
       d->taskfile.data = v >> 8;
     }
+#endif
     if (d->dptr == d->data + 512) {
       if (ide_write_sector(d) < 0) {
         ide_set_error(d);

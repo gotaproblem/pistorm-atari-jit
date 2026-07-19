@@ -464,9 +464,32 @@ static void *ipl_task(void *)
     g_ipl = ipl;
     if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask)
     {
+#ifdef ATARI_LAT_DIAG
+      /* Latency instrumentation: stamp the moment a level becomes pending;
+       * intlev() measures the latch->delivery delta. */
+      extern volatile uint64_t g_irq_latch_us;
+      if (g_irq == 0)
+        g_irq_latch_us = get_time_us();
+#endif
       g_irq = ipl;
       jit_request_cpu_exit();
     }
+
+#ifdef ATARI_LAT_DIAG
+    /* Stall watchdog (measurement only): while a latched interrupt is
+     * waiting on delivery, sample the CPU thread's state from this thread. */
+    {
+      extern volatile uint64_t g_irq_latch_us;
+      extern void jit_stall_probe(uint32_t age_us);
+      const uint64_t t_latch = g_irq_latch_us;
+      if (t_latch)
+      {
+        const uint64_t age = get_time_us() - t_latch;
+        if (age > 2500)
+          jit_stall_probe((uint32_t)age);
+      }
+    }
+#endif /* ATARI_LAT_DIAG */
     /*
      * IPL pulses are short enough that scheduler sleep jitter can miss them,
      * especially under MiNT/ET4000 load. Keep this as a short busy wait on the

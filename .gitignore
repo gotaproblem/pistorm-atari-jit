@@ -6,6 +6,7 @@
 *.exe
 *.stackdump
 *.vscode
+.smbdelete*
 ._*
 .DS_Store
 perf.data

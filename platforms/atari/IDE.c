@@ -125,6 +125,24 @@ void InitIDE (void)
 
 
 
+void ide_dump_stats(void)
+{
+  static struct ide_stats_s last;
+  if (ide_stats.sectors_read == last.sectors_read &&
+      ide_stats.sectors_written == last.sectors_written &&
+      ide_stats.commands == last.commands)
+    return;                       /* quiet when idle */
+  fprintf(stderr,
+          "[IDE] rd=%u wr=%u words=%u polls=%u cmds=%u last:",
+          ide_stats.sectors_read, ide_stats.sectors_written,
+          ide_stats.data_words, ide_stats.status_polls, ide_stats.commands);
+  for (unsigned i = 0; i < 8; i++)
+    fprintf(stderr, " %02X",
+            ide_stats.last_cmds[(ide_stats.cmd_idx + i) & 7]);
+  fprintf(stderr, "\n");
+  last = ide_stats;
+}
+
 void writeIDEB ( uint32_t address, unsigned int value ) 
 {
   uint8_t IDE_action;
@@ -147,6 +165,8 @@ void writeIDEB ( uint32_t address, unsigned int value )
       case GCMD_OFFSET:
         //DEBUG_PRINTF ("Write to GCMD: %.2X.\n", value);
         IDE_action = IDE_command_w;
+        ide_stats.commands++;
+        ide_stats.last_cmds[ide_stats.cmd_idx++ & 7] = (uint8_t)value;
         break;
 
       case GSECTCOUNT_OFFSET:
@@ -303,6 +323,7 @@ uint8_t readIDEB ( uint32_t address )
         break;
 
       case GSTATUS_OFFSET:
+        ide_stats.status_polls++;
         IDE_action = IDE_status_r;
         break;
 
@@ -360,6 +381,7 @@ uint16_t readIDE ( uint32_t address )
   {
     if ( base == GDATA_OFFSET ) 
     {
+      ide_stats.data_words++;
       return IDE_read16 ( atariIDE [port], IDE_data );
     }
 
@@ -387,6 +409,7 @@ uint32_t readIDEL ( uint32_t address )
   {
     if ( base == GDATA_OFFSET ) 
     {
+      ide_stats.data_words += 2;          /* long access = two words   */
       value = IDE_read16 ( atariIDE [port], IDE_data );
       
       return value << 16 | IDE_read16 ( atariIDE [port], IDE_data ) ;

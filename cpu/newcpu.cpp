@@ -2791,7 +2791,14 @@ extern volatile uint8_t g_irq_mask;
 extern volatile uint8_t g_irq;
 extern volatile uint8_t g_ipl;
 extern volatile uint8_t g_buserr;
-extern "C" uint8_t ps_read_ipl(void);
+/* NOTE: the linked implementation (gpio/ps_protocol.c) takes a POINTER and
+ * returns void - it waits for bus idle internally and stores the shifted
+ * IPL value ((raw & 0x60) >> 4). The old zero-argument declaration here
+ * matched the SMI protocol variant, which is NOT in the build: calling it
+ * argument-less made the implementation store through whatever garbage was
+ * in x0 - a random one-byte memory scribble on every call (crashed in
+ * ps_read_ipl with si_addr=0 under heavy IDE+TimerA load). */
+extern "C" void ps_read_ipl(uint8_t *ipl);
 extern "C" uint8_t ps_read_8_fc(uint32_t addr, uint8_t fc_value, uint8_t *berr_out);
 extern "C" volatile uint32_t pistorm_mfp_iack_counts[16];
 extern "C" volatile uint8_t pistorm_mfp_last_iack_vector;
@@ -2803,11 +2810,8 @@ extern "C" volatile uint8_t pistorm_mfp_last_iack_vector;
 static inline void atari_serial_irq_poll(void)
 {
 #if PISTORM_SERIAL_IRQ
-	uint8_t status = ps_read_ipl();
-	if (status & 0x01)
-		return;
-
-	uint8_t irq = (status & 0x60) >> 4;
+	uint8_t irq = 0;
+	ps_read_ipl(&irq);   /* already shifted; waits for bus idle itself */
 	if (!irq)
 		return;
 
@@ -3046,10 +3050,9 @@ static uae_u8 atari_recover_mfp_vector_from_isrb(void)
 static uae_u8 atari_live_ipl_level(void)
 {
 #ifdef PISTORM_ATARI
-	const uae_u8 status = ps_read_ipl();
-	if (status & 0x01)
-		return 0xff;
-	return (status & 0x60) >> 4;
+	uint8_t ipl = 0;
+	ps_read_ipl(&ipl);   /* already shifted; waits for bus idle itself */
+	return ipl;
 #else
 	return 0;
 #endif
@@ -4443,6 +4446,78 @@ static void do_interrupt (int nr)
 	/* Match the old Musashi contract: once a level has been latched, acknowledge
 	 * it on the real bus and build the CPU exception frame. */
 	intlev_ack (nr);
+
+	/* HBL suppression: under MiNT the level-2 autovector (HBL) fires at
+	 * video line rate (~15.7kHz) into a do-nothing RTE handler - each one
+	 * a full exception+RTE round trip, several % of total CPU (measured
+	 * via IRQHIST: l2 ~15700/s at idle desktop). If the guest's level-2
+	 * vector points at a bare RTE, delivering it has no observable effect,
+	 * so after the IACK above (GLUE handshake preserved) we skip the
+	 * exception. Programs that install a real HBL handler (raster effects)
+	 * do not point the vector at RTE and get normal delivery. */
+	if (nr == 2)
+	{
+		/* Fast-path the guest HBL handler host-side when its complete
+		 * observable effect is known (verdict cached per vector value):
+		 *  kind 1: bare RTE - no effect at all.
+		 *  kind 2: EmuTOS int_hbl (identified via [HBLVEC] at E007AC:
+		 *          3F00 302F 0002 0240 0700 6606 ...) - d0 saved/restored,
+		 *          CCR changes discarded by RTE, so the entire effect is
+		 *          "if the interrupted IPL was 0, raise it to 3". */
+		static uae_u32 hbl_fp_vec = 0xffffffffu;
+		static int hbl_fp_kind = 0;
+		const uae_u32 hblvec = get_long(regs.vbr + 0x68);
+		if (hblvec != hbl_fp_vec)
+		{
+			hbl_fp_vec = hblvec;
+			hbl_fp_kind = 0;
+			if (hblvec != 0 && (hblvec & 1) == 0)
+			{
+				if (get_word(hblvec) == 0x4e73)
+					hbl_fp_kind = 1;
+				else if (get_word(hblvec)      == 0x3f00 &&
+				         get_word(hblvec + 2)  == 0x302f &&
+				         get_word(hblvec + 4)  == 0x0002 &&
+				         get_word(hblvec + 6)  == 0x0240 &&
+				         get_word(hblvec + 8)  == 0x0700 &&
+				         get_word(hblvec + 10) == 0x6606)
+					hbl_fp_kind = 2;
+			}
+		}
+		/* Never suppress while the CPU is STOPped: on real hardware any
+		 * unmasked interrupt WAKES a stopped CPU (execution resumes after
+		 * the STOP), and in this core it is Exception() that clears the
+		 * stopped state. Suppressing here left the guest asleep until
+		 * Timer C, up to 5ms - visible as laggy/missing window redraws. */
+		if (regs.stopped)
+			;
+		else if (hbl_fp_kind == 1)
+			interrupt_taken = false;
+		else if (hbl_fp_kind == 2)
+		{
+			if (regs.intmask == 0)
+			{
+				regs.intmask = 3;
+				regs.sr = (regs.sr & ~0x0700) | 0x0300;
+				g_irq_mask = 3;
+			}
+			interrupt_taken = false;
+		}
+	}
+
+#ifdef ATARI_LAT_DIAG
+	{
+		extern uint32_t g_irqhist_vec[16];
+		extern uint32_t g_irqhist_lvl[8];
+		extern uint32_t g_irqhist_hblskip;
+		if (nr == 2 && !interrupt_taken)
+			g_irqhist_hblskip++;
+		else if (nr == 6 && (pistorm_iack_vector & 0xfff0) == 0x0040)
+			g_irqhist_vec[pistorm_iack_vector & 0x0f]++;
+		else
+			g_irqhist_lvl[nr & 7]++;
+	}
+#endif
 #if (1)
 	if (nr == 6)
 	{
@@ -4585,16 +4660,20 @@ static void do_interrupt (int nr)
 
 interrupt_done:
 //#define IRQ_PROFILE
-#ifdef IRQ_PROFILE
+#if defined(IRQ_PROFILE) || defined(ATARI_LAT_DIAG)
 	if (nr == 2)
 	{
-		static int hbl_dumped = 0;
-		if (!hbl_dumped)
+		/* One-shot per distinct vector: identify the guest's HBL handler so
+		 * the suppression fast path can match it exactly. */
+		static uae_u32 hbl_dumped_vec = 0xffffffffu;
+		uae_u32 hblvec = get_long(regs.vbr + 0x68); /* autovector level 2 */
+		if (hblvec != hbl_dumped_vec)
 		{
-			hbl_dumped = 1;
-			uae_u32 hblvec = get_long(regs.vbr + 0x68); /* autovector level 2 */
-			fprintf(stderr, "[HBLVEC] vbr=%08X vec2=%08X op@vec=%04X\n",
-					regs.vbr, hblvec, get_word(hblvec));
+			hbl_dumped_vec = hblvec;
+			fprintf(stderr, "[HBLVEC] vbr=%08X vec2=%08X code=%04X %04X %04X %04X %04X %04X\n",
+					regs.vbr, hblvec,
+					get_word(hblvec), get_word(hblvec + 2), get_word(hblvec + 4),
+					get_word(hblvec + 6), get_word(hblvec + 8), get_word(hblvec + 10));
 		}
 	}
 #endif
@@ -4656,14 +4735,259 @@ interrupt_done:
 
 
 volatile uint8_t g_intmask = 0;
+/* ---- interrupt delivery latency instrumentation (measurement only) ----
+ * Hypothesis under test (SB): heavy JIT/render load delays interrupt
+ * servicing beyond the ACIA's ~2.56ms one-byte tolerance; lost input
+ * bytes then cause the beeping/erratic symptoms. Requirement: level-6
+ * latch->delivery under 1ms at all times. This measures exactly that. */
+volatile uint64_t g_irq_latch_us = 0;
+
+/* JIT stall attribution counters (all CPU-thread only, no races).
+ * smc  = cache_invalidate() calls (guest write hit a marked code page)
+ * lazy = full lazy flushes (walk of every active block)
+ * hard = hard flushes (cache full / reset)
+ * comp = compile_block calls;  chk = calc_checksum calls
+ * NOTE: chk includes compile-time checksum calcs, so chkus overlaps compus. */
+uint32_t g_jp_smc, g_jp_lazy, g_jp_lazy_maxus, g_jp_hard;
+uint32_t g_jp_comp, g_jp_comp_us, g_jp_comp_maxus;
+uint32_t g_jp_chk,  g_jp_chk_us,  g_jp_chk_maxus;
+
+uint64_t get_time_us(void);    /* emulator.c (built as C++) */
+
+#include <sys/syscall.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <dlfcn.h>
+volatile int g_cpu_tid = 0;
+
+/* Host-PC sampler: the ipl thread fires SIGUSR2 at the CPU thread during a
+ * stall; this handler records where the CPU thread actually was. */
+static volatile uintptr_t g_stall_hostpc, g_stall_hostlr;
+static void stall_pc_handler(int sig, siginfo_t *si, void *uc_)
+{
+	(void)sig; (void)si;
+	ucontext_t *uc = (ucontext_t *)uc_;
+#if defined(__aarch64__)
+	g_stall_hostpc = (uintptr_t)uc->uc_mcontext.pc;
+	g_stall_hostlr = (uintptr_t)uc->uc_mcontext.regs[30];
+#endif
+}
+
+/* [IDE] per-second stats dump (defined in platforms/atari/IDE.c). */
+extern "C" void ide_dump_stats(void);
+
+/* Interrupt source histogram (diag): level-6 deliveries binned by MFP
+ * vector nibble (0x40+n), plus autovector levels. Identifies what is
+ * firing ~16k times/sec under MiNT. */
+uint32_t g_irqhist_vec[16];
+uint32_t g_irqhist_lvl[8];
+uint32_t g_irqhist_hblskip;
+
+/* Called from ipl_task while a latched interrupt has been waiting >2.5ms:
+ * samples what the CPU thread is doing DURING the stall (measurement only).
+ * Discriminates: BRK set + incomp=1 for the whole stall -> translated code
+ * not honoring spcflags; incomp=0 -> CPU thread blocked host-side (lock,
+ * syscall, scheduler); BRK clear -> the kick itself was lost. */
+extern "C" {
+extern volatile uint32_t g_cpu_where;       /* ps_protocol.c */
+extern volatile uint32_t g_cpu_where_addr;
+}
+
+void jit_stall_probe(uint32_t age_us)
+{
+	static uint64_t last_us;
+	const uint64_t now = get_time_us();
+	if (now - last_us < 5000)      /* one line per 5ms of stall */
+		return;
+	last_us = now;
+	/* Scheduler view of the CPU thread, read from /proc:
+	 * st   = R running/runnable, S sleeping, D uninterruptible
+	 * cpu  = core it last ran on
+	 * drun/dwait = ns actually ran / ns spent runnable-but-waiting since the
+	 * previous probe line (5ms apart). dwait~5ms => starved of CPU;
+	 * drun~5ms => spinning somewhere; neither => blocked (futex/io). */
+	char st = '?'; int core = -1;
+	unsigned long long run_ns = 0, wait_ns = 0;
+	static unsigned long long prev_run, prev_wait;
+	extern volatile int g_cpu_tid;
+	if (g_cpu_tid) {
+		char path[64], buf[512];
+		snprintf(path, sizeof path, "/proc/self/task/%d/stat", g_cpu_tid);
+		FILE *f = fopen(path, "r");
+		if (f) {
+			size_t n = fread(buf, 1, sizeof buf - 1, f);
+			fclose(f);
+			buf[n] = 0;
+			char *cp = strrchr(buf, ')');   /* comm may contain spaces */
+			if (cp && cp[1]) {
+				st = cp[2] == ' ' ? cp[3] : cp[2];
+				int fld = 3; core = -1;
+				char *tok = cp + 2;
+				for (char *q = strtok(tok, " "); q; q = strtok(NULL, " "), fld++)
+					if (fld == 39) { core = atoi(q); break; }
+			}
+		}
+		snprintf(path, sizeof path, "/proc/self/task/%d/schedstat", g_cpu_tid);
+		f = fopen(path, "r");
+		if (f) {
+			if (fscanf(f, "%llu %llu", &run_ns, &wait_ns) != 2)
+				run_ns = wait_ns = 0;
+			fclose(f);
+		}
+	}
+	/* Resolve the host PC captured by the previous SIGUSR2 (5ms ago). */
+	const uintptr_t hpc = g_stall_hostpc, hlr = g_stall_hostlr;
+	const char *pcn = "?", *lrn = "?";
+	uintptr_t pco = 0, lro = 0;
+	{
+		extern uae_u8 *compiled_code;
+		Dl_info di;
+		if (hpc) {
+			if (dladdr((void *)hpc, &di) && di.dli_sname) {
+				pcn = di.dli_sname; pco = hpc - (uintptr_t)di.dli_saddr;
+			} else if (compiled_code && hpc >= (uintptr_t)compiled_code &&
+			           hpc < (uintptr_t)compiled_code + (64u << 20)) {
+				pcn = "JITCACHE"; pco = hpc - (uintptr_t)compiled_code;
+			}
+		}
+		if (hlr) {
+			if (dladdr((void *)hlr, &di) && di.dli_sname) {
+				lrn = di.dli_sname; lro = hlr - (uintptr_t)di.dli_saddr;
+			} else if (compiled_code && hlr >= (uintptr_t)compiled_code &&
+			           hlr < (uintptr_t)compiled_code + (64u << 20)) {
+				lrn = "JITCACHE"; lro = hlr - (uintptr_t)compiled_code;
+			}
+		}
+	}
+	fprintf(stderr,
+		"[STALLW] age=%uus spc=%08X incomp=%d countdown=%d pcp=%p where=%u wa=%06X "
+		"st=%c cpu=%d drun=%lluus dwait=%lluus hpc=%lx<%s+0x%lx> hlr=%lx<%s+0x%lx>\n",
+		age_us, (unsigned)regs.spcflags, (int)jit_in_compiled_code,
+		(int)pissoff, (void*)regs.pc_p,
+		(unsigned)g_cpu_where, (unsigned)g_cpu_where_addr,
+		st, core,
+		(run_ns  - prev_run)  / 1000ULL,
+		(wait_ns - prev_wait) / 1000ULL,
+		(unsigned long)hpc, pcn, (unsigned long)pco,
+		(unsigned long)hlr, lrn, (unsigned long)lro);
+	prev_run = run_ns; prev_wait = wait_ns;
+
+	/* Arm the next sample: interrupt the CPU thread wherever it is. */
+	if (g_cpu_tid)
+		syscall(SYS_tgkill, (int)getpid(), g_cpu_tid, SIGUSR2);
+}
+
+static struct {
+	uint32_t n;          /* deliveries measured this window            */
+	uint32_t over1ms;    /* exceeded the 1ms requirement               */
+	uint32_t over2500us; /* exceeded the ACIA tolerance                */
+	uint32_t max_us;     /* worst this window                          */
+	uint32_t alltime_max_us;
+	uint64_t win_start_us;
+} irqlat;
+
 int intlev (void)
 {
 	uint8_t ipl;
+
+#ifdef ATARI_LAT_DIAG
+	if (!g_cpu_tid) {
+		g_cpu_tid = (int)syscall(SYS_gettid);
+		struct sigaction sa;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_sigaction = stall_pc_handler;
+		sa.sa_flags = SA_SIGINFO | SA_RESTART;
+		sigaction(SIGUSR2, &sa, NULL);
+	}
+#endif
 
 	ipl = g_irq;
 
 	if (ipl > regs.intmask)
 	{
+#ifdef ATARI_LAT_DIAG
+		/* latency sample: latch (sampler thread) -> here (delivery) */
+		{
+			const uint64_t t_latch = g_irq_latch_us;
+			if (t_latch)
+			{
+				const uint64_t now = get_time_us();
+				const uint32_t d = (uint32_t)(now - t_latch);
+				g_irq_latch_us = 0;
+
+				irqlat.n++;
+				if (d > irqlat.max_us) irqlat.max_us = d;
+				if (d > irqlat.alltime_max_us) irqlat.alltime_max_us = d;
+				if (d > 1000) irqlat.over1ms++;
+				if (d > 2500)
+				{
+					irqlat.over2500us++;
+					/* immediate: what was the guest doing? Rate-limited. */
+					static uint32_t burst; static uint64_t burst_t;
+					if (now - burst_t > 1000000) { burst_t = now; burst = 0; }
+					if (burst < 8)
+					{
+						burst++;
+						fprintf(stderr, "[LAT-STALL] %uus lvl=%u pc=%08X\n",
+							d, ipl, (unsigned)m68k_getpc());
+					}
+				}
+				if (now - irqlat.win_start_us >= 1000000)
+				{
+					if (irqlat.win_start_us && irqlat.n)
+						fprintf(stderr,
+							"[LAT] n=%u max=%uus >1ms=%u >2.5ms=%u alltime=%uus\n",
+							irqlat.n, irqlat.max_us, irqlat.over1ms,
+							irqlat.over2500us, irqlat.alltime_max_us);
+					if (irqlat.win_start_us &&
+					    (g_jp_smc | g_jp_lazy | g_jp_hard | g_jp_comp | g_jp_chk))
+						fprintf(stderr,
+							"[JIT] smc=%u lazy=%u lazymax=%uus hard=%u "
+							"comp=%u compus=%u compmax=%uus "
+							"chk=%u chkus=%u chkmax=%uus\n",
+							g_jp_smc, g_jp_lazy, g_jp_lazy_maxus, g_jp_hard,
+							g_jp_comp, g_jp_comp_us, g_jp_comp_maxus,
+							g_jp_chk, g_jp_chk_us, g_jp_chk_maxus);
+					g_jp_smc = g_jp_lazy = g_jp_lazy_maxus = g_jp_hard = 0;
+					g_jp_comp = g_jp_comp_us = g_jp_comp_maxus = 0;
+					g_jp_chk = g_jp_chk_us = g_jp_chk_maxus = 0;
+					{
+						char hb[256];
+						int hl = 0, any = 0;
+						for (int hv = 0; hv < 16; hv++) {
+							if (!g_irqhist_vec[hv]) continue;
+							hl += snprintf(hb + hl, sizeof hb - (size_t)hl,
+								" v4%X:%u", hv, g_irqhist_vec[hv]);
+							g_irqhist_vec[hv] = 0;
+							any = 1;
+						}
+						for (int hv = 0; hv < 8; hv++) {
+							if (!g_irqhist_lvl[hv]) continue;
+							hl += snprintf(hb + hl, sizeof hb - (size_t)hl,
+								" l%d:%u", hv, g_irqhist_lvl[hv]);
+							g_irqhist_lvl[hv] = 0;
+							any = 1;
+						}
+						if (g_irqhist_hblskip) {
+							hl += snprintf(hb + hl, sizeof hb - (size_t)hl,
+								" hblskip:%u", g_irqhist_hblskip);
+							g_irqhist_hblskip = 0;
+							any = 1;
+						}
+						if (any)
+							fprintf(stderr, "[IRQHIST]%s\n", hb);
+					}
+					/* [IDE] per-second transfer stats; self-silencing
+					 * when the disk is idle. */
+					ide_dump_stats();
+					irqlat.win_start_us = now;
+					irqlat.n = 0; irqlat.max_us = 0;
+					irqlat.over1ms = 0; irqlat.over2500us = 0;
+				}
+			}
+		}
+#endif /* ATARI_LAT_DIAG */
+
 		//printf ("[INTLEV] got interrupt level %d, intmask %d\n", ipl, regs.intmask);
 		g_irq = ipl;
 		g_intmask = regs.intmask;
@@ -10453,6 +10777,23 @@ void do_cycles_stop(int c)
 #ifdef DEBUGGER
 		}
 #endif
+	}
+
+	/* Atari STOP-wake fix (v3): the STOP wait loop can starve the JIT
+	 * dispatcher's g_irq check for milliseconds because the cycle/event
+	 * machinery above refills the countdown every iteration, and the
+	 * sampler's one-shot SPCFLAG_BRK kick was consumed long ago. Kill the
+	 * countdown AFTER the refill so the next block exit reaches the
+	 * dispatcher, which delivers through the normal path. Gated on
+	 * regs.stopped so it can only fire inside the STOP wait loop (v2
+	 * kicked from checkint on every MOVE-to-SR too, storming the run-loop
+	 * relaunch safety net during boot). No SPCFLAG is touched. */
+	{
+		extern volatile uint8_t g_irq;
+		if (regs.stopped && g_irq > regs.intmask) {
+			if (pissoff >= 0)
+				pissoff = -1;
+	}
 	}
 }
 

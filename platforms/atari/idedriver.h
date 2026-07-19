@@ -85,3 +85,17 @@ void ide_detach(struct ide_drive *d);
 void ide_free(struct ide_controller *c);
 
 int IDE_make_drive(uint8_t type, int fd);
+
+/* ---- transfer statistics (host-side, zero hot-path cost) ---- */
+#include <stdint.h>
+struct ide_stats_s {
+    uint32_t sectors_read;
+    uint32_t sectors_written;
+    uint32_t data_words;      /* 16-bit data-port accesses            */
+    uint32_t status_polls;    /* status/alt-status byte reads         */
+    uint32_t commands;        /* command-register writes              */
+    uint8_t  last_cmds[8];    /* ring of recent ATA command bytes     */
+    uint32_t cmd_idx;
+};
+extern struct ide_stats_s ide_stats;
+void ide_dump_stats(void);

@@ -69,6 +69,7 @@ uint32_t pistorm_fvdi_height(void);
 uint32_t pistorm_fvdi_bpp(void);
 int pistorm_fvdi_is_active(void);
 uint64_t pistorm_fvdi_write_count(void);
+void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx);
 #ifdef __cplusplus
 }
 #endif
@@ -82,6 +83,10 @@ uint8_t *fb_ptr;
 uint8_t *vram_ptr;
 volatile int et4000_thread_ready = 0;
 pthread_mutex_t et4000_engine_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* stall attribution (defined in ps_protocol.c, read by jit_stall_probe) */
+extern volatile uint32_t g_cpu_where;
+extern volatile uint32_t g_cpu_where_addr;
 
 /* -----------------------------------------------------------------------
  * SDL2 output backend
@@ -1102,10 +1107,13 @@ uint8_t et4000_io_read8(ET4000State *s, uint32_t port)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
+    g_cpu_where_addr = port;
+    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     uint8_t v = et4000_io_read8_unlocked(s, port);
     pthread_mutex_unlock(&et4000_engine_mutex);
+    g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_RD_WAIT, t1 - t0);
@@ -1118,11 +1126,14 @@ uint16_t et4000_io_read16(ET4000State *s, uint32_t port)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
+    g_cpu_where_addr = port;
+    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     uint16_t v = ((uint16_t)et4000_io_read8_unlocked(s, port) << 8) |
                  et4000_io_read8_unlocked(s, port + 1);
     pthread_mutex_unlock(&et4000_engine_mutex);
+    g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_RD_WAIT, t1 - t0);
@@ -1135,10 +1146,13 @@ int et4000_io_write8(ET4000State *s, uint32_t port, uint8_t val)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
+    g_cpu_where_addr = port;
+    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     int rc = et4000_io_write8_unlocked(s, port, val);
     pthread_mutex_unlock(&et4000_engine_mutex);
+    g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_WR_WAIT, t1 - t0);
@@ -1151,11 +1165,14 @@ int et4000_io_write16(ET4000State *s, uint32_t port, uint16_t val)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
+    g_cpu_where_addr = port;
+    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     et4000_io_write8_unlocked(s, port, (uint8_t)(val >> 8));
     et4000_io_write8_unlocked(s, port + 1, (uint8_t)val);
     pthread_mutex_unlock(&et4000_engine_mutex);
+    g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_WR_WAIT, t1 - t0);
@@ -1167,11 +1184,14 @@ int et4000_io_write32(ET4000State *s, uint32_t port, uint32_t val)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
+    g_cpu_where_addr = port;
+    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     for (int i = 0; i < 4; i++)
         et4000_io_write8_unlocked(s, port + i, (uint8_t)((val >> (24 - 8 * i)) & 0xFF));
     pthread_mutex_unlock(&et4000_engine_mutex);
+    g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_WR_WAIT, t1 - t0);
@@ -1515,6 +1535,37 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
     }
 }
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
+/* 32bpp fvdi row conversion: guest bytes A,R,G,B -> host XRGB8888 (B,G,R,X).
+ * Pure byte permutation, so on aarch64 one TBL handles 4 pixels; index 16 is
+ * out of range and yields 0, patched to 0xFF by the alpha OR. */
+static void fvdi_swizzle_row32(uint32_t *out, const uint8_t *row, uint32_t w)
+{
+    uint32_t x = 0;
+#if defined(__aarch64__)
+    static const uint8_t idx_b[16] = { 3,2,1,16, 7,6,5,16, 11,10,9,16, 15,14,13,16 };
+    const uint8x16_t idx = vld1q_u8(idx_b);
+    const uint32x4_t amask = vdupq_n_u32(0xff000000u);
+    for (; x + 4 <= w; x += 4)
+    {
+        uint8x16_t v = vld1q_u8(row + (size_t)x * 4);
+        uint8x16_t t = vqtbl1q_u8(v, idx);
+        vst1q_u32(out + x, vorrq_u32(vreinterpretq_u32_u8(t), amask));
+    }
+#endif
+    for (; x < w; x++)
+    {
+        const uint8_t *p = row + (size_t)x * 4;
+        out[x] = 0xff000000u |
+                 ((uint32_t)p[1] << 16) |
+                 ((uint32_t)p[2] << 8) |
+                 (uint32_t)p[3];
+    }
+}
+
 static bool blit_fvdi_linear(ET4000State *s, bool *updated)
 {
     static uint64_t last_write_count = UINT64_MAX;
@@ -1543,6 +1594,7 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
     if (write_count == last_write_count && w == last_w && h == last_h && bpp == last_bpp)
         return true;
 
+    bool mode_changed = (w != last_w || h != last_h || bpp != last_bpp);
     last_write_count = write_count;
     last_w = w;
     last_h = h;
@@ -1550,28 +1602,40 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
     if (updated)
         *updated = true;
 
+    /* Dirty-row render (latency work, phase 5): the CPU-side natfeat ops
+     * report the byte extent they touched; only those rows need the ARGB
+     * swizzle. Full-frame swizzles of 2Mpx at 1080p were 22-28ms of steady
+     * render-thread memory traffic that starved the CPU thread's blits. */
+    uint32_t y0 = 0;
+    uint32_t y1 = h - 1;
+    {
+        uint32_t dmin, dmax;
+        uint32_t rowbytes = w * ((bpp == 32) ? 4u : 2u);
+        pistorm_fvdi_fetch_dirty(&dmin, &dmax);
+        if (!mode_changed && dmin < dmax && rowbytes) {
+            y0 = dmin / rowbytes;
+            y1 = (dmax - 1) / rowbytes;
+            if (y1 >= h)
+                y1 = h - 1;
+            if (y0 > y1)
+                y0 = 0;
+        }
+        /* torn or empty extent with a changed write_count, or a mode
+         * change: render the full frame */
+    }
+
     uint32_t *dst = (uint32_t *)s->fb_mem;
     uint32_t dst_pitch = s->fb_stride ? (uint32_t)(s->fb_stride / 4) : w;
 
     if (bpp == 32)
     {
-        for (uint32_t y = 0; y < h; y++)
-        {
-            const uint8_t *row = src + (size_t)y * w * 4;
-            uint32_t *out = dst + (size_t)y * dst_pitch;
-            for (uint32_t x = 0; x < w; x++)
-            {
-                const uint8_t *p = row + x * 4;
-                out[x] = 0xff000000u |
-                         ((uint32_t)p[1] << 16) |
-                         ((uint32_t)p[2] << 8) |
-                         (uint32_t)p[3];
-            }
-        }
+        for (uint32_t y = y0; y <= y1; y++)
+            fvdi_swizzle_row32(dst + (size_t)y * dst_pitch,
+                               src + (size_t)y * w * 4, w);
     }
     else
     {
-        for (uint32_t y = 0; y < h; y++)
+        for (uint32_t y = y0; y <= y1; y++)
         {
             const uint8_t *row = src + (size_t)y * w * 2;
             uint32_t *out = dst + (size_t)y * dst_pitch;
@@ -1743,6 +1807,13 @@ void *render_frame(void *vptr)
             if (took - FRAME_RATE > 2000)
                 printf("[DISPLAY] render overrun source=%s took=%dms budget=%dms\n",
                        render_source, took / 1000, FRAME_RATE / 1000);
+            /* Backpressure (latency work): an overrunning render means the
+             * frame saturated memory bandwidth that the CPU thread's fvdi
+             * blits are competing for. Skip the next frame slot so sustained
+             * full-screen animation drops the renderer to half rate and
+             * gives the CPU thread the bus. No effect when renders fit
+             * their budget. */
+            usleep((useconds_t)FRAME_RATE);
         }
 
         /* frame counter - currently unused */
