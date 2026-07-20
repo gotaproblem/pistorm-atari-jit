@@ -39,6 +39,49 @@
 #define IDEBASE 0x00F00000
 #define IDETOP  0x00F00100
 
+/* Focused IDE access trace (make IDEDBG=1). Register names by offset so the
+ * driver's probe sequence is readable. Status/alt-status reads are logged
+ * only on VALUE CHANGE so a BSY spin-wait shows two lines, not thousands. */
+#ifdef ATARI_IDE_DIAG
+static const char *ide_regname(int base)
+{
+    switch (base) {
+        case 0x00: return "DATA";
+        case 0x05: return "ERR/FEAT";
+        case 0x09: return "SECCNT";
+        case 0x0d: return "SECNUM";
+        case 0x11: return "CYLLO";
+        case 0x15: return "CYLHI";
+        case 0x19: return "DEVHEAD";
+        case 0x1d: return "STAT/CMD";
+        case 0x39: return "CTRL/ALT";
+        default:   return "?";
+    }
+}
+#define IDE_LOG_W(addr, port, base, val) \
+    fprintf(stderr, "[IDEw] @%06X p%d %-8s <= %02X %s\n", \
+            (unsigned)(addr), (port), ide_regname(base), (unsigned)((val)&0xff), \
+            atariIDE[port] ? "" : "(NO DRIVE)")
+#define IDE_LOG_R(addr, port, base, val) \
+    fprintf(stderr, "[IDEr] @%06X p%d %-8s => %02X %s\n", \
+            (unsigned)(addr), (port), ide_regname(base), (unsigned)((val)&0xff), \
+            atariIDE[port] ? "" : "(NO DRIVE)")
+#define IDE_LOG_STAT(addr, port, base, val) do {                 \
+        static int last = -1;                                    \
+        if (((val)&0xff) != last) {                              \
+            last = (val)&0xff;                                   \
+            fprintf(stderr, "[IDEr] @%06X p%d %-8s => %02X%s\n", \
+                    (unsigned)(addr), (port), ide_regname(base), \
+                    (unsigned)((val)&0xff),                      \
+                    atariIDE[port] ? "" : " (NO DRIVE)");        \
+        }                                                        \
+    } while (0)
+#else
+#define IDE_LOG_W(a,p,b,v)    ((void)0)
+#define IDE_LOG_R(a,p,b,v)    ((void)0)
+#define IDE_LOG_STAT(a,p,b,v) ((void)0)
+#endif
+
 
 static struct ide_controller *atariIDE [4] = {NULL, NULL, NULL, NULL};
 
@@ -151,11 +194,13 @@ void writeIDEB ( uint32_t address, unsigned int value )
 
   port = (address & 0xf0) >> 6; /* get IDE interface number 0 - 3 */
 
-  if ( atariIDE [port] ) 
+  IDE_LOG_W(address, port, (int)(address - IDEBASE - (0x40 * port)), value);
+
+  if ( atariIDE [port] )
   {
     base = address - IDEBASE - ( 0x40 * port );
 
-    switch ( base ) 
+    switch ( base )
     {
       case GFEAT_OFFSET:
         //DEBUG_PRINTF ("Write to GFEAT: %.2X.\n", value);
@@ -305,8 +350,11 @@ uint8_t readIDEB ( uint32_t address )
         * not busy / not ready -> the driver falls through to its no-drive
         * path. Other registers keep the floating-bus 0xFF so the ATA
         * signature check still fails and reports "no device". */
-      if (base == GSTATUS_OFFSET || base == GCTRL_OFFSET)
+      if (base == GSTATUS_OFFSET || base == GCTRL_OFFSET) {
+          IDE_LOG_STAT(address, port, base, 0x00);
           return 0x00;
+      }
+      IDE_LOG_R(address, port, base, 0xFF);
       return 0xFF;
   }
 
@@ -361,7 +409,14 @@ uint8_t readIDEB ( uint32_t address )
         return 0xFF;
     }
 
-    return IDE_read8 ( atariIDE [port], IDE_action );
+    {
+      uint8_t rv = IDE_read8 ( atariIDE [port], IDE_action );
+      if (base == GSTATUS_OFFSET || base == GCTRL_OFFSET)
+        IDE_LOG_STAT(address, port, base, rv);   /* transition-logged */
+      else
+        IDE_LOG_R(address, port, base, rv);
+      return rv;
+    }
   }
 
   //DEBUG("Read Byte From IDE Space 0x%06x\n", address);

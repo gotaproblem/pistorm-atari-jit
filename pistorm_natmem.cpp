@@ -1045,9 +1045,14 @@ static uae_u32 io_lget(uaecptr a)
     a &= 0x00FFFFFF;
     if (blitter_hide_addr(a))
     {
-        uae_u32 v = blitter_absent_value(4);
-        blitter_trace("H", a, v, 4);
-        return v;
+        /* Blitter ABSENT semantics: raise a guest bus error exactly like a
+         * machine with no blitter, so TOS/EmuTOS's presence probe fails and
+         * it uses software rendering. Returning a value here (old code) made
+         * the probe detect a phantom blitter whose writes were swallowed -
+         * desktop with no menus. */
+        blitter_trace("H", a, 0, 4);
+        hardware_exception2(a, 0, true, false, sz_long);
+        return 0xFFFFFFFFu; /* not reached */
     }
     if (FDD_enabled && fdd_owns_address(a))
         return fdd_io_read(a, 4);
@@ -1072,9 +1077,10 @@ static uae_u32 io_wget(uaecptr a)
     a &= 0x00FFFFFF;
     if (blitter_hide_addr(a))
     {
-        uae_u32 v = blitter_absent_value(2);
-        blitter_trace("H", a, v, 2);
-        return v;
+        /* Blitter ABSENT: guest bus error, see lget comment. */
+        blitter_trace("H", a, 0, 2);
+        hardware_exception2(a, 0, true, false, sz_word);
+        return 0xFFFFu; /* not reached */
     }
     if (FDD_enabled)
     {
@@ -1108,9 +1114,10 @@ static uae_u32 io_bget(uaecptr a)
     a &= 0x00FFFFFF;
     if (blitter_hide_addr(a))
     {
-        uae_u32 v = blitter_absent_value(1);
-        blitter_trace("H", a, v, 1);
-        return v;
+        /* Blitter ABSENT: guest bus error, see lget comment. */
+        blitter_trace("H", a, 0, 1);
+        hardware_exception2(a, 0, true, false, sz_byte);
+        return 0xFFu; /* not reached */
     }
     if (FDD_enabled)
     {
@@ -1150,8 +1157,10 @@ static void io_lput(uaecptr a, uae_u32 v)
     st_video_snoop32(a, (uint32_t)v);
     if (blitter_hide_addr(a))
     {
+        /* Blitter ABSENT: guest bus error, see lget comment. */
         blitter_trace("h", a, v, 4);
-        return;
+        hardware_exception2(a, v, false, false, sz_long);
+        return; /* not reached */
     }
     if (FDD_enabled && fdd_owns_address(a))
     {
@@ -1181,8 +1190,10 @@ static void io_wput(uaecptr a, uae_u32 v)
     st_video_snoop16(a, (uint16_t)v);
     if (blitter_hide_addr(a))
     {
+        /* Blitter ABSENT: guest bus error, see lget comment. */
         blitter_trace("h", a, v, 2);
-        return;
+        hardware_exception2(a, v, false, false, sz_word);
+        return; /* not reached */
     }
     if (FDD_enabled && fdd_owns_address(a))
     {
@@ -1213,8 +1224,10 @@ static void io_bput(uaecptr a, uae_u32 v)
     st_video_snoop8(a, (uint8_t)v);
     if (blitter_hide_addr(a))
     {
+        /* Blitter ABSENT: guest bus error, see lget comment. */
         blitter_trace("h", a, v, 1);
-        return;
+        hardware_exception2(a, v, false, false, sz_byte);
+        return; /* not reached */
     }
     if (FDD_enabled && fdd_owns_address(a))
     {
@@ -1559,9 +1572,14 @@ static inline uae_u32 hw_blitter_lget(uaecptr a)
 {
     if (blitter_hide_addr(a))
     {
-        uae_u32 v = blitter_absent_value(4);
-        blitter_trace("H", a, v, 4);
-        return v;
+        /* Blitter ABSENT semantics: raise a guest bus error exactly like a
+         * machine with no blitter, so TOS/EmuTOS's presence probe fails and
+         * it uses software rendering. Returning a value here (old code) made
+         * the probe detect a phantom blitter whose writes were swallowed -
+         * desktop with no menus. */
+        blitter_trace("H", a, 0, 4);
+        hardware_exception2(a, 0, true, false, sz_long);
+        return 0xFFFFFFFFu; /* not reached */
     }
 
     uae_u32 v = hw_bus_lget(a);
@@ -1573,9 +1591,10 @@ static inline uae_u32 hw_blitter_wget(uaecptr a)
 {
     if (blitter_hide_addr(a))
     {
-        uae_u32 v = blitter_absent_value(2);
-        blitter_trace("H", a, v, 2);
-        return v;
+        /* Blitter ABSENT: guest bus error, see lget comment. */
+        blitter_trace("H", a, 0, 2);
+        hardware_exception2(a, 0, true, false, sz_word);
+        return 0xFFFFu; /* not reached */
     }
 
     uae_u32 v = hw_bus_wget(a);
@@ -1587,9 +1606,10 @@ static inline uae_u32 hw_blitter_bget(uaecptr a)
 {
     if (blitter_hide_addr(a))
     {
-        uae_u32 v = blitter_absent_value(1);
-        blitter_trace("H", a, v, 1);
-        return v;
+        /* Blitter ABSENT: guest bus error, see lget comment. */
+        blitter_trace("H", a, 0, 1);
+        hardware_exception2(a, 0, true, false, sz_byte);
+        return 0xFFu; /* not reached */
     }
 
     uae_u32 v = hw_bus_bget(a);
@@ -1601,8 +1621,10 @@ static inline void hw_blitter_lput(uaecptr a, uae_u32 v)
 {
     if (blitter_hide_addr(a))
     {
+        /* Blitter ABSENT: guest bus error, see lget comment. */
         blitter_trace("h", a, v, 4);
-        return;
+        hardware_exception2(a, v, false, false, sz_long);
+        return; /* not reached */
     }
 
     hw_bus_lput(a, v);
@@ -1614,8 +1636,10 @@ static inline void hw_blitter_wput(uaecptr a, uae_u32 v)
 {
     if (blitter_hide_addr(a))
     {
+        /* Blitter ABSENT: guest bus error, see lget comment. */
         blitter_trace("h", a, v, 2);
-        return;
+        hardware_exception2(a, v, false, false, sz_word);
+        return; /* not reached */
     }
 
     hw_bus_wput(a, v);
@@ -1627,8 +1651,10 @@ static inline void hw_blitter_bput(uaecptr a, uae_u32 v)
 {
     if (blitter_hide_addr(a))
     {
+        /* Blitter ABSENT: guest bus error, see lget comment. */
         blitter_trace("h", a, v, 1);
-        return;
+        hardware_exception2(a, v, false, false, sz_byte);
+        return; /* not reached */
     }
 
     hw_bus_bput(a, v);

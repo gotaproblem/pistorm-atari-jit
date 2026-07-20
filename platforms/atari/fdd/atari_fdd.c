@@ -77,6 +77,7 @@ extern "C" {
 #endif
 
 void pistorm_dma_to_stram(uint32_t, const uint8_t*, uint32_t);
+void pistorm_dma_from_stram(uint32_t, uint8_t*, uint32_t);
 
 #ifdef __cplusplus
 }
@@ -92,9 +93,13 @@ static void dma_copy_to_ram(uint32_t addr, const uint8_t *buf, size_t count)
 
 static void dma_copy_from_ram(uint32_t addr, uint8_t *buf, size_t count)
 {
-    for (int i = 0; i < count; i++ ) {
-        *buf++     = ps_read_8 (addr + i);
-    }
+    /* Snapshot the CPU's *authoritative* memory (the natmem mirror), NOT the
+     * real bus. CPU stores to ST-RAM always land in natmem but are only
+     * conditionally written through to the bus (stram_needs_bus_write), so
+     * reading ps_read_8() here captures STALE bus bytes -> the FDC then writes
+     * garbage sectors to the .st image, progressively corrupting the FAT /
+     * directory / files. Read natmem so we write exactly what the guest wrote. */
+    pistorm_dma_from_stram(addr, buf, (uint32_t)count);
 }
 
 /* =========================================================================
@@ -402,9 +407,9 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
  * PSG Port A - drive and side selection
  *
  * Atari ST hardware wiring (from official schematics):
+ *   PSG port A bit 0 (/SIDE1)   = 0 → side 1, = 1 → side 0
  *   PSG port A bit 1 (/DRIVE_A) = 0 → drive A selected
- *   PSG port A bit 0 (/DRIVE_B) = 0 → drive B selected
- *   PSG port A bit 2 (/SIDE1)   = 0 → side 1, = 1 → side 0
+ *   PSG port A bit 2 (/DRIVE_B) = 0 → drive B selected
  * ========================================================================= */
 
 static uint32_t psg_read_addr(uint32_t addr, int size)
@@ -814,6 +819,11 @@ static void fdc_do_type1(uint8_t cmd)
         //        'A' + drv, d->current_track, cmd);
     }
 
+#if defined(ATARI_LAT_DIAG) || defined(ATARI_IDE_DIAG)
+    fprintf(stderr, "[FDC-T1] cmd=%02X drv=%d data=%u -> trk=%d\n",
+            cmd, drv, fdc.data_reg, d->current_track);
+#endif
+
     /* Update Track 0 status bit */
     if (d->current_track == 0)
         fdc.status |= FDC_STATUS_TRACK0;
@@ -897,6 +907,12 @@ static void fdc_do_read_sectors(void)
     }
 
     int img_ret = fdd_image_read(drv, track, side, sector, count, buf);
+#if defined(ATARI_LAT_DIAG) || defined(ATARI_IDE_DIAG)
+    fprintf(stderr, "[FDC-RD] T%d S%d sec%d n%d dma=%06X treg=%u %s %02X %02X\n",
+            track, side, sector, count, fdc.dma_addr, fdc.track_reg,
+            img_ret < 0 ? "FAIL" : "ok",
+            img_ret < 0 ? 0 : buf[0], img_ret < 0 ? 0 : buf[1]);
+#endif
     static int read_count = 0;
     //fprintf(stderr, "[COUNT] Read #%d T%d S%d Sec%d %s\n",
     //        ++read_count, track, side, sector,

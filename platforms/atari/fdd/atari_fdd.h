@@ -66,9 +66,15 @@
 /* =========================================================================
  * PSG Port A Bits
  * ========================================================================= */
-#define PSG_DRIVE_B_SEL     (1u << 0)   /* 0=drive B selected */
+/* Real Atari ST YM2149 port A wiring:
+ *   bit 0 = floppy side select (0 -> side 1, 1 -> side 0)
+ *   bit 1 = /drive A select    (0 -> drive A selected)
+ *   bit 2 = /drive B select    (0 -> drive B selected)
+ * (side and drive-B were previously swapped, which forced every access to
+ *  side 0 whenever drive A was in use -> side-1 sectors read garbage.) */
+#define PSG_SIDE_SEL        (1u << 0)   /* 0=side 1, 1=side 0 */
 #define PSG_DRIVE_A_SEL     (1u << 1)   /* 0=drive A selected */
-#define PSG_SIDE_SEL        (1u << 2)   /* 0=side 1, 1=side 0 */
+#define PSG_DRIVE_B_SEL     (1u << 2)   /* 0=drive B selected */
 
 /* =========================================================================
  * WD1772 FDC Register Indices (DMA mode A1:A0)

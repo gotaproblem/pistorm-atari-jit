@@ -47,6 +47,7 @@ CFILES = config_file/config_file.c \
 # -----------------------------------------------------------------
 PISTORM_CPP = emulator.c \
               platforms/atari/et4000/et4000.c \
+              platforms/atari/et4000/et4000_drm.c \
               platforms/atari/et4000/pcem/vid_svga.c \
               platforms/atari/et4000/pcem/vid_svga_render.c \
               platforms/atari/et4000/pcem/vid_et4000.c \
@@ -138,6 +139,13 @@ endif
 # Off by default; enable with:  make DIAG=1
 ifeq ($(DIAG),1)
 DEFS += -DATARI_LAT_DIAG
+endif
+
+# Focused storage diagnostics (FDC load trace + real-time IDE register
+# access log), WITHOUT the LAT/STALL/IRQHIST/FVDI firehose. Enable with:
+#   make IDEDBG=1
+ifeq ($(IDEDBG),1)
+DEFS += -DATARI_IDE_DIAG
 endif
 
 # Include order is critical: our dir (.) FIRST so our sysconfig.h / sysdeps.h

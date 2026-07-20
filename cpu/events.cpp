@@ -350,6 +350,69 @@ void do_cycles_slow(int cycles_to_add)
 		}
 	}
 	currcycle += cycles_to_add;     /* PiStorm: advance the clock, no event dispatch */
+
+#ifndef AMIGA_
+	/* PiStorm Atari: wall-clock governor for real-68000-speed gaming.
+	 * The Amiga vsync-wait machinery that normally converts virtual cycles
+	 * into real time was swept out with the chipset layer, so m68k_speed=0
+	 * accounted cycles but nothing ever paced them - the CPU ran at Pi
+	 * speed regardless. This paces currcycle against CLOCK_MONOTONIC.
+	 * Reference: one 8MHz CPU cycle = CYCLE_UNIT/2 currcycle units = 125ns.
+	 * cpu_clock_multiplier already scales the per-instruction consumption
+	 * (via cpucycleunit), so it directly scales the governed speed:
+	 * unset/256 = 8MHz, 512 = 16MHz, plain 2 = 4MHz.
+	 * Active ONLY with m68k_speed=0 and the JIT off (interpreter); the
+	 * default max-speed configs never enter this block.
+	 * Sleeps are capped at 1ms per check so level-6 interrupt latency
+	 * stays well inside the ACIA's 2.5ms budget. */
+	if (currprefs.m68k_speed == 0 && !currprefs.cachesize) {
+		static evt_t gov_cyc0;
+		static int64_t gov_ns0;
+		static evt_t gov_next;
+		static int gov_on = 0;
+		static int64_t gov_khz;
+		if (!gov_on || currcycle < gov_cyc0) {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			gov_ns0 = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+			gov_cyc0 = currcycle;
+			gov_next = currcycle + (evt_t)1000 * (CYCLE_UNIT / 2);
+			if (!gov_on) {
+				/* Governed speed in kHz; default a real 8MHz ST. Bus-write
+				 * heavy code runs under budget regardless (each ST-RAM
+				 * write costs 1-2us of real bus time vs 500ns on a real
+				 * ST), so a slightly higher target here compensates the
+				 * average - tune to taste, e.g. 9000-10000. */
+				const char *env = getenv("PISTORM_GOV_KHZ");
+				gov_khz = env ? atoll(env) : 8000;
+				if (gov_khz < 1000 || gov_khz > 64000)
+					gov_khz = 8000;
+				fprintf(stderr, "[GOV] 68k governor active: %lld kHz\n",
+				        (long long)gov_khz);
+			}
+			gov_on = 1;
+		}
+		if (currcycle >= gov_next) {
+			struct timespec ts;
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			int64_t real_ns = ((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec) - gov_ns0;
+			int64_t virt_ns = (int64_t)((currcycle - gov_cyc0) / (CYCLE_UNIT / 2))
+			                  * 1000000LL / gov_khz;
+			int64_t ahead_ns = virt_ns - real_ns;
+			if (ahead_ns > 150000)
+				usleep(ahead_ns > 1000000 ? 1000 : (useconds_t)(ahead_ns / 1000));
+			else if (ahead_ns < -2000000LL) {
+				/* Behind by >2ms (bus-bound stretch, host stall): re-anchor
+				 * so the deficit is forgiven rather than repaid as an
+				 * unthrottled sprint through the next light section -
+				 * uniform pacing feels right, oscillation doesn't. */
+				gov_ns0 -= ahead_ns + 2000000LL;
+			}
+			/* next check after ~1000 guest cycles (~125us of guest time) */
+			gov_next = currcycle + (evt_t)1000 * (CYCLE_UNIT / 2);
+		}
+	}
+#endif
 #ifdef AMIGA_
 	while (cycles_to_add >= CYCLE_UNIT) {
 
