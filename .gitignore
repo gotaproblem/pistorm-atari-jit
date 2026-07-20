@@ -16,7 +16,6 @@ perf.data.old
 /m68kmake.exe
 /m68kops.c
 /m68kops.h
-/emulator
-/ataritest
 /rtl/._*
 nprog_log.txt
+run.log

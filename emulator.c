@@ -1028,8 +1028,10 @@ int main (int argc, char *argv[])
         usleep(1000);
       if (et4000_thread_ready < 0)
       {
-        fprintf(stderr, "[ERROR] Display thread failed to initialise\n");
-        return 1;
+        /* No HDMI/SDL surface available (e.g. headless Pi): don't abort the
+         * whole emulator — carry on without the mirror; the real Atari video
+         * output is unaffected. */
+        fprintf(stderr, "[WARN] Display/native-HDMI init failed; continuing without screen mirror\n");
       }
     }
   }

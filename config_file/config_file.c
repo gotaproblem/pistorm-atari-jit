@@ -163,7 +163,13 @@ bool emulator_config_native_hdmi_enabled(void)
 
 bool emulator_config_display_enabled(void)
 {
-  return current_config ? current_config->graphics.card != NO_GRAPHICS_CARD : false;
+  if (!current_config)
+    return false;
+  /* The render thread also drives the "native_hdmi" ST-screen mirror, so it
+   * must start whenever a graphics card OR native HDMI mirroring is requested,
+   * not only for an emulated VGA card. */
+  return current_config->graphics.card != NO_GRAPHICS_CARD
+      || current_config->native_hdmi;
 }
 
 bool emulator_config_et4k_enabled(void)

@@ -102,6 +102,16 @@ static SDL_Window *g_sdl_win = NULL;
 static SDL_Renderer *g_sdl_ren = NULL;
 static SDL_Texture *g_sdl_tex = NULL;
 static int g_sdl_tex_has_frame = 0;
+/* Dirty-row extent of the last fvdi staging render, for partial texture
+ * upload in sdl_present. g_fvdi_up_partial=1 means the texture already
+ * holds a valid frame and only rows y0..y1 changed; 0 forces a full
+ * upload (first frame, mode change, or non-fvdi render source).
+ * g_sdl_tex_valid tracks "texture has received at least one full upload
+ * since (re)creation" - partial updates are only legal on top of that. */
+static uint32_t g_fvdi_up_y0 = 0;
+static uint32_t g_fvdi_up_y1 = 0;
+static int g_fvdi_up_partial = 0;
+static int g_sdl_tex_valid = 0;
 
 /* Native-resolution staging: the blits decode 1:1 into g_logical at the
  * mode's source resolution; the texture is sized to match; the GPU does the
@@ -116,6 +126,11 @@ static uint32_t g_tex_w = 0, g_tex_h = 0;   /* current texture (native) size */
 static uint32_t g_disp_w = 0, g_disp_h = 0; /* current renderer logical size  */
 
 static int g_fbdev_mode = 0;
+/* Direct DRM/KMS scanout (PISTORM_VGA_DRM=1): the staging buffer IS the
+ * scanout buffer - the dirty-row swizzle writes straight into display
+ * memory and presentation costs nothing. See et4000_drm.c. */
+#include "et4000_drm.h"
+static int g_drm_mode = 0;
 static int g_fbdev_fd = -1;
 static uint8_t *g_fbdev_mem = NULL;
 static size_t g_fbdev_size = 0;
@@ -450,6 +465,25 @@ volatile uint8_t _VSYNC;
 
 static int sdl_open(ET4000State *s, const char *unused_dev)
 {
+    {
+        const char *drm_env = getenv("PISTORM_VGA_DRM");
+        if (drm_env && *drm_env == '1')
+        {
+            if (drmpres_open() == 0)
+            {
+                g_drm_mode = 1;
+                s->fb_mem = NULL;      /* set per-source in sdl_set_logical */
+                s->fb_size = 0;
+                s->fb_width = 0;
+                s->fb_height = 0;
+                s->fb_stride = 0;
+                return 0;
+            }
+            fprintf(stderr, "[ET4000] PISTORM_VGA_DRM set but DRM init "
+                            "failed - falling back to SDL\n");
+        }
+    }
+
     g_fbdev_mode = getenv("PISTORM_VGA_FBDEV") ? 1 : 0;
     if (g_fbdev_mode)
     {
@@ -576,6 +610,33 @@ static void sdl_set_logical(ET4000State *s, uint32_t w, uint32_t h,
     if (h > ET4K_MAX_LH)
         h = ET4K_MAX_LH;
 
+    if (g_drm_mode)
+    {
+        /* Blit target = scanout memory, source image centered 1:1 in the
+         * mode (black borders for smaller-than-mode guest resolutions;
+         * 1920x1080 fvdi is exact fullscreen). */
+        uint32_t mw = drmpres_mode_w();
+        uint32_t mh = drmpres_mode_h();
+        uint32_t pitch = drmpres_pitch();
+        uint8_t *base = drmpres_fb();
+        if (!base || mw == 0 || mh == 0)
+            return;
+        if (w > mw) w = mw;
+        if (h > mh) h = mh;
+        if (w != g_tex_w || h != g_tex_h)
+        {
+            memset(base, 0, (size_t)pitch * mh);   /* clear old image+borders */
+            g_tex_w = w;
+            g_tex_h = h;
+        }
+        s->fb_mem = base + (size_t)((mh - h) / 2) * pitch
+                         + (size_t)((mw - w) / 2) * 4;
+        s->fb_width = w;
+        s->fb_height = h;
+        s->fb_stride = pitch;
+        return;
+    }
+
     s->fb_mem = (uint8_t *)(g_logical + ET4K_ROW_PAD);
     s->fb_width = w;
     s->fb_height = h;
@@ -592,6 +653,7 @@ static void sdl_set_logical(ET4000State *s, uint32_t w, uint32_t h,
                                       SDL_TEXTUREACCESS_STREAMING,
                                       (int)w, (int)h);
         g_sdl_tex_has_frame = 0;
+        g_sdl_tex_valid = 0;   /* fresh texture: next upload must be full */
         if (g_sdl_tex)
             SDL_SetTextureScaleMode(g_sdl_tex, SDL_ScaleModeNearest);
         g_tex_w = w;
@@ -701,6 +763,26 @@ static void sdl_present (ET4000State *s)
         g_screenrecord_req = 0;
     }
 
+    if (g_drm_mode)
+    {
+        /* Scanout is live - the swizzle already wrote display memory, so
+         * presenting costs nothing. (Screendump reads write-combined
+         * memory: slow but correct, and it's a user-triggered one-off.) */
+        if (g_screendump_req)
+        {
+            g_screendump_req = 0;
+            if (s->fb_mem && s->fb_width && s->fb_height && s->fb_stride &&
+                save_png_rgb("screendump.png", (const uint32_t *)s->fb_mem,
+                             s->fb_width, s->fb_height, s->fb_stride / 4) == 0)
+                printf("[DISPLAY] Screendump %ux%u -> screendump.png\n",
+                       s->fb_width, s->fb_height);
+            else
+                fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
+        }
+        et4000_record_frame(s);
+        return;
+    }
+
     if (g_fbdev_mode)
     {
         if (g_screendump_req)
@@ -725,7 +807,41 @@ static void sdl_present (ET4000State *s)
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     if (!g_sdl_tex_has_frame)
     {
-        if (SDL_UpdateTexture(g_sdl_tex, NULL, s->fb_mem, (int)s->fb_stride) == 0)
+        int rc = -1;
+        /* Partial upload: only the dirty rows the fvdi staging render
+         * touched. Legal only once the texture holds a full frame, and only
+         * when the extent is sane against the current texture size.
+         * DEFAULT OFF (PISTORM_PARTIAL_UPLOAD=1 to enable): first hardware
+         * test left stale rows on the HDMI output - suspected sub-rect
+         * glTexSubImage2D quirk in the KMSDRM/GLES2 driver, needs a
+         * dedicated diagnosis session. Extent bookkeeping is correct (same
+         * rows the swizzle uses), so the fallback full upload is exactly
+         * the pre-change behavior. */
+        static int partial_enabled = -1;
+        if (partial_enabled < 0)
+        {
+            const char *env = getenv("PISTORM_PARTIAL_UPLOAD");
+            partial_enabled = (env && *env == '1') ? 1 : 0;
+        }
+        if (partial_enabled && g_fvdi_up_partial && g_sdl_tex_valid &&
+            g_fvdi_up_y0 <= g_fvdi_up_y1 && g_fvdi_up_y1 < g_tex_h)
+        {
+            SDL_Rect r;
+            r.x = 0;
+            r.y = (int)g_fvdi_up_y0;
+            r.w = (int)g_tex_w;
+            r.h = (int)(g_fvdi_up_y1 - g_fvdi_up_y0 + 1);
+            rc = SDL_UpdateTexture(g_sdl_tex, &r,
+                                   s->fb_mem + (size_t)g_fvdi_up_y0 * s->fb_stride,
+                                   (int)s->fb_stride);
+        }
+        else
+        {
+            rc = SDL_UpdateTexture(g_sdl_tex, NULL, s->fb_mem, (int)s->fb_stride);
+            if (rc == 0)
+                g_sdl_tex_valid = 1;
+        }
+        if (rc == 0)
             g_sdl_tex_has_frame = 1;
         if (t0)
             et4000_profile_add(ET4K_PROF_SDL_UPDATE, et4000_profile_now_ns() - t0);
@@ -790,7 +906,7 @@ static void sdl_present (ET4000State *s)
 static void sdl_pump(void)
 {
     extern volatile int cpu_emulation_running;
-    if (g_fbdev_mode)
+    if (g_fbdev_mode || g_drm_mode)
         return;
 
     SDL_Event e;
@@ -805,6 +921,15 @@ static void sdl_pump(void)
 
 static void sdl_close(ET4000State *s)
 {
+    if (g_drm_mode)
+    {
+        drmpres_close();       /* restores the previous CRTC config */
+        g_drm_mode = 0;
+        if (s)
+            s->fb_mem = NULL;
+        return;
+    }
+
     if (g_fbdev_mode)
     {
         fbdev_close_output();
@@ -1624,6 +1749,12 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
          * change: render the full frame */
     }
 
+    /* Publish the extent for sdl_present's partial texture upload. A
+     * full-height extent or mode change is equivalent to a full upload. */
+    g_fvdi_up_y0 = y0;
+    g_fvdi_up_y1 = y1;
+    g_fvdi_up_partial = !mode_changed;
+
     uint32_t *dst = (uint32_t *)s->fb_mem;
     uint32_t dst_pitch = s->fb_stride ? (uint32_t)(s->fb_stride / 4) : w;
 
@@ -1733,6 +1864,7 @@ void *render_frame(void *vptr)
             }
 
             else if (show_rtg) {
+                g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
                 et4000_update_display (g_et4000); /* aperture has pixels -> show RTG */
                 render_source = "et4000";
                 rendered = true;
@@ -1743,6 +1875,7 @@ void *render_frame(void *vptr)
                      rtg.vram_base + 0x8000 < 0xE00000)
             {
                 g_sdl_tex_has_frame = 0;
+                g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
                 blit_st_native(g_et4000,
                                st_native_frame_source(rtg.vram_base, rtg.natmem + rtg.vram_base),
                                rtg.shift_mode); /* Native ST screen, including real blitter DMA writes. */
