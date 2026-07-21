@@ -15,11 +15,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "dmasnd.h"
 
-#define RING_BYTES (1u << 18)          /* 256 KiB raw-sample FIFO (pow2) */
+#define RING_BYTES (1u << 20)          /* 1 MiB raw-sample FIFO (pow2) - holds a
+                                          couple of the ~180 KB MiNT buffers plus
+                                          the pre-roll cushion */
 #define RING_MASK  (RING_BYTES - 1)
 #define MAX_FRAMES 2048                /* per writei() */
 #define PRIME_BYTES 24576u             /* pre-roll cushion (~0.5 s) */
@@ -32,6 +35,13 @@ static unsigned long long now_us(void)
 {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000ull;
+}
+
+static int dmasnd_out_dbg(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("PISTORM_DMASND_DEBUG"); v = (e && *e == '1') ? 1 : 0; }
+    return v;
 }
 
 void dmasnd_note_frame_len(unsigned bytes)
@@ -125,6 +135,9 @@ static void *audio_thread(void *arg)
     int      primed = 0;
     int16_t  out[MAX_FRAMES * 2];
 
+    unsigned long long last_commit_seen = 0;
+    unsigned commit_interval_us = 40000;        /* seed ~40 ms until measured */
+
     while (atomic_load(&running)) {
         unsigned rate   = atomic_load(&a_rate);
         int      stereo = atomic_load(&a_stereo);
@@ -135,18 +148,64 @@ static void *audio_thread(void *arg)
             else { usleep(5000); continue; }
         }
 
+        /* Track the gap between commits (accepted buffers). This, not the
+           buffer size, is what sets how much slack we need: a bursty player
+           (big buffers, long gaps -> MP3/MOD) needs a deep cushion; a fast
+           interactive stream (small buffers, short gaps -> Doom) needs almost
+           none, so it stays low-latency. */
+        unsigned long long lc = atomic_load(&g_last_commit_us);
+        if (lc && lc != last_commit_seen) {
+            if (last_commit_seen && lc > last_commit_seen) {
+                unsigned d = (unsigned)(lc - last_commit_seen);
+                if (d > 3000000u) d = 3000000u;                    /* clamp pauses */
+                commit_interval_us = (commit_interval_us * 3u + d) / 4u; /* smooth */
+            }
+            last_commit_seen = lc;
+        }
+
         unsigned tail  = atomic_load_explicit(&r_tail, memory_order_relaxed);
         unsigned head  = atomic_load_explicit(&r_head, memory_order_acquire);
         unsigned avail = head - tail;
         /* Pre-roll: build a cushion before draining, and re-prime after any
            drain to empty. This is the only cushion available for sources with
            no lookahead (a player refilling one buffer in place per frame). */
-        /* Cushion scales with the commit size: a big-buffer player (bursty,
-           ~1 commit/sec) needs ~2 buffers so the trough between bursts never
-           hits zero; a chunk streamer stays tight and low-latency. */
-        unsigned prime = atomic_load(&g_frame_len) * 2u;
-        if (prime < 16384u)  prime = 16384u;
-        if (prime > 131072u) prime = 131072u;
+        /* Cushion = ~2x the measured commit interval worth of samples. */
+        /* Two kinds of source need opposite cushions, so choose by buffer size:
+             - big-buffer bursty players (MP3/MOD, ~180 KB commits): need ~2
+               buffers so the trough between infrequent refills never hits zero.
+               Latency is irrelevant for playback.
+             - small-buffer interactive streams (Doom, system sounds): cushion
+               scales with the commit interval so it stays low-latency. Tune the
+               interval factor with PISTORM_DMASND_CUSHION (percent, default 80). */
+        static int cushion_pct = -1;
+        if (cushion_pct < 0) {
+            const char *e = getenv("PISTORM_DMASND_CUSHION");
+            int p = e ? atoi(e) : 0;
+            cushion_pct = (p >= 25 && p <= 400) ? p : 80;
+        }
+        unsigned byterate = rate * (unsigned)(stereo ? 2 : 1);   /* bytes/sec */
+        unsigned flen = atomic_load(&g_frame_len);
+        unsigned prime;
+        if (flen >= 32768u) {
+            prime = flen * 2u;                          /* bursty big-buffer */
+        } else {
+            uint64_t cush = ((uint64_t)commit_interval_us * byterate) / 1000000ull;
+            prime = (unsigned)(cush * (unsigned)cushion_pct / 100u);   /* stream */
+        }
+        if (prime < 2048u)   prime = 2048u;
+        if (prime > 524288u) prime = 524288u;   /* hard cap (ring is 1 MiB) */
+
+        if (dmasnd_out_dbg()) {
+            static unsigned long long last_log = 0;
+            unsigned long long tnow = now_us();
+            if (tnow - last_log >= 1000000ull) {
+                last_log = tnow;
+                fprintf(stderr, "[dmasnd] rate=%u intv=%ums cush=%u avail=%u "
+                        "frame_len=%u xrun=%u primed=%d\n",
+                        rate, commit_interval_us / 1000u, prime, avail,
+                        atomic_load(&g_frame_len), atomic_load(&xruns), primed);
+            }
+        }
         if (!primed) {
             int ready = (avail >= prime);
             if (!ready && avail > 0 && !dmasnd_is_repeat()) {

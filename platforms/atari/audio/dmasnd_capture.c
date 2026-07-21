@@ -25,9 +25,23 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "dmasnd.h"
 
 #define DMASND_DEBUG 0
+
+/* Opt-in probe (PISTORM_DMASND_DEBUG=1): traces the capture chain so we can see
+ * where DMA sound stalls - whether the guest ever writes the $FF89xx registers,
+ * whether commits fire, and whether the pump accepts or rejects each buffer. */
+static int dmasnd_dbg(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_DMASND_DEBUG");
+        v = (e && *e == '1') ? 1 : 0;
+    }
+    return v;
+}
 
 extern unsigned char *natmem_offset;    /* pistorm_natmem.cpp: flat ST-RAM mmap */
 #define ST_RAM_SIZE 0x00400000u
@@ -37,7 +51,8 @@ static const unsigned ste_rates[4] = { 6258, 12517, 25033, 50066 };
 #define SND_BASE    0x00FF8900u
 #define SND_TOP     0x00FF8925u
 #define ADDR_MASK   0x003FFFFEu
-#define MAX_FRAME   0x00020000u          /* sanity cap on one commit (128 KB) */
+#define MAX_FRAME   0x00040000u          /* sanity cap on one commit (256 KB) -
+                                            MiNT players use ~180 KB buffers */
 #define PUMP_US     500                  /* poll faster than the 20 ms VBL */
 
 static uint8_t      reg[0x26];
@@ -55,7 +70,9 @@ static uint32_t end_addr(void)
 
 static void dmasnd_commit(const char *why)
 {
-    (void)why;
+    if (dmasnd_dbg())
+        fprintf(stderr, "[dmasnd] commit (%s) en=%d rpt=%d\n", why,
+                atomic_load(&g_enabled), atomic_load(&g_repeat));
     atomic_fetch_add(&g_gen, 1);
 }
 
@@ -67,6 +84,15 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
     if (a < SND_BASE || a > SND_TOP) return;
     uint32_t off = a - SND_BASE;
     reg[off] = val;
+
+    if (dmasnd_dbg()) {
+        static int first = 1;
+        if (first) {
+            first = 0;
+            fprintf(stderr, "[dmasnd] first sound-reg write seen: $%06X = 0x%02X\n",
+                    a, val);
+        }
+    }
 
     if (off == 0x00 || off == 0x01) {
         int was_enabled = atomic_load(&g_enabled);
@@ -127,6 +153,14 @@ static void *pump_thread(void *arg)
                     }
                     dmasnd_note_frame_len(e - s);
                     dmasnd_write_bytes(&natmem_offset[s], e - s);
+                    if (dmasnd_dbg())
+                        fprintf(stderr, "[dmasnd] accept s=0x%06X e=0x%06X len=%u "
+                                "%s %uHz\n", s, e, e - s,
+                                (m & 0x80) ? "mono" : "stereo", ste_rates[m & 3]);
+                } else if (dmasnd_dbg()) {
+                    fprintf(stderr, "[dmasnd] REJECT s=0x%06X e=0x%06X len=%d mode=0x%02X"
+                            " (need e>s, len<=%u, e<=0x%X)\n",
+                            s, e, (int)e - (int)s, m, MAX_FRAME, ST_RAM_SIZE);
                 }
             }
         }

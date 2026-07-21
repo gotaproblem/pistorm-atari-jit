@@ -466,21 +466,37 @@ volatile uint8_t _VSYNC;
 static int sdl_open(ET4000State *s, const char *unused_dev)
 {
     {
+        /* DRM/KMS direct scanout is the DEFAULT display path. Opt out with
+         * PISTORM_VGA_DRM=0 (or select another backend with PISTORM_VGA_SDL=1
+         * / PISTORM_VGA_FBDEV=1) to fall back to SDL/fbdev. */
         const char *drm_env = getenv("PISTORM_VGA_DRM");
-        if (drm_env && *drm_env == '1')
+        int drm_disabled = (drm_env && *drm_env == '0')
+                           || getenv("PISTORM_VGA_SDL")
+                           || getenv("PISTORM_VGA_FBDEV");
+        if (!drm_disabled)
         {
             if (drmpres_open() == 0)
             {
+                /* Render through the same padded staging buffer every other
+                 * backend uses; sdl_present copies the visible frame into the
+                 * DRM buffer and the HVS scales it. */
+                g_logical = (uint32_t *)calloc((size_t)ET4K_STAGE_PITCH * ET4K_MAX_LH, 4);
+                if (!g_logical)
+                {
+                    fprintf(stderr, "[ET4000] staging buffer alloc failed\n");
+                    drmpres_close();
+                    return -1;
+                }
                 g_drm_mode = 1;
-                s->fb_mem = NULL;      /* set per-source in sdl_set_logical */
-                s->fb_size = 0;
+                s->fb_mem = (uint8_t *)(g_logical + ET4K_ROW_PAD);
+                s->fb_size = (size_t)ET4K_STAGE_PITCH * ET4K_MAX_LH * 4;
                 s->fb_width = 0;
                 s->fb_height = 0;
                 s->fb_stride = 0;
                 return 0;
             }
-            fprintf(stderr, "[ET4000] PISTORM_VGA_DRM set but DRM init "
-                            "failed - falling back to SDL\n");
+            fprintf(stderr, "[ET4000] DRM init failed - falling back to SDL "
+                            "(set PISTORM_VGA_SDL=1 to skip DRM)\n");
         }
     }
 
@@ -612,28 +628,19 @@ static void sdl_set_logical(ET4000State *s, uint32_t w, uint32_t h,
 
     if (g_drm_mode)
     {
-        /* Blit target = scanout memory, source image centered 1:1 in the
-         * mode (black borders for smaller-than-mode guest resolutions;
-         * 1920x1080 fvdi is exact fullscreen). */
-        uint32_t mw = drmpres_mode_w();
-        uint32_t mh = drmpres_mode_h();
-        uint32_t pitch = drmpres_pitch();
-        uint8_t *base = drmpres_fb();
-        if (!base || mw == 0 || mh == 0)
+        /* Phase 2: render into the padded staging buffer (identical layout to
+         * the fbdev path, so et4000_engine_render_direct's left-pad/stride
+         * assumptions hold). sdl_present copies the visible w x h into the DRM
+         * double buffer and the vc4 HVS scales it to fullscreen. Size the DRM
+         * buffers to the native mode (no-op if unchanged). */
+        if (drmpres_set_source(w, h) != 0)
             return;
-        if (w > mw) w = mw;
-        if (h > mh) h = mh;
-        if (w != g_tex_w || h != g_tex_h)
-        {
-            memset(base, 0, (size_t)pitch * mh);   /* clear old image+borders */
-            g_tex_w = w;
-            g_tex_h = h;
-        }
-        s->fb_mem = base + (size_t)((mh - h) / 2) * pitch
-                         + (size_t)((mw - w) / 2) * 4;
-        s->fb_width = w;
+        s->fb_mem    = (uint8_t *)(g_logical + ET4K_ROW_PAD);
+        s->fb_width  = w;
         s->fb_height = h;
-        s->fb_stride = pitch;
+        s->fb_stride = ET4K_STAGE_PITCH * 4;
+        g_tex_w = w;
+        g_tex_h = h;
         return;
     }
 
@@ -765,9 +772,8 @@ static void sdl_present (ET4000State *s)
 
     if (g_drm_mode)
     {
-        /* Scanout is live - the swizzle already wrote display memory, so
-         * presenting costs nothing. (Screendump reads write-combined
-         * memory: slow but correct, and it's a user-triggered one-off.) */
+        /* Screendump/record read the just-rendered back buffer (write-combined:
+         * slow but correct, user-triggered one-off) BEFORE we flip it. */
         if (g_screendump_req)
         {
             g_screendump_req = 0;
@@ -780,6 +786,24 @@ static void sdl_present (ET4000State *s)
                 fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
         }
         et4000_record_frame(s);
+
+        /* Copy the visible frame from the padded staging buffer into the DRM
+         * back buffer (cached read -> write-combined write), then scale-present
+         * to fullscreen and swap. */
+        uint8_t *back = drmpres_backbuffer();
+        if (back && s->fb_mem && s->fb_stride)
+        {
+            uint32_t bp = drmpres_src_pitch();
+            uint32_t sw = drmpres_src_w();
+            uint32_t sh = drmpres_src_h();
+            uint32_t rowbytes = sw * 4;
+            if (rowbytes > bp)
+                rowbytes = bp;
+            for (uint32_t y = 0; y < sh; y++)
+                memcpy(back + (size_t)y * bp,
+                       s->fb_mem + (size_t)y * s->fb_stride, rowbytes);
+        }
+        drmpres_flip();
         return;
     }
 
@@ -925,6 +949,11 @@ static void sdl_close(ET4000State *s)
     {
         drmpres_close();       /* restores the previous CRTC config */
         g_drm_mode = 0;
+        if (g_logical)
+        {
+            free(g_logical);
+            g_logical = NULL;
+        }
         if (s)
             s->fb_mem = NULL;
         return;
