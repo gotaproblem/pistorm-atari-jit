@@ -12,12 +12,29 @@ clean **`--uninstall`** that reverses every system change.
 
 ## Requirements
 
-- **Raspberry Pi 4** (Pi 3 and Pi Zero 2 W are also detected). 64-bit.
+- **64-bit OS (aarch64).** The JIT backend is AArch64-only — a 32-bit OS can
+  neither build nor run it. **The installer aborts if the OS isn't 64-bit.**
+- **Raspberry Pi 4** recommended (Pi 3 and Pi Zero 2 W are currently not supported).
 - **Raspberry Pi OS Lite (64-bit)** — a fresh install is fine and recommended.
+- **No desktop environment.** PiSTorm JIT can't run with a desktop: the
+  compositor holds the display/DRM master (so `native_hdmi`/KMSDRM can't get the
+  console) and steals the isolated CPU cores. Use **Lite**, or let the installer
+  switch you to console boot.
 - **PiSTorm board fitted to a real Atari ST/STe.**
 - Run as your **normal user** (the script calls `sudo` itself; do **not** run it
   as root).
-- For the HDMI screen-mirror, a monitor on the **Pi's** HDMI, connected at boot.
+- For the HDMI screen-mirror, a monitor on the **Pi's** HDMI, must be connected at boot.
+
+### Pre-flight checks
+
+Before touching anything, the installer verifies:
+
+| Check              | If it fails                                                       |
+|--------------------|------------------------------------------------------------------|
+| 64-bit (`aarch64`) | **Aborts** — re-install with 64-bit Raspberry Pi OS.              |
+| Pi model           | Warns on unrecognised/older boards (validated: Pi 4 / 3 / Zero 2 W). |
+| RAM                | Warns if low, suggesting `make HEAVY_OPT=-O0` / swap for building. |
+| Desktop present    | Offers to disable it (console boot); **aborts** if you decline (`KILLGUI=1` to auto-disable). |
 
 ---
 
@@ -70,6 +87,7 @@ runtime libs, so a prebuilt binary works too):
 ```
 build-essential  g++  make  pkg-config
 libsdl2-dev  libdrm-dev  libslirp-dev  libasound2-dev  zlib1g-dev
+ffmpeg           # used by the screendump helper
 ```
 
 `samba` is only installed if you choose the share option.
@@ -140,14 +158,14 @@ The installer ships **EmuTOS** (GPL, freely distributable) as the default ROM.
 To use a real Atari TOS instead, drop it in and point your `.cfg` at it:
 
 ```
-<parent>/roms/tos206uk.rom        # your own copy — NOT included/redistributable
+<parent>/roms/emutos-aranym.rom   # your own copy — NOT included/redistributable
 <parent>/dkimages/…               # your own disk/game images
 ```
 
 Then in your config (e.g. `configs/master.cfg`):
 
 ```
-rom ../roms/tos206uk.rom
+rom ../roms/emutos-aranym.rom
 hdd ../dkimages/yourdisk.img
 fdd ../dkimages/fdd/yourfloppy.st
 ```

@@ -124,14 +124,73 @@ EOF
 esac
 
 # --------------------------------------------------------------------------
+# 0. Pre-flight (install path only): JIT requirements + no desktop environment
+# --------------------------------------------------------------------------
+require_jit() {
+  say "Checking JIT requirements"
+  # The Amiberry JIT backend is AArch64-only: 32-bit OS can neither build nor run it.
+  local arch; arch="$(uname -m)"
+  case "$arch" in
+    aarch64|arm64) ;;
+    *) die "PiSTorm JIT requires a 64-bit (aarch64) OS — detected '$arch'. Reflash with 64-bit Raspberry Pi OS." ;;
+  esac
+  # Board model
+  local model; model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
+  case "$model" in
+    *"Pi 4"*|*"Pi 400"*|*"Compute Module 4"*) ;;
+    *) warn "Unrecognised/older board '$model' — JIT is validated on Pi 4 only" ;;
+  esac
+  # RAM — compiling the CPU/JIT units is memory-hungry.
+  local memmb; memmb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
+  if [ "$memmb" -lt 1800 ]; then
+    warn "Only ${memmb} MB RAM — if the build is OOM-killed, use 'make HEAVY_OPT=-O0' and/or add swap."
+  fi
+  say "OK: $arch | $model | ${memmb} MB RAM"
+}
+
+no_desktop() {
+  local dm p found=""
+  [ "$(systemctl get-default 2>/dev/null)" = graphical.target ] && found="graphical boot target"
+  for dm in lightdm gdm3 gdm sddm xdm; do
+    if systemctl is-active --quiet "$dm" 2>/dev/null || systemctl is-enabled --quiet "$dm" 2>/dev/null; then
+      found="${found:+$found, }$dm"
+    fi
+  done
+  for p in Xorg Xwayland labwc wayfire weston mutter lxsession; do
+    if pgrep -x "$p" >/dev/null 2>&1; then found="${found:+$found, }$p"; break; fi
+  done
+  [ -z "$found" ] && return 0
+
+  warn "Desktop environment detected: $found"
+  warn "PiSTorm JIT can not run with desktop environment enabled."
+  if ask KILLGUI "Disable the desktop and switch to console boot?" n; then
+    say "Switching to console boot + disabling the display manager"
+    sudo systemctl set-default multi-user.target
+    for dm in lightdm gdm3 gdm sddm xdm; do
+      if systemctl list-unit-files "$dm.service" >/dev/null 2>&1; then
+        sudo systemctl disable "$dm" 2>/dev/null || true
+      fi
+    done
+    warn "Desktop disabled — takes full effect after reboot (your current session is left running)."
+  else
+    die "PiSTorm JIT can not run with desktop environment enabled."
+  fi
+}
+
+require_jit
+no_desktop
+
+# --------------------------------------------------------------------------
 # 1. Dependencies (build + runtime). The -dev packages pull in the runtime
 #    libs, so this covers both "build from source" and "run a prebuilt binary".
 # --------------------------------------------------------------------------
 say "Installing dependencies"
 sudo apt-get update
+# build + runtime libs; ffmpeg is used by the screendump helper.
 sudo apt-get install -y \
   build-essential g++ make pkg-config \
-  libsdl2-dev libdrm-dev libslirp-dev libasound2-dev zlib1g-dev
+  libsdl2-dev libdrm-dev libslirp-dev libasound2-dev zlib1g-dev \
+  ffmpeg
 
 # --------------------------------------------------------------------------
 # 2. Runtime file tree (idempotent)
@@ -211,7 +270,7 @@ Conflicts=getty@tty1.service
 Type=simple
 User=root
 WorkingDirectory=$HERE
-ExecStart=$HERE/emulator -c ../configs/$CFG
+ExecStart=$HERE/emulator --config ../configs/$CFG
 Restart=on-failure
 RestartSec=2
 StandardInput=tty
