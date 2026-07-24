@@ -8188,6 +8188,306 @@ MIDFUNC(3,jnf_MEM_READMEMBANK,(W4 dest, RR4 adr, IM8 offset))
 }
 MENDFUNC(3,jnf_MEM_READMEMBANK,(W4 dest, RR4 adr, IM8 offset))
 
+/* -------------------------------------------------------------------------- *
+ * Runtime-bank-guarded reads (PISTORM_JIT_GUARD).
+ *
+ * Same setup/teardown as jnf_MEM_READMEMBANK (so register/spill handling is
+ * identical and proven), but before calling the bank getter we look at
+ *   bank->jit_read_flag  (offset 0x6c in addrbank; 0 = direct RAM/ROM/TT,
+ *                         nonzero = I/O handler required)
+ * at the RUNTIME address. If it's direct we do an inline big-endian natmem
+ * load and skip the call entirely; only true I/O falls through to the getter.
+ * This is the "modest" variant: prepare_for_call is still emitted, so the fast
+ * path avoids the call+dispatch but not the register spill. Correct and safe;
+ * the no-spill version is a later step.
+ * -------------------------------------------------------------------------- */
+
+MIDFUNC(3,jnf_MEM_READ_GUARDED_l,(W4 dest, RR4 adr, IM8 offset))
+{
+	clobber_flags();
+	if (dest != adr) {
+		COMPCALL(forget_about)(dest);
+	}
+
+	adr = readreg_specific(adr, REG_PAR1);
+	prepare_for_call_1();
+	unlock2(adr);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);   // WORK3 = mem_banks[page]
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x6c);               // WORK1 = bank->jit_read_flag
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);                                          // nonzero => I/O => slow
+
+	// FAST: direct big-endian long from natmem (adr in REG_PAR1)
+	LDR_wXx(REG_WORK1, REG_PAR1, R_MEMSTART);
+	REV_ww(REG_RESULT, REG_WORK1);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	// SLOW: call bank->lget (WORK3 still holds the bank pointer)
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+	if (offset != SIZEOF_VOID_P * 6) {
+		MOV_ww(REG_RESULT, REG_RESULT);
+	}
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = dest;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+
+	live.state[dest].realreg = REG_RESULT;
+	live.state[dest].realind = 0;
+	live.state[dest].val = 0;
+	set_status(dest, DIRTY);
+}
+MENDFUNC(3,jnf_MEM_READ_GUARDED_l,(W4 dest, RR4 adr, IM8 offset))
+
+MIDFUNC(3,jnf_MEM_READ_GUARDED_w,(W4 dest, RR4 adr, IM8 offset))
+{
+	clobber_flags();
+	if (dest != adr) {
+		COMPCALL(forget_about)(dest);
+	}
+
+	adr = readreg_specific(adr, REG_PAR1);
+	prepare_for_call_1();
+	unlock2(adr);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x6c);
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	LDRH_wXx(REG_WORK1, REG_PAR1, R_MEMSTART);
+	REV16_ww(REG_RESULT, REG_WORK1);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+	if (offset != SIZEOF_VOID_P * 6) {
+		MOV_ww(REG_RESULT, REG_RESULT);
+	}
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = dest;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+
+	live.state[dest].realreg = REG_RESULT;
+	live.state[dest].realind = 0;
+	live.state[dest].val = 0;
+	set_status(dest, DIRTY);
+}
+MENDFUNC(3,jnf_MEM_READ_GUARDED_w,(W4 dest, RR4 adr, IM8 offset))
+
+MIDFUNC(3,jnf_MEM_READ_GUARDED_b,(W4 dest, RR4 adr, IM8 offset))
+{
+	clobber_flags();
+	if (dest != adr) {
+		COMPCALL(forget_about)(dest);
+	}
+
+	adr = readreg_specific(adr, REG_PAR1);
+	prepare_for_call_1();
+	unlock2(adr);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x6c);
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	LDRB_wXx(REG_RESULT, REG_PAR1, R_MEMSTART);        // byte: no swap
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+	if (offset != SIZEOF_VOID_P * 6) {
+		MOV_ww(REG_RESULT, REG_RESULT);
+	}
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = dest;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+
+	live.state[dest].realreg = REG_RESULT;
+	live.state[dest].realind = 0;
+	live.state[dest].val = 0;
+	set_status(dest, DIRTY);
+}
+MENDFUNC(3,jnf_MEM_READ_GUARDED_b,(W4 dest, RR4 adr, IM8 offset))
+
+/* -------------------------------------------------------------------------- *
+ * No-spill runtime-bank-guarded reads (PISTORM_JIT_GUARD=2).
+ *
+ * Unlike the "modest" variant above, these do NOT call prepare_for_call, so no
+ * flush_all / register eviction happens on the read. Guest registers stay live
+ * in host regs across the read. The fast (direct RAM/ROM/TT) path is a plain
+ * inline load. The rare I/O path calls a register-preserving trampoline
+ * (pistorm_grd_slow_{l,w,b}, in pistorm_natmem.cpp) that saves/restores x1-x18
+ * and x30 around the bank getter, so from the allocator's view only x0
+ * (REG_PAR1==REG_RESULT) is touched. readreg_specific evicts only x0; every
+ * other guest register is untouched on both paths.
+ * -------------------------------------------------------------------------- */
+extern "C" uae_u32 pistorm_grd_slow_l(uae_u32);
+extern "C" uae_u32 pistorm_grd_slow_w(uae_u32);
+extern "C" uae_u32 pistorm_grd_slow_b(uae_u32);
+
+/* adr is forced into x0, its VALUE copied to REG_WORK3 (x4, a work reg the
+ * trampoline preserves and free_nreg's STR_wXi never clobbers). free_nreg then
+ * evicts adr's guest register out of x0 PROPERLY (to memory) so x0 is free for
+ * the result; the read uses the WORK3 copy. Result lands in x0 and is bound to
+ * d like READMEMBANK. Only x0 (and adr's guest, once) leave registers; all
+ * other guest regs stay live. Correct for d==adr (adr's guest is evicted to mem
+ * before d takes over x0). */
+MIDFUNC(2,jnf_MEM_READ_GUARDED_NS_l,(W4 d, RR4 adr))
+{
+	clobber_flags();
+	if (d != adr) {
+		COMPCALL(forget_about)(d);
+	}
+	adr = readreg_specific(adr, REG_PAR1);   // adr -> x0
+	MOV_ww(REG_WORK3, REG_PAR1);             // WORK3 = adr value (stable)
+	unlock2(adr);
+	free_nreg(REG_RESULT);                   // evict adr's guest from x0 -> memory
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_WORK3, 16);
+	LDR_xXxLSLi(REG_WORK2, REG_WORK2, REG_WORK1, 1);   // WORK2 = bank
+	LDR_wXi(REG_WORK1, REG_WORK2, 0x6c);               // bank->jit_read_flag
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	// FAST: x0 = byteswap(load32[WORK3 + MEMSTART])
+	LDR_wXx(REG_WORK1, REG_WORK3, R_MEMSTART);
+	REV_ww(REG_RESULT, REG_WORK1);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	// SLOW: register-preserving trampoline (x0=adr -> x0=result)
+	write_jmp_target(b_slow, (uintptr)get_target());
+	MOV_ww(REG_PAR1, REG_WORK3);             // x0 = adr
+	compemu_raw_call((uintptr)&pistorm_grd_slow_l);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = d;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+	live.state[d].realreg = REG_RESULT;
+	live.state[d].realind = 0;
+	live.state[d].val = 0;
+	set_status(d, DIRTY);
+}
+MENDFUNC(2,jnf_MEM_READ_GUARDED_NS_l,(W4 d, RR4 adr))
+
+MIDFUNC(2,jnf_MEM_READ_GUARDED_NS_w,(W4 d, RR4 adr))
+{
+	clobber_flags();
+	if (d != adr) {
+		COMPCALL(forget_about)(d);
+	}
+	adr = readreg_specific(adr, REG_PAR1);
+	MOV_ww(REG_WORK3, REG_PAR1);
+	unlock2(adr);
+	free_nreg(REG_RESULT);
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_WORK3, 16);
+	LDR_xXxLSLi(REG_WORK2, REG_WORK2, REG_WORK1, 1);
+	LDR_wXi(REG_WORK1, REG_WORK2, 0x6c);
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	LDRH_wXx(REG_WORK1, REG_WORK3, R_MEMSTART);
+	REV16_ww(REG_RESULT, REG_WORK1);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	write_jmp_target(b_slow, (uintptr)get_target());
+	MOV_ww(REG_PAR1, REG_WORK3);
+	compemu_raw_call((uintptr)&pistorm_grd_slow_w);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = d;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+	live.state[d].realreg = REG_RESULT;
+	live.state[d].realind = 0;
+	live.state[d].val = 0;
+	set_status(d, DIRTY);
+}
+MENDFUNC(2,jnf_MEM_READ_GUARDED_NS_w,(W4 d, RR4 adr))
+
+MIDFUNC(2,jnf_MEM_READ_GUARDED_NS_b,(W4 d, RR4 adr))
+{
+	clobber_flags();
+	if (d != adr) {
+		COMPCALL(forget_about)(d);
+	}
+	adr = readreg_specific(adr, REG_PAR1);
+	MOV_ww(REG_WORK3, REG_PAR1);
+	unlock2(adr);
+	free_nreg(REG_RESULT);
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_WORK3, 16);
+	LDR_xXxLSLi(REG_WORK2, REG_WORK2, REG_WORK1, 1);
+	LDR_wXi(REG_WORK1, REG_WORK2, 0x6c);
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	LDRB_wXx(REG_RESULT, REG_WORK3, R_MEMSTART);   // byte: no swap
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	write_jmp_target(b_slow, (uintptr)get_target());
+	MOV_ww(REG_PAR1, REG_WORK3);
+	compemu_raw_call((uintptr)&pistorm_grd_slow_b);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = d;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+	live.state[d].realreg = REG_RESULT;
+	live.state[d].realind = 0;
+	live.state[d].val = 0;
+	set_status(d, DIRTY);
+}
+MENDFUNC(2,jnf_MEM_READ_GUARDED_NS_b,(W4 d, RR4 adr))
+
 
 MIDFUNC(3,jnf_MEM_WRITEMEMBANK,(RR4 adr, RR4 source, IM8 offset))
 {

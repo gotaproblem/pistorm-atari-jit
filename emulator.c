@@ -309,28 +309,27 @@ extern uae_u8 *natmem_offset;
 
 void wait_ns(uint64_t nanoseconds)
 {
-  struct timespec start, current;
+  /* Busy-wait on the ARM generic timer (CNTVCT_EL0) instead of clock_gettime.
+   * This runs in the ipl_task poll loop (and bus timing) millions of times/sec;
+   * clock_gettime is a ~40ns vdso call and was showing as ~40% of the whole
+   * profile. CNTVCT_EL0 is a single mrs (~1ns), no vdso, no memory access. */
+  static uint64_t freq = 0;                 /* CNTFRQ_EL0, read once */
+  if (!freq)
+  {
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    if (!freq)
+      freq = 54000000ULL;                   /* Pi 4 arch-timer fallback */
+  }
 
-  // Get the initial hardware clock value
-  clock_gettime(CLOCK_MONOTONIC_RAW, &start);
+  uint64_t start, now;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(start));
+  const uint64_t target = start + (nanoseconds * freq) / 1000000000ULL;
 
-  // Calculate the target end time in absolute nanoseconds
-  uint64_t start_ns = ((uint64_t)start.tv_sec * 1000000000ULL) + start.tv_nsec;
-  uint64_t target_ns = start_ns + nanoseconds;
-
-  uint64_t current_ns = 0;
-
-  // Hardware busy-loop
   do
   {
-    clock_gettime(CLOCK_MONOTONIC_RAW, &current);
-    current_ns = ((uint64_t)current.tv_sec * 1000000000ULL) + current.tv_nsec;
-
-    // Inline assembly "no-operation" instruction
-    // Prevents the compiler (-O3) from optimizing away this empty loop
-    asm volatile ("nop");
-    //asm volatile ("yield" ::: "memory");
-  } while (current_ns < target_ns);
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(now));
+    asm volatile("yield" ::: "memory");
+  } while (now < target);
 }
 
 /*
@@ -450,7 +449,7 @@ static void *ipl_task(void *)
     {
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
       asm volatile("yield" ::: "memory");
-      //wait_ns (250);
+      wait_ns (250);
       continue;
     }
 
@@ -461,7 +460,13 @@ static void *ipl_task(void *)
     */
     ipl = (status & 0x60) >> 4;
 
-    g_ipl = ipl;
+    /* Only write g_ipl when it actually changes. This poller spins on cpu3 at
+     * millions of iterations/sec; writing g_ipl every pass dirtied the cache
+     * line it shares with g_irq/g_irq_mask, which the CPU thread reads in
+     * intlev()/get_ipl() - false sharing that taxed guest execution on every
+     * interrupt check. */
+    if (g_ipl != ipl)
+      g_ipl = ipl;
     if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask)
     {
 #ifdef ATARI_LAT_DIAG

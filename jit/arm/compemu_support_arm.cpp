@@ -2546,27 +2546,71 @@ static inline void readmem_special(int address, int dest, int offset)
     jnf_MEM_READMEMBANK(dest, address, offset);
 }
 
+/* PISTORM_JIT_GUARD: reads that would otherwise be forced through the bank
+ * getter purely because jit_n_addr_unsafe==1 instead emit a runtime bank-guarded
+ * read (inline natmem load for direct RAM/ROM/TT, getter only for I/O).
+ * Evaluated once at codegen time. Modes:
+ *   0 = off (old always-getter path)
+ *   1 = guarded, keeps prepare_for_call spill (proven, ~11% CoreMark) [default]
+ *   2 = guarded, no spill (register-preserving trampoline on the I/O path) */
+static int pistorm_jit_guard_mode(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_JIT_GUARD");
+        if (!e)              v = 1;   // default: proven spill variant
+        else if (e[0] == '0') v = 0;
+        else if (e[0] == '2') v = 2;
+        else                 v = 1;
+    }
+    return v;
+}
+
 void readbyte(int address, int dest)
 {
-    if ((special_mem & S_READ) || distrust_byte() || jit_n_addr_unsafe)
+    if ((special_mem & S_READ) || distrust_byte())
         readmem_special(address, dest, SIZEOF_VOID_P * 2);
-    else
+    else if (jit_n_addr_unsafe) {
+        int m = pistorm_jit_guard_mode();
+        if (m == 2)
+            jnf_MEM_READ_GUARDED_NS_b(dest, address);
+        else if (m == 1)
+            jnf_MEM_READ_GUARDED_b(dest, address, SIZEOF_VOID_P * 2);
+        else
+            readmem_special(address, dest, SIZEOF_VOID_P * 2);
+    } else
         readmem_real(address, dest, 1);
 }
 
 void readword(int address, int dest)
 {
-    if ((special_mem & S_READ) || distrust_word() || jit_n_addr_unsafe)
+    if ((special_mem & S_READ) || distrust_word())
         readmem_special(address, dest, SIZEOF_VOID_P * 1);
-    else
+    else if (jit_n_addr_unsafe) {
+        int m = pistorm_jit_guard_mode();
+        if (m == 2)
+            jnf_MEM_READ_GUARDED_NS_w(dest, address);
+        else if (m == 1)
+            jnf_MEM_READ_GUARDED_w(dest, address, SIZEOF_VOID_P * 1);
+        else
+            readmem_special(address, dest, SIZEOF_VOID_P * 1);
+    } else
         readmem_real(address, dest, 2);
 }
 
 void readlong(int address, int dest)
 {
-    if ((special_mem & S_READ) || distrust_long() || jit_n_addr_unsafe)
+    if ((special_mem & S_READ) || distrust_long())
         readmem_special(address, dest, SIZEOF_VOID_P * 0);
-    else
+    else if (jit_n_addr_unsafe) {
+        int m = pistorm_jit_guard_mode();
+        if (m == 2)
+            jnf_MEM_READ_GUARDED_NS_l(dest, address);
+        else if (m == 1)
+            jnf_MEM_READ_GUARDED_l(dest, address, SIZEOF_VOID_P * 0);
+        else
+            readmem_special(address, dest, SIZEOF_VOID_P * 0);
+    } else
         readmem_real(address, dest, 4);
 }
 

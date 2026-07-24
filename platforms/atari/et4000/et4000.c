@@ -85,8 +85,8 @@ volatile int et4000_thread_ready = 0;
 pthread_mutex_t et4000_engine_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* stall attribution (defined in ps_protocol.c, read by jit_stall_probe) */
-extern volatile uint32_t g_cpu_where;
-extern volatile uint32_t g_cpu_where_addr;
+//extern volatile uint32_t g_cpu_where;
+//extern volatile uint32_t g_cpu_where_addr;
 
 /* -----------------------------------------------------------------------
  * SDL2 output backend
@@ -1261,13 +1261,13 @@ uint8_t et4000_io_read8(ET4000State *s, uint32_t port)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
-    g_cpu_where_addr = port;
-    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
+    //g_cpu_where_addr = port;
+    //g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     uint8_t v = et4000_io_read8_unlocked(s, port);
     pthread_mutex_unlock(&et4000_engine_mutex);
-    g_cpu_where = 0;
+    //g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_RD_WAIT, t1 - t0);
@@ -1280,14 +1280,14 @@ uint16_t et4000_io_read16(ET4000State *s, uint32_t port)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
-    g_cpu_where_addr = port;
-    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
+    //g_cpu_where_addr = port;
+    //g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     uint16_t v = ((uint16_t)et4000_io_read8_unlocked(s, port) << 8) |
                  et4000_io_read8_unlocked(s, port + 1);
     pthread_mutex_unlock(&et4000_engine_mutex);
-    g_cpu_where = 0;
+    //g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_RD_WAIT, t1 - t0);
@@ -1300,13 +1300,13 @@ int et4000_io_write8(ET4000State *s, uint32_t port, uint8_t val)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
-    g_cpu_where_addr = port;
-    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
+    //g_cpu_where_addr = port;
+    //g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     int rc = et4000_io_write8_unlocked(s, port, val);
     pthread_mutex_unlock(&et4000_engine_mutex);
-    g_cpu_where = 0;
+    //g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_WR_WAIT, t1 - t0);
@@ -1319,14 +1319,14 @@ int et4000_io_write16(ET4000State *s, uint32_t port, uint16_t val)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
-    g_cpu_where_addr = port;
-    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
+    //g_cpu_where_addr = port;
+    //g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     et4000_io_write8_unlocked(s, port, (uint8_t)(val >> 8));
     et4000_io_write8_unlocked(s, port + 1, (uint8_t)val);
     pthread_mutex_unlock(&et4000_engine_mutex);
-    g_cpu_where = 0;
+    //g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_WR_WAIT, t1 - t0);
@@ -1338,14 +1338,14 @@ int et4000_io_write32(ET4000State *s, uint32_t port, uint32_t val)
 {
     uint64_t t0 = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
     uint64_t t1;
-    g_cpu_where_addr = port;
-    g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
+    //g_cpu_where_addr = port;
+    //g_cpu_where = 5;                     /* et4k io (engine mutex + body) */
     pthread_mutex_lock(&et4000_engine_mutex);
     t1 = t0 ? et4000_profile_now_ns() : 0;
     for (int i = 0; i < 4; i++)
         et4000_io_write8_unlocked(s, port + i, (uint8_t)((val >> (24 - 8 * i)) & 0xFF));
     pthread_mutex_unlock(&et4000_engine_mutex);
-    g_cpu_where = 0;
+    //g_cpu_where = 0;
     if (t0)
     {
         et4000_profile_add(ET4K_PROF_IO_WR_WAIT, t1 - t0);

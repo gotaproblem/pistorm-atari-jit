@@ -206,7 +206,21 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     currprefs.address_space_24 = changed_prefs.address_space_24 = !(enable_ttram || enable_addr32);
 
     currprefs.cachesize = changed_prefs.cachesize = disable_jit ? 0 : jit_cache; // KB; >0 enables JIT default 8192KB
-    pissoff_value = currprefs.cachesize ? (64 * CYCLE_UNIT) : 0;
+    /* pissoff_value == compiled-chain budget (countdown is #defined to pissoff):
+     * how many cycle-units the JIT runs compiled code before breaking back to C.
+     * Bigger = longer runs = fewer C round-trips (do_cycles/do_nothing/poll), at
+     * the cost of a wider *fallback* interrupt window. Real IPLs still break the
+     * chain immediately via SPCFLAG_BRK, so MFP latency is dominated by that, not
+     * this. Tune with PISTORM_PISSOFF (multiplier of CYCLE_UNIT, default 1024).
+     * Default 1024 measured on HW: 68000 CoreMark 540->734 (~+36%), I/O clean,
+     * plateau ~2048; 1024 keeps ~98% of the gain with 2x the fallback margin.
+     * Watch for keyboard beep / erratic mouse = a break got delayed; back off. */
+    {
+        int pissoff_mult = 1024;
+        const char *e = getenv("PISTORM_PISSOFF");
+        if (e) { int v = atoi(e); if (v >= 1 && v <= 65536) pissoff_mult = v; }
+        pissoff_value = currprefs.cachesize ? (pissoff_mult * CYCLE_UNIT) : 0;
+    }
     pissoff_nojit_value = 0;
     pissoff = currprefs.cachesize ? pissoff_value : 0;
     jit_n_addr_unsafe = 1;

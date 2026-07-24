@@ -2826,6 +2826,105 @@ static void map_region(uaecptr start, uint32_t len, addrbank *b)
 }
 
 /* ------------------------------------------------------------------ */
+/* No-spill guarded-read slow path (PISTORM_JIT_GUARD=2).              */
+/*                                                                     */
+/* The JIT's fast path handles direct RAM/ROM/TT inline. Only true I/O */
+/* reaches here. These dispatch helpers do the ordinary bank getter    */
+/* call; the naked trampolines below wrap them so that x1-x18 and x30   */
+/* are preserved across the call. That lets the JIT emit the slow-path  */
+/* call WITHOUT flushing guest registers to memory (no prepare_for_call */
+/* / flush_all), which is the whole point of the no-spill variant.     */
+/* x0 is arg(adr)->result; x19-x28 (incl the JIT's R_MEMSTART=x27 and   */
+/* R_REGSTRUCT=x28) are callee-saved and preserved by the C helper.    */
+/* ------------------------------------------------------------------ */
+extern "C" uae_u32 pistorm_grd_dispatch_l(uae_u32 adr) { return mem_banks[bankindex(adr)]->lget(adr); }
+extern "C" uae_u32 pistorm_grd_dispatch_w(uae_u32 adr) { return mem_banks[bankindex(adr)]->wget(adr); }
+extern "C" uae_u32 pistorm_grd_dispatch_b(uae_u32 adr) { return mem_banks[bankindex(adr)]->bget(adr); }
+
+__asm__(
+".text\n"
+".p2align 2\n"
+".global pistorm_grd_slow_l\n"
+".global pistorm_grd_slow_w\n"
+".global pistorm_grd_slow_b\n"
+"pistorm_grd_slow_l:\n"
+"  sub  sp, sp, #160\n"
+"  stp  x1,  x2,  [sp, #0]\n"
+"  stp  x3,  x4,  [sp, #16]\n"
+"  stp  x5,  x6,  [sp, #32]\n"
+"  stp  x7,  x8,  [sp, #48]\n"
+"  stp  x9,  x10, [sp, #64]\n"
+"  stp  x11, x12, [sp, #80]\n"
+"  stp  x13, x14, [sp, #96]\n"
+"  stp  x15, x16, [sp, #112]\n"
+"  stp  x17, x18, [sp, #128]\n"
+"  str  x30,      [sp, #144]\n"
+"  bl   pistorm_grd_dispatch_l\n"
+"  ldp  x1,  x2,  [sp, #0]\n"
+"  ldp  x3,  x4,  [sp, #16]\n"
+"  ldp  x5,  x6,  [sp, #32]\n"
+"  ldp  x7,  x8,  [sp, #48]\n"
+"  ldp  x9,  x10, [sp, #64]\n"
+"  ldp  x11, x12, [sp, #80]\n"
+"  ldp  x13, x14, [sp, #96]\n"
+"  ldp  x15, x16, [sp, #112]\n"
+"  ldp  x17, x18, [sp, #128]\n"
+"  ldr  x30,      [sp, #144]\n"
+"  add  sp, sp, #160\n"
+"  ret\n"
+"pistorm_grd_slow_w:\n"
+"  sub  sp, sp, #160\n"
+"  stp  x1,  x2,  [sp, #0]\n"
+"  stp  x3,  x4,  [sp, #16]\n"
+"  stp  x5,  x6,  [sp, #32]\n"
+"  stp  x7,  x8,  [sp, #48]\n"
+"  stp  x9,  x10, [sp, #64]\n"
+"  stp  x11, x12, [sp, #80]\n"
+"  stp  x13, x14, [sp, #96]\n"
+"  stp  x15, x16, [sp, #112]\n"
+"  stp  x17, x18, [sp, #128]\n"
+"  str  x30,      [sp, #144]\n"
+"  bl   pistorm_grd_dispatch_w\n"
+"  ldp  x1,  x2,  [sp, #0]\n"
+"  ldp  x3,  x4,  [sp, #16]\n"
+"  ldp  x5,  x6,  [sp, #32]\n"
+"  ldp  x7,  x8,  [sp, #48]\n"
+"  ldp  x9,  x10, [sp, #64]\n"
+"  ldp  x11, x12, [sp, #80]\n"
+"  ldp  x13, x14, [sp, #96]\n"
+"  ldp  x15, x16, [sp, #112]\n"
+"  ldp  x17, x18, [sp, #128]\n"
+"  ldr  x30,      [sp, #144]\n"
+"  add  sp, sp, #160\n"
+"  ret\n"
+"pistorm_grd_slow_b:\n"
+"  sub  sp, sp, #160\n"
+"  stp  x1,  x2,  [sp, #0]\n"
+"  stp  x3,  x4,  [sp, #16]\n"
+"  stp  x5,  x6,  [sp, #32]\n"
+"  stp  x7,  x8,  [sp, #48]\n"
+"  stp  x9,  x10, [sp, #64]\n"
+"  stp  x11, x12, [sp, #80]\n"
+"  stp  x13, x14, [sp, #96]\n"
+"  stp  x15, x16, [sp, #112]\n"
+"  stp  x17, x18, [sp, #128]\n"
+"  str  x30,      [sp, #144]\n"
+"  bl   pistorm_grd_dispatch_b\n"
+"  ldp  x1,  x2,  [sp, #0]\n"
+"  ldp  x3,  x4,  [sp, #16]\n"
+"  ldp  x5,  x6,  [sp, #32]\n"
+"  ldp  x7,  x8,  [sp, #48]\n"
+"  ldp  x9,  x10, [sp, #64]\n"
+"  ldp  x11, x12, [sp, #80]\n"
+"  ldp  x13, x14, [sp, #96]\n"
+"  ldp  x15, x16, [sp, #112]\n"
+"  ldp  x17, x18, [sp, #128]\n"
+"  ldr  x30,      [sp, #144]\n"
+"  add  sp, sp, #160\n"
+"  ret\n"
+);
+
+/* ------------------------------------------------------------------ */
 /* jit_mem_init(): called once from emulator.c before the CPU threads  */
 /* ------------------------------------------------------------------ */
 

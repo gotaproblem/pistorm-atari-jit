@@ -39,8 +39,16 @@ static unsigned long long now_us(void)
 
 static int dmasnd_out_dbg(void)
 {
+    /* The once-per-second output-side stats line. Enable it on its own with
+     * PISTORM_DMASND_STATS=1 (quiet — no per-frame capture flood), or as part
+     * of the full PISTORM_DMASND_DEBUG=1 trace. Keeping the stats light avoids
+     * fprintf overhead perturbing the audio timing. */
     static int v = -1;
-    if (v < 0) { const char *e = getenv("PISTORM_DMASND_DEBUG"); v = (e && *e == '1') ? 1 : 0; }
+    if (v < 0) {
+        const char *e = getenv("PISTORM_DMASND_DEBUG");
+        const char *s = getenv("PISTORM_DMASND_STATS");
+        v = ((e && *e == '1') || (s && *s == '1')) ? 1 : 0;
+    }
     return v;
 }
 
@@ -183,11 +191,20 @@ static void *audio_thread(void *arg)
             int p = e ? atoi(e) : 0;
             cushion_pct = (p >= 25 && p <= 400) ? p : 80;
         }
+        /* Big-buffer (MP3/MOD) pre-roll depth, in multiples of one frame.
+         * Default 2. Raise with PISTORM_DMASND_BIGMULT (2..8) if a bursty
+         * player still underruns; the prime is still capped at half the ring. */
+        static int big_mult = -1;
+        if (big_mult < 0) {
+            const char *e = getenv("PISTORM_DMASND_BIGMULT");
+            int m = e ? atoi(e) : 0;
+            big_mult = (m >= 2 && m <= 8) ? m : 2;
+        }
         unsigned byterate = rate * (unsigned)(stereo ? 2 : 1);   /* bytes/sec */
         unsigned flen = atomic_load(&g_frame_len);
         unsigned prime;
         if (flen >= 32768u) {
-            prime = flen * 2u;                          /* bursty big-buffer */
+            prime = flen * (unsigned)big_mult;          /* bursty big-buffer */
         } else {
             uint64_t cush = ((uint64_t)commit_interval_us * byterate) / 1000000ull;
             prime = (unsigned)(cush * (unsigned)cushion_pct / 100u);   /* stream */

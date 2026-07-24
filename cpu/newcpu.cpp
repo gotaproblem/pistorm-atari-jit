@@ -2071,7 +2071,7 @@ void set_cpu_caches(bool flush)
 			set_cache_state(regs.cacr & 1);
 			if (regs.cacr & 0x08)
 			{
-				flush_icache(3);
+					flush_icache(3);
 			}
 		}
 		else
@@ -4789,8 +4789,8 @@ uint32_t g_irqhist_hblskip;
  * not honoring spcflags; incomp=0 -> CPU thread blocked host-side (lock,
  * syscall, scheduler); BRK clear -> the kick itself was lost. */
 extern "C" {
-extern volatile uint32_t g_cpu_where;       /* ps_protocol.c */
-extern volatile uint32_t g_cpu_where_addr;
+//extern volatile uint32_t g_cpu_where;       /* ps_protocol.c */
+//extern volatile uint32_t g_cpu_where_addr;
 }
 
 void jit_stall_probe(uint32_t age_us)
@@ -4864,7 +4864,8 @@ void jit_stall_probe(uint32_t age_us)
 		"st=%c cpu=%d drun=%lluus dwait=%lluus hpc=%lx<%s+0x%lx> hlr=%lx<%s+0x%lx>\n",
 		age_us, (unsigned)regs.spcflags, (int)jit_in_compiled_code,
 		(int)pissoff, (void*)regs.pc_p,
-		(unsigned)g_cpu_where, (unsigned)g_cpu_where_addr,
+		//(unsigned)g_cpu_where, (unsigned)g_cpu_where_addr,
+		0,0,
 		st, core,
 		(run_ns  - prev_run)  / 1000ULL,
 		(wait_ns - prev_wait) / 1000ULL,

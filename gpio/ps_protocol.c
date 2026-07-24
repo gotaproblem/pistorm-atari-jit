@@ -56,12 +56,14 @@ static atomic_flag ps_txn_lock = ATOMIC_FLAG_INIT;
 
 static inline void ps_lock_bus(void)
 {
+  return;
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
 }
 
 static inline void ps_unlock_bus(void)
 {
+  return;
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
 
@@ -244,21 +246,21 @@ void ps_write ( ps_io_t *ps_io );
  * thread inside? Read by jit_stall_probe (newcpu.cpp) from the ipl thread.
  * 1=ps_read lock-wait  2=ps_read txn  3=ps_write lock-wait  4=ps_write txn
  * 5=et4k io rd  6=et4k io wr  7=et4k vram rd  8=et4k vram wr */
-volatile uint32_t g_cpu_where = 0;
-volatile uint32_t g_cpu_where_addr = 0;
+//volatile uint32_t g_cpu_where = 0;
+//volatile uint32_t g_cpu_where_addr = 0;
 
 inline
 void ps_write ( ps_io_t *ps_io )
 {
   register uint32_t status;
 
-  g_cpu_where_addr = ps_io->addr;
-  g_cpu_where = 3;
+ // g_cpu_where_addr = ps_io->addr;
+  //g_cpu_where = 3;
   ps_lock_bus ();
-  g_cpu_where = 4;
+  //g_cpu_where = 4;
   asm volatile ("dmb sy" : : : "memory");
 
-  ps_wait_idle ();
+  //ps_wait_idle ();
 
   *ioset = (ps_io->data << 8) | REG_DATA;
   txn_go ();
@@ -289,7 +291,7 @@ void ps_write ( ps_io_t *ps_io )
   status = *ioread;
   ps_io->berr = CHECK_BERR (status);
   ps_unlock_bus();
-  g_cpu_where = 0;
+  //g_cpu_where = 0;
 }
 
 
@@ -340,12 +342,12 @@ void ps_read (ps_io_t *ps_io)
 {
   register uint32_t status;
 
-  g_cpu_where_addr = ps_io->addr;
-  g_cpu_where = 1;
+  //g_cpu_where_addr = ps_io->addr;
+  //g_cpu_where = 1;
   ps_lock_bus ();
-  g_cpu_where = 2;
+  //g_cpu_where = 2;
   asm volatile ("dmb sy" : : : "memory");
-  ps_wait_idle ();
+  //ps_wait_idle ();
 
   *ioset = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
   txn_go ();
@@ -365,7 +367,7 @@ void ps_read (ps_io_t *ps_io)
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
   ps_unlock_bus();
-  g_cpu_where = 0;
+  //g_cpu_where = 0;
 }
 
 inline uint16_t ps_read_16 (uint32_t addr) 
