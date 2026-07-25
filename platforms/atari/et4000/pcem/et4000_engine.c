@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdatomic.h>
 
 /* from the vendored engine */
 extern void   *pcem_et4000_init(void);
@@ -209,10 +210,31 @@ static uint8_t et4k_synth_input_status(uint8_t value)
 static volatile unsigned long g_vw_count = 0;   /* VRAM writes since last frame  */
 static uint32_t      g_vw_min   = 0xFFFFFFFFu;  /* min guest addr written        */
 static uint32_t      g_vw_max   = 0;            /* max guest addr written        */
+
+/* Frame-dirty flag (PISTORM_ET4000_DIRTY). Set race-free by the CPU thread on
+ * any VRAM write (via vw_track) or known register write; consumed by the render
+ * thread via et4000_take_dirty(). Starts 1 so the first frame always renders. */
+static atomic_int    g_et4000_dirty = 1;
+static inline void et4000_mark_dirty(void) {
+    atomic_store_explicit(&g_et4000_dirty, 1, memory_order_relaxed);
+}
+
+/* Render thread: returns non-zero if the screen changed this frame OR last frame
+ * (2-frame union keeps both double-buffers current), and atomically clears the
+ * flag. A write landing mid-render re-sets it -> rendered next frame, never lost. */
+int et4000_take_dirty(void) {
+    static int last = 1;
+    int now = atomic_exchange_explicit(&g_et4000_dirty, 0, memory_order_acquire);
+    int render = now | last;
+    last = now;
+    return render;
+}
+
 static inline void vw_track(uint32_t a) {
     g_vw_count++;
     if (a < g_vw_min) g_vw_min = a;
     if (a > g_vw_max) g_vw_max = a;
+    et4000_mark_dirty();
 }
 
 /* Which ports does an ET4000AX actually decode? VGA/EGA/CGA + ET4000 extensions
@@ -252,6 +274,8 @@ void    et4000_engine_io_write(uint32_t port, uint8_t val) {
         }
         return;
     }
+    /* Known register write reaches the engine -> may change the picture. */
+    et4000_mark_dirty();
 /*
     if (et4k_io_log && port != 0x3DA && port != 0x3BA && io_log_n < 6000) {
         fprintf(stderr, "[io] W %04X = %02X\n", port, val); io_log_n++;

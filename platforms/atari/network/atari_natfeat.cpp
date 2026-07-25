@@ -741,9 +741,50 @@ static bool hostfs_parent_path(char *dst, size_t dst_len, const char *path)
   return true;
 }
 
+/* Return the existing node for (mount_index, dev, path) if we already have one,
+ * otherwise allocate a fresh one. Deduping here is what keeps the node table
+ * bounded: the MiNT kernel re-looks-up the same paths constantly (see the
+ * HOSTFS_DEBUG trace - 'ico24' and each icon get looked up over and over), and
+ * without dedup every lookup burned a new slot until the 1024-entry table
+ * filled and returned EINVFN (TOS ERROR #32). We deliberately never free nodes
+ * (a live fcookie the kernel still holds could otherwise be reused underneath
+ * it - that corruption is what broke exec and showed ---w- permissions); dedup
+ * bounds the table by the number of DISTINCT paths touched instead of by the
+ * number of operations, which is the Hatari-style "bounded, recycled state"
+ * principle adapted to the XFS cookie model. */
+/* Path-dedup keeps the node table bounded by distinct paths instead of by op
+ * count (see hostfs_alloc_path_node). Default ON - confirmed stable on hardware
+ * with programs running off the share. PISTORM_HOSTFS_DEDUP=0 restores the old
+ * fresh-node-per-lookup behaviour as an escape hatch. */
+static bool hostfs_dedup_enabled(void)
+{
+  static int cached = -1;
+  if (cached < 0) {
+    const char *e = getenv("PISTORM_HOSTFS_DEDUP");
+    cached = (e && atoi(e) == 0) ? 0 : 1;
+  }
+  return cached != 0;
+}
+
+static hostfs_node_t *hostfs_find_path_node(int mount_index, uae_u16 dev, const char *path)
+{
+  if (!hostfs_dedup_enabled())
+    return NULL;
+  for (unsigned i = 0; i < HOSTFS_MAX_NODES; i++) {
+    hostfs_node_t *n = &g_hostfs_nodes[i];
+    if (n->used && n->mount_index == mount_index && n->dev == dev &&
+        strcmp(n->path, path) == 0)
+      return n;
+  }
+  return NULL;
+}
+
 static hostfs_node_t *hostfs_alloc_path_node(int mount_index, uae_u16 dev, const char *path)
 {
-  hostfs_node_t *node = hostfs_alloc_node();
+  hostfs_node_t *node = hostfs_find_path_node(mount_index, dev, path);
+  if (node)
+    return node;
+  node = hostfs_alloc_node();
   if (!node)
     return NULL;
   node->dev = dev;
@@ -3247,14 +3288,11 @@ static uae_u32 nf_call_hostfs(uae_u32 subid, uaecptr params)
         return TOS_ENOENT;
       }
 
-      hostfs_node_t *node = hostfs_alloc_node();
+      hostfs_node_t *node = hostfs_alloc_path_node(idx,
+                                                   (uae_u16)nf_read_word(dir_cookie + 4),
+                                                   resolved);
       if (!node)
         return TOS_ENOSYS;
-
-      node->dev = (uint16_t)nf_read_word(dir_cookie + 4);
-      node->mount_index = idx;
-      strncpy(node->path, resolved, sizeof(node->path) - 1);
-      node->path[sizeof(node->path) - 1] = '\0';
 
       hostfs_write_cookie(out_cookie,
                           g_hostfs_mounts[idx].fs_ptr,
@@ -3445,14 +3483,10 @@ static uae_u32 nf_call_hostfs(uae_u32 subid, uaecptr params)
           return TOS_ERANGE;
       }
 
-      hostfs_node_t *node = hostfs_alloc_node();
+      hostfs_node_t *node = hostfs_alloc_path_node(host_dir->mount_index,
+                                                   host_dir->dev, child_path);
       if (!node)
         return TOS_ENOSYS;
-
-      node->dev = host_dir->dev;
-      node->mount_index = host_dir->mount_index;
-      strncpy(node->path, child_path, sizeof(node->path) - 1);
-      node->path[sizeof(node->path) - 1] = '\0';
 
       if (out_cookie) {
         hostfs_write_cookie(out_cookie,
@@ -3673,8 +3707,7 @@ static uae_u32 nf_call_hostfs(uae_u32 subid, uaecptr params)
     case HOSTFS_XFS_RELEASE:
     {
       uaecptr cookie = nf_get_param(params, 0);
-      HOSTFS_LOG("[NF] HOSTFS.XFS_RELEASE cookie=0x%08X index=%u -> 0\n",
-              cookie, cookie ? nf_read_long(cookie + 8) : 0);
+      HOSTFS_LOG("[NF] HOSTFS.XFS_RELEASE cookie=0x%08X -> 0\n", cookie);
       return TOS_E_OK;
     }
 
@@ -3685,8 +3718,8 @@ static uae_u32 nf_call_hostfs(uae_u32 subid, uaecptr params)
       if (!dst || !src)
         return TOS_EDRIVE;
       hostfs_copy_cookie(dst, src);
-      HOSTFS_LOG("[NF] HOSTFS.XFS_DUPCOOKIE src=0x%08X dst=0x%08X index=%u -> 0\n",
-              src, dst, nf_read_long(dst + 8));
+      HOSTFS_LOG("[NF] HOSTFS.XFS_DUPCOOKIE src=0x%08X dst=0x%08X -> 0\n",
+              src, dst);
       return TOS_E_OK;
     }
 

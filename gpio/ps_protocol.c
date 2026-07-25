@@ -56,14 +56,12 @@ static atomic_flag ps_txn_lock = ATOMIC_FLAG_INIT;
 
 static inline void ps_lock_bus(void)
 {
-  return;
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
 }
 
 static inline void ps_unlock_bus(void)
 {
-  return;
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
 

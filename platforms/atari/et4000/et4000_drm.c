@@ -24,6 +24,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <poll.h>
+#include <stdlib.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
@@ -45,16 +47,29 @@ static uint8_t *g_bg_map = NULL;
 /* scaling plane */
 static uint32_t g_plane_id;
 
-/* native double-buffered source */
+/* native source buffers. Blocking (legacy) path uses 2 (double buffer). Async
+ * (atomic) path uses 3 (triple buffer): scanned + pending + one the render
+ * thread can always write without waiting or tearing. */
+#define NUM_SRC 3
 struct srcbuf {
     uint32_t handle, fb, pitch;
     uint64_t size;
     uint8_t *map;
 };
-static struct srcbuf g_src[2];
+static struct srcbuf g_src[NUM_SRC];
+static int g_nsrc;          /* how many buffers we actually allocated (2 or 3) */
 static uint32_t g_src_w, g_src_h;
 static int g_back;          /* index the caller writes the next frame into */
 static int g_have_src;
+
+/* ---- async atomic present (PISTORM_DRM_ASYNC=1) --------------------------- */
+static int g_async;              /* atomic async available + enabled */
+static int g_flip_pending;       /* an async commit is in flight (awaiting event) */
+static int g_first_flip = 1;     /* first atomic commit: blocking + ALLOW_MODESET */
+static int g_last_committed = -1;/* buffer index of the previous successful commit */
+/* plane atomic property ids */
+static uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h,
+                p_src_x, p_src_y, p_src_w, p_src_h;
 
 /* ---- dumb-buffer helpers -------------------------------------------------- */
 
@@ -222,6 +237,76 @@ static uint32_t pick_plane(int fd, int crtc_index)
 
 /* ---- public API ----------------------------------------------------------- */
 
+/* ---- async atomic helpers ------------------------------------------------- */
+
+static uint32_t plane_prop_id(int fd, uint32_t plane, const char *name)
+{
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(fd, plane, DRM_MODE_OBJECT_PLANE);
+    uint32_t id = 0;
+    if (props) {
+        for (uint32_t i = 0; i < props->count_props && !id; i++) {
+            drmModePropertyRes *p = drmModeGetProperty(fd, props->props[i]);
+            if (p) {
+                if (!strcmp(p->name, name))
+                    id = p->prop_id;
+                drmModeFreeProperty(p);
+            }
+        }
+        drmModeFreeObjectProperties(props);
+    }
+    return id;
+}
+
+static void page_flip_handler(int fd, unsigned int seq, unsigned int tv_sec,
+                              unsigned int tv_usec, unsigned int crtc_id, void *data)
+{
+    (void)fd; (void)seq; (void)tv_sec; (void)tv_usec; (void)crtc_id; (void)data;
+    g_flip_pending = 0;
+}
+
+/* Non-blocking: consume any completed-flip events without ever waiting. */
+static void drmpres_drain_flip(void)
+{
+    if (!g_flip_pending)
+        return;
+    struct pollfd pfd = { .fd = g_fd, .events = POLLIN };
+    while (g_flip_pending && poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+        drmEventContext ev;
+        memset(&ev, 0, sizeof ev);
+        ev.version = 3;
+        ev.page_flip_handler2 = page_flip_handler;
+        drmHandleEvent(g_fd, &ev);
+    }
+}
+
+/* Enable atomic + cache the plane property ids. Best-effort: on any failure we
+ * leave g_async=0 and the caller keeps the blocking legacy path. */
+static void drmpres_atomic_setup(void)
+{
+    const char *e = getenv("PISTORM_DRM_ASYNC");
+    if (!(e && *e && strcmp(e, "0") != 0))
+        return;
+    if (drmSetClientCap(g_fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
+        fprintf(stderr, "[DRM] atomic cap unavailable; async present off\n");
+        return;
+    }
+    p_fb_id   = plane_prop_id(g_fd, g_plane_id, "FB_ID");
+    p_crtc_id = plane_prop_id(g_fd, g_plane_id, "CRTC_ID");
+    p_crtc_x  = plane_prop_id(g_fd, g_plane_id, "CRTC_X");
+    p_crtc_y  = plane_prop_id(g_fd, g_plane_id, "CRTC_Y");
+    p_crtc_w  = plane_prop_id(g_fd, g_plane_id, "CRTC_W");
+    p_crtc_h  = plane_prop_id(g_fd, g_plane_id, "CRTC_H");
+    p_src_x   = plane_prop_id(g_fd, g_plane_id, "SRC_X");
+    p_src_y   = plane_prop_id(g_fd, g_plane_id, "SRC_Y");
+    p_src_w   = plane_prop_id(g_fd, g_plane_id, "SRC_W");
+    p_src_h   = plane_prop_id(g_fd, g_plane_id, "SRC_H");
+    g_async = p_fb_id && p_crtc_id && p_crtc_x && p_crtc_y && p_crtc_w &&
+              p_crtc_h && p_src_x && p_src_y && p_src_w && p_src_h;
+    fprintf(stderr, "[DRM] async atomic present: %s\n",
+            g_async ? "ON (triple buffer, non-blocking)" : "unavailable (missing props)");
+}
+
 int drmpres_open(void)
 {
     char card[32] = "";
@@ -354,6 +439,7 @@ int drmpres_open(void)
         goto fail_crtc;
     }
     plane_set_nearest(g_fd, g_plane_id);   /* crisp upscaling like SDL */
+    drmpres_atomic_setup();                 /* opt-in async atomic present */
 
     fprintf(stderr, "[DRM] phase2 scanout up: %ux%u@%u plane=%u(%s) (%s)\n",
             g_mode.hdisplay, g_mode.vdisplay, g_mode.vrefresh, g_plane_id,
@@ -396,19 +482,25 @@ int drmpres_set_source(uint32_t w, uint32_t h)
         return 0;                               /* unchanged */
 
     if (g_have_src) {
-        free_dumb(&g_src[0]);
-        free_dumb(&g_src[1]);
+        for (int i = 0; i < g_nsrc; i++)
+            free_dumb(&g_src[i]);
         g_have_src = 0;
     }
-    if (make_dumb(w, h, &g_src[0]) < 0)
-        return -1;
-    if (make_dumb(w, h, &g_src[1]) < 0) {
-        free_dumb(&g_src[0]);
-        return -1;
+    int n = g_async ? NUM_SRC : 2;   /* triple buffer only for async */
+    for (int i = 0; i < n; i++) {
+        if (make_dumb(w, h, &g_src[i]) < 0) {
+            for (int j = 0; j < i; j++)
+                free_dumb(&g_src[j]);
+            return -1;
+        }
     }
+    g_nsrc = n;
     g_src_w = w;
     g_src_h = h;
     g_back = 0;
+    g_last_committed = -1;
+    g_flip_pending = 0;
+    g_first_flip = 1;
     g_have_src = 1;
     return 0;
 }
@@ -431,10 +523,69 @@ void drmpres_flip(void)
     if (g_fd < 0 || !g_have_src)
         return;
 
-    int back = g_back;
+    if (g_async) {
+        static int stuck = 0;
+        drmpres_drain_flip();            /* reap a completed flip, never blocks */
+        if (g_flip_pending) {
+            /* previous flip still in flight -> drop this frame (g_back unchanged).
+             * Failsafe: if a completion event is ever missed, recover after ~8
+             * frames instead of freezing the display forever. */
+            if (++stuck <= 8)
+                return;
+            g_flip_pending = 0;
+        }
+        stuck = 0;
 
-    /* present the current back buffer, scaled to fill the display.
-     * src rect is 16.16 fixed point. */
+        int back = g_back;
+        drmModeAtomicReq *req = drmModeAtomicAlloc();
+        if (!req)
+            return;
+        drmModeAtomicAddProperty(req, g_plane_id, p_fb_id,   g_src[back].fb);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_id, g_crtc_id);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_x,  0);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_y,  0);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_w,  g_mode.hdisplay);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_h,  g_mode.vdisplay);
+        drmModeAtomicAddProperty(req, g_plane_id, p_src_x,   0);
+        drmModeAtomicAddProperty(req, g_plane_id, p_src_y,   0);
+        drmModeAtomicAddProperty(req, g_plane_id, p_src_w,   (uint64_t)g_src_w << 16);
+        drmModeAtomicAddProperty(req, g_plane_id, p_src_h,   (uint64_t)g_src_h << 16);
+        /* First commit enables the plane on the CRTC: allow-modeset + blocking.
+         * All later commits are the fast non-blocking flips with completion events. */
+        uint32_t flags = g_first_flip
+            ? DRM_MODE_ATOMIC_ALLOW_MODESET
+            : (DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT);
+        int r = drmModeAtomicCommit(g_fd, req, flags, NULL);
+        drmModeAtomicFree(req);
+        if (r == 0) {
+            if (g_first_flip)
+                g_first_flip = 0;   /* blocking commit: no completion event pending */
+            else
+                g_flip_pending = 1;
+            /* next render buffer = the one that is neither the buffer we just
+             * committed (back) nor the one before it (g_last_committed, still
+             * scanned until this flip latches). With 3 buffers exactly one such
+             * index exists, so the render thread never waits and never tears. */
+            int next = 0;
+            for (int i = 0; i < g_nsrc; i++)
+                if (i != back && i != g_last_committed) { next = i; break; }
+            g_last_committed = back;
+            g_back = next;
+        } else {
+            static int warned = 0;
+            if (!warned) {
+                warned = 1;
+                fprintf(stderr, "[DRM] atomic commit failed: %s -> reverting to blocking present\n",
+                        strerror(errno));
+            }
+            g_async = 0;
+            g_back = 0;                   /* legacy uses buffers 0/1 only */
+        }
+        return;
+    }
+
+    /* legacy blocking present (default): SetPlane latches at vblank. */
+    int back = g_back;
     if (drmModeSetPlane(g_fd, g_plane_id, g_crtc_id, g_src[back].fb, 0,
                         0, 0, g_mode.hdisplay, g_mode.vdisplay,
                         0, 0, g_src_w << 16, g_src_h << 16) < 0) {
@@ -456,8 +607,8 @@ void drmpres_close(void)
         return;
 
     if (g_have_src) {
-        free_dumb(&g_src[0]);
-        free_dumb(&g_src[1]);
+        for (int i = 0; i < g_nsrc; i++)
+            free_dumb(&g_src[i]);
         g_have_src = 0;
     }
 

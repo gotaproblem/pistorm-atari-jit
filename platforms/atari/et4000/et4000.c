@@ -191,6 +191,20 @@ static int et4000_no_render(void)
     return env && *env && strcmp(env, "0") != 0;
 }
 
+/* Dirty gate: skip the ET4000 RTG render+present on frames where nothing changed
+ * (engine reports not dirty), so a static desktop renders ~0 frames/sec instead
+ * of 60. Default ON; set PISTORM_ET4000_DIRTY=0 to force the old always-render. */
+extern int et4000_take_dirty(void);   /* et4000_engine.c */
+static int et4000_dirty_gate_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_ET4000_DIRTY");
+        v = (e && strcmp(e, "0") == 0) ? 0 : 1;   /* default on; =0 disables */
+    }
+    return v;
+}
+
 static int et4000_irq_backoff_enabled(void)
 {
     const char *env = getenv("PISTORM_VGA_IRQ_BACKOFF");
@@ -753,6 +767,26 @@ static void et4000_record_frame(ET4000State *s)
  * Upload the native staging buffer and present; the GPU scales it up. Called
  * once per frame from the render thread. 
  */
+/* Write-combined-friendly row copy for the DRM back buffer. glibc memcpy is
+ * tuned for cached memory (prefetch, cache-line ops) which is counterproductive
+ * writing to the WC-mapped scanout buffer; plain sequential 64-byte NEON stores
+ * fill the WC write buffers the way the hardware wants (~15ms -> ~1.2ms here). */
+#if defined(__aarch64__)
+#include <arm_neon.h>
+static inline void wc_copy(uint8_t *restrict d, const uint8_t *restrict s, size_t n)
+{
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        uint8x16x4_t v = vld1q_u8_x4(s + i);
+        vst1q_u8_x4(d + i, v);
+    }
+    for (; i < n; i++)
+        d[i] = s[i];
+}
+#else
+static inline void wc_copy(uint8_t *d, const uint8_t *s, size_t n) { memcpy(d, s, n); }
+#endif
+
 static void sdl_present (ET4000State *s)
 {
     static uint32_t present_count = 0;
@@ -800,8 +834,8 @@ static void sdl_present (ET4000State *s)
             if (rowbytes > bp)
                 rowbytes = bp;
             for (uint32_t y = 0; y < sh; y++)
-                memcpy(back + (size_t)y * bp,
-                       s->fb_mem + (size_t)y * s->fb_stride, rowbytes);
+                wc_copy(back + (size_t)y * bp,
+                        s->fb_mem + (size_t)y * s->fb_stride, rowbytes);
         }
         drmpres_flip();
         return;
@@ -1720,6 +1754,43 @@ static void fvdi_swizzle_row32(uint32_t *out, const uint8_t *row, uint32_t w)
     }
 }
 
+/* 16bpp fvdi row conversion: guest big-endian RGB565 -> host XRGB8888.
+ * aarch64: 8 px/iteration (byte-swap the BE pixels, expand each channel to 8
+ * bits, interleave-store B,G,R,A). Bit-identical to the scalar fallback. */
+static void fvdi_swizzle_row16(uint32_t *out, const uint8_t *row, uint32_t w)
+{
+    uint32_t x = 0;
+#if defined(__aarch64__)
+    const uint8x8_t a8 = vdup_n_u8(0xff);
+    for (; x + 8 <= w; x += 8)
+    {
+        uint8x16_t raw = vld1q_u8(row + (size_t)x * 2);
+        uint16x8_t p  = vreinterpretq_u16_u8(vrev16q_u8(raw));   /* BE -> native */
+        uint16x8_t r5 = vshrq_n_u16(p, 11);
+        uint16x8_t g6 = vandq_u16(vshrq_n_u16(p, 5), vdupq_n_u16(0x3f));
+        uint16x8_t b5 = vandq_u16(p, vdupq_n_u16(0x1f));
+        uint16x8_t R  = vorrq_u16(vshlq_n_u16(r5, 3), vshrq_n_u16(r5, 2));
+        uint16x8_t G  = vorrq_u16(vshlq_n_u16(g6, 2), vshrq_n_u16(g6, 4));
+        uint16x8_t B  = vorrq_u16(vshlq_n_u16(b5, 3), vshrq_n_u16(b5, 2));
+        uint8x8x4_t px;
+        px.val[0] = vmovn_u16(B);   /* B = low byte of XRGB8888 */
+        px.val[1] = vmovn_u16(G);
+        px.val[2] = vmovn_u16(R);
+        px.val[3] = a8;             /* X/A = 0xff */
+        vst4_u8((uint8_t *)(out + x), px);
+    }
+#endif
+    for (; x < w; x++)
+    {
+        uint16_t p = ((uint16_t)row[x * 2] << 8) | row[x * 2 + 1];
+        uint32_t r = (p >> 11) & 0x1f, g = (p >> 5) & 0x3f, b = p & 0x1f;
+        out[x] = 0xff000000u |
+                 (((r << 3) | (r >> 2)) << 16) |
+                 (((g << 2) | (g >> 4)) << 8)  |
+                  ((b << 3) | (b >> 2));
+    }
+}
+
 static bool blit_fvdi_linear(ET4000State *s, bool *updated)
 {
     static uint64_t last_write_count = UINT64_MAX;
@@ -1796,21 +1867,8 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
     else
     {
         for (uint32_t y = y0; y <= y1; y++)
-        {
-            const uint8_t *row = src + (size_t)y * w * 2;
-            uint32_t *out = dst + (size_t)y * dst_pitch;
-            for (uint32_t x = 0; x < w; x++)
-            {
-                uint16_t p = ((uint16_t)row[x * 2] << 8) | row[x * 2 + 1];
-                uint32_t r = (p >> 11) & 0x1f;
-                uint32_t g = (p >> 5) & 0x3f;
-                uint32_t b = p & 0x1f;
-                out[x] = 0xff000000u |
-                         ((r << 19) | (r << 14)) |
-                         ((g << 10) | (g << 4)) |
-                         ((b << 3) | (b >> 2));
-            }
-        }
+            fvdi_swizzle_row16(dst + (size_t)y * dst_pitch,
+                               src + (size_t)y * w * 2, w);
     }
 
     return true;
@@ -1824,6 +1882,8 @@ void *render_frame(void *vptr)
 {
     extern rtg_s rtg;
     int took;
+    int remaining;
+    int render_took = 0;   /* actual render+present time (excludes pacing sleep) */
     struct timeval stop, start;
     int FRAME_RATE = et4000_frame_interval_us ();
     int no_render = et4000_no_render();
@@ -1886,17 +1946,30 @@ void *render_frame(void *vptr)
 
             bool fvdi_updated = false;
             if (blit_fvdi_linear(g_et4000, &fvdi_updated)) {
-                if (fvdi_updated)
-                    g_sdl_tex_has_frame = 0;
-                render_source = "fvdi";
-                rendered = true;
+                /* fVDI dirty gate: blit_fvdi_linear already reports whether the
+                 * framebuffer changed (write-count). Only copy+flip when it did;
+                 * an unchanged fVDI screen skips the present and the front buffer
+                 * keeps showing. Safe on DRM (full-copy present, no stale rows).
+                 * blit_fvdi_linear returning true still short-circuits the other
+                 * sources. Disable with PISTORM_ET4000_DIRTY=0. */
+                if (fvdi_updated || !et4000_dirty_gate_enabled()) {
+                    if (fvdi_updated)
+                        g_sdl_tex_has_frame = 0;
+                    render_source = "fvdi";
+                    rendered = true;
+                }
             }
 
             else if (show_rtg) {
-                g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
-                et4000_update_display (g_et4000); /* aperture has pixels -> show RTG */
-                render_source = "et4000";
-                rendered = true;
+                /* Stage 1 dirty gate: only redraw+present when the engine says
+                 * the picture changed (this or last frame). Unchanged -> skip
+                 * both, the current front buffer keeps showing. */
+                if (!et4000_dirty_gate_enabled() || et4000_take_dirty()) {
+                    g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
+                    et4000_update_display (g_et4000); /* aperture has pixels -> show RTG */
+                    render_source = "et4000";
+                    rendered = true;
+                }
             }
 
             else if (emulator_config_native_hdmi_enabled() && rtg.vram_base &&
@@ -1923,6 +1996,16 @@ void *render_frame(void *vptr)
                     et4000_profile_add(ET4K_PROF_PRESENT_TOTAL, et4000_profile_now_ns() - t_present);
             }
         }
+
+        /* Measure the ACTUAL render+present cost here, before any pacing sleep.
+         * (took, computed after the usleep loop below, is padded frame time and
+         * unreliable for overrun detection because usleep only guarantees a
+         * minimum and overshoots under scheduling jitter.) */
+        gettimeofday(&stop, NULL);
+        render_took = ((stop.tv_sec - start.tv_sec) * 1000000) + (stop.tv_usec - start.tv_usec);
+        remaining = FRAME_RATE - render_took;
+
+        gettimeofday(&start, NULL);
 
         _VSYNC = 1;
 
@@ -1955,27 +2038,30 @@ void *render_frame(void *vptr)
             gettimeofday(&stop, NULL);
             took = ((stop.tv_sec - start.tv_sec) * 1000000) + (stop.tv_usec - start.tv_usec);
 
-            int remaining = FRAME_RATE - took;
-            if (remaining > 1000)
-                usleep (remaining > 2000 ? 1000 : remaining / 2);
+            int todo = remaining - took;
+            if (todo > 1000)
+                usleep (todo > 2000 ? 1000 : todo / 2);
             else
                 asm volatile ("yield" ::: "memory");
         } 
-        while (took < FRAME_RATE);
+        while (took < remaining);//FRAME_RATE);
 
-        /* check for overruns - is this really needed? */
-        if (took > FRAME_RATE)
+        /* check for overruns - only meaningful when we actually rendered this
+         * frame. On skipped frames (dirty gate -> render_source=="none") a
+         * "took > budget" is just frame-pacing usleep jitter, not a render
+         * overrun, and the backpressure sleep below would be pointless. */
+        if (render_took > FRAME_RATE && strcmp(render_source, "none") != 0)
         {
-            if (took - FRAME_RATE > 2000)
-                printf("[DISPLAY] render overrun source=%s took=%dms budget=%dms\n",
-                       render_source, took / 1000, FRAME_RATE / 1000);
+            if (render_took - FRAME_RATE > 2000)
+                printf("[DISPLAY] render overrun source=%s render=%dms budget=%dms\n",
+                       render_source, render_took / 1000, FRAME_RATE / 1000);
             /* Backpressure (latency work): an overrunning render means the
              * frame saturated memory bandwidth that the CPU thread's fvdi
              * blits are competing for. Skip the next frame slot so sustained
              * full-screen animation drops the renderer to half rate and
              * gives the CPU thread the bus. No effect when renders fit
              * their budget. */
-            usleep((useconds_t)FRAME_RATE);
+           // usleep((useconds_t)FRAME_RATE);
         }
 
         /* frame counter - currently unused */
