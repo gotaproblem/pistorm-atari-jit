@@ -14,6 +14,8 @@ Then add-ons can be developed, such as
 - [x] WiFi networking [implemented]
 - [x] DMA Sound [implemented]
 - [x] FDD Emulation [implemented]
+- [x] Host MP3 playback via NatFeats (mixed with ST sound, SDL3) [implemented]
+- [x] A/V screen recording (hardware H.264 + sound, see capmux.sh) [implemented]
 - [ ] Additional SVGA Cards
 ## Requirements
 This is not for newbies, a good amount of linux development knowledge is needed.
@@ -36,7 +38,7 @@ Before starting the process in earnest, make sure your O/S is current.
 sudo apt upgrade
 
 As is always the case, you must install a bunch of packages and libraries to build the binaries.
->sudo apt install build-essential git libsdl2-dev libzstd-dev libcurl4-openssl-dev libdrm-dev libasound2-dev ffmpeg
+>sudo apt install build-essential git libsdl3-dev libmpg123-dev libjpeg-dev libzstd-dev libcurl4-openssl-dev libdrm-dev ffmpeg
 
 ##### Clone
 Everything is ready to clone this repository

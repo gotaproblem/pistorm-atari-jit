@@ -89,7 +89,20 @@ enum nf_feature_index {
   NF_FEATURE_ETHERNET,
   NF_FEATURE_HOSTFS,
   NF_FEATURE_FVDI,
+  NF_FEATURE_MP3,
   NF_FEATURE_COUNT
+};
+
+/* MP3PLAY subids (NF_SUBID of the id) */
+enum nf_mp3_ops {
+  NF_MP3_PLAY = 0,   /* param0 = ptr to GEMDOS path string (e.g. "U:\\dir\\x.mp3") */
+  NF_MP3_STOP,       /* stop playback / unload */
+  NF_MP3_STATUS,     /* -> 1 if playing/buffered, else 0 */
+  NF_MP3_PAUSE,      /* param0: 1 = pause, 0 = resume */
+  NF_MP3_SEEK,       /* param0: signed seconds relative to current position */
+  NF_MP3_POS,        /* -> current position in seconds (-1 if n/a) */
+  NF_MP3_LEN,        /* -> track length in seconds (0 if unknown) */
+  NF_MP3_META        /* param0: 0=title 1=artist 2=album; param1: buf; param2: len */
 };
 
 enum nfeth_ops {
@@ -184,7 +197,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "NF_STDERR",
   "ETHERNET",
   "HOSTFS",
-  "fVDI"
+  "fVDI",
+  "MP3PLAY"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -197,6 +211,14 @@ extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t b
 extern "C" uint64_t pistorm_fvdi_write_count(void);
 extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes);
 extern "C" void pistorm_dma_to_stram(uaecptr addr, const uint8_t *src, uint32_t n);
+extern "C" int  dmasnd_mp3_play(const char *host_path);
+extern "C" void dmasnd_mp3_stop(void);
+extern "C" int  dmasnd_mp3_active(void);
+extern "C" void dmasnd_mp3_pause(int on);
+extern "C" long dmasnd_mp3_pos_s(void);
+extern "C" long dmasnd_mp3_len_s(void);
+extern "C" void dmasnd_mp3_seek_rel(long delta_s);
+extern "C" const char *dmasnd_mp3_meta(int which);
 extern uae_u8 *natmem_offset;
 extern bool tt_ram_available;
 extern uint32_t tt_ram_size;
@@ -3952,6 +3974,96 @@ extern "C" void atari_natfeat_raise_network_irq(void)
   atari_request_irq_level(nfeth_interrupt_level());
 }
 
+/* Translate a GEMDOS path ("U:\dir\file.mp3") to a host path via the mounted
+ * HOSTFS drive whose letter matches. Requires an explicit drive letter. */
+static bool mp3_gemdos_to_host(const char *gem, char *out, size_t outsz)
+{
+  if (!gem || !gem[0])
+    return false;
+
+  char letter = 0;
+  const char *rest = NULL;
+  if (gem[1] == ':') {
+    /* GEMDOS drive form:  X:\dir\file  or  X:/dir/file */
+    letter = gem[0];
+    rest = gem + 2;
+  } else if (gem[0] == '/' && gem[1] && gem[2] == '/') {
+    /* MiNT unix form:  /x/dir/file */
+    letter = gem[1];
+    rest = gem + 2;                 /* keep the '/' after the letter */
+  } else {
+    return false;
+  }
+  if (letter >= 'a' && letter <= 'z') letter = (char)(letter - 'a' + 'A');
+
+  const char *root = NULL;
+  for (unsigned i = 0; i < ATARI_NATFEAT_HOSTFS_MAX_DRIVES; i++) {
+    if (g_hostfs_mounts[i].mounted && g_hostfs_mounts[i].drive) {
+      char dl = g_hostfs_mounts[i].drive->drive;
+      if (dl >= 'a' && dl <= 'z') dl = (char)(dl - 'a' + 'A');
+      if (dl == letter) { root = g_hostfs_mounts[i].drive->path; break; }
+    }
+  }
+  if (!root)
+    return false;
+
+  while (*rest == '\\' || *rest == '/') rest++;
+  int n = snprintf(out, outsz, "%s/%s", root, rest);
+  if (n < 0 || (size_t)n >= outsz)
+    return false;
+  for (char *p = out; *p; p++)
+    if (*p == '\\') *p = '/';
+  return true;
+}
+
+static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
+{
+  switch (subid) {
+    case NF_MP3_PLAY: {
+      uaecptr pathp = nf_get_param(params, 0);
+      char gem[512];
+      char host[HOSTFS_HOST_PATH_MAX + 16];
+      if (!pathp)
+        return (uae_u32)-1;
+      nf_read_string(pathp, gem, sizeof(gem));
+      if (!mp3_gemdos_to_host(gem, host, sizeof(host))) {
+        fprintf(stderr, "[NF] MP3.PLAY '%s' -> could not map to a host path "
+                "(need a mounted HOSTFS drive letter; accepts X:\\.. or /x/..)\n", gem);
+        return (uae_u32)-1;
+      }
+      int rc = dmasnd_mp3_play(host);
+      HOSTFS_LOG("[NF] MP3.PLAY '%s' -> host '%s' rc=%d\n", gem, host, rc);
+      return rc == 0 ? 0u : (uae_u32)-1;
+    }
+    case NF_MP3_STOP:
+      dmasnd_mp3_stop();
+      HOSTFS_LOG("[NF] MP3.STOP\n");
+      return 0;
+    case NF_MP3_STATUS:
+      return (uae_u32)dmasnd_mp3_active();
+    case NF_MP3_PAUSE:
+      dmasnd_mp3_pause((int)nf_get_param(params, 0));
+      return 0;
+    case NF_MP3_SEEK:
+      dmasnd_mp3_seek_rel((long)(int32_t)nf_get_param(params, 0));
+      return 0;
+    case NF_MP3_POS:
+      return (uae_u32)dmasnd_mp3_pos_s();
+    case NF_MP3_LEN:
+      return (uae_u32)dmasnd_mp3_len_s();
+    case NF_MP3_META: {
+      uae_u32 which = nf_get_param(params, 0);
+      uaecptr buf = nf_get_param(params, 1);
+      uae_u32 len = nf_get_param(params, 2);
+      if (!buf || len == 0)
+        return (uae_u32)-1;
+      nf_write_string(buf, len, dmasnd_mp3_meta((int)which));
+      return 0;
+    }
+  }
+  return (uae_u32)-1;
+}
+
 static uae_u32 nf_call(uaecptr stack)
 {
   uae_u32 id = nf_read_long(stack + 4);
@@ -3975,6 +4087,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_hostfs(subid, params);
     case NF_FEATURE_FVDI:
       return nf_call_fvdi(subid, params);
+    case NF_FEATURE_MP3:
+      return nf_call_mp3(subid, params);
   }
 
   return 0;

@@ -2339,6 +2339,12 @@ extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t b
  * lost - at worst one frame renders more rows than needed. */
 static uint32_t pistorm_fvdi_dirty_min = 0xffffffffu;
 static uint32_t pistorm_fvdi_dirty_max = 0;
+/* Column extent (byte-offset-within-row units). A note that stays inside one
+ * row yields an exact column span; one that crosses rows means full width.
+ * Lets the render convert/copy a dirty RECT instead of full-width bands -
+ * dragging a 640px window on a 1920px screen is 3x less traffic. */
+static uint32_t pistorm_fvdi_dirty_xmin = 0xffffffffu;
+static uint32_t pistorm_fvdi_dirty_xmax = 0;
 
 static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
 {
@@ -2351,12 +2357,36 @@ static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
         pistorm_fvdi_dirty_min = o;
     if (o + bytes > pistorm_fvdi_dirty_max)
         pistorm_fvdi_dirty_max = o + bytes;
+
+    uint32_t rb = pistorm_fvdi_mode_width * (pistorm_fvdi_mode_bpp / 8);
+    if (rb && bytes) {
+        uint32_t x0, x1e;                      /* [x0, x1e) within a row */
+        uint32_t r0 = o / rb, r1 = (o + bytes - 1) / rb;
+        if (r0 == r1) { x0 = o - r0 * rb; x1e = x0 + bytes; }
+        else          { x0 = 0;           x1e = rb; }
+        if (x0 < pistorm_fvdi_dirty_xmin)
+            pistorm_fvdi_dirty_xmin = x0;
+        if (x1e > pistorm_fvdi_dirty_xmax)
+            pistorm_fvdi_dirty_xmax = x1e;
+    }
 }
 
 extern "C" void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx)
 {
     *mn = __atomic_exchange_n(&pistorm_fvdi_dirty_min, 0xffffffffu, __ATOMIC_ACQ_REL);
     *mx = __atomic_exchange_n(&pistorm_fvdi_dirty_max, 0u, __ATOMIC_ACQ_REL);
+}
+
+/* Fetch-and-reset the dirty rect: row byte extent + column byte extent.
+ * Same single-writer/single-reader torn-pair contract as fetch_dirty:
+ * the reader treats (max <= min) as "unknown -> full". */
+extern "C" void pistorm_fvdi_fetch_dirty_rect(uint32_t *mn, uint32_t *mx,
+                                              uint32_t *xmn, uint32_t *xmx)
+{
+    *mn  = __atomic_exchange_n(&pistorm_fvdi_dirty_min, 0xffffffffu, __ATOMIC_ACQ_REL);
+    *mx  = __atomic_exchange_n(&pistorm_fvdi_dirty_max, 0u, __ATOMIC_ACQ_REL);
+    *xmn = __atomic_exchange_n(&pistorm_fvdi_dirty_xmin, 0xffffffffu, __ATOMIC_ACQ_REL);
+    *xmx = __atomic_exchange_n(&pistorm_fvdi_dirty_xmax, 0u, __ATOMIC_ACQ_REL);
 }
 
 extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes)

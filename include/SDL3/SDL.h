@@ -1,21 +1,24 @@
 /* SPDX-License-Identifier: MIT
  *
- * SDL3/SDL.h  —  minimal shim for the headless pistorm JIT build.
+ * SDL3/SDL.h  —  shim with two modes, selected per translation unit:
  *
- * jit/arm/compemu_support_arm.cpp does an unconditional `#include <SDL3/SDL.h>`,
- * but the only thing it ever uses from SDL is SDL_Quit(), and that sits inside
- * `#ifdef JIT_DEBUG` (which we do not define). So nothing from real SDL is
- * actually needed — this stub just satisfies the include. SDL_Quit() is provided
- * anyway, in case JIT_DEBUG is ever switched on.
+ *  - Default (CPU core, JIT, uae/string.h): a minimal stub. Those files include
+ *    <SDL3/SDL.h> but only ever reference SDL_Quit() (under JIT_DEBUG, off) and
+ *    the SDL_str* helpers in uae/string.h are dead code, so nothing real is
+ *    needed. Keeping the stub avoids dragging the whole SDL3 header into the
+ *    Amiberry-derived core.
  *
- * Place at  <tree>/include/SDL3/SDL.h  so `-Iinclude` resolves the angle-bracket
- * include. Remove this shim (and use the real SDL dev headers) only if you later
- * pull in SDL-dependent Amiberry code.
+ *  - Real SDL3 (audio only): dmasnd_hdmi.c is compiled with -DPISTORM_REAL_SDL3
+ *    (plus the sdl3 pkg-config cflags), so this header forwards to the actual
+ *    system <SDL3/SDL.h> via #include_next. That gives the audio backend the
+ *    real SDL3 API without exposing it to any other file.
  */
 
-#ifndef PISTORM_SDL3_SHIM_H
-#define PISTORM_SDL3_SHIM_H
-
-static inline void SDL_Quit(void) { }
-
-#endif /* PISTORM_SDL3_SHIM_H */
+#ifdef PISTORM_REAL_SDL3
+#  include_next <SDL3/SDL.h>
+#else
+#  ifndef PISTORM_SDL3_SHIM_H
+#  define PISTORM_SDL3_SHIM_H
+     static inline void SDL_Quit(void) { }
+#  endif
+#endif

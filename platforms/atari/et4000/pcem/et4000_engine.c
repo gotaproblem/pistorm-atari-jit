@@ -725,6 +725,22 @@ void et4000_engine_render_direct(uint32_t *visible_dst, int pitch_px, int left_p
 
     pcem_buffer32_point_at(visible_dst, pitch_px, W, H, copy_offset);
 
+    /* Zero the staging lines ONCE per mode/geometry change, not per frame.
+     * The old per-line memset in the scanline loop cleared the full staging
+     * pitch (~5.6KB) on every line of every frame - at 800x600@50 that alone
+     * was ~170MB/s of writes the renderer immediately overwrote, and it grew
+     * with resolution (the "overruns get worse at higher res" signature).
+     * The pad columns only exist to absorb renderer overshoot and are never
+     * presented, so stale bytes there are harmless between mode changes. */
+    {
+        static int zeroed_w = 0, zeroed_h = 0, zeroed_off = -1;
+        if (W != zeroed_w || H != zeroed_h || copy_offset != zeroed_off) {
+            for (int y = 0; y < H; y++)
+                memset(buffer32->line[y], 0, (size_t)buffer32->w * sizeof(uint32_t));
+            zeroed_w = W; zeroed_h = H; zeroed_off = copy_offset;
+        }
+    }
+
     s->sc = s->crtc[8] & 0x1f;
     s->scrollcache = s->attrregs[0x13] & 7;
     s->linecountff = 0;
@@ -740,8 +756,17 @@ void et4000_engine_render_direct(uint32_t *visible_dst, int pitch_px, int left_p
 
     s->firstline_draw = 2000; s->lastline_draw = 0;
     uint64_t t_scan = et4000_render_profile_enabled() ? et4000_render_profile_now_ns() : 0;
+    static int lineclear = -1;          /* PISTORM_ENGINE_LINECLEAR=1 restores
+                                           the old per-line memset (A/B switch) */
+    if (lineclear < 0) {
+        const char *e = getenv("PISTORM_ENGINE_LINECLEAR");
+        lineclear = (e && *e == '1') ? 1 : 0;
+    }
     for (int y = 0; y < H; y++) {
-        memset(buffer32->line[y], 0, (size_t)buffer32->w * sizeof(uint32_t));
+        /* no per-line memset by default: the renderer writes every visible
+         * pixel, and the pad columns were zeroed at the geometry change above */
+        if (lineclear)
+            memset(buffer32->line[y], 0, (size_t)buffer32->w * sizeof(uint32_t));
         s->displine = y;
         s->ma &= mask;
         if (s->render == svga_render_blank) {

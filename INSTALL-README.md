@@ -86,8 +86,8 @@ runtime libs, so a prebuilt binary works too):
 
 ```
 build-essential  g++  make  pkg-config
-libsdl2-dev  libdrm-dev  libslirp-dev  libasound2-dev  zlib1g-dev
-ffmpeg           # used by the screendump helper
+libsdl3-dev  libmpg123-dev  libjpeg-dev  libdrm-dev  libslirp-dev  zlib1g-dev
+ffmpeg           # screendump helper + capture muxing (capmux.sh)
 ```
 
 `samba` is only installed if you choose the share option.

@@ -55,8 +55,13 @@
 #include <time.h>
 #include <linux/fb.h>
 
-#include <SDL2/SDL.h>
+#ifdef PISTORM_ENABLE_SDL_DISPLAY
+#include <SDL2/SDL.h>          /* real SDL2 render backend (opt-in) */
+#else
+#include "et4000_sdl_stub.h"   /* default: no-op shim, DRM/fbdev only, no libSDL2 */
+#endif
 #include <zlib.h>
+#include "../avrecord.h"       /* live A/V screen recorder */
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +75,8 @@ uint32_t pistorm_fvdi_bpp(void);
 int pistorm_fvdi_is_active(void);
 uint64_t pistorm_fvdi_write_count(void);
 void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx);
+void pistorm_fvdi_fetch_dirty_rect(uint32_t *mn, uint32_t *mx,
+                                   uint32_t *xmn, uint32_t *xmx);
 #ifdef __cplusplus
 }
 #endif
@@ -110,6 +117,8 @@ static int g_sdl_tex_has_frame = 0;
  * since (re)creation" - partial updates are only legal on top of that. */
 static uint32_t g_fvdi_up_y0 = 0;
 static uint32_t g_fvdi_up_y1 = 0;
+static uint32_t g_fvdi_up_x0 = 0;      /* column extent (pixels), 16px aligned */
+static uint32_t g_fvdi_up_x1 = 0;
 static int g_fvdi_up_partial = 0;
 static int g_sdl_tex_valid = 0;
 
@@ -145,8 +154,9 @@ static int g_screenrecord_active = 0;
 static uint64_t g_screenrecord_end_us = 0;
 static unsigned g_screenrecord_frame = 0;
 static char g_screenrecord_dir[512];
-static int write_png_rgb(const char *path, const uint32_t *pixels,
-                        uint32_t w, uint32_t h, uint32_t stride_px);
+/* non-static: also used by the A/V recorder (avrecord.c) for PNG mode */
+int write_png_rgb(const char *path, const uint32_t *pixels,
+                  uint32_t w, uint32_t h, uint32_t stride_px);
 static int save_png_rgb(const char *path, const uint32_t *pixels,
                         uint32_t w, uint32_t h, uint32_t stride_px);
 
@@ -714,6 +724,19 @@ static int et4000_make_capture_dir(char *out, size_t out_sz)
     return -1;
 }
 
+/* PNG-per-frame legacy recorder (no audio, heavy zlib on the render thread).
+ * Kept behind PISTORM_RECORD_PNG=1; default is the live A/V recorder
+ * (avrecord.c): hardware H.264 + the mixed SDL3 audio into capture.mkv. */
+static int et4000_record_png_mode(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_RECORD_PNG");
+        v = (e && *e == '1') ? 1 : 0;
+    }
+    return v;
+}
+
 static void et4000_start_screenrecord(int seconds)
 {
     if (seconds <= 0)
@@ -730,6 +753,8 @@ static void et4000_start_screenrecord(int seconds)
     g_screenrecord_frame = 0;
     g_screenrecord_end_us = et4000_wall_us() + (uint64_t)seconds * 1000000u;
     g_screenrecord_active = 1;
+    if (!et4000_record_png_mode())
+        avrecord_arm(g_screenrecord_dir, seconds);
     printf("[ET4K] Recording %d seconds -> %s\n", seconds, g_screenrecord_dir);
 }
 
@@ -740,6 +765,34 @@ static void et4000_record_frame(ET4000State *s)
 
     if (!s->fb_mem || !s->fb_width || !s->fb_height || !s->fb_stride)
         return;
+
+    if (!et4000_record_png_mode())
+    {
+        /* Live A/V path: hand the frame over (cheap row copy); the writer
+         * thread and ffmpeg do the rest. Audio arrives via the SDL3 postmix
+         * tap in dmasnd_hdmi.c. */
+        /* pass the frame's dirty rect (fvdi publishes it) so the recorder
+         * copies only what changed; full frame when unknown */
+        if (g_fvdi_up_partial)
+            avrecord_video_frame(s->fb_mem, (int)s->fb_stride,
+                                 (int)s->fb_width, (int)s->fb_height,
+                                 (int)g_fvdi_up_x0, (int)g_fvdi_up_y0,
+                                 (int)g_fvdi_up_x1, (int)g_fvdi_up_y1);
+        else
+            avrecord_video_frame(s->fb_mem, (int)s->fb_stride,
+                                 (int)s->fb_width, (int)s->fb_height,
+                                 0, 0, (int)s->fb_width - 1, (int)s->fb_height - 1);
+        /* The writer self-stops at the duration (works even if the display
+         * idles); this finalizes the files as soon as we notice. */
+        if (et4000_wall_us() >= g_screenrecord_end_us || !avrecord_ok() ||
+            !avrecord_active())
+        {
+            avrecord_stop();
+            g_screenrecord_active = 0;
+            printf("[ET4K] Recording complete -> %s\n", g_screenrecord_dir);
+        }
+        return;
+    }
 
     char path[640];
     snprintf(path, sizeof(path), "%s/frame_%04u.png",
@@ -823,7 +876,15 @@ static void sdl_present (ET4000State *s)
 
         /* Copy the visible frame from the padded staging buffer into the DRM
          * back buffer (cached read -> write-combined write), then scale-present
-         * to fullscreen and swap. */
+         * to fullscreen and swap.
+         *
+         * Dirty-band present: at 1920x1080 a full-frame copy is 8.3MB of WC
+         * writes (~5-6ms) EVERY frame - the single biggest fixed cost in the
+         * FHD/fVDI path. The fvdi render publishes the frame's dirty row
+         * extent (g_fvdi_up_partial/y0/y1); with 2-3 DRM buffers in flight,
+         * each buffer accumulates the union of all bands published since IT
+         * was last filled, and only that band is copied. Unknown buffer
+         * pointer or geometry change -> full copy (fresh/realloc'd buffer). */
         uint8_t *back = drmpres_backbuffer();
         if (back && s->fb_mem && s->fb_stride)
         {
@@ -833,9 +894,85 @@ static void sdl_present (ET4000State *s)
             uint32_t rowbytes = sw * 4;
             if (rowbytes > bp)
                 rowbytes = bp;
-            for (uint32_t y = 0; y < sh; y++)
-                wc_copy(back + (size_t)y * bp,
-                        s->fb_mem + (size_t)y * s->fb_stride, rowbytes);
+
+            static struct { uint8_t *ptr; uint32_t y0, y1, x0, x1; int full; } pend[4];
+            static uint32_t pend_sw = 0, pend_sh = 0;
+            if (sw != pend_sw || sh != pend_sh) {       /* buffers realloc'd */
+                memset(pend, 0, sizeof(pend));
+                pend_sw = sw; pend_sh = sh;
+            }
+
+            /* this frame's dirty rect (divisor > 1 skips presents, which
+             * would lose rects from skipped frames - force full then).
+             * PISTORM_DRM_DIRTYBAND=0 disables it entirely (full copy
+             * every present) as an A/B switch. */
+            static int band_enabled = -1;
+            if (band_enabled < 0) {
+                const char *e = getenv("PISTORM_DRM_DIRTYBAND");
+                band_enabled = (e && *e == '0') ? 0 : 1;
+            }
+            uint32_t fy0 = 0, fy1 = sh ? sh - 1 : 0;
+            uint32_t fx0 = 0, fx1 = sw ? sw - 1 : 0;
+            int ffull = 1;
+            if (band_enabled && present_divisor == 1 && g_fvdi_up_partial &&
+                g_fvdi_up_y0 <= g_fvdi_up_y1 && g_fvdi_up_y1 < sh) {
+                fy0 = g_fvdi_up_y0; fy1 = g_fvdi_up_y1;
+                if (g_fvdi_up_x0 <= g_fvdi_up_x1 && g_fvdi_up_x1 < sw) {
+                    fx0 = g_fvdi_up_x0; fx1 = g_fvdi_up_x1;
+                }
+                ffull = 0;
+            }
+
+            /* every in-flight buffer goes stale by this frame's rect */
+            for (int i = 0; i < 4; i++) {
+                if (!pend[i].ptr) continue;
+                if (ffull) { pend[i].full = 1; continue; }
+                if (pend[i].full) continue;
+                if (pend[i].y1 < pend[i].y0) {          /* was clean */
+                    pend[i].y0 = fy0; pend[i].y1 = fy1;
+                    pend[i].x0 = fx0; pend[i].x1 = fx1;
+                } else {
+                    if (fy0 < pend[i].y0) pend[i].y0 = fy0;
+                    if (fy1 > pend[i].y1) pend[i].y1 = fy1;
+                    if (fx0 < pend[i].x0) pend[i].x0 = fx0;
+                    if (fx1 > pend[i].x1) pend[i].x1 = fx1;
+                }
+            }
+
+            /* copy this buffer's accumulated rect (full for unseen buffers) */
+            int bi = -1, freei = -1;
+            for (int i = 0; i < 4; i++) {
+                if (pend[i].ptr == back) { bi = i; break; }
+                if (!pend[i].ptr && freei < 0) freei = i;
+            }
+            uint32_t cy0 = 0, cy1 = sh ? sh - 1 : 0;   /* default: full copy */
+            uint32_t cx0 = 0, cx1 = sw ? sw - 1 : 0;
+            if (bi >= 0 && !pend[bi].full) {
+                if (pend[bi].y1 < pend[bi].y0) { cy0 = 1; cy1 = 0; } /* clean */
+                else {
+                    cy0 = pend[bi].y0;
+                    cy1 = pend[bi].y1 < sh ? pend[bi].y1 : sh - 1;
+                    cx0 = pend[bi].x0;
+                    cx1 = pend[bi].x1 < sw ? pend[bi].x1 : sw - 1;
+                    if (cx0 > cx1) { cx0 = 0; cx1 = sw - 1; }
+                }
+            }
+            if (bi < 0) {
+                bi = freei >= 0 ? freei : 0;
+                pend[bi].ptr = back;
+            }
+            pend[bi].full = 0;                          /* now up to date */
+            pend[bi].y0 = 1; pend[bi].y1 = 0;           /* empty rect */
+            pend[bi].x0 = 1; pend[bi].x1 = 0;
+
+            /* x0 is 16px-aligned by the publisher -> 64-byte aligned copies */
+            uint32_t xbytes = (cx1 - cx0 + 1) * 4;
+            uint32_t xoff = cx0 * 4;
+            if (xoff + xbytes > rowbytes)
+                xbytes = rowbytes > xoff ? rowbytes - xoff : 0;
+            for (uint32_t y = cy0; y <= cy1 && y < sh && xbytes; y++)
+                wc_copy(back + (size_t)y * bp + xoff,
+                        s->fb_mem + (size_t)y * s->fb_stride + xoff, xbytes);
         }
         drmpres_flip();
         return;
@@ -1465,8 +1602,8 @@ static void png_write_chunk(FILE *f, const char *type,
     png_write_u32(f, (uint32_t)crc);
 }
 
-static int write_png_rgb(const char *path, const uint32_t *pixels,
-                        uint32_t w, uint32_t h, uint32_t stride_px)
+int write_png_rgb(const char *path, const uint32_t *pixels,
+                  uint32_t w, uint32_t h, uint32_t stride_px)
 {
     size_t row_bytes = 1 + (size_t)w * 3; /* filter byte + RGB */
     size_t raw_size = row_bytes * h;
@@ -1833,10 +1970,13 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
      * render-thread memory traffic that starved the CPU thread's blits. */
     uint32_t y0 = 0;
     uint32_t y1 = h - 1;
+    uint32_t px0 = 0;                   /* dirty column extent, pixels */
+    uint32_t px1 = w - 1;
     {
-        uint32_t dmin, dmax;
-        uint32_t rowbytes = w * ((bpp == 32) ? 4u : 2u);
-        pistorm_fvdi_fetch_dirty(&dmin, &dmax);
+        uint32_t dmin, dmax, xmin, xmax;
+        uint32_t bytespp  = (bpp == 32) ? 4u : 2u;
+        uint32_t rowbytes = w * bytespp;
+        pistorm_fvdi_fetch_dirty_rect(&dmin, &dmax, &xmin, &xmax);
         if (!mode_changed && dmin < dmax && rowbytes) {
             y0 = dmin / rowbytes;
             y1 = (dmax - 1) / rowbytes;
@@ -1844,31 +1984,45 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
                 y1 = h - 1;
             if (y0 > y1)
                 y0 = 0;
+            /* column extent: torn/empty pair -> full width. Align the span
+             * to 16px so the NEON swizzle and the 64-byte WC copy in the
+             * present stage both run whole vectors from aligned addresses. */
+            if (xmin < xmax && xmax <= rowbytes) {
+                px0 = (xmin / bytespp) & ~15u;
+                px1 = ((xmax - 1) / bytespp) | 15u;
+                if (px1 >= w)
+                    px1 = w - 1;
+                if (px0 > px1)
+                    px0 = 0;
+            }
         }
         /* torn or empty extent with a changed write_count, or a mode
          * change: render the full frame */
     }
 
-    /* Publish the extent for sdl_present's partial texture upload. A
-     * full-height extent or mode change is equivalent to a full upload. */
+    /* Publish the rect for the present stage. A full extent or mode change
+     * is equivalent to a full upload. */
     g_fvdi_up_y0 = y0;
     g_fvdi_up_y1 = y1;
+    g_fvdi_up_x0 = px0;
+    g_fvdi_up_x1 = px1;
     g_fvdi_up_partial = !mode_changed;
 
     uint32_t *dst = (uint32_t *)s->fb_mem;
     uint32_t dst_pitch = s->fb_stride ? (uint32_t)(s->fb_stride / 4) : w;
+    uint32_t pw = px1 - px0 + 1;
 
     if (bpp == 32)
     {
         for (uint32_t y = y0; y <= y1; y++)
-            fvdi_swizzle_row32(dst + (size_t)y * dst_pitch,
-                               src + (size_t)y * w * 4, w);
+            fvdi_swizzle_row32(dst + (size_t)y * dst_pitch + px0,
+                               src + ((size_t)y * w + px0) * 4, pw);
     }
     else
     {
         for (uint32_t y = y0; y <= y1; y++)
-            fvdi_swizzle_row16(dst + (size_t)y * dst_pitch,
-                               src + (size_t)y * w * 2, w);
+            fvdi_swizzle_row16(dst + (size_t)y * dst_pitch + px0,
+                               src + ((size_t)y * w + px0) * 2, pw);
     }
 
     return true;

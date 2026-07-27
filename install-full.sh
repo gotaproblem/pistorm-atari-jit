@@ -186,10 +186,11 @@ no_desktop
 # --------------------------------------------------------------------------
 say "Installing dependencies"
 sudo apt-get update
-# build + runtime libs; ffmpeg is used by the screendump helper.
+# build + runtime libs; SDL3 = audio backend, libmpg123 = host MP3 decode,
+# ffmpeg = screendump helper + capture muxing (capmux.sh).
 sudo apt-get install -y \
   build-essential g++ make pkg-config \
-  libsdl2-dev libdrm-dev libslirp-dev libasound2-dev zlib1g-dev \
+  libsdl3-dev libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev \
   ffmpeg
 
 # --------------------------------------------------------------------------
@@ -204,6 +205,10 @@ copy_once "$HERE/configs/atari.cfg"         "$ROOT/configs/atari.cfg"
 copy_once "$HERE/configs/master.cfg"        "$ROOT/configs/master.cfg"
 copy_once "$HERE/configs/emutos-aranym.rom" "$ROOT/roms/emutos-aranym.rom"
 copy_once "$HERE/configs/720k.st"           "$ROOT/dkimages/fdd/720k.st"
+
+# capture muxer: shipped in configs/, run from the emulator directory
+copy_once "$HERE/configs/capmux.sh"         "$HERE/capmux.sh"
+chmod +x "$HERE/capmux.sh" 2>/dev/null || true
 
 # --------------------------------------------------------------------------
 # 3. Boot configuration — MERGE, don't clobber the user's settings.

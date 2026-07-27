@@ -36,7 +36,8 @@ CFILES = config_file/config_file.c \
          platforms/atari/network/pistorm_net_slirp.c \
          platforms/atari/network/platform_atari_network.c \
          platforms/atari/audio/dmasnd_hdmi.c \
-         platforms/atari/audio/dmasnd_capture.c
+         platforms/atari/audio/dmasnd_capture.c \
+         platforms/atari/avrecord.c
 
 # -----------------------------------------------------------------
 # C++ source.
@@ -104,11 +105,49 @@ CPPFILES = $(PISTORM_CPP) $(JIT_CPP) $(CPU_CPP) $(SOFTFLOAT_CPP)
 CC  = gcc
 CXX = g++
 
-# SDL2 (ET4000 display backend). sdl2-config ships with libsdl2-dev.
-SDL_CFLAGS = $(shell sdl2-config --cflags)
-SDL_LIBS   = $(shell sdl2-config --libs)
+# SDL3 (audio backend, dmasnd_hdmi.c only). pkg-config sdl3 ships with libsdl3-dev.
+# The display no longer uses SDL (DRM/fbdev + no-op SDL2 shim), so no SDL2 here.
+SDL3_CFLAGS = $(shell pkg-config sdl3 --cflags)
+SDL3_LIBS   = $(shell pkg-config sdl3 --libs)
 SLIRP_CFLAGS = $(shell pkg-config --cflags libslirp 2>/dev/null || pkg-config --cflags slirp 2>/dev/null)
 SLIRP_LIBS   = $(shell pkg-config --libs libslirp 2>/dev/null || pkg-config --libs slirp 2>/dev/null)
+
+# -----------------------------------------------------------------
+# Dependency preflight - fail early with a clear message instead of
+# pages of compiler/linker errors. Skipped for `make clean`.
+# (libslirp stays optional: networking is disabled without it.)
+# -----------------------------------------------------------------
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+
+ifeq ($(shell command -v pkg-config 2>/dev/null),)
+$(error pkg-config not found. Install the build tools first: sudo apt install build-essential pkg-config)
+endif
+
+MISSING_DEPS :=
+ifeq ($(shell pkg-config --exists sdl3 && echo ok),)
+MISSING_DEPS += libsdl3-dev
+endif
+ifeq ($(shell pkg-config --exists libmpg123 && echo ok),)
+MISSING_DEPS += libmpg123-dev
+endif
+ifeq ($(shell pkg-config --exists libdrm && echo ok),)
+MISSING_DEPS += libdrm-dev
+endif
+ifeq ($(shell pkg-config --exists zlib && echo ok),)
+MISSING_DEPS += zlib1g-dev
+endif
+ifeq ($(shell pkg-config --exists libjpeg && echo ok),)
+MISSING_DEPS += libjpeg-dev
+endif
+ifneq ($(strip $(MISSING_DEPS)),)
+$(error Missing build dependencies: $(MISSING_DEPS)  ->  sudo apt install $(MISSING_DEPS))
+endif
+
+ifeq ($(strip $(SLIRP_LIBS)),)
+$(info NOTE: libslirp-dev not found - building WITHOUT WiFi networking support)
+endif
+
+endif # not clean
 
 PIMODEL ?= PI4
 PIMODEL_CANON := $(shell printf '%s' '$(PIMODEL)' | tr '[:lower:]' '[:upper:]')
@@ -198,15 +237,21 @@ DELETEFILES = $(COBJS) $(CPPOBJS) $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d) \
 all: $(TARGET) ataritest
 
 $(TARGET): $(COBJS) $(CPPOBJS)
-	$(CXX) -o $@ $^ $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SDL_LIBS) $(SLIRP_LIBS) -lz -lasound
+	$(CXX) -o $@ $^ $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SLIRP_LIBS) -lz $(SDL3_LIBS) -lmpg123 -ljpeg
 
 # emulator.c built as C++
 emulator.o: emulator.c
 	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
-# et4000.c is built as C (generic %.o:%.c rule); add the SDL2 include path.
+# et4000.c is built as C. It uses the DRM/fbdev backends plus the no-op SDL2
+# shim (et4000_sdl_stub.h) - no libSDL2, no SDL2 include path needed.
 platforms/atari/et4000/et4000.o: platforms/atari/et4000/et4000.c
-	$(CC) $(CFLAGS) $(SDL_CFLAGS) -MMD -MP -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# dmasnd_hdmi.c is the SDL3 audio backend: real SDL3 header (-DPISTORM_REAL_SDL3
+# makes include/SDL3/SDL.h forward to the system header) + sdl3 pkg-config cflags.
+platforms/atari/audio/dmasnd_hdmi.o: platforms/atari/audio/dmasnd_hdmi.c
+	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
 
 ataritest: ataritest.c gpio/ps_protocol.c
 	$(CC) $^ -o $@ $(CFLAGS)
