@@ -1745,6 +1745,125 @@ static void ste_load_palette (uint32_t pal[16])
     }
 }
 
+/* ---- Fuji splash --------------------------------------------------------
+ * Shown whenever no source (fvdi / VGA / native ST mirror) is rendering to
+ * HDMI - e.g. native_hdmi disabled for shifter-output gaming, or before the
+ * guest has a screen. Loads the Atari logo BMP shipped in configs/
+ * (8-bit palettized or 24/32-bit uncompressed; PISTORM_LOGO overrides the
+ * path). Presented once when the display goes idle. */
+static uint32_t *g_logo_px;
+static uint32_t g_logo_w, g_logo_h;
+
+static uint32_t bmp_u32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
+static uint16_t bmp_u16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1]<<8)); }
+
+static void logo_try_load(const char *path)
+{
+    if (g_logo_px || !path)
+        return;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return;
+    uint8_t fh[14], ih[124];
+    if (fread(fh, 1, 14, f) != 14 || fh[0] != 'B' || fh[1] != 'M')
+        goto out;
+    {
+        uint32_t dataoff = bmp_u32(fh + 10);
+        if (fread(ih, 1, 4, f) != 4)
+            goto out;
+        uint32_t hs = bmp_u32(ih);
+        if (hs < 40 || hs > sizeof ih || fread(ih + 4, 1, hs - 4, f) != hs - 4)
+            goto out;
+        int32_t w = (int32_t)bmp_u32(ih + 4), h = (int32_t)bmp_u32(ih + 8);
+        uint16_t bpp = bmp_u16(ih + 14);
+        uint32_t comp = bmp_u32(ih + 16);
+        int topdown = h < 0;
+        uint32_t ah = (uint32_t)(topdown ? -h : h);
+        if (comp != 0 || w <= 0 || (uint32_t)w > 1920 || ah == 0 || ah > 1200 ||
+            (bpp != 8 && bpp != 24 && bpp != 32))
+            goto out;
+        uint32_t pal[256];
+        memset(pal, 0, sizeof pal);
+        if (bpp == 8)
+        {
+            uint32_t ncol = bmp_u32(ih + 32);
+            if (ncol == 0 || ncol > 256) ncol = 256;
+            if (fseek(f, 14 + (long)hs, SEEK_SET) != 0)
+                goto out;
+            for (uint32_t i = 0; i < ncol; i++)
+            {
+                uint8_t e[4];
+                if (fread(e, 1, 4, f) != 4)
+                    goto out;
+                pal[i] = 0xFF000000u | ((uint32_t)e[2] << 16) | ((uint32_t)e[1] << 8) | e[0];
+            }
+        }
+        uint32_t rowbytes = (((uint32_t)w * bpp / 8u) + 3u) & ~3u;
+        uint8_t *row = (uint8_t *)malloc(rowbytes);
+        uint32_t *px = (uint32_t *)malloc((size_t)w * ah * 4u);
+        if (!row || !px || fseek(f, (long)dataoff, SEEK_SET) != 0)
+        {
+            free(row); free(px);
+            goto out;
+        }
+        for (uint32_t r = 0; r < ah; r++)
+        {
+            if (fread(row, 1, rowbytes, f) != rowbytes)
+            {
+                free(row); free(px);
+                goto out;
+            }
+            uint32_t *o = px + (size_t)(topdown ? r : ah - 1 - r) * (uint32_t)w;
+            if (bpp == 8)
+                for (int32_t x = 0; x < w; x++)
+                    o[x] = pal[row[x]];
+            else if (bpp == 24)
+                for (int32_t x = 0; x < w; x++)
+                    o[x] = 0xFF000000u | ((uint32_t)row[x*3+2] << 16) |
+                           ((uint32_t)row[x*3+1] << 8) | row[x*3];
+            else
+                for (int32_t x = 0; x < w; x++)
+                    o[x] = 0xFF000000u | ((uint32_t)row[x*4+2] << 16) |
+                           ((uint32_t)row[x*4+1] << 8) | row[x*4];
+        }
+        free(row);
+        g_logo_px = px;
+        g_logo_w = (uint32_t)w;
+        g_logo_h = ah;
+        fprintf(stderr, "[DISPLAY] splash logo loaded: %s (%ux%u)\n", path, g_logo_w, g_logo_h);
+    }
+out:
+    fclose(f);
+}
+
+static void logo_load(void)
+{
+    logo_try_load(getenv("PISTORM_LOGO"));
+    logo_try_load("configs/AtariLogo800x600.bmp");
+    logo_try_load("../configs/AtariLogo800x600.bmp");
+    logo_try_load("AtariLogo800x600.bmp");
+    if (!g_logo_px)
+        fprintf(stderr, "[DISPLAY] no splash logo found (idle screen stays black)\n");
+}
+
+static int logo_present(ET4000State *s)
+{
+    if (!g_logo_px)
+        return 0;
+    sdl_set_logical(s, g_logo_w, g_logo_h, 800, 600);
+    if (!s->fb_mem || !s->fb_stride || s->fb_width < g_logo_w)
+        return 0;
+    uint32_t pitch = s->fb_stride / 4;
+    uint32_t *dst = (uint32_t *)s->fb_mem;
+    for (uint32_t y = 0; y < g_logo_h && y < s->fb_height; y++)
+        memcpy(dst + (size_t)y * pitch, g_logo_px + (size_t)y * g_logo_w,
+               (size_t)g_logo_w * 4u);
+    g_sdl_tex_has_frame = 0;
+    g_fvdi_up_partial = 0;
+    sdl_present(s);
+    return 1;
+}
+
 static const uint8_t *st_native_frame_source(uint32_t base, const uint8_t *mirror)
 {
     (void)base;
@@ -1822,6 +1941,22 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
         break;
     }
 
+    /* STE linewidth ($FF820F): the shifter skips this many extra WORDS at
+     * the end of every scanline, so the memory stride grows accordingly.
+     * STE fine scroll ($FF8265): the visible line is shifted left by
+     * 0-15 pixels; the rightmost pixels come from one extra 16-pixel group
+     * the shifter prefetches, and the video counter advances by one extra
+     * group (planes*2 bytes) per line. Both mirror the real chip's rules -
+     * software's registers then do whatever they do on the real shifter. */
+    uint32_t hs;
+    {
+        extern rtg_s rtg;            /* lives in emulator.c */
+        stride += (uint32_t)rtg.linewidth * 2u;
+        hs = rtg.hscroll & 15u;
+        if (hs)
+            stride += planes * 2u;   /* prefetched extra group */
+    }
+
     /* Decode at the native sample grid; the GPU stretches it to the common
      * 640x400 display shape (so MED's 640x200 fills the same area as LOW/HIGH)
      * and letterboxes to HDMI. */
@@ -1839,7 +1974,7 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
         //st_load_palette (pal);
         ste_load_palette (pal);
 
-    uint8_t idx[640];
+    uint8_t idx[640 + 16];           /* +16: hscroll prefetch group */
 
     for (uint32_t y = 0; y < src_h; y++)
     {
@@ -1849,13 +1984,16 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
         if (planes == 1)
         {
             for (uint32_t x = 0; x < src_w; x++)
-                o[x] = pal[(row[x >> 3] >> (7 - (x & 7))) & 1];
+            {
+                uint32_t sx = x + hs;
+                o[x] = pal[(row[sx >> 3] >> (7 - (sx & 7))) & 1];
+            }
         }
         else
         {
-            st_decode_row(row, src_w, planes, idx);
+            st_decode_row(row, src_w + (hs ? 16u : 0u), planes, idx);
             for (uint32_t x = 0; x < src_w; x++)
-                o[x] = pal[idx[x]];
+                o[x] = pal[idx[x + hs]];
         }
     }
 }
@@ -2054,6 +2192,8 @@ void *render_frame(void *vptr)
     }
     et4000_thread_ready = 1;
 
+    logo_load();
+
     while (!cpu_emulation_running)
         usleep(1000);
 
@@ -2084,6 +2224,8 @@ void *render_frame(void *vptr)
             bool video_enabled = (g_et4000->video_subsystem & 0x01) != 0;
             bool show_rtg = false;
             bool rendered = false;
+            bool source_active = false;
+            static bool splash_shown = false;
             uint64_t t_build = et4000_profile_enabled() ? et4000_profile_now_ns() : 0;
             uint64_t t_present;
 
@@ -2100,6 +2242,7 @@ void *render_frame(void *vptr)
 
             bool fvdi_updated = false;
             if (blit_fvdi_linear(g_et4000, &fvdi_updated)) {
+                source_active = true;
                 /* fVDI dirty gate: blit_fvdi_linear already reports whether the
                  * framebuffer changed (write-count). Only copy+flip when it did;
                  * an unchanged fVDI screen skips the present and the front buffer
@@ -2115,6 +2258,7 @@ void *render_frame(void *vptr)
             }
 
             else if (show_rtg) {
+                source_active = true;
                 /* Stage 1 dirty gate: only redraw+present when the engine says
                  * the picture changed (this or last frame). Unchanged -> skip
                  * both, the current front buffer keeps showing. */
@@ -2137,6 +2281,7 @@ void *render_frame(void *vptr)
                                rtg.shift_mode); /* Native ST screen, including real blitter DMA writes. */
                 render_source = "st";
                 rendered = true;
+                source_active = true;
             }
 
             if (t_build)
@@ -2148,6 +2293,18 @@ void *render_frame(void *vptr)
                 sdl_present(g_et4000);
                 if (t_present)
                     et4000_profile_add(ET4K_PROF_PRESENT_TOTAL, et4000_profile_now_ns() - t_present);
+            }
+
+            /* Idle splash: no source claimed this frame (native_hdmi off for
+             * shifter-output gaming, or no guest screen yet) - show the Fuji
+             * logo once. Any live source (even dirty-gated and currently
+             * unchanged) suppresses it and re-arms it for the next idle. */
+            if (source_active)
+                splash_shown = false;
+            else if (!splash_shown && logo_present(g_et4000))
+            {
+                render_source = "splash";
+                splash_shown = true;
             }
         }
 

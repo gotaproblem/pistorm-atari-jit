@@ -20,6 +20,7 @@
 extern "C" {
 #endif
 
+uint8_t IDE_intrq_pending (void);
 void InitIDE(void);
 void writeIDEB(unsigned int address, unsigned value);
 void writeIDE(unsigned int address, unsigned value);

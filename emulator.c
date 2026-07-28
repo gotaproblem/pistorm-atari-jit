@@ -23,6 +23,8 @@
 #include "config_file/config_file.h"
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
+#include "platforms/atari/audio/ym2149.h"
+#include "platforms/atari/st_blitter.h"
 #include "sysdeps.h"
 #include "threaddep/thread.h"
 
@@ -40,6 +42,7 @@ extern "C"
   extern void jit_cpu_reset(void);
   extern void jit_cpu_execute(void);
   extern void pistorm_set_blitter_enabled(int enabled);
+  extern void pistorm_set_blitter_mode(int mode);
 
 #ifdef __cplusplus
 }
@@ -871,7 +874,7 @@ int main (int argc, char *argv[])
     return 1;
   }
   emulator_config_set_current(config);
-  pistorm_set_blitter_enabled(emulator_config_blitter_enabled() ? 1 : 0);
+  pistorm_set_blitter_mode(emulator_config_blitter_mode());
 
   /*
    * initialise emulator with config file parameters
@@ -925,11 +928,22 @@ int main (int argc, char *argv[])
    */
   if (config->ttram)
   {
-    tt_ram_available = true;
-    tt_ram_size = config->ttram_size ? config->ttram_size : (128u * 1024u * 1024u);
-    if (tt_ram_size > 128u * 1024u * 1024u)
-      tt_ram_size = 128u * 1024u * 1024u;
-    printf("[INIT] TT-RAM allocated - %uMB\n", tt_ram_size >> 20);
+    if (cpu_type < 2)
+    {
+      /* 68000/68010 are 24-bit parts: TT-RAM at 0x01000000 is unreachable and
+       * enabling it would switch the core to 32-bit addressing, breaking the
+       * 24-bit wraparound real STs (and their software) rely on. */
+      printf("[INIT] TT-RAM requested but CPU is 680%s0 - ignored (24-bit bus)\n",
+             cpu_type == 0 ? "0" : "1");
+    }
+    else
+    {
+      tt_ram_available = true;
+      tt_ram_size = config->ttram_size ? config->ttram_size : (128u * 1024u * 1024u);
+      if (tt_ram_size > 128u * 1024u * 1024u)
+        tt_ram_size = 128u * 1024u * 1024u;
+      printf("[INIT] TT-RAM allocated - %uMB\n", tt_ram_size >> 20);
+    }
   }
 
   /*
@@ -978,17 +992,37 @@ int main (int argc, char *argv[])
 
   /* --------------------------- */
 
-  /* Initialise DMA Sound -> HDMI (STe only) */
-  if (config->dma_sound) {
-    if (dmasnd_init (NULL) == 0 && dmasnd_capture_start() == 0) {
-      DMA_Sound_enabled = true;
-      printf ("[INIT] DMA Sound enabled\n");
+  /* Audio -> HDMI. dma_sound (STe DMA capture) and ym2149 (emulated PSG
+   * shadowing the real chip's register writes) are independent switches;
+   * either one brings up the shared SDL3 audio device. */
+  if (config->dma_sound || config->ym2149) {
+    if (dmasnd_init (NULL) == 0) {
+      if (config->dma_sound) {
+        if (dmasnd_capture_start() == 0) {
+          DMA_Sound_enabled = true;
+          printf ("[INIT] DMA Sound enabled\n");
+        } else {
+          DMA_Sound_enabled = false;
+          fprintf(stderr, "[INIT] DMA Sound failed to start\n");
+        }
+      } else {
+        printf ("[INIT] DMA Sound disabled\n");
+      }
+      if (config->ym2149) {
+        if (ym2149_init () == 0)
+          printf ("[INIT] YM2149 emulation enabled\n");
+        else
+          fprintf(stderr, "[INIT] YM2149 emulation failed to start\n");
+      } else {
+        printf ("[INIT] YM2149 emulation disabled\n");
+      }
     } else {
       DMA_Sound_enabled = false;
-      fprintf(stderr, "[INIT] DMA Sound failed to start\n");
+      fprintf(stderr, "[INIT] audio device failed; DMA Sound / YM2149 unavailable\n");
     }
   } else {
     printf ("[INIT] DMA Sound disabled\n");
+    printf ("[INIT] YM2149 emulation disabled\n");
   }
 
   /* start threads */
@@ -1080,7 +1114,7 @@ int main (int argc, char *argv[])
                            config->jit_cache_set ? 1 : 0);
   jit_cpu_init (cpu_type,
                 config->fpu ? 1 : 0,
-                config->ttram ? 1 : 0,
+                tt_ram_available ? 1 : 0,  /* not config->ttram: may be vetoed for 68000/010 */
                 config->addr32 ? 1 : 0,
                 config->jit ? 1 : 0); /* cpu_type: 0=68000 1=010 2=020 3=030 4=040 */
   fprintf(stderr, "[MAIN] jit_cpu_init returned\n");
@@ -1110,6 +1144,8 @@ void cpu_pulse_reset(void)
   ps_pulse_reset();
   if (DMA_Sound_enabled)
     dmasnd_capture_reset();
+  ym2149_reset();
+  st_blitter_reset();
 
   pulse_reset_inprogress = 0;
 }
@@ -1128,6 +1164,8 @@ void atari_hard_reset(void)
   ps_pulse_reset();         /* pulse Atari RESET: MFP / GLUE / DMA / FDC / PSG */
   if (DMA_Sound_enabled)
     dmasnd_capture_reset();
+  ym2149_reset();
+  st_blitter_reset();
   pistorm_net_reset();
 
   jit_cpu_reset(); /* drop stale translations before re-fetch */
@@ -1323,6 +1361,10 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     rtg.mid = value;
   else if (a == 0x00FF820D)
     rtg.low = value;
+  else if (a == 0x00FF820F)
+    rtg.linewidth = value;         /* STE: extra words per scanline */
+  else if (a == 0x00FF8265)
+    rtg.hscroll = value & 0x0F;    /* STE: fine horizontal scroll */
   else if (a == 0x00FF8260)
     rtg.shift_mode = value;
 }
@@ -1337,6 +1379,10 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     rtg.mid = (uint8_t)value;
   else if (a == 0x00FF820C)
     rtg.low = (uint8_t)value;
+  else if (a == 0x00FF820E)
+    rtg.linewidth = (uint8_t)value;
+  else if (a == 0x00FF8264)
+    rtg.hscroll = (uint8_t)(value & 0x0F);
   else if (a == 0x00FF8260)
     rtg.shift_mode = (uint8_t)(value >> 8);
   else if (a >= 0x00FF8240 && a < 0x00FF8260)
@@ -1352,6 +1398,7 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
     rtg.mid = (uint8_t)value;
   } else if (a == 0x00FF820C) {
     rtg.low = (uint8_t)(value >> 16);
+    rtg.linewidth = (uint8_t)value;
   } else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     unsigned i = (a - 0x00FF8240) >> 1;
     st_palette[i] = (uint16_t)(value >> 16);

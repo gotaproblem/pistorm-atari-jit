@@ -43,7 +43,12 @@
  * is pre-swapped at generation to stay consistent (see
  * cmd_identify_complete). Preserving the user's test setting: 1. */
 #ifndef IDE_NATIVE_BYTEORDER
-#define IDE_NATIVE_BYTEORDER 1
+#define IDE_NATIVE_BYTEORDER 0   /* 0 = twisted-cable order: matches PPera-
+                                    prepared images (byte-swapped boot code /
+                                    driver in the MBR track). EmuTOS detects
+                                    the swapped signature and adapts; the
+                                    on-image PPera boot driver only checksums
+                                    and executes correctly in this order. */
 #endif
 
 
@@ -159,12 +164,24 @@ static off_t xlate_block(struct ide_taskfile *t)
   struct ide_drive *d = t->drive;
   struct ide_controller *c = d->controller;
 
-  /* Compose 28-bit LBA from taskfile registers:
-     lba4[3:0] = LBA[27:24], lba3 = LBA[23:16], lba2 = LBA[15:8], lba1 = LBA[7:0] */
-  off_t lba = ((off_t)(c->lba4 & DEVH_HEAD) << 24) |
-              ((off_t)c->lba3 << 16) |
-              ((off_t)c->lba2 << 8)  |
-               (off_t)c->lba1;
+  off_t lba;
+
+  if (c->lba4 & DEVH_LBA) {
+    /* LBA mode (EmuTOS, modern drivers):
+       lba4[3:0] = LBA[27:24], lba3 = LBA[23:16], lba2 = LBA[15:8], lba1 = LBA[7:0] */
+    lba = ((off_t)(c->lba4 & DEVH_HEAD) << 24) |
+          ((off_t)c->lba3 << 16) |
+          ((off_t)c->lba2 << 8)  |
+           (off_t)c->lba1;
+  } else {
+    /* CHS mode (TOS 2.06's ROM IDE routines, old drivers). Sector numbers
+       are 1-based: CHS 0/0/1 is the very first sector of the disk.
+       lba1 = sector, lba2/lba3 = cylinder low/high, lba4[3:0] = head. */
+    uint32_t cyl  = ((uint32_t)c->lba3 << 8) | c->lba2;
+    uint32_t head = c->lba4 & DEVH_HEAD;
+    uint32_t sec  = c->lba1 ? c->lba1 : 1;
+    lba = ((off_t)cyl * d->heads + head) * d->sectors + (sec - 1);
+  }
 
   /* Skip the header sector if one is present (headerless HDF images have none) */
   lba += (d->header_present) ? 2 : 0;
@@ -172,11 +189,14 @@ static off_t xlate_block(struct ide_taskfile *t)
   return lba * 512;   /* return byte offset so d->offset is always in bytes */
 }
 
-/* Indicate the drive is ready */
+/* Indicate the drive is ready. Real idle drives report DRDY|DSC (0x50);
+ * strict ROM probes (TOS 2.06's IDE boot detect in particular) spin waiting
+ * for DSC after drive select and time out on DRDY alone. EmuTOS doesn't
+ * check DSC, which is how the omission went unnoticed. */
 static void ready(struct ide_taskfile *tf)
 {
   tf->status &= ~(ST_BSY|ST_DRQ);
-  tf->status |= ST_DRDY;
+  tf->status |= ST_DRDY | ST_DSC;
   tf->drive->state = IDE_IDLE;
   //usleep(1000);
 }
@@ -234,12 +254,12 @@ void ide_reset(struct ide_controller *c)
     edd_setup(&c->drive[0].taskfile);
     /* A drive could clear busy then set DRDY up to 2 minutes later if its
        mindnumbingly slow to start up ! We don't emulate any of that */
-    c->drive[0].taskfile.status = ST_DRDY;
+    c->drive[0].taskfile.status = ST_DRDY | ST_DSC;
     c->drive[0].eightbit = 0;
   }
   if (c->drive[1].present) {
     edd_setup(&c->drive[1].taskfile);
-    c->drive[1].taskfile.status = ST_DRDY;
+    c->drive[1].taskfile.status = ST_DRDY | ST_DSC;
     c->drive[1].eightbit = 0;
   }
   if (c->selected != 0) {
@@ -349,6 +369,20 @@ static void cmd_readsectors_complete(struct ide_taskfile *tf)
     return;
   }
   d->offset = xlate_block(tf);
+#ifdef ATARI_IDE_DIAG
+  fprintf(stderr,
+      "[IDE] READ %s sel=%d sec=%u cyl=%u head=%u cnt=%u -> offset=%lld "
+      "(geo %u/%u hdr=%d order=%s)\n",
+      (d->controller->lba4 & DEVH_LBA) ? "LBA" : "CHS",
+      d->controller->selected,
+      d->controller->lba1,
+      (unsigned)((d->controller->lba3 << 8) | d->controller->lba2),
+      d->controller->lba4 & DEVH_HEAD,
+      tf->count,
+      (long long)d->offset,
+      d->heads, d->sectors, d->header_present,
+      IDE_NATIVE_BYTEORDER ? "native" : "legacy");
+#endif
   /* DRDY is not guaranteed here but at least one buggy RC2014 firmware
      expects it */
   tf->status |= ST_DRQ | ST_DSC | ST_DRDY;
@@ -753,10 +787,11 @@ void IDE_write8(struct ide_controller *c, uint8_t r, uint8_t v)
       break;
     case IDE_lba_top:
       c->selected = (v & DEVH_DEV) ? 1 : 0;
-      /* Always operate in LBA mode; preserve DEV and head bits */
-      c->lba4 = v & (DEVH_HEAD | DEVH_LBA);
-      /* Ensure the LBA bit is always set */
-      c->lba4 |= DEVH_LBA;
+      /* Store the guest's mode bit as written: LBA set = LBA addressing,
+       * clear = CHS (TOS 2.06's ROM routines, old drivers). Forcing LBA
+       * here - the old behaviour - made the CHS path unreachable and sent
+       * CHS 0/0/1 (the boot sector) to LBA 1 instead. */
+      c->lba4 = v & (DEVH_HEAD | DEVH_DEV | DEVH_LBA);
       break;
     case IDE_command_w:
       t->command = v;
@@ -857,6 +892,17 @@ int IDE_attach(struct ide_controller *c, int drive, int fd)
 
   d->fd = fd;
   d->present = 1;
+#ifdef ATARI_IDE_DIAG
+  fprintf(stderr,
+      "[IDE] identify: w0=%02X%02X cyls=%u heads=%u spt=%u lba=%u total=%u\n",
+      d->identify[1], d->identify[0],
+      (unsigned)(d->identify[2] | (d->identify[3] << 8)),
+      (unsigned)(d->identify[6] | (d->identify[7] << 8)),
+      (unsigned)(d->identify[12] | (d->identify[13] << 8)),
+      (unsigned)(d->identify[99] >> 1 & 1),
+      (unsigned)(d->identify[120] | (d->identify[121] << 8) |
+                 ((uint32_t)(d->identify[122] | (d->identify[123] << 8)) << 16)));
+#endif
   d->heads = d->identify[3];
   d->sectors = d->identify[6];
   d->cylinders = le16(d->identify[1]);

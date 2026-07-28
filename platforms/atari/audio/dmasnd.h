@@ -21,6 +21,12 @@ void     dmasnd_set_mode(unsigned rate_hz, int stereo);
 void     dmasnd_write_bytes(const void *src, unsigned n);
 unsigned dmasnd_ring_used(void);
 unsigned dmasnd_xruns(void);
+unsigned dmasnd_device_id(void);   /* SDL audio device id (Uint32); 0 before init.
+                                      Used by ym2149.c to bind its stream. */
+
+/* ---- LMC1992 volume/mix shadow (STE microwire, dmasnd_hdmi.c) ---- */
+void dmasnd_microwire_write(uint16_t data);  /* $FF8922 data word written */
+void dmasnd_lmc_reset(void);                 /* back to "wide open" defaults */
 void dmasnd_note_frame_len(unsigned bytes);
 void dmasnd_output_reset(void);
 int  dmasnd_is_repeat(void);

@@ -131,6 +131,8 @@ typedef struct {
   uint8_t  low;
   uint8_t  mid;
   uint8_t  high;
+  uint8_t  linewidth;   /* STE $FF820F: extra words added per scanline */
+  uint8_t  hscroll;     /* STE $FF8265: fine horizontal scroll (0-15 px) */
   uint8_t  *natmem;
 } rtg_s;
 

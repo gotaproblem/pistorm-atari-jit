@@ -106,6 +106,11 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
         }
     } else if (off == 0x13 && atomic_load(&g_enabled)) {
         dmasnd_commit(atomic_load(&g_repeat) ? "repeat-end" : "end-low");
+    } else if (off == 0x22 || off == 0x23) {
+        /* Microwire data register ($FF8922): both halves are captured in
+         * reg[] above, so decode once the word is complete. Decoding twice
+         * for a word write is harmless - the command is idempotent. */
+        dmasnd_microwire_write((uint16_t)((reg[0x22] << 8) | reg[0x23]));
     }
 }
 
@@ -220,6 +225,7 @@ void dmasnd_capture_stop(void)
 
 void dmasnd_capture_reset(void)
 {
+    dmasnd_lmc_reset();
     for (unsigned i = 0; i < sizeof reg; i++) reg[i] = 0;
     atomic_store(&g_enabled, 0);
     atomic_store(&g_gen, 0);

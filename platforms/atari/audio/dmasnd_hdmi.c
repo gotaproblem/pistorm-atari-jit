@@ -25,7 +25,10 @@
 #include <unistd.h>
 #include <dlfcn.h>
 
+#include <math.h>
+
 #include "dmasnd.h"
+#include "ym2149.h"
 #include "../avrecord.h"
 
 /* One SDL audio stream carrying the STE sound. src format is set to match the
@@ -145,9 +148,111 @@ static void SDLCALL dmasnd_postmix(void *ud, const SDL_AudioSpec *spec,
         avrecord_audio_push_f32(buffer, buflen / (int)sizeof(float));
 }
 
+/* ------------------------------------------------------- LMC1992 -------- *
+ * The STE routes YM2149 and DMA sound through an LMC1992 volume/tone chip,
+ * programmed over the Microwire interface at $FF8922/$FF8924. The real chip
+ * still does its job for the shifter/monitor audio path; this shadows the
+ * same commands onto the HDMI streams so both outputs track the guest's
+ * volume - otherwise game fade-outs, volume settings and mutes are simply
+ * inaudible on HDMI while the real output obeys them.
+ *
+ * Command word (11 bits): 10 CCC DDDDDD
+ *   CCC = 0  mixing   (bits 1-0: 01/10 route YM, 00/11 DMA only)
+ *         1  bass     ) tone controls - NOT modelled here: they need real
+ *         2  treble   ) filtering, and only shape the sound rather than
+ *                       gate it, so the HDMI copy just stays flat
+ *         3  master volume  (0-63, 2 dB steps, 0 = -80 dB, >=40 = 0 dB)
+ *         4  right volume   (0-31, 2 dB steps, 0 = -40 dB, >=20 = 0 dB)
+ *         5  left volume
+ *
+ * Defaults are deliberately WIDE OPEN rather than the chip's real power-on
+ * state (which is near-muted and relies on TOS to open it up). This shadow
+ * must fail open: if we ever miss the guest's setup writes, the worst case
+ * is HDMI ignoring a volume change, not HDMI going silent.
+ * PISTORM_LMC=0 disables the shadow entirely. */
+#define LMC_MASTER_MAX 40
+#define LMC_LR_MAX     20
+static int lmc_master = LMC_MASTER_MAX;
+static int lmc_left   = LMC_LR_MAX;
+static int lmc_right  = LMC_LR_MAX;
+static int lmc_mixing = 1;              /* 1 = DMA + YM (what TOS programs) */
+
+static int lmc_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("PISTORM_LMC");
+        on = (e && *e == '0') ? 0 : 1;
+    }
+    return on;
+}
+
+static float lmc_gain_db(float db) { return powf(10.0f, db / 20.0f); }
+
+static float lmc_master_gain(int idx)
+{
+    if (idx >= LMC_MASTER_MAX) return 1.0f;
+    if (idx < 0) idx = 0;
+    return lmc_gain_db(-80.0f + 2.0f * (float)idx);
+}
+
+static float lmc_lr_gain(int idx)
+{
+    if (idx >= LMC_LR_MAX) return 1.0f;
+    if (idx < 0) idx = 0;
+    return lmc_gain_db(-40.0f + 2.0f * (float)idx);
+}
+
+static void lmc_apply(void)
+{
+    /* SDL stream gain is scalar, so left/right are folded to their mean.
+     * Software almost always sets them equal; true L/R balance would need
+     * per-channel scaling in the postmix. */
+    float g = lmc_master_gain(lmc_master) *
+              0.5f * (lmc_lr_gain(lmc_left) + lmc_lr_gain(lmc_right));
+
+    if (g_ste)
+        SDL_SetAudioStreamGain(g_ste, g);
+    /* mixing 01 = YM full range, 10 = YM via low-pass (audible either way;
+     * we don't model the filter). 00/11 leave the YM input unrouted. */
+    ym2149_set_gain((lmc_mixing == 1 || lmc_mixing == 2) ? g : 0.0f);
+    /* NOTE: the MP3 stream is deliberately untouched - it is a host-side
+     * player, not something the guest's volume chip is wired to. */
+}
+
+void dmasnd_lmc_reset(void)
+{
+    lmc_master = LMC_MASTER_MAX;
+    lmc_left = lmc_right = LMC_LR_MAX;
+    lmc_mixing = 1;
+    lmc_apply();
+}
+
+void dmasnd_microwire_write(uint16_t data)
+{
+    if (!lmc_enabled())
+        return;
+    if (((data >> 9) & 0x3) != 0x2)     /* not addressed to the LMC1992 */
+        return;
+
+    switch ((data >> 6) & 0x7) {
+        case 0: lmc_mixing = data & 0x3;  break;
+        case 3: lmc_master = data & 0x3F; break;
+        case 4: lmc_right  = data & 0x1F; break;
+        case 5: lmc_left   = data & 0x1F; break;
+        default: return;                  /* bass/treble: not modelled */
+    }
+    lmc_apply();
+}
+
 /* Device format accessors for the recorder's ffmpeg arguments. */
 int dmasnd_out_freq(void)     { return g_devspec.freq; }
 int dmasnd_out_channels(void) { return g_devspec.channels; }
+
+/* Device id for other audio sources (ym2149.c) to bind their own stream to.
+ * SDL_AudioDeviceID is a Uint32, so a plain unsigned keeps SDL types out of
+ * dmasnd.h. 0 until dmasnd_init() has opened the device. */
+unsigned dmasnd_device_id(void) { return (unsigned)g_dev; }
 
 void dmasnd_close(void)
 {

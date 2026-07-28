@@ -30,6 +30,7 @@ typedef enum {
   CONFITEM_HDD,
   CONFITEM_FDD,
   CONFITEM_DMA_SOUND,
+  CONFITEM_YM2149,
   CONFITEM_BLITTER,
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
@@ -83,6 +84,7 @@ static const config_switch_def config_switches[] = {
   { "hdd", CONFITEM_HDD },
   { "fdd", CONFITEM_FDD },
   { "dma_sound", CONFITEM_DMA_SOUND },
+  { "ym2149", CONFITEM_YM2149 },
   { "blitter", CONFITEM_BLITTER },
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
@@ -146,6 +148,15 @@ bool emulator_config_blitter_enabled(void)
   return current_config ? current_config->blitter : true;
 }
 
+int emulator_config_blitter_mode(void)
+{
+  if (!current_config)
+    return 2;                       /* default: emulated */
+  if (!current_config->blitter)
+    return 0;
+  return current_config->blitter_real ? 1 : 2;
+}
+
 bool emulator_config_stram_cache_enabled(void)
 {
   return current_config ? current_config->stram_cache : false;
@@ -163,13 +174,11 @@ bool emulator_config_native_hdmi_enabled(void)
 
 bool emulator_config_display_enabled(void)
 {
-  if (!current_config)
-    return false;
-  /* The render thread also drives the "native_hdmi" ST-screen mirror, so it
-   * must start whenever a graphics card OR native HDMI mirroring is requested,
-   * not only for an emulated VGA card. */
-  return current_config->graphics.card != NO_GRAPHICS_CARD
-      || current_config->native_hdmi;
+  /* The render thread always runs: it owns the HDMI output. It drives the
+   * emulated VGA card and/or the native_hdmi ST-screen mirror when they are
+   * enabled, and presents the Fuji splash whenever nothing is being rendered
+   * (e.g. native_hdmi disabled for shifter-output gaming). */
+  return current_config != NULL;
 }
 
 bool emulator_config_et4k_enabled(void)
@@ -474,7 +483,8 @@ struct emulator_config *load_config_file(char *filename) {
   cfg->jit = true;
   cfg->blitter = true;
   cfg->vga_render = true;
-  cfg->native_hdmi = true;
+  cfg->native_hdmi = false;   /* default off: shifter is the game display;
+                                 HDMI shows the splash unless enabled */
   
   while (!feof(in)) 
   {
@@ -661,12 +671,31 @@ struct emulator_config *load_config_file(char *filename) {
         break;
 
       case CONFITEM_DMA_SOUND:
-        cfg->dma_sound = get_bool_default_true(parse_line + str_pos);;
+        cfg->dma_sound = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] DMA Sound %s\n", cfg->dma_sound ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_YM2149:
+        cfg->ym2149 = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] YM2149 sound %s\n", cfg->ym2149 ? "enabled" : "disabled");
         break;
 
       case CONFITEM_BLITTER:
-        cfg->blitter = get_bool_default_true(parse_line + str_pos);
-        printf ("[CFG] Blitter %s\n", cfg->blitter ? "enabled" : "disabled");
+        {
+          char *arg = parse_line + str_pos;
+          while (*arg == ' ' || *arg == '\t')
+            arg++;
+          if (strncasecmp(arg, "real", 4) == 0) {
+            cfg->blitter = true;
+            cfg->blitter_real = true;
+          } else {
+            cfg->blitter = get_bool_default_true(parse_line + str_pos);
+            cfg->blitter_real = false;
+          }
+          printf ("[CFG] Blitter %s\n",
+                  !cfg->blitter ? "disabled" :
+                  cfg->blitter_real ? "real (pass-through)" : "emulated");
+        }
         break;
 
       case CONFITEM_STRAM_CACHE:

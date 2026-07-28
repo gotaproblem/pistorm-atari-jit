@@ -415,26 +415,51 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
 static uint32_t psg_read_addr(uint32_t addr, int size)
 {
     (void)size;
+    /* Port A is owned by the emulated drive; every other register belongs to
+     * the real PSG (sound state, and whatever else the guest reads back). */
     if (addr == PSG_REG_SELECT && fdc.psg_reg_sel == PSG_PORT_A_REG)
         return fdc.psg_porta;
-    return 0xFFu;
+    return ps_read_8(addr);
 }
 
 static void psg_write_addr(uint32_t addr, uint32_t val, int size)
 {
-    (void)size;
+    /* The PSG sits on the UPPER data byte at even addresses: a word write
+     * carries the value in bits 15-8, and a long write is two word cycles
+     * (register select at addr, data at addr+2 - the classic
+     * move.l #$RR00VV00,$FF8800 idiom). Decoding only the low byte, as this
+     * did before, mis-recorded every word/long-form PSG access. */
+    if (size == 4) {
+        psg_write_addr(addr,     (val >> 24) & 0xFFu, 1);
+        psg_write_addr(addr + 2, (val >> 8)  & 0xFFu, 1);
+        return;
+    }
+    if (size == 2)
+        val = (val >> 8) & 0xFFu;
+
     uint8_t v = val & 0xFF;
 
     if (addr == PSG_REG_SELECT) {
         fdc.psg_reg_sel = v & 0x0F;
         //FDD_DBG("PSG: select reg %d", fdc.psg_reg_sel);
+        /* The real chip must track the latch too, or the forwarded data
+         * writes below would land in whatever register it last had selected. */
+        ps_write_8(addr, v);
     } else if (addr == PSG_REG_WRITE) {
         //FDD_DBG("PSG: write reg%d = 0x%02X", fdc.psg_reg_sel, v);
         if (fdc.psg_reg_sel == PSG_PORT_A_REG) {
             fdc.psg_porta = v;
             fdc_decode_drive_side();
+            /* Deliberately NOT forwarded: port A drives the physical drive /
+             * side select lines, which the emulated FDD owns. */
+        } else {
+            /* Everything else - tone, noise, mixer, volume, envelope - is
+             * sound, and belongs to the real YM2149. Swallowing these (the
+             * old behaviour) left the physical chip mute whenever FDD
+             * emulation was enabled, while the shadow copy feeding HDMI
+             * carried on playing perfectly. */
+            ps_write_8(addr, v);
         }
-        /* All other PSG registers (mixer, tone, envelope etc) silently accepted */
     }
 }
 

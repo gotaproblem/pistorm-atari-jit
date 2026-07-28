@@ -32,6 +32,8 @@
 #include <stdio.h>
 #include <time.h>
 #include "platforms/atari/audio/dmasnd.h"
+#include "platforms/atari/audio/ym2149.h"
+#include "platforms/atari/st_blitter.h"
 
 extern "C"
 {
@@ -682,10 +684,23 @@ static inline void ps_bus_lput(uaecptr a, uae_u32 v)
 
 static int pistorm_blitter_real_bus = 1;
 
-extern "C" void pistorm_set_blitter_enabled(int enabled)
+/* Blitter handling mode for the $FF8A00 page:
+ *   0 = off   (page hidden; guest bus error, like a machine with no blitter)
+ *   1 = real  (pass-through to the real chip - needs bus arbitration in the
+ *              CPLD, which the current bitstream does not have)
+ *   2 = emu   (st_blitter.c software blitter over the natmem mirror; the
+ *              real chip is never touched)                                  */
+static int pistorm_blitter_mode = 2;
+
+extern "C" void pistorm_set_blitter_mode(int mode)
 {
-    pistorm_blitter_real_bus = enabled ? 1 : 0;
-    //fprintf(stderr, "[NATMEM] Blitter %s\n", pistorm_blitter_real_bus ? "enabled" : "disabled");
+    pistorm_blitter_mode = (mode >= 0 && mode <= 2) ? mode : 2;
+    pistorm_blitter_real_bus = (pistorm_blitter_mode == 1) ? 1 : 0;
+}
+
+extern "C" void pistorm_set_blitter_enabled(int enabled)   /* legacy shim */
+{
+    pistorm_set_blitter_mode(enabled ? 2 : 0);
 }
 
 static inline int blitter_addr(uaecptr a)
@@ -701,7 +716,12 @@ static inline int blitter_real_bus_enabled(void)
 
 static inline int blitter_hide_addr(uaecptr a)
 {
-    return blitter_addr(a) && !blitter_real_bus_enabled();
+    return blitter_addr(a) && pistorm_blitter_mode == 0;
+}
+
+static inline int blitter_emulated(void)
+{
+    return pistorm_blitter_mode == 2;
 }
 
 static inline uae_u32 blitter_absent_value(int size)
@@ -1568,6 +1588,49 @@ static inline void hw_bus_bput(uaecptr a, uae_u32 v)
     pistorm_buserr(a, v, false, sz_byte);
 }
 
+/* Guest access to the blitter page with BERR retry. While the blitter owns
+ * the bus (shared-mode 64-cycle bursts, HOG mode), a PiStorm cycle can time
+ * out and come back BERR where a real 68000 would simply be wait-stated until
+ * the blitter yields. blitter_after_write()'s own busy-poll already treats
+ * BERR as "bus busy"; give guest-visible cycles (EmuTOS VDI's TAS $FF8A3C
+ * restart idiom, busy-bit polls) the same tolerance. Only a BERR that
+ * persists across every retry - genuinely absent hardware, e.g. the EmuTOS
+ * presence probe on a blitterless ST - reaches the guest as exception 2. */
+#define BLITTER_BERR_RETRIES 64
+
+static inline uae_u32 hw_blitter_bus_get(uaecptr a, int size)
+{
+    uae_u32 v = 0;
+    for (int t = 0; t < BLITTER_BERR_RETRIES; t++)
+    {
+        g_buserr = 0;
+        v = size == 1 ? (uae_u32)ps_read_8(a)
+          : size == 2 ? (uae_u32)ps_read_16(a)
+                      : ps_bus_lget(a);
+        if (!g_buserr)
+            return v;
+    }
+    pistorm_buserr(a, 0, true, size == 1 ? sz_byte : size == 2 ? sz_word : sz_long);
+    return v;
+}
+
+static inline void hw_blitter_bus_put(uaecptr a, uae_u32 v, int size)
+{
+    for (int t = 0; t < BLITTER_BERR_RETRIES; t++)
+    {
+        g_buserr = 0;
+        if (size == 1)
+            ps_write_8(a, (uae_u8)v);
+        else if (size == 2)
+            ps_write_16(a, (uae_u16)v);
+        else
+            ps_bus_lput(a, v);
+        if (!g_buserr)
+            return;
+    }
+    pistorm_buserr(a, v, false, size == 1 ? sz_byte : size == 2 ? sz_word : sz_long);
+}
+
 static inline uae_u32 hw_blitter_lget(uaecptr a)
 {
     if (blitter_hide_addr(a))
@@ -1582,7 +1645,18 @@ static inline uae_u32 hw_blitter_lget(uaecptr a)
         return 0xFFFFFFFFu; /* not reached */
     }
 
-    uae_u32 v = hw_bus_lget(a);
+    if (blitter_emulated())
+    {
+        if ((hw_fold_addr(a) - 0x00FF8A00u) >= 0x40u)
+        {   /* nothing decodes past $FF8A3D, even in emu mode */
+            hardware_exception2(a, 0, true, false, sz_long);
+            return 0xFFFFFFFFu; /* not reached */
+        }
+        uae_u32 v = st_blitter_reg_read(a, 4);
+        blitter_trace("R", a, v, 4);
+        return v;
+    }
+    uae_u32 v = hw_blitter_bus_get(a, 4);
     blitter_trace("R", a, v, 4);
     return v;
 }
@@ -1597,7 +1671,18 @@ static inline uae_u32 hw_blitter_wget(uaecptr a)
         return 0xFFFFu; /* not reached */
     }
 
-    uae_u32 v = hw_bus_wget(a);
+    if (blitter_emulated())
+    {
+        if ((hw_fold_addr(a) - 0x00FF8A00u) >= 0x40u)
+        {
+            hardware_exception2(a, 0, true, false, sz_word);
+            return 0xFFFFu; /* not reached */
+        }
+        uae_u32 v = st_blitter_reg_read(a, 2);
+        blitter_trace("R", a, v, 2);
+        return v;
+    }
+    uae_u32 v = hw_blitter_bus_get(a, 2);
     blitter_trace("R", a, v, 2);
     return v;
 }
@@ -1612,7 +1697,18 @@ static inline uae_u32 hw_blitter_bget(uaecptr a)
         return 0xFFu; /* not reached */
     }
 
-    uae_u32 v = hw_bus_bget(a);
+    if (blitter_emulated())
+    {
+        if ((hw_fold_addr(a) - 0x00FF8A00u) >= 0x40u)
+        {
+            hardware_exception2(a, 0, true, false, sz_byte);
+            return 0xFFu; /* not reached */
+        }
+        uae_u32 v = st_blitter_reg_read(a, 1);
+        blitter_trace("R", a, v, 1);
+        return v;
+    }
+    uae_u32 v = hw_blitter_bus_get(a, 1);
     blitter_trace("R", a, v, 1);
     return v;
 }
@@ -1627,7 +1723,18 @@ static inline void hw_blitter_lput(uaecptr a, uae_u32 v)
         return; /* not reached */
     }
 
-    hw_bus_lput(a, v);
+    if (blitter_emulated())
+    {
+        if ((hw_fold_addr(a) - 0x00FF8A00u) >= 0x40u)
+        {
+            hardware_exception2(a, v, false, false, sz_long);
+            return; /* not reached */
+        }
+        blitter_trace("W", a, v, 4);
+        st_blitter_reg_write(a, v, 4);   /* runs the blit if BUSY was set */
+        return;
+    }
+    hw_blitter_bus_put(a, v, 4);
     blitter_trace("W", a, v, 4);
     blitter_after_write(a, v, 4);
 }
@@ -1642,7 +1749,18 @@ static inline void hw_blitter_wput(uaecptr a, uae_u32 v)
         return; /* not reached */
     }
 
-    hw_bus_wput(a, v);
+    if (blitter_emulated())
+    {
+        if ((hw_fold_addr(a) - 0x00FF8A00u) >= 0x40u)
+        {
+            hardware_exception2(a, v, false, false, sz_word);
+            return; /* not reached */
+        }
+        blitter_trace("W", a, v, 2);
+        st_blitter_reg_write(a, v, 2);
+        return;
+    }
+    hw_blitter_bus_put(a, v, 2);
     blitter_trace("W", a, v, 2);
     blitter_after_write(a, v, 2);
 }
@@ -1657,16 +1775,38 @@ static inline void hw_blitter_bput(uaecptr a, uae_u32 v)
         return; /* not reached */
     }
 
-    hw_bus_bput(a, v);
+    if (blitter_emulated())
+    {
+        if ((hw_fold_addr(a) - 0x00FF8A00u) >= 0x40u)
+        {
+            hardware_exception2(a, v, false, false, sz_byte);
+            return; /* not reached */
+        }
+        blitter_trace("W", a, v, 1);
+        st_blitter_reg_write(a, v, 1);
+        return;
+    }
+    hw_blitter_bus_put(a, v, 1);
     blitter_trace("W", a, v, 1);
     blitter_after_write(a, v, 1);
 }
 
+extern "C" uint8_t IDE_intrq_pending(void);
+
+static inline uae_u8 mfp_gpip_shim(uae_u8 v)
+{
+    if (FDD_enabled)
+        v = fdd_gpip(v);
+    if (IDE_intrq_pending())
+        v &= (uae_u8)~0x20;      /* GPIP5 low = disk interrupt (active low) */
+    return v;
+}
+
 static inline uae_u32 hw_mfp_wget(uaecptr a)
 {
-    if (FDD_enabled && a == MFP_GPIP)
+    if (a == MFP_GPIP)
     {
-        uae_u16 v = fdd_gpip(ps_read_8(a));
+        uae_u16 v = mfp_gpip_shim(ps_read_8(a));
         pistorm_buserr(a, 0, true, sz_word);
         return v;
     }
@@ -1675,9 +1815,9 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
 
 static inline uae_u32 hw_mfp_bget(uaecptr a)
 {
-    if (FDD_enabled && a == MFP_GPIP)
+    if (a == MFP_GPIP)
     {
-        uae_u8 v = fdd_gpip(ps_read_8(a));
+        uae_u8 v = mfp_gpip_shim(ps_read_8(a));
         pistorm_buserr(a, 0, true, sz_byte);
         return v;
     }
@@ -1890,11 +2030,19 @@ static void hw_lput(uaecptr a, uae_u32 v)
     switch (hw_page_addr(a))
     {
         case HW_PAGE_VIDEO:
+            /* NOTE: no BERR retry here. Shifter register writes are beam-
+             * timed; a retry both delays the CPU and risks double-writing a
+             * register whose first attempt actually landed. Games/demos that
+             * race the beam need single-shot writes - the shifter output is
+             * the reference display for those. */
             st_video_snoop32(a, (uint32_t)v);
             hw_bus_lput(a, v);
             break;
         case HW_PAGE_FDD_DMA:
+            hw_fdd_lput(a, v);
+            break;
         case HW_PAGE_PSG:
+            ym2149_snoop32(a, (uint32_t)v);  /* shadow YM2149 -> HDMI */
             hw_fdd_lput(a, v);
             break;
         case HW_PAGE_DMASND:
@@ -1946,7 +2094,10 @@ static void hw_wput(uaecptr a, uae_u32 v)
             hw_bus_wput(a, v);
             break;
         case HW_PAGE_FDD_DMA:
+            hw_fdd_wput(a, v);
+            break;
         case HW_PAGE_PSG:
+            ym2149_snoop16(a, (uint16_t)v);  /* shadow YM2149 -> HDMI */
             hw_fdd_wput(a, v);
             break;
         case HW_PAGE_DMASND:
@@ -1998,7 +2149,10 @@ static void hw_bput(uaecptr a, uae_u32 v)
             hw_bus_bput(a, v);
             break;
         case HW_PAGE_FDD_DMA:
+            hw_fdd_bput(a, v);
+            break;
         case HW_PAGE_PSG:
+            ym2149_snoop8(a, (uint8_t)v);    /* shadow YM2149 -> HDMI */
             hw_fdd_bput(a, v);
             break;
         case HW_PAGE_DMASND:
@@ -2185,6 +2339,36 @@ static void sr_bput(uaecptr a, uae_u32 v)
 }
 static uae_u8 *sr_xlate(uaecptr a) { return natmem_offset + a; }
 static int sr_check(uaecptr a, uae_u32 sz) { return 1; } // return a < ST_RAM_SIZE; }
+
+/* ---- emulated blitter memory hooks (st_blitter.c) ----------------------
+ * Reads come from the natmem mirror (coherent: every CPU write updates it).
+ * Writes follow the exact CPU ST-RAM write path: mirror + snoop +
+ * write-through to the real bus (so the physical shifter displays the
+ * result) + JIT SMC invalidation. */
+extern "C" uint16_t pistorm_blit_read16(uint32_t a)
+{
+    a &= 0x00FFFFFEu;
+    return do_get_mem_word((uae_u16 *)(natmem_offset + a));
+}
+
+extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
+{
+    a &= 0x00FFFFFEu;
+    if (a >= ST_RAM_SIZE)
+        return;                       /* the 24-bit blitter only writes ST-RAM */
+    do_put_mem_word((uae_u16 *)(natmem_offset + a), v);
+    stram_snoop_lowram(a, 2);
+    if (stram_needs_bus_write(a, 2))
+    {
+        uint8_t old_fc = fc;
+        fc = 5;
+        g_buserr = 0;
+        ps_write_16(a, v);
+        g_buserr = 0;
+        fc = old_fc;
+    }
+    pistorm_smc(a, 2);
+}
 
 static addrbank pistorm_stram_bank = {
     sr_lget,

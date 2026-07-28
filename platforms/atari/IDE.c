@@ -67,19 +67,39 @@ static const char *ide_regname(int base)
             (unsigned)(addr), (port), ide_regname(base), (unsigned)((val)&0xff), \
             atariIDE[port] ? "" : "(NO DRIVE)")
 #define IDE_LOG_STAT(addr, port, base, val) do {                 \
-        static int last = -1;                                    \
-        if (((val)&0xff) != last) {                              \
-            last = (val)&0xff;                                   \
+        static int last_stat = -1, last_ctrl = -1;               \
+        int *lp = ((base) == 0x39) ? &last_ctrl : &last_stat;    \
+        if (((val)&0xff) != *lp) {                               \
+            *lp = (val)&0xff;                                    \
             fprintf(stderr, "[IDEr] @%06X p%d %-8s => %02X%s\n", \
                     (unsigned)(addr), (port), ide_regname(base), \
                     (unsigned)((val)&0xff),                      \
                     atariIDE[port] ? "" : " (NO DRIVE)");        \
         }                                                        \
     } while (0)
+/* data-port burst trace: first words of each transfer + total count */
+static unsigned ide_dbg_words, ide_dbg_burst;
+#define IDE_LOG_DATA_RESET() do {                                       \
+        if (ide_dbg_words)                                              \
+            fprintf(stderr, "[IDEd] burst end: %u words\n", ide_dbg_words); \
+        ide_dbg_words = 0; ide_dbg_burst++;                             \
+    } while (0)
+#define IDE_LOG_DATA(val, width) do {                                   \
+        if (ide_dbg_words < 4)                                          \
+            fprintf(stderr, "[IDEd] b%u w%u => %0*X\n", ide_dbg_burst, \
+                    ide_dbg_words, (width), (unsigned)(val));           \
+        ide_dbg_words++;                                                \
+    } while (0)
+#define IDE_LOG_UNHANDLED(addr, kind, val)                              \
+    fprintf(stderr, "[IDE?] %s @%06X => %04X (unhandled)\n",           \
+            (kind), (unsigned)(addr), (unsigned)(val))
 #else
 #define IDE_LOG_W(a,p,b,v)    ((void)0)
 #define IDE_LOG_R(a,p,b,v)    ((void)0)
 #define IDE_LOG_STAT(a,p,b,v) ((void)0)
+#define IDE_LOG_DATA_RESET()  ((void)0)
+#define IDE_LOG_DATA(v,w)     ((void)0)
+#define IDE_LOG_UNHANDLED(a,k,v) ((void)0)
 #endif
 
 
@@ -93,6 +113,29 @@ bool IDE_enabled;
 struct ide_controller *get_ide ( int index ) 
 {
   return atariIDE [index];
+}
+
+/* INTRQ aggregation for the MFP GPIP5 shim. The ST wires the disk interrupt
+ * (FDC/ACSI - and IDE on machines that have it) to MFP GPIP bit 5, active
+ * low. TOS 2.06's IDE routines program devctrl with nIEN=0 and then wait on
+ * that line after issuing a command instead of polling the status register -
+ * with no line to pull low, the probe times out silently. Reading the ATA
+ * status register acks INTRQ (idedriver clears drive->intrq), which releases
+ * the line again. */
+uint8_t IDE_intrq_pending ( void )
+{
+  if ( !IDE_enabled )
+    return 0;
+  for ( int p = 0; p < 4; p++ )
+  {
+    struct ide_controller *c = atariIDE [p];
+    if ( !c )
+      continue;
+    struct ide_drive *d = &c->drive [c->selected];
+    if ( d->present && d->intrq && !( d->taskfile.devctrl & 0x02 /* nIEN */ ) )
+      return 1;
+  }
+  return 0;
 }
 
 
@@ -109,6 +152,10 @@ void InitIDE (void)
 {
   uint8_t num_IDE_drives = 0;
   int port = 0;
+
+#ifdef ATARI_IDE_DIAG
+  fprintf(stderr, "[IDE] diag build " __DATE__ " " __TIME__ "\n");
+#endif
 
   for ( int i = 0; i < IDE_MAX_HARDFILES && port < 4; i++ ) 
   {
@@ -209,6 +256,7 @@ void writeIDEB ( uint32_t address, unsigned int value )
 
       case GCMD_OFFSET:
         //DEBUG_PRINTF ("Write to GCMD: %.2X.\n", value);
+        IDE_LOG_DATA_RESET();
         IDE_action = IDE_command_w;
         ide_stats.commands++;
         ide_stats.last_cmds[ide_stats.cmd_idx++ & 7] = (uint8_t)value;
@@ -306,6 +354,7 @@ void writeIDE ( uint32_t address, unsigned int value )
   if ( atariIDE [port] ) 
   {
     //if ( base == GDATA_OFFSET )
+      IDE_LOG_DATA(value, 4);
       IDE_write16 ( atariIDE [port], IDE_data, value );
 
     return;
@@ -327,11 +376,11 @@ void writeIDEL ( uint32_t address, unsigned int value )
   {
     if ( base == GDATA_OFFSET )
     {
+      IDE_LOG_DATA(value, 8);
       IDE_write16 ( atariIDE [port], IDE_data, value >> 16 ) ;
       IDE_write16 ( atariIDE [port], IDE_data, value & 0xffff );
     }
   }
-  //DEBUG("Write Long to IDE Space 0x%06x (0x%06x)\n", address, value);
 }
 
 
@@ -437,16 +486,15 @@ uint16_t readIDE ( uint32_t address )
     if ( base == GDATA_OFFSET ) 
     {
       ide_stats.data_words++;
-      return IDE_read16 ( atariIDE [port], IDE_data );
+      {
+        uint16_t v = IDE_read16 ( atariIDE [port], IDE_data );
+        IDE_LOG_DATA(v, 4);
+        return v;
+      }
     }
-
-    //if (address == GIRQ_A4000) {
-    //  IDE_a4k_irq = 0x8000;
-    //  return 0x8000;
-    //}
   }
 
-  //DEBUG("Read Word From IDE Space 0x%06x\n", address);
+  IDE_LOG_UNHANDLED(address, "wget", 0x8000);
   return 0x8000;
 }
 
@@ -466,11 +514,12 @@ uint32_t readIDEL ( uint32_t address )
     {
       ide_stats.data_words += 2;          /* long access = two words   */
       value = IDE_read16 ( atariIDE [port], IDE_data );
-      
-      return value << 16 | IDE_read16 ( atariIDE [port], IDE_data ) ;
+      value = value << 16 | IDE_read16 ( atariIDE [port], IDE_data );
+      IDE_LOG_DATA(value, 8);
+      return value;
     }
   }
 
-  //DEBUG("Read Long From IDE Space 0x%06x\n", address);
+  IDE_LOG_UNHANDLED(address, "lget", 0x8000);
   return 0x8000;
 }

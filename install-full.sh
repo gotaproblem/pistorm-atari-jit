@@ -186,12 +186,38 @@ no_desktop
 # --------------------------------------------------------------------------
 say "Installing dependencies"
 sudo apt-get update
-# build + runtime libs; SDL3 = audio backend, libmpg123 = host MP3 decode,
-# ffmpeg = screendump helper + capture muxing (capmux.sh).
+# build + runtime libs; SDL3 = audio backend (handled separately below),
+# libmpg123 = host MP3 decode, ffmpeg = screendump helper + capture muxing
+# (capmux.sh). libasound2-dev: ALSA backend for an SDL3 source build.
 sudo apt-get install -y \
-  build-essential g++ make pkg-config \
-  libsdl3-dev libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev \
-  ffmpeg
+  build-essential g++ make pkg-config cmake git \
+  libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev \
+  libasound2-dev ffmpeg
+
+# ---- SDL3 -----------------------------------------------------------------
+# Debian ships libsdl3-dev from trixie (Raspberry Pi OS 13) onwards. On a
+# bookworm image the package does not exist in apt, so build it from source
+# once (audio is all we use; the build takes a few minutes on a Pi 4).
+if apt-cache show libsdl3-dev >/dev/null 2>&1; then
+  say "Installing SDL3 from apt"
+  sudo apt-get install -y libsdl3-dev
+elif pkg-config --exists sdl3; then
+  say "SDL3 already present ($(pkg-config --modversion sdl3)) — skipping"
+else
+  SDL3_TAG=release-3.2.16
+  say "libsdl3-dev not in apt (pre-trixie OS) — building SDL3 $SDL3_TAG from source"
+  SDL3_TMP="$(mktemp -d)"
+  git clone --depth 1 --branch "$SDL3_TAG" https://github.com/libsdl-org/SDL.git "$SDL3_TMP/SDL"
+  cmake -S "$SDL3_TMP/SDL" -B "$SDL3_TMP/build" \
+        -DCMAKE_BUILD_TYPE=Release -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+  cmake --build "$SDL3_TMP/build" -j"$(nproc)"
+  sudo cmake --install "$SDL3_TMP/build"
+  sudo ldconfig
+  rm -rf "$SDL3_TMP"
+  pkg-config --exists sdl3 \
+    || die "SDL3 installed to /usr/local but pkg-config can't see it — check PKG_CONFIG_PATH includes /usr/local/lib/pkgconfig"
+  say "SDL3 $(pkg-config --modversion sdl3) installed from source"
+fi
 
 # --------------------------------------------------------------------------
 # 2. Runtime file tree (idempotent)

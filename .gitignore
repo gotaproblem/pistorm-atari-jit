@@ -19,4 +19,4 @@ perf.data.old
 /m68kops.h
 /rtl/._*
 nprog_log.txt
-run.log
+*.log

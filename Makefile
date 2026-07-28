@@ -37,6 +37,9 @@ CFILES = config_file/config_file.c \
          platforms/atari/network/platform_atari_network.c \
          platforms/atari/audio/dmasnd_hdmi.c \
          platforms/atari/audio/dmasnd_capture.c \
+         platforms/atari/audio/emu2149.c \
+         platforms/atari/audio/ym2149.c \
+         platforms/atari/st_blitter.c \
          platforms/atari/avrecord.c
 
 # -----------------------------------------------------------------
@@ -251,6 +254,11 @@ platforms/atari/et4000/et4000.o: platforms/atari/et4000/et4000.c
 # dmasnd_hdmi.c is the SDL3 audio backend: real SDL3 header (-DPISTORM_REAL_SDL3
 # makes include/SDL3/SDL.h forward to the system header) + sdl3 pkg-config cflags.
 platforms/atari/audio/dmasnd_hdmi.o: platforms/atari/audio/dmasnd_hdmi.c
+	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
+
+# ym2149.c binds a third stream to the same SDL3 device (emu2149 core is
+# plain C with no SDL dependency and uses the default %.o rule).
+platforms/atari/audio/ym2149.o: platforms/atari/audio/ym2149.c
 	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
 
 ataritest: ataritest.c gpio/ps_protocol.c
