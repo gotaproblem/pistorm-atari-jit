@@ -28,6 +28,7 @@
 #include "newcpu.h"
 #include "uae.h" /* quit_program, UAE_RESET */
 #include "jit/compemu.h"
+#include "platforms/atari/kbd_usb.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -384,6 +385,26 @@ volatile uint8_t pistorm_mfp_last_iack_vector;
  * Exception_normal() uses this vector for the actual vector-table lookup. */
 void intlev_ack (uint8_t nr)
 {
+    /* Virtual keyboard (USB/Bluetooth -> IKBD injection): if the pending
+     * level-6 was raised for an injected byte, the real MFP has nothing to
+     * acknowledge - a bus IACK would BERR. Supply GPIP4's vector directly.
+     * If the real IPL line is itself at 6, a real MFP interrupt raced us:
+     * acknowledge that one on the bus first; the injected byte stays
+     * pending and re-raises after the guest's RTE. */
+    if (nr == 6 && KBD_USB_enabled && kbd_usb_irq_wanted())
+    {
+        uint8_t live = 0;
+        ps_read_ipl(&live);
+        if (live < 6)
+        {
+            pistorm_iack_vector = 0x46;
+            pistorm_mfp_last_iack_vector = 0x46;
+            pistorm_mfp_iack_counts[6]++;
+            kbd_usb_stat_virtual_iacks++;
+            return;
+        }
+    }
+
 #if (1)
     uint8_t iack_berr = 0;
     uint8_t vector = ps_read_8_fc (0x00FFFFF1u | (nr << 1), 7, &iack_berr);

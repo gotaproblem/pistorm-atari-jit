@@ -103,6 +103,8 @@ struct emulator_config {
   FDD_s fdd;
   bool dma_sound;
   bool ym2149;
+  bool kbd_usb;        /* "kbd usb": inject USB/Bluetooth input into IKBD */
+  bool kbd_grab;       /* grab evdev devices away from the Pi console     */
   bool blitter;
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
   bool stram_cache;

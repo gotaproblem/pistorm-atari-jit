@@ -34,6 +34,7 @@
 #include "platforms/atari/audio/dmasnd.h"
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
+#include "platforms/atari/kbd_usb.h"
 
 extern "C"
 {
@@ -1799,7 +1800,35 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
         v = fdd_gpip(v);
     if (IDE_intrq_pending())
         v &= (uae_u8)~0x20;      /* GPIP5 low = disk interrupt (active low) */
+    if (KBD_USB_enabled)
+        v = kbd_usb_gpip_shim(v);  /* GPIP4 low = keyboard irq (active low) */
     return v;
+}
+
+/* ------------------------------------------------------------------ */
+/* Keyboard ACIA ($FFFC00 status / $FFFC02 data) merge shadow.          */
+/* Real IKBD traffic passes through untouched; injected USB/Bluetooth   */
+/* bytes are presented only when the real receiver is empty (or when    */
+/* finishing an injected packet, so packets never interleave). Logic    */
+/* lives in platforms/atari/kbd_usb.c (shared with emulator.c).         */
+/* ------------------------------------------------------------------ */
+
+#define KBD_ACIA_CTRL 0x00FFFC00u
+#define KBD_ACIA_DATA 0x00FFFC02u
+
+static inline uae_u8 kbd_acia_status_merge(uae_u8 real)
+{
+    return kbd_usb_acia_status_shim(real);
+}
+
+static inline uae_u8 kbd_acia_data_read(void)
+{
+    return kbd_usb_acia_data_shim();
+}
+
+static inline int kbd_acia_shadowed(uaecptr a)
+{
+    return KBD_USB_enabled && (a == KBD_ACIA_CTRL || a == KBD_ACIA_DATA);
 }
 
 static inline uae_u32 hw_mfp_wget(uaecptr a)
@@ -1831,6 +1860,12 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
         fdd_io_write(a, v, 4);
         return;
     }
+    if (KBD_USB_enabled)
+    {
+        /* MFP registers live on odd addresses: a long write covers two */
+        kbd_usb_mfp_snoop(a + 1, (v >> 16) & 0xFF, 0);
+        kbd_usb_mfp_snoop(a + 3, v & 0xFF, 0);
+    }
     hw_bus_lput(a, v);
 }
 
@@ -1842,6 +1877,8 @@ static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, true);
+    if (KBD_USB_enabled)
+        kbd_usb_mfp_snoop(a, v, 1);
     hw_bus_wput(a, v);
 }
 
@@ -1853,6 +1890,8 @@ static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, false);
+    if (KBD_USB_enabled)
+        kbd_usb_mfp_snoop(a, v, 0);
     hw_bus_bput(a, v);
 }
 
@@ -1930,6 +1969,18 @@ static uae_u32 hw_lget(uaecptr a)
             return hw_blitter_lget(a);
         case HW_PAGE_ACIA:
         {
+            if (KBD_USB_enabled && a == KBD_ACIA_CTRL)
+            {
+                /* long read spans status ($FFFC00) and data ($FFFC02):
+                 * evaluate in bus order - status first, then data pop   */
+                uae_u8 s = kbd_acia_status_merge(ps_read_8(KBD_ACIA_CTRL));
+                uae_u8 d = kbd_acia_data_read();
+                uae_u32 v = ((uae_u32)s << 24) | 0x00FF0000u |
+                            ((uae_u32)d << 8) | 0xFFu;
+                pistorm_buserr(a, 0, true, sz_long);
+                acia_trace("R", a, v, 4);
+                return v;
+            }
             uae_u32 v = hw_bus_lget(a);
             acia_trace("R", a, v, 4);
             return v;
@@ -1967,6 +2018,24 @@ static uae_u32 hw_wget(uaecptr a)
             return hw_blitter_wget(a);
         case HW_PAGE_ACIA:
         {
+            if (kbd_acia_shadowed(a))
+            {
+                /* 6850 sits on D8-D15: register byte is the HIGH byte    */
+                uae_u16 v;
+                if (a == KBD_ACIA_CTRL)
+                {
+                    v = (uae_u16)ps_read_16(a);
+                    v = (uae_u16)((kbd_acia_status_merge((uae_u8)(v >> 8)) << 8) |
+                                  (v & 0xFF));
+                }
+                else
+                {
+                    v = (uae_u16)((kbd_acia_data_read() << 8) | 0xFF);
+                }
+                pistorm_buserr(a, 0, true, sz_word);
+                acia_trace("R", a, v, 2);
+                return v;
+            }
             uae_u32 v = hw_bus_wget(a);
             acia_trace("R", a, v, 2);
             return v;
@@ -2004,6 +2073,15 @@ static uae_u32 hw_bget(uaecptr a)
             return hw_blitter_bget(a);
         case HW_PAGE_ACIA:
         {
+            if (kbd_acia_shadowed(a))
+            {
+                uae_u8 v = (a == KBD_ACIA_CTRL)
+                    ? kbd_acia_status_merge(ps_read_8(a))
+                    : kbd_acia_data_read();
+                pistorm_buserr(a, 0, true, sz_byte);
+                acia_trace("R", a, v, 1);
+                return v;
+            }
             uae_u32 v = hw_bus_bget(a);
             acia_trace("R", a, v, 1);
             return v;
@@ -2060,6 +2138,11 @@ static void hw_lput(uaecptr a, uae_u32 v)
                 hw_bus_lput(a, v);
             break;
         case HW_PAGE_ACIA:
+            if (KBD_USB_enabled && a == KBD_ACIA_CTRL)
+            {
+                kbd_usb_ctrl_snoop((uae_u8)(v >> 24));   /* $FFFC00      */
+                kbd_usb_tx_snoop((uae_u8)(v >> 8));      /* $FFFC02      */
+            }
             hw_bus_lput(a, v);
             acia_trace("W", a, v, 4);
             break;
@@ -2115,6 +2198,13 @@ static void hw_wput(uaecptr a, uae_u32 v)
                 hw_bus_wput(a, v);
             break;
         case HW_PAGE_ACIA:
+            if (KBD_USB_enabled)
+            {
+                if (a == KBD_ACIA_CTRL)
+                    kbd_usb_ctrl_snoop((uae_u8)(v >> 8));
+                else if (a == KBD_ACIA_DATA)
+                    kbd_usb_tx_snoop((uae_u8)(v >> 8));
+            }
             hw_bus_wput(a, v);
             acia_trace("W", a, v, 2);
             break;
@@ -2170,6 +2260,13 @@ static void hw_bput(uaecptr a, uae_u32 v)
                 hw_bus_bput(a, v);
             break;
         case HW_PAGE_ACIA:
+            if (KBD_USB_enabled)
+            {
+                if (a == KBD_ACIA_CTRL)
+                    kbd_usb_ctrl_snoop((uae_u8)v);
+                else if (a == KBD_ACIA_DATA)
+                    kbd_usb_tx_snoop((uae_u8)v);
+            }
             hw_bus_bput(a, v);
             acia_trace("W", a, v, 1);
             break;

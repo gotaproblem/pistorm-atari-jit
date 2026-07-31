@@ -31,6 +31,7 @@ typedef enum {
   CONFITEM_FDD,
   CONFITEM_DMA_SOUND,
   CONFITEM_YM2149,
+  CONFITEM_KBD,
   CONFITEM_BLITTER,
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
@@ -85,6 +86,7 @@ static const config_switch_def config_switches[] = {
   { "fdd", CONFITEM_FDD },
   { "dma_sound", CONFITEM_DMA_SOUND },
   { "ym2149", CONFITEM_YM2149 },
+  { "kbd", CONFITEM_KBD },
   { "blitter", CONFITEM_BLITTER },
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
@@ -678,6 +680,29 @@ struct emulator_config *load_config_file(char *filename) {
       case CONFITEM_YM2149:
         cfg->ym2149 = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] YM2149 sound %s\n", cfg->ym2149 ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_KBD:
+        {
+          /* "kbd usb" or "kbd usb nograb" - inject USB/Bluetooth keyboard
+           * and mouse into the IKBD stream (real IKBD keeps working) */
+          char *arg = parse_line + str_pos;
+          while (*arg == ' ' || *arg == '\t')
+            arg++;
+          if (strncasecmp(arg, "usb", 3) == 0)
+          {
+            cfg->kbd_usb  = true;
+            cfg->kbd_grab = (strstr(arg, "nograb") == NULL);
+          }
+          else
+          {
+            cfg->kbd_usb = get_bool_default_true(arg);
+            cfg->kbd_grab = true;
+          }
+          printf ("[CFG] USB/Bluetooth keyboard+mouse injection %s%s\n",
+                  cfg->kbd_usb ? "enabled" : "disabled",
+                  (cfg->kbd_usb && !cfg->kbd_grab) ? " (nograb)" : "");
+        }
         break;
 
       case CONFITEM_BLITTER:

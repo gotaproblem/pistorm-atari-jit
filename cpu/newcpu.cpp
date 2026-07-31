@@ -4657,7 +4657,7 @@ static void do_interrupt (int nr)
 	return;
 #endif
 
-
+  
 interrupt_done:
 //#define IRQ_PROFILE
 #if defined(IRQ_PROFILE) || defined(ATARI_LAT_DIAG)

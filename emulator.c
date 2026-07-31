@@ -58,6 +58,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/fdd/atari_fdd.h"
 #include "platforms/atari/fdd/platform_atari_fdd.h"
 #include "platforms/atari/network/platform_atari_network.h"
+#include "platforms/atari/kbd_usb.h"
 
 #define IDEBASEADDR 0x00F00000
 #define IDETOPADDR 0x00F00100
@@ -480,6 +481,16 @@ static void *ipl_task(void *)
         g_irq_latch_us = get_time_us();
 #endif
       g_irq = ipl;
+      jit_request_cpu_exit();
+    }
+
+    /* Virtual keyboard (USB/Bluetooth -> IKBD): the real MFP cannot raise
+     * an interrupt for injected bytes (its GPIP4 pin belongs to the real
+     * ACIA), so synthesise the level-6 here. intlev_ack() recognises the
+     * virtual cause and supplies vector 0x46 without a bus IACK cycle. */
+    if (KBD_USB_enabled && kbd_usb_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
+    {
+      g_irq = 6;
       jit_request_cpu_exit();
     }
 
@@ -983,6 +994,13 @@ int main (int argc, char *argv[])
     //printf ("[INIT] FDD Image Attached %s\n", cfg->fdd.img_path);
   }
 
+  if (config->kbd_usb)
+  {
+    KBD_USB_enabled = true;
+    if (kbd_usb_init (config->kbd_grab ? 1 : 0) != 0)
+      KBD_USB_enabled = false;
+  }
+
   if (platform_network_init_from_config(config) != 0)
     fprintf(stderr, "[NET] network init failed; continuing without network backend\n");
 
@@ -1127,6 +1145,7 @@ int main (int argc, char *argv[])
 
   printf("[MAIN] Emulation Ended\n");
   platform_network_shutdown();
+  kbd_usb_shutdown();
 
   return 0;
 }
@@ -1497,12 +1516,28 @@ extern "C"
     if (FDD_enabled) {
       if (address == MFP_GPIP) {
         cpu_data_fc();
-        return fdd_gpip (ps_read_8 (address));
+        return kbd_usb_gpip_shim (fdd_gpip (ps_read_8 (address)));
       }
 
       if (fdd_owns_address (address))
         return fdd_io_read (address, 1);
 	    }
+
+    /* USB/Bluetooth keyboard injection shadows */
+    if (KBD_USB_enabled) {
+      if (address == MFP_GPIP) {
+        cpu_data_fc();
+        return kbd_usb_gpip_shim (ps_read_8 (address));
+      }
+      if (address == 0x00FFFC00) {
+        cpu_data_fc();
+        return kbd_usb_acia_status_shim (ps_read_8 (address));
+      }
+      if (address == 0x00FFFC02) {
+        cpu_data_fc();
+        return kbd_usb_acia_data_shim ();
+      }
+    }
 
 	    cpu_data_fc();
 	    return ps_read_8(address);
@@ -1580,11 +1615,28 @@ extern "C"
       if (address == MFP_GPIP) {
         cpu_data_fc();
         uint8_t gpip = ps_read_16 (address);
-        return fdd_gpip (gpip);
+        return kbd_usb_gpip_shim (fdd_gpip (gpip));
       }
 
       if (fdd_owns_address (address))
           return fdd_io_read (address, 2);
+    }
+
+    /* USB/Bluetooth keyboard injection shadows (register on high byte) */
+    if (KBD_USB_enabled) {
+      if (address == MFP_GPIP) {
+        cpu_data_fc();
+        return kbd_usb_gpip_shim ((uint8_t)ps_read_16 (address));
+      }
+      if (address == 0x00FFFC00) {
+        cpu_data_fc();
+        uint16_t v = ps_read_16 (address);
+        return (uint16_t)((kbd_usb_acia_status_shim ((uint8_t)(v >> 8)) << 8) | (v & 0xFF));
+      }
+      if (address == 0x00FFFC02) {
+        cpu_data_fc();
+        return (uint16_t)((kbd_usb_acia_data_shim () << 8) | 0xFF);
+      }
     }
 
 	    cpu_data_fc();
@@ -1751,6 +1803,14 @@ extern "C"
 
     cpu_data_fc();
     mfp_note_eoi_write(address, value, false);
+    if (KBD_USB_enabled)
+    {
+      kbd_usb_mfp_snoop (address, value, 0);
+      if (address == 0x00FFFC00)
+        kbd_usb_ctrl_snoop ((uint8_t)value);
+      else if (address == 0x00FFFC02)
+        kbd_usb_tx_snoop ((uint8_t)value);
+    }
     ps_write_8 (address, (uint8_t)value);
   }
 
@@ -1866,6 +1926,14 @@ extern "C"
 
     cpu_data_fc();
     mfp_note_eoi_write(address, value, true);
+    if (KBD_USB_enabled)
+    {
+      kbd_usb_mfp_snoop (address, value, 1);
+      if (address == 0x00FFFC00)
+        kbd_usb_ctrl_snoop ((uint8_t)(value >> 8));
+      else if (address == 0x00FFFC02)
+        kbd_usb_tx_snoop ((uint8_t)(value >> 8));
+    }
     ps_write_16 (address, (uint16_t)value);
   }
 

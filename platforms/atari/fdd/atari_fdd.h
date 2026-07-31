@@ -55,8 +55,17 @@
  * ========================================================================= */
 #define DMA_MODE_A0         (1u << 1)   /* FDC register A0 */
 #define DMA_MODE_A1         (1u << 2)   /* FDC register A1 */
+#define DMA_MODE_FDC_HDC    (1u << 3)   /* 1=HDC/ACSI (real bus), 0=FDC
+                                           (emulated here). TOS floppy modes
+                                           are $80-$86/$90 (bit3=0), ACSI
+                                           command modes are $88/$8A (bit3=1).
+                                           GLUE routes the $8604 port with
+                                           this bit on real hardware and so
+                                           do we - see atari_fdd.c. */
 #define DMA_MODE_SCREG      (1u << 4)   /* 1=sector count, 0=FDC register */
-#define DMA_MODE_RW         (1u << 8)   /* 1=read from disk, 0=write to disk */
+#define DMA_MODE_RW         (1u << 8)   /* 1=write (RAM->device), 0=read
+                                           (device->RAM). TOS floppy reads use
+                                           $80/$90, writes $180/$190. */
 
 /* DMA Status Register ($FF8606 read) */
 #define DMA_STATUS_OK       (1u << 0)   /* 1=ok, 0=error */
@@ -172,6 +181,14 @@ typedef struct {
     uint16_t        dma_sector_count;
     uint8_t         dma_status;
     uint32_t        dma_base_addr;
+
+    /* HDC (ACSI) coherence-sync latch: parameters of the current real-bus
+     * DMA transfer, captured so the natmem mirror can be brought up to date
+     * when it completes. See hdc_sync in atari_fdd.c. */
+    uint32_t        hdc_base;           /* DMA base at HDC sector-count write */
+    uint16_t        hdc_count;          /* sectors programmed for the HDC */
+    bool            hdc_dir_write;      /* RAM -> device (mode bit 8 set) */
+    bool            hdc_pending;        /* a device->RAM transfer awaits sync */
 
     /* PSG port A shadow */
     uint8_t         psg_porta;

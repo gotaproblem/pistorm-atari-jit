@@ -1,9 +1,6 @@
 *.d
 *.o
 *.img
-*.hdf
-*.dll
-*.exe
 *.stackdump
 *.vscode
 .smbdelete*
@@ -20,3 +17,6 @@ perf.data.old
 /rtl/._*
 nprog_log.txt
 *.log
+session-*.patch
+ataritest
+emulator

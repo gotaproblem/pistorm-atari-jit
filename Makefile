@@ -40,7 +40,8 @@ CFILES = config_file/config_file.c \
          platforms/atari/audio/emu2149.c \
          platforms/atari/audio/ym2149.c \
          platforms/atari/st_blitter.c \
-         platforms/atari/avrecord.c
+         platforms/atari/avrecord.c \
+         platforms/atari/kbd_usb.c
 
 # -----------------------------------------------------------------
 # C++ source.

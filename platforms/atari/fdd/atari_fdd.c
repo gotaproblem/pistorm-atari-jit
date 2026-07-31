@@ -38,6 +38,15 @@
 static fdc_controller_t fdc;
 static int motor_ticks[FDD_MAX_DRIVES];
 
+/* Who ran the DMA last: 0 = emulated FDC, 1 = real HDC/ACSI. Decides which
+ * side answers reads of the shared registers (status, count, counters). */
+static int hdc_active;
+
+/* A sector-count write is anonymous (same mode bits for floppy and ACSI);
+ * it becomes an ACSI transfer's count only when ACSI command bytes follow.
+ * Latched at count-write, claimed (or discarded) by the next command. */
+static int hdc_count_fresh;
+
 /* =========================================================================
  * Forward declarations
  * ========================================================================= */
@@ -123,6 +132,8 @@ void fdd_init(void)
     fdc.psg_porta      = 0xFF;
     fdc.selected_drive = -1;
     fdc.sector_reg     = 1;     /* WD1772 power-on default */
+    hdc_active         = 0;     /* DMA starts floppy-owned */
+    hdc_count_fresh    = 0;
 
     for (int i = 0; i < FDD_MAX_DRIVES; i++) {
         fdc.drives[i].fd            = -1;
@@ -293,18 +304,20 @@ bool fdd_irq_active(void)
 
 uint8_t fdd_gpip(uint8_t other_gpip)
 {
-    //bool irq = fdd_irq_active();
+    /* GPIP bit 5 is the SHARED disk interrupt: WD1772 INTRQ and the ACSI
+     * port's /IRQ are combined onto it. The emulated FDC may only ADD its
+     * own assertion (pull the bit low); it must never force the bit high,
+     * because that overwrites what a real ACSI device is signalling and its
+     * driver then never sees command completion - which broke ACSI boot.
+     * When our FDC is idle, the real line passes through untouched (the
+     * real WD1772 receives no commands from us, so its INTRQ stays quiet;
+     * anything else on the line is real and belongs to the guest). */
+    if (fdc.selected_drive >= 0 &&
+        fdc.drives[fdc.selected_drive].disk_inserted &&
+        fdd_irq_active())
+        return other_gpip & ~(1u << 5);   /* our FDC asserts */
 
-     /* Only assert FDD IRQ if a disk is inserted and active */
-    if (fdc.selected_drive < 0 || 
-        !fdc.drives[fdc.selected_drive].disk_inserted) {
-        return other_gpip | (1u << 5);  /* IRQ inactive */
-    }
-    
-    if (fdd_irq_active())
-        return other_gpip & ~(1u << 5);
-    else
-        return other_gpip |  (1u << 5);
+    return other_gpip;                    /* real line as-is (ACSI visible) */
 }
 
 void fdd_vbl(void)
@@ -346,7 +359,158 @@ void fdd_status(void)
 
 /* =========================================================================
  * Main memory dispatch
+ *
+ * FDC / HDC (ACSI) ROUTING. The $FF8600-$FF860F window is the DMA
+ * controller, and it is SHARED: the WD1772 floppy controller and the ACSI
+ * hard-disk port both sit behind it. On real hardware the GLUE routes the
+ * $FF8604 data port between them with DMA mode register bit 3 (0 = FDC,
+ * 1 = HDC: floppy modes are $80-$86/$90, ACSI modes $88/$8A). Before this
+ * existed, the emulation claimed the whole window for
+ * the emulated FDC, which made ACSI unreachable: TOS's boot-time ACSI scan
+ * landed in the emulated floppy chip (ACSI command bytes even executed as
+ * WD1772 commands), so booting from a real ACSI device was impossible with
+ * fdd enabled.
+ *
+ * So route exactly as the GLUE does:
+ *   - Bit 3 selects which chip answers at $8604 ONLY when bit 4 (SCREG) is
+ *     clear. With SCREG set, $8604 is the DMA chip's own sector-count
+ *     register REGARDLESS of bit 3 - drivers write the count for ACSI
+ *     transfers with mode $90/$190, bit 3 clear, exactly as for floppy.
+ *     (The first routing cut keyed count writes off bit 3 and sent ACSI
+ *     counts into the emulated floppy; the real DMA was never armed and
+ *     every ACSI data phase transferred nothing.)
+ *   - $8604 with SCREG clear: bit 3 = 1 -> real bus (ACSI command/status
+ *     bytes), bit 3 = 0 -> emulated FDC, exactly as before.
+ *   - The count is SHARED plumbing like the mode and address registers:
+ *     written to both sides. Which side a READ of the shared registers
+ *     (count, $8606 status, address counters) should come from cannot be
+ *     decided by mode bits - drivers use bit3=0 modes for those reads after
+ *     ACSI transfers too - so ownership is tracked by the last command
+ *     activity: an ACSI command byte marks the DMA as HDC-owned, an
+ *     emulated FDC command takes it back.
+ *   - Offsets not modelled here ($8600/02, STE density at $860E, ...) pass
+ *     through to the real bus instead of being swallowed.
  * ========================================================================= */
+
+
+
+static int hdc_selected(void)
+{
+    return (fdc.dma_mode & DMA_MODE_FDC_HDC) != 0;
+}
+
+static uint32_t bus_read(uint32_t addr, int size)
+{
+    return (size == 2) ? ps_read_16(addr) : ps_read_8(addr);
+}
+
+static void bus_write(uint32_t addr, uint32_t val, int size)
+{
+    if (size == 2)
+        ps_write_16(addr, (uint16_t)val);
+    else
+        ps_write_8(addr, (uint8_t)val);
+}
+
+/* ---- HDC (ACSI) mirror coherence ---------------------------------------
+ * A real ACSI transfer is real-bus DMA: the DMA chip moves data between the
+ * device and REAL ST-RAM. The emulated CPU, however, reads ST-RAM from the
+ * natmem mirror, and its writes only conditionally reach the real bus. So
+ * both directions need a sync or the guest and the device each see stale
+ * data:
+ *   device -> RAM: after the transfer, pull the window from the real bus
+ *     into the mirror. Trigger: the guest's read of the ACSI status byte at
+ *     $8604 - the mandatory end-of-command handshake every driver performs
+ *     (it releases the device IRQ), and always before the data is touched.
+ *   RAM -> device: before the transfer, push the window from the mirror to
+ *     the real bus (write-through only covers low RAM and the screen).
+ *     Trigger: the HDC sector-count write, which drivers program after
+ *     filling the buffer and before sending the command block.
+ * The window is known because we latch the DMA base and the HDC sector
+ * count as the guest programs them. */
+
+#define HDC_MAX_SYNC_SECTORS 256u        /* 128 KB bound per sync pass */
+
+static void hdc_sync_pull(void)
+{
+    fdc.hdc_pending = false;
+    uint32_t len = (uint32_t)fdc.hdc_count * 512u;
+    if (!len || fdc.hdc_base >= 0x400000u || fdc.hdc_base + len > 0x400000u)
+        return;
+    uint8_t buf[512];
+    for (uint32_t off = 0; off < len; off += 512u) {
+        for (uint32_t i = 0; i < 512u; i++)
+            buf[i] = ps_read_8(fdc.hdc_base + off + i);
+        pistorm_dma_to_stram(fdc.hdc_base + off, buf, 512u);
+
+        /* Show what the guest will actually see, for the first few pulls:
+         * enough of the sector to judge an MBR/AHDI root by eye (partition
+         * bytes, and the $55AA MBR signature at the end). Self-limiting. */
+        static unsigned pulls;
+        if (pulls < 6 && off == 0) {
+            pulls++;
+            FDD_LOG("HDC pull #%u: %u sector(s) -> 0x%06X | "
+                    "%02X %02X %02X %02X %02X %02X %02X %02X ... "
+                    "%02X %02X %02X %02X @1B0 ... sig %02X%02X",
+                    pulls, fdc.hdc_count, fdc.hdc_base,
+                    buf[0], buf[1], buf[2], buf[3],
+                    buf[4], buf[5], buf[6], buf[7],
+                    buf[0x1B0], buf[0x1B1], buf[0x1B2], buf[0x1B3],
+                    buf[0x1FE], buf[0x1FF]);
+        }
+    }
+    FDD_DBG("HDC sync pull: %u sectors @ 0x%06X", fdc.hdc_count, fdc.hdc_base);
+}
+
+static void hdc_sync_push(void)
+{
+    uint32_t len = (uint32_t)fdc.hdc_count * 512u;
+    if (!len || fdc.hdc_base >= 0x400000u || fdc.hdc_base + len > 0x400000u)
+        return;
+    uint8_t buf[512];
+    for (uint32_t off = 0; off < len; off += 512u) {
+        pistorm_dma_from_stram(fdc.hdc_base + off, buf, 512u);
+        for (uint32_t i = 0; i < 512u; i++)
+            ps_write_8(fdc.hdc_base + off + i, buf[i]);
+    }
+    FDD_DBG("HDC sync push: %u sectors @ 0x%06X", fdc.hdc_count, fdc.hdc_base);
+}
+
+/* Sector-count write seen ($8604, SCREG set - mode bits cannot say whether
+ * it is for the floppy or for ACSI). Stash it; if ACSI command bytes follow,
+ * hdc_claim_count() turns it into a transfer window. */
+static void hdc_note_sector_count(uint32_t val)
+{
+    uint16_t n = (uint16_t)(val & 0xFFu);
+    if (n > HDC_MAX_SYNC_SECTORS) {
+        FDD_LOG("HDC transfer of %u sectors exceeds sync bound (%u) - "
+                "mirror sync capped", n, HDC_MAX_SYNC_SECTORS);
+        n = HDC_MAX_SYNC_SECTORS;
+    }
+    fdc.hdc_count   = n;
+    hdc_count_fresh = 1;
+}
+
+/* First ACSI command byte after a count write: the count was for the HDC.
+ * Snapshot the window HERE (the base could legally be programmed after the
+ * count - only the final command byte starts the transfer) and prepare the
+ * coherence sync for the direction in force. */
+static void hdc_claim_count(void)
+{
+    hdc_active = 1;
+    if (!hdc_count_fresh)
+        return;
+    hdc_count_fresh   = 0;
+    fdc.hdc_base      = fdc.dma_base_addr;
+    fdc.hdc_dir_write = (fdc.dma_mode & DMA_MODE_RW) != 0;
+    if (fdc.hdc_dir_write) {
+        hdc_sync_push();                 /* buffer must be on the real bus
+                                            before the device reads it */
+        fdc.hdc_pending = false;
+    } else {
+        fdc.hdc_pending = (fdc.hdc_count != 0);   /* pull after completion */
+    }
+}
 
 uint32_t fdd_io_read(uint32_t addr, int size)
 {
@@ -364,9 +528,26 @@ uint32_t fdd_io_read(uint32_t addr, int size)
     //pthread_mutex_lock(&fdc.lock);
 
     if (addr >= 0xFF8600u && addr <= 0xFF860Fu) {
-        if (addr == FDC_DATA_REG)
-            val = fdc_read_addr(addr, size);
-        else
+        if (addr == FDC_DATA_REG) {
+            if (fdc.dma_mode & DMA_MODE_SCREG)
+                /* DMA chip's own count register (bit 3 is not consulted by
+                 * the GLUE here): whoever ran the DMA last answers */
+                val = hdc_active ? bus_read(addr, size)
+                                 : fdc_read_addr(addr, size);
+            else if (hdc_selected()) {
+                val = bus_read(addr, size);   /* ACSI status byte */
+                if (fdc.hdc_pending)
+                    hdc_sync_pull();          /* end-of-command handshake:
+                                                 bring the mirror up to date */
+            } else
+                val = fdc_read_addr(addr, size);
+        } else if (addr == DMA_MODE_REG ||
+                   addr == DMA_BASE_HIGH || addr == DMA_BASE_MID ||
+                   addr == DMA_BASE_LOW) {
+            /* shared: DMA status and address counters follow ownership */
+            val = hdc_active ? bus_read(addr, size)
+                             : dma_read_addr(addr, size);
+        } else
             val = dma_read_addr(addr, size);
     } else if (addr >= 0xFF8800u && addr <= 0xFF8803u) {
         val = psg_read_addr(addr, size);
@@ -392,10 +573,34 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
     //pthread_mutex_lock(&fdc.lock);
 
     if (addr >= 0xFF8600u && addr <= 0xFF860Fu) {
-        if (addr == FDC_DATA_REG)
-            fdc_write_addr(addr, val, size);
-        else
+        if (addr == DMA_MODE_REG ||
+            addr == DMA_BASE_HIGH || addr == DMA_BASE_MID ||
+            addr == DMA_BASE_LOW) {
+            /* shared plumbing: latch locally AND program the real chip */
             dma_write_addr(addr, val, size);
+            bus_write(addr, val, size);
+        } else if (addr == FDC_DATA_REG) {
+            if (fdc.dma_mode & DMA_MODE_SCREG) {
+                /* sector count: the DMA chip's own register, shared by both
+                 * devices and written with bit3=0 modes even for ACSI. Arm
+                 * both sides; the next command decides whose it was. */
+                hdc_note_sector_count(val);
+                fdc_write_addr(addr, val, size);  /* local latch (floppy) */
+                bus_write(addr, val, size);       /* real chip (ACSI) */
+            } else if (hdc_selected()) {
+                hdc_claim_count();                /* ACSI command byte */
+                bus_write(addr, val, size);
+            } else {
+                /* emulated FDC command: the DMA is floppy's again */
+                hdc_active = 0;
+                hdc_count_fresh = 0;
+                fdc.hdc_pending = false;
+                fdc_write_addr(addr, val, size);
+            }
+        } else {
+            /* unmodelled offset: the real chip may still care ($860E...) */
+            bus_write(addr, val, size);
+        }
     } else if (addr >= 0xFF8800u && addr <= 0xFF8803u) {
         psg_write_addr(addr, val, size);
     }
@@ -415,51 +620,26 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
 static uint32_t psg_read_addr(uint32_t addr, int size)
 {
     (void)size;
-    /* Port A is owned by the emulated drive; every other register belongs to
-     * the real PSG (sound state, and whatever else the guest reads back). */
     if (addr == PSG_REG_SELECT && fdc.psg_reg_sel == PSG_PORT_A_REG)
         return fdc.psg_porta;
-    return ps_read_8(addr);
+    return 0xFFu;
 }
 
 static void psg_write_addr(uint32_t addr, uint32_t val, int size)
 {
-    /* The PSG sits on the UPPER data byte at even addresses: a word write
-     * carries the value in bits 15-8, and a long write is two word cycles
-     * (register select at addr, data at addr+2 - the classic
-     * move.l #$RR00VV00,$FF8800 idiom). Decoding only the low byte, as this
-     * did before, mis-recorded every word/long-form PSG access. */
-    if (size == 4) {
-        psg_write_addr(addr,     (val >> 24) & 0xFFu, 1);
-        psg_write_addr(addr + 2, (val >> 8)  & 0xFFu, 1);
-        return;
-    }
-    if (size == 2)
-        val = (val >> 8) & 0xFFu;
-
+    (void)size;
     uint8_t v = val & 0xFF;
 
     if (addr == PSG_REG_SELECT) {
         fdc.psg_reg_sel = v & 0x0F;
         //FDD_DBG("PSG: select reg %d", fdc.psg_reg_sel);
-        /* The real chip must track the latch too, or the forwarded data
-         * writes below would land in whatever register it last had selected. */
-        ps_write_8(addr, v);
     } else if (addr == PSG_REG_WRITE) {
         //FDD_DBG("PSG: write reg%d = 0x%02X", fdc.psg_reg_sel, v);
         if (fdc.psg_reg_sel == PSG_PORT_A_REG) {
             fdc.psg_porta = v;
             fdc_decode_drive_side();
-            /* Deliberately NOT forwarded: port A drives the physical drive /
-             * side select lines, which the emulated FDD owns. */
-        } else {
-            /* Everything else - tone, noise, mixer, volume, envelope - is
-             * sound, and belongs to the real YM2149. Swallowing these (the
-             * old behaviour) left the physical chip mute whenever FDD
-             * emulation was enabled, while the shadow copy feeding HDMI
-             * carried on playing perfectly. */
-            ps_write_8(addr, v);
         }
+        /* All other PSG registers (mixer, tone, envelope etc) silently accepted */
     }
 }
 
@@ -617,10 +797,14 @@ static void fdc_write_addr(uint32_t addr, uint32_t val, int size)
         case FDC_REG_CMD_STATUS:
             FDD_DBG("FDC command: 0x%02X drive=%d", v, fdc.selected_drive);
 
-            /* Start motor */
-            //fprintf (stderr, "[SXB] Motor running\n");
-            motor_ticks[fdc.selected_drive] = MOTOR_OFF_TICKS;
-            fdc.status |= FDC_STATUS_MOTORON;
+            /* Start motor. Guard the drive index: a command with no drive
+             * selected (probe-time FORCE INTERRUPT, say) used to write
+             * motor_ticks[-1] - an underflow that corrupted whatever static
+             * the linker placed before the array. */
+            if (fdc.selected_drive >= 0 && fdc.selected_drive < FDD_MAX_DRIVES) {
+                motor_ticks[fdc.selected_drive] = MOTOR_OFF_TICKS;
+                fdc.status |= FDC_STATUS_MOTORON;
+            }
 
             fdc_exec_command(v);
             usleep (2000);
