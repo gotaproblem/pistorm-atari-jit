@@ -1314,6 +1314,37 @@ static bool fvdi_mfdb_is_screen(uaecptr mfdb)
   return addr == 0 || addr == pistorm_fvdi_fb_base();
 }
 
+/* --- Destination redirection for fill / line / polygon -------------------
+ * fVDI passes the destination for these operations inside the workstation
+ * (vwk->real_address->screen.mfdb, offsets from ARAnyM src/natfeat/nfvdi.h)
+ * rather than as an argument. The renderers below were written against the
+ * visible framebuffer only, so drawing aimed at an off-screen bitmap
+ * (v_opnbm - e.g. the GEM port of Elite renders its 3D view that way) was
+ * painted onto the screen at 0,0, detached from the window, and the window
+ * itself was blitted from a buffer nothing had drawn into.
+ *
+ * g_fvdi_dest_mfdb is 0 for the screen, in which case every path below is
+ * bit-identical to before. When set, the leaf pixel accessors redirect into
+ * the MFDB and dirty-rect marking is suppressed (an off-screen bitmap has
+ * nothing to present). */
+#define FVDI_VWK_REAL_ADDRESS 0
+#define FVDI_WK_SCREEN_MFDB   24
+
+static uaecptr g_fvdi_dest_mfdb = 0;
+static int32_t g_fvdi_dest_w = 0;
+static int32_t g_fvdi_dest_h = 0;
+
+static int32_t fvdi_dest_width(void)
+{
+  return g_fvdi_dest_mfdb ? g_fvdi_dest_w : (int32_t)pistorm_fvdi_width();
+}
+
+static int32_t fvdi_dest_height(void)
+{
+  return g_fvdi_dest_mfdb ? g_fvdi_dest_h : (int32_t)pistorm_fvdi_height();
+}
+
+
 static uint32_t fvdi_mfdb_bpp(uaecptr mfdb)
 {
   if (!mfdb)
@@ -1529,6 +1560,8 @@ static bool fvdi_screen_copy_rows(int32_t src_x, int32_t src_y,
 
 static bool fvdi_xy_in_bounds(int32_t x, int32_t y)
 {
+  if (g_fvdi_dest_mfdb)
+    return x >= 0 && y >= 0 && x < g_fvdi_dest_w && y < g_fvdi_dest_h;
   return x >= 0 && y >= 0 &&
          (uint32_t)x < pistorm_fvdi_width() &&
          (uint32_t)y < pistorm_fvdi_height();
@@ -1549,6 +1582,11 @@ static uint8_t *fvdi_pixel_ptr(int32_t x, int32_t y)
 
 static void fvdi_put_raw_pixel_marked(int32_t x, int32_t y, uint32_t colour, bool mark)
 {
+  if (g_fvdi_dest_mfdb) {
+    fvdi_mfdb_put_pixel(g_fvdi_dest_mfdb, x, y, colour);
+    return;
+  }
+
   uint8_t *p = fvdi_pixel_ptr(x, y);
   uint32_t bytes = fvdi_bytes_per_pixel();
   if (!p)
@@ -1575,6 +1613,8 @@ static void fvdi_put_raw_pixel(int32_t x, int32_t y, uint32_t colour)
 
 static void fvdi_note_screen_span(int32_t x, int32_t y, int32_t w)
 {
+  if (g_fvdi_dest_mfdb)
+    return;
   uint32_t bytes = fvdi_bytes_per_pixel();
   if (bytes == 0 || w <= 0 || x < 0 || y < 0)
     return;
@@ -1584,6 +1624,38 @@ static void fvdi_note_screen_span(int32_t x, int32_t y, int32_t w)
 
 static void fvdi_fill_solid_span(int32_t x, int32_t y, int32_t w, uint32_t colour)
 {
+  if (g_fvdi_dest_mfdb) {
+    if (w <= 0)
+      return;
+    /* Fill the row through a host pointer when the bitmap is contiguous
+     * fast RAM; per-pixel nf_write fallback otherwise. */
+    const uint32_t mb = fvdi_mfdb_pixel_bytes(g_fvdi_dest_mfdb);
+    const uaecptr a0 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x, y);
+    const uaecptr a1 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x + w - 1, y);
+    uae_u8 *rp;
+    if ((mb == 2 || mb == 4) && a0 && a1 &&
+        a1 == a0 + (uaecptr)(w - 1) * mb && a0 >= NF_ST_RAM_SIZE &&
+        nf_host_ram_ptr(a0, (uint32_t)((size_t)w * mb), &rp)) {
+      if (mb == 4) {
+        for (int32_t i = 0; i < w; i++) {
+          rp[i * 4 + 0] = (uint8_t)(colour >> 24);
+          rp[i * 4 + 1] = (uint8_t)(colour >> 16);
+          rp[i * 4 + 2] = (uint8_t)(colour >> 8);
+          rp[i * 4 + 3] = (uint8_t)colour;
+        }
+      } else {
+        for (int32_t i = 0; i < w; i++) {
+          rp[i * 2 + 0] = (uint8_t)(colour >> 8);
+          rp[i * 2 + 1] = (uint8_t)colour;
+        }
+      }
+      return;
+    }
+    for (int32_t i = 0; i < w; i++)
+      fvdi_mfdb_put_pixel(g_fvdi_dest_mfdb, x + i, y, colour);
+    return;
+  }
+
   uint8_t *p = fvdi_pixel_ptr(x, y);
   uint32_t bytes = fvdi_bytes_per_pixel();
 
@@ -1615,6 +1687,9 @@ static void fvdi_fill_solid_span(int32_t x, int32_t y, int32_t w, uint32_t colou
 
 static uint32_t fvdi_get_raw_pixel(int32_t x, int32_t y)
 {
+  if (g_fvdi_dest_mfdb)
+    return fvdi_mfdb_get_pixel(g_fvdi_dest_mfdb, x, y);
+
   uint8_t *p = fvdi_pixel_ptr(x, y);
   if (!p)
     return 0;
@@ -1686,10 +1761,10 @@ static uae_u32 fvdi_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
     h += y;
     y = 0;
   }
-  if (x + w > (int32_t)pistorm_fvdi_width())
-    w = (int32_t)pistorm_fvdi_width() - x;
-  if (y + h > (int32_t)pistorm_fvdi_height())
-    h = (int32_t)pistorm_fvdi_height() - y;
+  if (x + w > fvdi_dest_width())
+    w = fvdi_dest_width() - x;
+  if (y + h > fvdi_dest_height())
+    h = fvdi_dest_height() - y;
   if (w <= 0 || h <= 0)
     return 1;
 
@@ -1939,8 +2014,8 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
 
   int32_t min_x = 0;
   int32_t min_y = 0;
-  int32_t max_x = (int32_t)pistorm_fvdi_width() - 1;
-  int32_t max_y = (int32_t)pistorm_fvdi_height() - 1;
+  int32_t max_x = fvdi_dest_width() - 1;
+  int32_t max_y = fvdi_dest_height() - 1;
 
   if (clip) {
     min_x = (int32_t)nf_read_long(clip + 0);
@@ -1953,10 +2028,10 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
     min_x = 0;
   if (min_y < 0)
     min_y = 0;
-  if (max_x >= (int32_t)pistorm_fvdi_width())
-    max_x = (int32_t)pistorm_fvdi_width() - 1;
-  if (max_y >= (int32_t)pistorm_fvdi_height())
-    max_y = (int32_t)pistorm_fvdi_height() - 1;
+  if (max_x >= fvdi_dest_width())
+    max_x = fvdi_dest_width() - 1;
+  if (max_y >= fvdi_dest_height())
+    max_y = fvdi_dest_height() - 1;
   if (min_x > max_x || min_y > max_y)
     return 1;
 
@@ -2091,8 +2166,8 @@ static uae_u32 fvdi_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
 {
   int32_t min_x = 0;
   int32_t min_y = 0;
-  int32_t max_x = (int32_t)pistorm_fvdi_width() - 1;
-  int32_t max_y = (int32_t)pistorm_fvdi_height() - 1;
+  int32_t max_x = fvdi_dest_width() - 1;
+  int32_t max_y = fvdi_dest_height() - 1;
   int32_t dx = abs(x2 - x1);
   int32_t sx = x1 < x2 ? 1 : -1;
   int32_t dy = -abs(y2 - y1);
@@ -2244,10 +2319,10 @@ static uae_u32 fvdi_text_area(uaecptr text, int32_t length,
     min_x = 0;
   if (min_y < 0)
     min_y = 0;
-  if (max_x >= (int32_t)pistorm_fvdi_width())
-    max_x = (int32_t)pistorm_fvdi_width() - 1;
-  if (max_y >= (int32_t)pistorm_fvdi_height())
-    max_y = (int32_t)pistorm_fvdi_height() - 1;
+  if (max_x >= fvdi_dest_width())
+    max_x = fvdi_dest_width() - 1;
+  if (max_y >= fvdi_dest_height())
+    max_y = fvdi_dest_height() - 1;
 
   for (int32_t row = 0; row < h; row++) {
     int32_t y = dst_y + row;
@@ -2795,6 +2870,8 @@ typedef struct fvdi_mouse_state {
   int32_t backup_y;
   int32_t backup_w;
   int32_t backup_h;
+  int32_t last_x;             /* last show() position (pre-hotspot) */
+  int32_t last_y;
   uint32_t backup[16 * 16];
 } fvdi_mouse_state_t;
 
@@ -2820,6 +2897,9 @@ static void fvdi_mouse_show(int32_t x, int32_t y)
 {
   if (!g_fvdi_mouse.shape_set)
     return;
+
+  g_fvdi_mouse.last_x = x;
+  g_fvdi_mouse.last_y = y;
 
   if (g_fvdi_mouse.visible)
     fvdi_mouse_hide();
@@ -2862,6 +2942,42 @@ static void fvdi_mouse_show(int32_t x, int32_t y)
   }
 
   g_fvdi_mouse.visible = true;
+}
+
+/* -----------------------------------------------------------------------
+ * Cursor guard. The host-drawn cursor keeps a 16x16 backup of the screen
+ * under it and stamps that backup back when hidden or moved. Drawing ops
+ * used to ignore it, so an op painting under the cursor was overwritten by
+ * the STALE backup on the next cursor move (mouse droppings), and blits
+ * could read the drawn cursor image into a copy. Every host-side op that
+ * touches the screen now hides the cursor first when its rectangle
+ * intersects it, and re-shows it afterwards. All serialized on the CPU
+ * thread via natfeat. */
+static bool fvdi_mouse_obscure_rect(int32_t x, int32_t y, int32_t w, int32_t h)
+{
+  if (!g_fvdi_mouse.visible || w <= 0 || h <= 0)
+    return false;
+  if (x + w <= g_fvdi_mouse.backup_x ||
+      g_fvdi_mouse.backup_x + g_fvdi_mouse.backup_w <= x ||
+      y + h <= g_fvdi_mouse.backup_y ||
+      g_fvdi_mouse.backup_y + g_fvdi_mouse.backup_h <= y)
+    return false;
+  fvdi_mouse_hide();
+  return true;
+}
+
+static bool fvdi_mouse_obscure_all(void)
+{
+  if (!g_fvdi_mouse.visible)
+    return false;
+  fvdi_mouse_hide();
+  return true;
+}
+
+static void fvdi_mouse_unobscure(bool was_visible)
+{
+  if (was_visible)
+    fvdi_mouse_show(g_fvdi_mouse.last_x, g_fvdi_mouse.last_y);
 }
 
 static uae_u32 fvdi_mouse_call(uaecptr params)
@@ -2972,6 +3088,44 @@ static uae_u32 nf_call_fvdi(uae_u32 subid, uaecptr params)
 #endif /* ATARI_LAT_DIAG */
 }
 
+/* Resolve the fill/line/polygon destination out of the workstation and arm
+ * the redirection. Stays disarmed (screen) whenever the destination is the
+ * screen or cannot be resolved, so screen drawing is untouched. */
+static void fvdi_dest_begin(uae_u32 vwk)
+{
+  g_fvdi_dest_mfdb = 0;
+  g_fvdi_dest_w = 0;
+  g_fvdi_dest_h = 0;
+
+  uaecptr real = (uaecptr)(vwk & ~1u);
+  if (!real)
+    return;
+  uaecptr wk = nf_read_long(real + FVDI_VWK_REAL_ADDRESS);
+  if (!wk)
+    return;
+
+  uaecptr mfdb = wk + FVDI_WK_SCREEN_MFDB;
+  uae_u32 addr = nf_read_long(mfdb + 0);
+  if (addr == 0 || addr == pistorm_fvdi_fb_base())
+    return;                       /* the screen - behave exactly as before */
+
+  int32_t w = (int32_t)nf_read_word(mfdb + 4);
+  int32_t h = (int32_t)nf_read_word(mfdb + 6);
+  if (w <= 0 || h <= 0)
+    return;
+
+  g_fvdi_dest_mfdb = mfdb;
+  g_fvdi_dest_w = w;
+  g_fvdi_dest_h = h;
+}
+
+static void fvdi_dest_end(void)
+{
+  g_fvdi_dest_mfdb = 0;
+  g_fvdi_dest_w = 0;
+  g_fvdi_dest_h = 0;
+}
+
 static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
 {
   switch (subid) {
@@ -3044,7 +3198,10 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       int32_t y = (int32_t)nf_get_param(params, 3);
       if (!fvdi_mfdb_is_screen(mfdb))
         return fvdi_mfdb_get_pixel_nf(mfdb, x, y);
-      return fvdi_get_raw_pixel(x, y);
+      bool gp_m = fvdi_mouse_obscure_rect(x, y, 1, 1);
+      uae_u32 gp_v = fvdi_get_raw_pixel(x, y);
+      fvdi_mouse_unobscure(gp_m);
+      return gp_v;
     }
 
     case FVDI_PUT_PIXEL:
@@ -3066,7 +3223,9 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       }
       if (!in_bounds)
         return 1;
+      bool pp_m = fvdi_mouse_obscure_rect(x, y, 1, 1);
       fvdi_put_raw_pixel(x, y, colour);
+      fvdi_mouse_unobscure(pp_m);
       return 1;
     }
 
@@ -3083,7 +3242,12 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       unsigned mode = nf_get_param(params, 9);
       uint32_t fg = nf_get_param(params, 10);
       uint32_t bg = nf_get_param(params, 11);
-      return fvdi_expand_mono(src, dst, src_x, src_y, dst_x, dst_y, w, h, mode, fg, bg);
+      bool exp_m = fvdi_mfdb_is_screen(dst) &&
+                   fvdi_mouse_obscure_rect(dst_x, dst_y, w, h);
+      uae_u32 exp_r = fvdi_expand_mono(src, dst, src_x, src_y, dst_x, dst_y,
+                                       w, h, mode, fg, bg);
+      fvdi_mouse_unobscure(exp_m);
+      return exp_r;
     }
 
     case FVDI_FILL_AREA:
@@ -3097,14 +3261,27 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       uint32_t fg = nf_get_param(params, 6);
       uint32_t bg = nf_get_param(params, 7);
       unsigned mode = nf_get_param(params, 8);
+      fvdi_dest_begin(vwk);
+      bool fill_m = false;
+      uae_u32 fill_r;
       if (vwk & 1u) {
         if (((uint32_t)y & 0xffffu) != 0)
-          return (uae_u32)-1;
-        return fvdi_fill_table((uaecptr)(uint32_t)x,
-                               (int32_t)((uint32_t)y >> 16),
-                               pattern, fg, bg, mode);
+          fill_r = (uae_u32)-1;
+        else {
+          if (!g_fvdi_dest_mfdb)
+            fill_m = fvdi_mouse_obscure_all();    /* span table: extent unknown */
+          fill_r = fvdi_fill_table((uaecptr)(uint32_t)x,
+                                   (int32_t)((uint32_t)y >> 16),
+                                   pattern, fg, bg, mode);
+        }
+      } else {
+        if (!g_fvdi_dest_mfdb)
+          fill_m = fvdi_mouse_obscure_rect(x, y, w, h);
+        fill_r = fvdi_fill_rect(x, y, w, h, pattern, fg, bg, mode);
       }
-      return fvdi_fill_rect(x, y, w, h, pattern, fg, bg, mode);
+      fvdi_mouse_unobscure(fill_m);
+      fvdi_dest_end();
+      return fill_r;
     }
 
     case FVDI_BLIT_AREA:
@@ -3118,7 +3295,15 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       int32_t w = (int32_t)nf_get_param(params, 7);
       int32_t h = (int32_t)nf_get_param(params, 8);
       unsigned op = nf_get_param(params, 9);
-      return fvdi_blit_area(src, dst, src_x, src_y, dst_x, dst_y, w, h, op);
+      bool blit_m = false;
+      if (fvdi_mfdb_is_screen(src))
+        blit_m |= fvdi_mouse_obscure_rect(src_x, src_y, w, h);
+      if (fvdi_mfdb_is_screen(dst))
+        blit_m |= fvdi_mouse_obscure_rect(dst_x, dst_y, w, h);
+      uae_u32 blit_r = fvdi_blit_area(src, dst, src_x, src_y, dst_x, dst_y,
+                                      w, h, op);
+      fvdi_mouse_unobscure(blit_m);
+      return blit_r;
     }
 
     case FVDI_LINE:
@@ -3134,13 +3319,28 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       unsigned mode = nf_get_param(params, 8);
       uaecptr clip = nf_get_param(params, 9);
 
-      if (vwk & 1u)
-        return fvdi_draw_line_table((uaecptr)(uint32_t)x1, (uint32_t)y1,
-                                    (uaecptr)(uint32_t)y2, (uint32_t)x2 & 0xffffu,
-                                    fg, bg, pattern, mode, clip);
-      if (!fvdi_line_coords_plausible(x1, y1, x2, y2))
-        return 1;
-      return fvdi_draw_line(x1, y1, x2, y2, fg, bg, pattern, mode, clip);
+      fvdi_dest_begin((uae_u32)vwk);
+      bool line_m = false;
+      uae_u32 line_r;
+      if (vwk & 1u) {
+        if (!g_fvdi_dest_mfdb)
+          line_m = fvdi_mouse_obscure_all();      /* line table: extent unknown */
+        line_r = fvdi_draw_line_table((uaecptr)(uint32_t)x1, (uint32_t)y1,
+                                      (uaecptr)(uint32_t)y2, (uint32_t)x2 & 0xffffu,
+                                      fg, bg, pattern, mode, clip);
+      } else if (!fvdi_line_coords_plausible(x1, y1, x2, y2))
+        line_r = 1;
+      else {
+        if (!g_fvdi_dest_mfdb) {
+          int32_t bx0 = x1 < x2 ? x1 : x2, bx1 = x1 < x2 ? x2 : x1;
+          int32_t by0 = y1 < y2 ? y1 : y2, by1 = y1 < y2 ? y2 : y1;
+          line_m = fvdi_mouse_obscure_rect(bx0, by0, bx1 - bx0 + 1, by1 - by0 + 1);
+        }
+        line_r = fvdi_draw_line(x1, y1, x2, y2, fg, bg, pattern, mode, clip);
+      }
+      fvdi_mouse_unobscure(line_m);
+      fvdi_dest_end();
+      return line_r;
     }
 
     case FVDI_FILL_POLYGON:
@@ -3157,7 +3357,15 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       uaecptr clip = nf_get_param(params, 10);
       if (vwk & 1u)
         return (uae_u32)-1;
-      return fvdi_fill_polygon(points, count, index, moves, pattern, fg, bg, mode, clip);
+      fvdi_dest_begin(vwk);
+      bool poly_m = false;
+      if (!g_fvdi_dest_mfdb)
+        poly_m = fvdi_mouse_obscure_all();
+      uae_u32 poly_r = fvdi_fill_polygon(points, count, index, moves,
+                                         pattern, fg, bg, mode, clip);
+      fvdi_mouse_unobscure(poly_m);
+      fvdi_dest_end();
+      return poly_r;
     }
 
     case FVDI_TEXT_AREA:
