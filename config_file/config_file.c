@@ -693,15 +693,39 @@ struct emulator_config *load_config_file(char *filename) {
           {
             cfg->kbd_usb  = true;
             cfg->kbd_grab = (strstr(arg, "nograb") == NULL);
+            /* real IKBD handling: auto (default) / merge / standalone */
+            if (strstr(arg, "standalone") != NULL)
+              cfg->kbd_mode = 2;
+            else if (strstr(arg, "merge") != NULL)
+              cfg->kbd_mode = 1;
+            else
+              cfg->kbd_mode = 0;
+
+            /* optional "mousediv N" - divide host mouse counts */
+            {
+              char *md = strstr(arg, "mousediv");
+              cfg->kbd_mouse_div = 1;
+              if (md)
+              {
+                int n = atoi(md + 8);
+                if (n >= 1 && n <= 16)
+                  cfg->kbd_mouse_div = n;
+              }
+            }
           }
           else
           {
             cfg->kbd_usb = get_bool_default_true(arg);
             cfg->kbd_grab = true;
+            cfg->kbd_mode = 0;
           }
-          printf ("[CFG] USB/Bluetooth keyboard+mouse injection %s%s\n",
+          printf ("[CFG] USB/Bluetooth keyboard+mouse injection %s%s%s\n",
                   cfg->kbd_usb ? "enabled" : "disabled",
-                  (cfg->kbd_usb && !cfg->kbd_grab) ? " (nograb)" : "");
+                  (cfg->kbd_usb && !cfg->kbd_grab) ? " (nograb)" : "",
+                  !cfg->kbd_usb ? "" :
+                    cfg->kbd_mode == 2 ? " (standalone: real IKBD ignored)" :
+                    cfg->kbd_mode == 1 ? " (merge: real IKBD always trusted)" :
+                                         " (auto-detect real IKBD)");
         }
         break;
 

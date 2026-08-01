@@ -45,12 +45,94 @@ guest-visible registers and synthesises the interrupt:
    the injection queue. Command *responses* (interrogate, clock reads, reset
    version byte) come from the real IKBD as before — we never fake them.
 
+## Real IKBD absent, or present-but-noisy
+
+If the ST keyboard is unplugged, the 6850's receive pin has nothing driving
+it. Noise gets framed as bytes, so the ACIA sits with framing/overrun errors
+set and garbage in RDRF. Handed to TOS that becomes nonsense scancodes, an
+overflowing keyboard buffer and **a constant bell** — and it starves the
+injected stream too, because the merge path defers to real bytes.
+
+So the real receiver is watched and classified:
+
+- **merge** (real IKBD trusted) — the normal path described above.
+- **quarantine** (real IKBD absent or noisy) — the real ACIA is *drained*
+  on every status read (which also clears its IRQ output, stopping the
+  real GPIP4 interrupt storm) and hidden from the guest: no RDRF, no error
+  flags, no IRQ claim. Only injected bytes reach TOS. IKBD reset commands
+  are answered with `0xF1` host-side, since nothing real will answer.
+
+Detection is automatic and runs both ways, so unplugging or reconnecting
+the ST keyboard is handled live without a restart. Classification happens
+per *consumed* byte, not per status read — RDRF and the error flags persist
+in the 6850 until RDR is read, so a polling guest sees the same byte many
+times and counting status reads wildly overcounts.
+
+- **Throughput** is the primary test. A real IKBD is silent unless touched
+  and is hard-limited to ~780 B/s by the 7812.5 bps link; even continuous
+  mouse movement sits near 300 B/s. Over 400 B/s for 2 consecutive seconds
+  ⇒ absent. This is the rule that catches a floating line, because much of
+  that noise *frames cleanly* — an earlier version tested only the error
+  flags, counted clean noise as proof of a live keyboard, stayed in merge
+  mode and kept feeding TOS garbage.
+- 12 consecutively error-flagged bytes ⇒ absent.
+- A guest IKBD reset (`0x80 0x01`) with no clean answer inside 400 ms ⇒
+  absent. Catches a *silent* disconnected line, which yields nothing to count.
+**Recovery is deliberately not rate-based.** Quarantine works *by* making
+the stream quiet — RIE is cleared, so the flood stops — which means judging
+"is the keyboard back?" from the observed rate is a feedback loop: quarantine
+succeeds, the line looks calm, it un-quarantines, the flood and the bell come
+straight back, and it oscillates once a second. The only way out of
+quarantine is the reset probe, which is *positive* evidence rather than
+absence of evidence: when the guest resets the IKBD, RIE is re-enabled for
+the 400 ms window so a genuinely reconnected keyboard can be heard, and a
+flood during that window cancels the probe outright.
+
+In practice that means: plug the ST keyboard back in, then reset or reboot
+the machine, and it returns to merge mode.
+
+Mode changes are logged: `[KBD] real IKBD absent/noisy - quarantining real
+ACIA, USB input only`.
+
+## Diagnostics
+
+Once per second, when anything is moving, the input thread prints:
+
+```
+[KBD] QUARANTINE(auto) real=812/s (passed=0 drained=812) inj=6/s status=$B1 errs=0 vIACK=143
+```
+
+- `real=N/s` — bytes coming out of the *real* ACIA. Anything sustained above
+  a few hundred with no keyboard attached is the floating-line noise.
+- `passed` — real bytes handed to TOS. **Must be 0 in quarantine**; if it
+  is climbing while beeping, the real receiver is still reaching the guest.
+- `drained` — garbage swallowed (and the ACIA IRQ cleared with it).
+- `inj=N/s` — injected USB/Bluetooth bytes actually consumed by TOS.
+- `status` — last real ACIA status byte; bit 0 RDRF, bit 4 framing,
+  bit 5 overrun, bit 7 IRQ.
+- `vIACK` — synthesised level-6 acknowledges.
+
+If the bell persists while `passed=0` and `real=` is near zero, the keyboard
+ACIA is not the source — the next suspect is the **MIDI ACIA** at
+`$FFFC04/06`, which shares the same MFP GPIP4 line and is not shimmed.
+
+Note that the beeping is caused by the disconnected keyboard, not by this
+patch — a stock build with `kbd usb` commented out will beep the same way on
+that machine. Quarantine mode incidentally suppresses it.
+
 ## Config
 
 ```
-kbd usb            # enable, grab devices away from the Pi console (default)
-kbd usb nograb     # enable, leave devices shared with the console
+kbd usb              # enable, grab devices, auto-detect the real IKBD (default)
+kbd usb nograb       # enable, leave devices shared with the Pi console
+kbd usb standalone   # force quarantine: ignore the real IKBD entirely
+kbd usb merge        # force merge: always trust the real IKBD (old behaviour)
 ```
+
+`standalone` and `merge` are escape hatches — `auto` is the right default,
+and the only reason to force `merge` is if auto-detect misjudges a working
+keyboard as noisy (which would show up as that log line appearing while the
+real keyboard still works).
 
 F12 toggles the grab at runtime (F11/F12 don't exist on an ST, so they're
 never forwarded). The emulator needs to run as root for GPIO anyway, which

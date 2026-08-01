@@ -105,6 +105,8 @@ struct emulator_config {
   bool ym2149;
   bool kbd_usb;        /* "kbd usb": inject USB/Bluetooth input into IKBD */
   bool kbd_grab;       /* grab evdev devices away from the Pi console     */
+  int  kbd_mode;       /* 0 = auto-detect real IKBD, 1 = merge, 2 = standalone */
+  int  kbd_mouse_div;  /* host mouse count divisor (1 = raw)              */
   bool blitter;
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
   bool stram_cache;

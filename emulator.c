@@ -997,6 +997,8 @@ int main (int argc, char *argv[])
   if (config->kbd_usb)
   {
     KBD_USB_enabled = true;
+    kbd_usb_force_mode = config->kbd_mode;
+    kbd_usb_mouse_div  = config->kbd_mouse_div > 0 ? config->kbd_mouse_div : 1;
     if (kbd_usb_init (config->kbd_grab ? 1 : 0) != 0)
       KBD_USB_enabled = false;
   }
@@ -1807,7 +1809,10 @@ extern "C"
     {
       kbd_usb_mfp_snoop (address, value, 0);
       if (address == 0x00FFFC00)
+      {
         kbd_usb_ctrl_snoop ((uint8_t)value);
+        value = kbd_usb_ctrl_filter ((uint8_t)value);
+      }
       else if (address == 0x00FFFC02)
         kbd_usb_tx_snoop ((uint8_t)value);
     }
@@ -1930,7 +1935,11 @@ extern "C"
     {
       kbd_usb_mfp_snoop (address, value, 1);
       if (address == 0x00FFFC00)
+      {
         kbd_usb_ctrl_snoop ((uint8_t)(value >> 8));
+        value = (value & 0x00FF) |
+                ((unsigned int)kbd_usb_ctrl_filter ((uint8_t)(value >> 8)) << 8);
+      }
       else if (address == 0x00FFFC02)
         kbd_usb_tx_snoop ((uint8_t)(value >> 8));
     }

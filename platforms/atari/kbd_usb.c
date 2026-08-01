@@ -42,6 +42,11 @@
 
 #include "kbd_usb.h"
 
+/* Per-second [KBD] state line: off unless explicitly built in. */
+#ifndef KBD_USB_DIAG
+#define KBD_USB_DIAG 0
+#endif
+
 bool KBD_USB_enabled = false;
 
 volatile uint32_t kbd_usb_stat_injected_bytes;
@@ -55,6 +60,11 @@ volatile uint32_t kbd_usb_stat_dropped_bytes;
 #define IKBD_BYTE_US      1280      /* 7812.5 bps, 10 bits/byte          */
 #define REAL_QUIET_US     2560      /* 2 byte-times: real pkt gap guard  */
 #define MOUSE_TICK_US     8000      /* mouse packet generation ~125 Hz   */
+#define MOUSE_MAX_QUEUE      6      /* bytes in flight: ~2 packets       */
+#define MOUSE_CARRY_CLAMP  384      /* max banked counts per axis        */
+
+/* Host-count divisor, "kbd usb mousediv N". 1 = raw host counts. */
+int kbd_usb_mouse_div = 1;
 
 static uint64_t now_us(void)
 {
@@ -64,7 +74,10 @@ static uint64_t now_us(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* SPSC ring of IKBD bytes; bit 8 marks "start of packet"              */
+/* MPSC ring of IKBD bytes; bit 8 marks "start of packet"              */
+/* Producers: evdev input thread, plus the CPU thread when it           */
+/* synthesises an IKBD command response in standalone mode - hence the  */
+/* push lock. Consumer: CPU thread only.                                */
 /* ------------------------------------------------------------------ */
 
 #define RING_SIZE 1024              /* power of two                      */
@@ -73,7 +86,8 @@ static uint64_t now_us(void)
 
 static uint16_t         ring[RING_SIZE];
 static _Atomic uint32_t ring_head;  /* consumer (CPU thread)             */
-static _Atomic uint32_t ring_tail;  /* producer (input thread)           */
+static _Atomic uint32_t ring_tail;  /* producers (see above)             */
+static pthread_mutex_t  ring_push_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* consumer-side presentation state (CPU thread owns, ipl_task reads)   */
 static _Atomic uint64_t next_ready_us;   /* serial pacing gate           */
@@ -83,6 +97,116 @@ static _Atomic int      in_packet;       /* mid-injected-packet flag     */
 /* guest MFP mask shadow: assume keyboard irq enabled until told else   */
 static _Atomic uint8_t  mfp_ierb = 0xFF;
 static _Atomic uint8_t  mfp_imrb = 0xFF;
+
+/* ------------------------------------------------------------------ */
+/* Real IKBD presence state (see the detection section further down)   */
+/* ------------------------------------------------------------------ */
+
+extern uint8_t ps_read_8(uint32_t address);   /* gpio/ps_protocol.h      */
+
+#define KBD_ACIA_CTRL_ADDR 0x00FFFC00u
+#define KBD_ACIA_DATA_ADDR 0x00FFFC02u
+
+/* 6850 status bits */
+#define ACIA_RDRF  0x01
+#define ACIA_FE    0x10
+#define ACIA_OVRN  0x20
+#define ACIA_PE    0x40
+#define ACIA_IRQ   0x80
+#define ACIA_ERRS  (ACIA_OVRN | ACIA_FE | ACIA_PE)
+
+enum { IKBD_UNKNOWN = 0, IKBD_PRESENT, IKBD_ABSENT };
+
+static _Atomic int      real_state = IKBD_UNKNOWN;
+static _Atomic uint32_t real_err_run;        /* consecutive bad reads     */
+static _Atomic uint32_t real_good_run;       /* consecutive clean reads   */
+static _Atomic uint64_t reset_probe_due;     /* IKBD reset answer deadline*/
+static _Atomic int      reset_probe_armed;
+static _Atomic int      probe_saw_clean;     /* real reply during probe   */
+static _Atomic uint32_t real_drained;        /* garbage bytes swallowed   */
+static _Atomic uint32_t real_rx_total;       /* real bytes consumed       */
+static _Atomic uint32_t real_rx_passed;      /* real bytes given to guest */
+static _Atomic uint32_t rate_win_bytes;      /* bytes in current window   */
+static _Atomic uint64_t rate_win_start;
+static _Atomic uint32_t rate_last_bps;       /* last completed window     */
+static _Atomic uint32_t rate_hot_wins;       /* consecutive flood windows */
+static _Atomic uint8_t  real_last_status;    /* for diagnostics           */
+
+/* forced mode from config: 0 = auto, 1 = force merge, 2 = force standalone */
+int kbd_usb_force_mode = 0;
+
+#define ERR_RUN_TO_ABSENT   12   /* noisy line -> quarantine              */
+#define GOOD_RUN_TO_PRESENT  4   /* clean bytes -> trust the real IKBD    */
+#define RESET_ANSWER_US 400000   /* IKBD reset reply window (0xF1)        */
+#define RATE_FLOOD_BPS     400   /* B/s above which it cannot be a human  */
+#define RATE_HOT_WINS        2   /* consecutive flood seconds -> absent   */
+
+/* Last control-register value the guest wrote to the keyboard ACIA. The
+ * register is write-only (reads return status), so we have to remember it
+ * to be able to put it back. TOS writes 0x96: RIE on, /64, 8N1. */
+static _Atomic uint8_t last_ctrl_written = 0x96;
+
+/* NOTE: must match gpio/ps_protocol.h exactly - the data argument is
+ * uint16_t there, not uint8_t. */
+extern void ps_write_8(uint32_t address, uint16_t value);
+
+static int quarantined(void);
+
+/* Hiding the garbage from the guest is not enough on its own: the real
+ * ACIA still asserts its IRQ output on every noise byte, so the real MFP
+ * keeps raising level 6 and TOS runs its ACIA handler thousands of times a
+ * second for nothing. That storm is pure emulated-CPU overhead and shows up
+ * as jerky mouse movement. Clearing RIE (control bit 7) stops the real ACIA
+ * driving GPIP4 at all, while leaving it perfectly able to receive - so we
+ * can still read RDRF to notice a keyboard being plugged back in, and our
+ * synthesised level-6 is unaffected because it never goes near the MFP.
+ * Only the keyboard ACIA is touched; the MIDI ACIA keeps its own RIE. */
+static void real_acia_set_rie(int on)
+{
+    /* Never re-arm the real receiver's interrupt while quarantined. In
+     * forced standalone the state machine can still wander to PRESENT off
+     * cleanly-framed noise, and without this guard that would switch the
+     * IRQ storm back on behind the user's back - silently, since the data
+     * itself stays hidden, so there is no bell to warn you. */
+    if (on && quarantined())
+        return;
+
+    uint8_t c = atomic_load_explicit(&last_ctrl_written, memory_order_relaxed);
+    c = on ? (uint8_t)(c | 0x80) : (uint8_t)(c & ~0x80);
+    ps_write_8(KBD_ACIA_CTRL_ADDR, c);
+}
+
+uint8_t kbd_usb_ctrl_filter(uint8_t v)
+{
+    atomic_store_explicit(&last_ctrl_written, v, memory_order_relaxed);
+    if (quarantined())
+        v &= (uint8_t)~0x80;          /* keep the real receiver silent   */
+    return v;
+}
+
+static void real_state_set(int s)
+{
+    int old = atomic_exchange(&real_state, s);
+    if (old == s)
+        return;
+    printf("[KBD] real IKBD %s - %s\n",
+           s == IKBD_PRESENT ? "detected"
+         : s == IKBD_ABSENT  ? "absent/noisy" : "unknown",
+           s == IKBD_PRESENT ? "merging real + USB input"
+                             : "quarantining real ACIA, USB input only");
+    fflush(stdout);
+
+    /* Runs on the CPU thread (all detection does), so touching the bus
+     * here is safe. */
+    real_acia_set_rie(s != IKBD_ABSENT);
+}
+
+static int quarantined(void)
+{
+    if (kbd_usb_force_mode == 1) return 0;
+    if (kbd_usb_force_mode == 2) return 1;
+    return atomic_load_explicit(&real_state, memory_order_relaxed) == IKBD_ABSENT;
+}
 
 static int ring_used(void)
 {
@@ -95,18 +219,20 @@ static int ring_free(void)
     return RING_SIZE - 1 - ring_used();
 }
 
-/* producer only */
 static void ring_push_packet(const uint8_t *bytes, int n)
 {
+    pthread_mutex_lock(&ring_push_lock);
     if (ring_free() < n)
     {
         kbd_usb_stat_dropped_bytes += (uint32_t)n;  /* whole packet or none */
+        pthread_mutex_unlock(&ring_push_lock);
         return;
     }
     uint32_t t = atomic_load_explicit(&ring_tail, memory_order_relaxed);
     for (int i = 0; i < n; i++)
         ring[(t + (uint32_t)i) & RING_MASK] = (uint16_t)bytes[i] | (i == 0 ? PKT_START : 0);
     atomic_store_explicit(&ring_tail, t + (uint32_t)n, memory_order_release);
+    pthread_mutex_unlock(&ring_push_lock);
 }
 
 /* ------------------------------------------------------------------ */
@@ -199,7 +325,36 @@ void kbd_usb_tx_snoop(uint8_t v)
     {
         ikbd.pending_params--;
         if (ikbd.pending_cmd == 0x80 && v == 0x01)
+        {
             ikbd_reset_state();
+            /* Arm the presence probe: a live IKBD answers a reset with
+             * 0xF1 within a few hundred ms. Silence means no keyboard.
+             * This is the only route back out of quarantine, so open the
+             * real receiver's interrupt for the duration of the window -
+             * otherwise a keyboard that HAS been reconnected can never be
+             * heard, because quarantine keeps RIE clear. A few hundred ms
+             * of noise is a fair price for being able to recover at all. */
+            const int was_quarantined = quarantined();
+            atomic_store(&probe_saw_clean, 0);
+            atomic_store(&reset_probe_due, now_us() + RESET_ANSWER_US);
+            atomic_store(&reset_probe_armed, 1);
+            atomic_store(&real_good_run, 0);
+            atomic_store(&rate_hot_wins, 0);
+            atomic_store(&rate_win_bytes, 0);
+            if (was_quarantined)
+            {
+                /* Only open the real receiver for the probe in AUTO mode.
+                 * Under forced standalone we are never leaving quarantine,
+                 * so a probe window would be 400ms of pointless IRQ storm
+                 * on every guest reset. */
+                if (kbd_usb_force_mode == 0)
+                    real_acia_set_rie(1);
+                /* Nothing real will answer if the line is dead, so answer
+                 * for it - otherwise TOS waits out its own timeout. */
+                static const uint8_t ack = 0xF1;
+                ring_push_packet(&ack, 1);
+            }
+        }
         if (ikbd.pending_cmd == 0x20 && ikbd.pending_params == 0)
             ikbd.memload_left = v;          /* 3rd param = byte count    */
         if (ikbd.pending_params == 0 && ikbd.pending_cmd != 0x20)
@@ -307,18 +462,172 @@ void kbd_usb_note_real_rx(void)
                           memory_order_relaxed);
 }
 
+/* ------------------------------------------------------------------ */
+/* Real IKBD presence detection + quarantine                           */
+/*                                                                      */
+/* With the ST keyboard unplugged the 6850's RX pin floats: noise gets  */
+/* framed as bytes, so the ACIA sits there with framing/overrun errors  */
+/* set and garbage in RDRF. Passed to TOS that garbage becomes nonsense */
+/* scancodes, an overflowing keyboard buffer and the constant bell -    */
+/* and it also starves the injected stream, because the merge logic     */
+/* defers to real bytes.                                                */
+/*                                                                      */
+/* So: watch the real receiver, and when it looks dead-or-noisy rather  */
+/* than like an IKBD, QUARANTINE it - drain the ACIA (which also clears */
+/* its IRQ, stopping the real GPIP4 storm) and hide it from the guest.  */
+/* Clean real traffic reappearing flips straight back to merge mode, so */
+/* hot-plugging the ST keyboard back in works without a restart.        */
+/* ------------------------------------------------------------------ */
+
+/* Called on every guest ACIA status read. Only the reset-probe timeout
+ * lives here: RDRF and the error flags persist in the 6850 until RDR is
+ * read, so a polling guest would see the SAME byte dozens of times.
+ * Classification therefore happens per consumed byte, below. */
+static void real_observe_status(uint8_t rs)
+{
+    (void)rs;
+    if (kbd_usb_force_mode != 0)
+        return;
+    if (!atomic_load_explicit(&reset_probe_armed, memory_order_relaxed) ||
+        now_us() <= atomic_load_explicit(&reset_probe_due, memory_order_relaxed))
+        return;
+
+    /* Probe window closed. A real IKBD answers a reset within a few
+     * hundred ms; silence (or nothing but noise) means there is nobody
+     * on the other end. This is the ONLY way back out of quarantine. */
+    atomic_store_explicit(&reset_probe_armed, 0, memory_order_relaxed);
+    const int clean = atomic_exchange(&probe_saw_clean, 0);
+    real_state_set(clean ? IKBD_PRESENT : IKBD_ABSENT);
+}
+
+/* Classify one byte actually taken out of the real receiver.
+ *
+ * Error flags alone are NOT a sufficient test: a floating RX line produces
+ * plenty of noise that happens to frame cleanly, and an earlier version of
+ * this code counted those as proof of a live keyboard - so it stayed in
+ * merge mode and kept feeding TOS garbage.
+ *
+ * The reliable discriminator is throughput. A real IKBD is silent unless
+ * you touch it, and is hard-limited to ~780 bytes/s by the 7812.5 bps link;
+ * even continuous mouse movement sits near 300 B/s. A floating line streams
+ * at close to line rate without pause. So: sustained flood => no keyboard. */
+static void real_byte_consumed(uint8_t rs)
+{
+    /* An explicit mode from the config is a decision, not a hint - don't
+     * let detection second-guess it (and save the work while we're here). */
+    if (kbd_usb_force_mode != 0)
+        return;
+
+    const uint64_t t = now_us();
+
+    if (rs & ACIA_ERRS)
+    {
+        atomic_store_explicit(&real_good_run, 0, memory_order_relaxed);
+        if (atomic_fetch_add(&real_err_run, 1) + 1 >= ERR_RUN_TO_ABSENT &&
+            atomic_load_explicit(&real_state, memory_order_relaxed) != IKBD_ABSENT)
+            real_state_set(IKBD_ABSENT);
+    }
+    else
+    {
+        atomic_store_explicit(&real_err_run, 0, memory_order_relaxed);
+        /* Positive evidence of a live keyboard, but only from a cold start
+         * or inside a reset probe - see the comment on recovery below. */
+        if (atomic_load_explicit(&reset_probe_armed, memory_order_relaxed))
+            atomic_store_explicit(&probe_saw_clean, 1, memory_order_relaxed);
+        if (atomic_fetch_add(&real_good_run, 1) + 1 >= GOOD_RUN_TO_PRESENT &&
+            atomic_load_explicit(&real_state, memory_order_relaxed) == IKBD_UNKNOWN)
+            real_state_set(IKBD_PRESENT);
+    }
+
+    /* --- rate window --- */
+    uint64_t ws = atomic_load_explicit(&rate_win_start, memory_order_relaxed);
+    if (ws == 0)
+    {
+        atomic_store_explicit(&rate_win_start, t, memory_order_relaxed);
+    }
+    else if (t - ws >= 1000000)
+    {
+        const uint32_t n = atomic_exchange(&rate_win_bytes, 0);
+        atomic_store_explicit(&rate_win_start, t, memory_order_relaxed);
+        atomic_store_explicit(&rate_last_bps, n, memory_order_relaxed);
+
+        if (n > RATE_FLOOD_BPS)
+        {
+            if (atomic_fetch_add(&rate_hot_wins, 1) + 1 >= RATE_HOT_WINS &&
+                atomic_load_explicit(&real_state, memory_order_relaxed) != IKBD_ABSENT)
+                real_state_set(IKBD_ABSENT);
+        }
+        else
+        {
+            atomic_store_explicit(&rate_hot_wins, 0, memory_order_relaxed);
+        }
+
+        /* NO rate-based recovery here. Quarantine works precisely BY making
+         * the stream quiet (RIE is cleared, so the flood stops), so judging
+         * "is the keyboard back?" from the observed rate is a feedback loop:
+         * quarantine succeeds -> looks calm -> un-quarantine -> flood and
+         * bell return -> quarantine again, oscillating once a second. The
+         * only way out of quarantine is the reset probe below, which is
+         * positive evidence rather than absence of evidence. */
+    }
+
+    /* Flood detection inside the window too, so a screaming line is caught
+     * in a fraction of a second instead of taking two full windows - that
+     * is the difference between a blip and a second of bell at boot.
+     *
+     * This also has to cancel any open reset probe: with RIE re-enabled for
+     * the probe, a floating line delivers plenty of cleanly-framed noise,
+     * and without this the probe would see a "clean reply" and conclude a
+     * keyboard had appeared. A flood is decisive - it is not a keyboard. */
+    if (atomic_load_explicit(&rate_win_bytes, memory_order_relaxed) > RATE_FLOOD_BPS &&
+        atomic_load_explicit(&real_state, memory_order_relaxed) != IKBD_ABSENT)
+    {
+        atomic_store_explicit(&reset_probe_armed, 0, memory_order_relaxed);
+        atomic_store_explicit(&probe_saw_clean, 0, memory_order_relaxed);
+        real_state_set(IKBD_ABSENT);
+    }
+    atomic_fetch_add(&rate_win_bytes, 1);
+    atomic_fetch_add(&real_rx_total, 1);
+}
+
+/* Swallow a pending real byte. Reading RDR also clears the ACIA's IRQ
+ * output, which is what stops the real MFP GPIP4 interrupt storm. */
+static void real_drain(uint8_t rs)
+{
+    if (!(rs & (ACIA_RDRF | ACIA_ERRS)))
+        return;
+    (void)ps_read_8(KBD_ACIA_DATA_ADDR);
+    atomic_fetch_add(&real_drained, 1);
+    real_byte_consumed(rs);
+}
+
 /* ---- shared ACIA/GPIP shims (used by pistorm_natmem.cpp and the ---- */
 /* ---- legacy emulator.c memory handlers)                          ---- */
 
-extern uint8_t ps_read_8(uint32_t address);   /* gpio/ps_protocol.h      */
-
-#define KBD_ACIA_CTRL_ADDR 0x00FFFC00u
-#define KBD_ACIA_DATA_ADDR 0x00FFFC02u
-
 uint8_t kbd_usb_acia_status_shim(uint8_t real)
 {
-    if (kbd_usb_rx_priority() || (!(real & 0x01) && kbd_usb_rx_ready()))
-        real |= 0x81;                        /* RDRF | IRQ                */
+    atomic_store_explicit(&real_last_status, real, memory_order_relaxed);
+    real_observe_status(real);
+
+    if (quarantined())
+    {
+        /* hide the real receiver entirely: no RDRF, no error flags, no
+         * IRQ claim - then present our own byte if one is due */
+        real_drain(real);
+        real &= (uint8_t)~(ACIA_RDRF | ACIA_ERRS | ACIA_IRQ);
+        if (kbd_usb_rx_priority() || kbd_usb_rx_ready())
+            real |= (ACIA_RDRF | ACIA_IRQ);
+        return real;
+    }
+
+    if (kbd_usb_rx_priority() || (!(real & ACIA_RDRF) && kbd_usb_rx_ready()))
+    {
+        /* Presenting an injected byte: the error flags belong to the real
+         * receiver, not to our byte. Leaving them set makes TOS discard
+         * the character we just handed it. */
+        real &= (uint8_t)~ACIA_ERRS;
+        real |= (ACIA_RDRF | ACIA_IRQ);
+    }
     return real;
 }
 
@@ -327,11 +636,23 @@ uint8_t kbd_usb_acia_data_shim(void)
     if (kbd_usb_rx_priority())
         return kbd_usb_rx_read();
 
-    /* fresh real status decides whose byte the guest gets */
     uint8_t rs = ps_read_8(KBD_ACIA_CTRL_ADDR);
-    if (rs & 0x01)
+    real_observe_status(rs);
+
+    if (quarantined())
+    {
+        real_drain(rs);
+        if (kbd_usb_rx_ready())
+            return kbd_usb_rx_read();
+        return 0xFF;                          /* idle line, never a key    */
+    }
+
+    /* fresh real status decides whose byte the guest gets */
+    if (rs & ACIA_RDRF)
     {
         uint8_t v = ps_read_8(KBD_ACIA_DATA_ADDR);
+        atomic_fetch_add(&real_rx_passed, 1);
+        real_byte_consumed(rs);
         kbd_usb_note_real_rx();
         return v;
     }
@@ -344,8 +665,51 @@ uint8_t kbd_usb_gpip_shim(uint8_t real)
 {
     if (kbd_usb_rx_ready() || kbd_usb_rx_priority())
         real &= (uint8_t)~0x10;              /* GPIP4 low (active low)    */
+    else if (quarantined())
+        real |= 0x10;                        /* hide the noisy real ACIA  */
     return real;
 }
+
+int kbd_usb_real_ikbd_present(void)
+{
+    return atomic_load_explicit(&real_state, memory_order_relaxed) == IKBD_PRESENT;
+}
+
+/* Once-per-second state dump. OFF by default - it was for bringing the
+ * merge/quarantine logic up and is just noise on a working system. Build
+ * with -DKBD_USB_DIAG=1 to get it back if the input path ever misbehaves.
+ * Called from the input thread. */
+#if KBD_USB_DIAG
+void kbd_usb_diag_tick(void)
+{
+    static uint32_t last_real, last_inj, last_drain;
+    const uint32_t r = atomic_load(&real_rx_total);
+    const uint32_t i = kbd_usb_stat_injected_bytes;
+    const uint32_t d = atomic_load(&real_drained);
+    const int      st = atomic_load(&real_state);
+
+    if (r == last_real && i == last_inj && d == last_drain)
+        return;                                  /* idle - stay quiet      */
+
+    printf("[KBD] %s real=%u/s (passed=%u drained=%u) inj=%u/s "
+           "status=$%02X errs=%u vIACK=%u\n",
+           kbd_usb_force_mode == 2 ? "STANDALONE(forced)"
+         : kbd_usb_force_mode == 1 ? "MERGE(forced)"
+         : st == IKBD_ABSENT       ? "QUARANTINE(auto)"
+         : st == IKBD_PRESENT      ? "MERGE(auto)" : "PROBING",
+           r - last_real,
+           atomic_load(&real_rx_passed),
+           d - last_drain,
+           i - last_inj,
+           atomic_load(&real_last_status),
+           atomic_load(&real_err_run),
+           kbd_usb_stat_virtual_iacks);
+    fflush(stdout);
+    last_real = r; last_inj = i; last_drain = d;
+}
+#else
+void kbd_usb_diag_tick(void) { }
+#endif
 
 int kbd_usb_irq_wanted(void)
 {
@@ -451,6 +815,7 @@ static struct {
     int buttons;                /* bit1 = left, bit0 = right (IKBD)      */
     int last_sent_buttons;
     uint64_t next_mouse_us;
+    uint64_t next_diag_us;
 } in_state;
 
 static int has_bit(const unsigned long *bits, int bit)
@@ -579,16 +944,37 @@ static void mouse_flush(void)
         return;
     }
 
-    while (in_state.dx || in_state.dy ||
+    /* Scale host counts down to something ST-like. A real ST mouse is
+     * ~200 CPI; modern optical mice are 800-1600 and will happily produce
+     * more motion per second than a 7812.5 bps IKBD link can carry. The
+     * remainder is carried, so slow movement stays pixel-accurate. */
+    const int div = kbd_usb_mouse_div > 0 ? kbd_usb_mouse_div : 1;
+
+    /* Cap carried motion. Without this a fast swipe banks thousands of
+     * counts that then dribble out over seconds. */
+    if (in_state.dx >  MOUSE_CARRY_CLAMP) in_state.dx =  MOUSE_CARRY_CLAMP;
+    if (in_state.dx < -MOUSE_CARRY_CLAMP) in_state.dx = -MOUSE_CARRY_CLAMP;
+    if (in_state.dy >  MOUSE_CARRY_CLAMP) in_state.dy =  MOUSE_CARRY_CLAMP;
+    if (in_state.dy < -MOUSE_CARRY_CLAMP) in_state.dy = -MOUSE_CARRY_CLAMP;
+
+    while (in_state.dx / div || in_state.dy / div ||
            in_state.buttons != in_state.last_sent_buttons)
     {
-        int sx = in_state.dx, sy = in_state.dy;
+        /* Bounded queue. The old test let the ring fill to ~1016 bytes -
+         * 1.3 SECONDS of backlogged motion at the IKBD byte rate, which
+         * showed up as the pointer lagging then catching up in lurches.
+         * Holding only ~2 packets in flight keeps latency near 8ms and
+         * lets unsent motion coalesce into the next packet instead. */
+        if (ring_used() >= MOUSE_MAX_QUEUE)
+            break;
+
+        int sx = in_state.dx / div, sy = in_state.dy / div;
         if (sx > 127)  sx = 127;
         if (sx < -128) sx = -128;
         if (sy > 127)  sy = 127;
         if (sy < -128) sy = -128;
-        in_state.dx -= sx;
-        in_state.dy -= sy;
+        in_state.dx -= sx * div;      /* keep the sub-division remainder */
+        in_state.dy -= sy * div;
         in_state.last_sent_buttons = in_state.buttons;
 
         if (!y0top)
@@ -599,9 +985,6 @@ static void mouse_flush(void)
         pkt[1] = (uint8_t)(int8_t)sx;
         pkt[2] = (uint8_t)(int8_t)sy;
         ring_push_packet(pkt, 3);
-
-        if (ring_free() < 8)
-            break;
     }
 }
 
@@ -679,6 +1062,7 @@ static void *input_thread(void *arg)
                "as evdev nodes)\n");
 
     in_state.next_mouse_us = now_us() + MOUSE_TICK_US;
+    in_state.next_diag_us  = now_us() + 1000000;
 
     while (atomic_load(&in_state.running))
     {
@@ -740,6 +1124,12 @@ static void *input_thread(void *arg)
         {
             mouse_flush();
             in_state.next_mouse_us = t + MOUSE_TICK_US;
+        }
+
+        if (t >= in_state.next_diag_us)
+        {
+            kbd_usb_diag_tick();
+            in_state.next_diag_us = t + 1000000;
         }
     }
 

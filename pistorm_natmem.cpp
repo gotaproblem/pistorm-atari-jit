@@ -2141,6 +2141,8 @@ static void hw_lput(uaecptr a, uae_u32 v)
             if (KBD_USB_enabled && a == KBD_ACIA_CTRL)
             {
                 kbd_usb_ctrl_snoop((uae_u8)(v >> 24));   /* $FFFC00      */
+                v = (v & 0x00FFFFFFu) |
+                    ((uae_u32)kbd_usb_ctrl_filter((uae_u8)(v >> 24)) << 24);
                 kbd_usb_tx_snoop((uae_u8)(v >> 8));      /* $FFFC02      */
             }
             hw_bus_lput(a, v);
@@ -2200,8 +2202,13 @@ static void hw_wput(uaecptr a, uae_u32 v)
         case HW_PAGE_ACIA:
             if (KBD_USB_enabled)
             {
+                /* 6850 sits on D8-D15: the register byte is the HIGH byte */
                 if (a == KBD_ACIA_CTRL)
+                {
                     kbd_usb_ctrl_snoop((uae_u8)(v >> 8));
+                    v = (v & 0x00FFu) |
+                        ((uae_u32)kbd_usb_ctrl_filter((uae_u8)(v >> 8)) << 8);
+                }
                 else if (a == KBD_ACIA_DATA)
                     kbd_usb_tx_snoop((uae_u8)(v >> 8));
             }
@@ -2263,7 +2270,10 @@ static void hw_bput(uaecptr a, uae_u32 v)
             if (KBD_USB_enabled)
             {
                 if (a == KBD_ACIA_CTRL)
+                {
                     kbd_usb_ctrl_snoop((uae_u8)v);
+                    v = kbd_usb_ctrl_filter((uae_u8)v);
+                }
                 else if (a == KBD_ACIA_DATA)
                     kbd_usb_tx_snoop((uae_u8)v);
             }

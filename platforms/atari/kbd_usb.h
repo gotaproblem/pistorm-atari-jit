@@ -27,6 +27,22 @@ extern "C" {
  * whole feature is dead code when disabled. */
 extern bool KBD_USB_enabled;
 
+/* Real-IKBD handling: 0 = auto-detect (default), 1 = always merge with the
+ * real IKBD, 2 = always quarantine it (USB/Bluetooth only).
+ *
+ * Auto-detect exists because an ST with the keyboard unplugged leaves the
+ * 6850's RX pin floating: noise frames as garbage bytes with framing/overrun
+ * errors, which TOS turns into nonsense scancodes and a constant bell, and
+ * which also starve the injected stream. When the real receiver looks noisy
+ * or dead it is quarantined - drained (clearing its IRQ, so the real GPIP4
+ * interrupt storm stops) and hidden from the guest. Clean real traffic
+ * reappearing switches back to merging, so plugging the ST keyboard back in
+ * works without a restart. */
+extern int kbd_usb_force_mode;
+
+/* True while the real IKBD is trusted and being merged. */
+int kbd_usb_real_ikbd_present(void);
+
 /* ---- lifecycle ------------------------------------------------------- */
 /* grab != 0: EVIOCGRAB input devices so keystrokes stop reaching the Pi
  * console. F12 toggles the grab at runtime (F11/F12 don't exist on an ST). */
@@ -52,6 +68,18 @@ void kbd_usb_tx_snoop(uint8_t v);
 
 /* Guest wrote to the keyboard ACIA control register ($FFFC00). */
 void kbd_usb_ctrl_snoop(uint8_t v);
+
+/* Filter a control-register write on its way to the real ACIA. While the
+ * real receiver is quarantined this clears RIE (bit 7) so the chip stops
+ * driving its IRQ output - otherwise every noise byte still raises a real
+ * level 6 and TOS burns the emulated CPU servicing dead interrupts, which
+ * shows up as stuttering. Returns the value to actually put on the bus. */
+uint8_t kbd_usb_ctrl_filter(uint8_t v);
+
+/* Host mouse-count divisor, "kbd usb mousediv N" (default 1). Modern mice
+ * are 800-1600 CPI against the ST's ~200, and can generate more motion per
+ * second than the 7812.5 bps IKBD link can carry. */
+extern int kbd_usb_mouse_div;
 
 /* A real IKBD byte was passed through to the guest: hold off starting new
  * injected packets for ~2 byte-times so we never split a real packet. */
