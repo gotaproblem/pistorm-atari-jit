@@ -28,3 +28,4 @@ emulator
 pistorm-rpi-ffmpeg-*.tar.gz
 pistorm-rpi-ffmpeg-*.tar.gz.sha256
 /.ffmpeg-choice
+drmprobe
