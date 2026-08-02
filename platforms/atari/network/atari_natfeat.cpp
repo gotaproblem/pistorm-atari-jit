@@ -90,6 +90,7 @@ enum nf_feature_index {
   NF_FEATURE_HOSTFS,
   NF_FEATURE_FVDI,
   NF_FEATURE_MP3,
+  NF_FEATURE_VIDEO,
   NF_FEATURE_COUNT
 };
 
@@ -103,6 +104,23 @@ enum nf_mp3_ops {
   NF_MP3_POS,        /* -> current position in seconds (-1 if n/a) */
   NF_MP3_LEN,        /* -> track length in seconds (0 if unknown) */
   NF_MP3_META        /* param0: 0=title 1=artist 2=album; param1: buf; param2: len */
+};
+
+/* VIDPLAY subids. 0..7 are deliberately identical to MP3PLAY so a front-end
+ * can drive either feature through the same code path. */
+enum nf_vid_ops {
+  NF_VID_PLAY = 0,   /* param0 = ptr to GEMDOS path string ("S:\\FILM\\X.MP4") */
+  NF_VID_STOP,       /* stop playback, hide the overlay, free everything       */
+  NF_VID_STATUS,     /* -> 1 while playing/paused, 0 when stopped or finished  */
+  NF_VID_PAUSE,      /* param0: 1 = pause, 0 = resume                          */
+  NF_VID_SEEK,       /* param0: signed seconds relative to current position    */
+  NF_VID_POS,        /* -> current position in seconds (-1 if n/a)             */
+  NF_VID_LEN,        /* -> duration in seconds (0 if unknown)                  */
+  NF_VID_META,       /* param0: 0=title 1=author 2=codecs; param1: buf; p2: len*/
+  NF_VID_RECT,       /* param0..3 = x,y,w,h in display pixels; all 0 = auto    */
+  NF_VID_VOLUME,     /* param0: 0..200 percent                                 */
+  NF_VID_INFO,       /* param0: 0=w 1=h 2=fps*100 3=audio 4=hwdec 5=volume     */
+  NF_VID_CLIP        /* param0..3 = visible part of the rect, display pixels   */
 };
 
 enum nfeth_ops {
@@ -198,7 +216,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "ETHERNET",
   "HOSTFS",
   "fVDI",
-  "MP3PLAY"
+  "MP3PLAY",
+  "VIDPLAY"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -219,6 +238,20 @@ extern "C" long dmasnd_mp3_pos_s(void);
 extern "C" long dmasnd_mp3_len_s(void);
 extern "C" void dmasnd_mp3_seek_rel(long delta_s);
 extern "C" const char *dmasnd_mp3_meta(int which);
+
+/* Host video player - platforms/atari/video/vidplay.c */
+extern "C" int  vidplay_play(const char *host_path);
+extern "C" void vidplay_stop(void);
+extern "C" int  vidplay_active(void);
+extern "C" void vidplay_pause(int on);
+extern "C" long vidplay_pos_s(void);
+extern "C" long vidplay_len_s(void);
+extern "C" void vidplay_seek_rel(long delta_s);
+extern "C" const char *vidplay_meta(int which);
+extern "C" long vidplay_info(int what);
+extern "C" void vidplay_set_rect(int x, int y, int w, int h);
+extern "C" void vidplay_set_volume(int percent);
+extern "C" void vidplay_set_clip(int x, int y, int w, int h);
 extern uae_u8 *natmem_offset;
 extern bool tt_ram_available;
 extern uint32_t tt_ram_size;
@@ -4272,6 +4305,71 @@ static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
   return (uae_u32)-1;
 }
 
+static uae_u32 nf_call_video(uae_u32 subid, uaecptr params)
+{
+  switch (subid) {
+    case NF_VID_PLAY: {
+      uaecptr pathp = nf_get_param(params, 0);
+      char gem[512];
+      char host[HOSTFS_HOST_PATH_MAX + 16];
+      if (!pathp)
+        return (uae_u32)-1;
+      nf_read_string(pathp, gem, sizeof(gem));
+      if (!mp3_gemdos_to_host(gem, host, sizeof(host))) {
+        fprintf(stderr, "[NF] VID.PLAY '%s' -> could not map to a host path "
+                "(need a mounted HOSTFS drive letter; accepts X:\\.. or /x/..)\n", gem);
+        return (uae_u32)-1;
+      }
+      int rc = vidplay_play(host);
+      HOSTFS_LOG("[NF] VID.PLAY '%s' -> host '%s' rc=%d\n", gem, host, rc);
+      return rc == 0 ? 0u : (uae_u32)-1;
+    }
+    case NF_VID_STOP:
+      vidplay_stop();
+      HOSTFS_LOG("[NF] VID.STOP\n");
+      return 0;
+    case NF_VID_STATUS:
+      return (uae_u32)vidplay_active();
+    case NF_VID_PAUSE:
+      vidplay_pause((int)nf_get_param(params, 0));
+      return 0;
+    case NF_VID_SEEK:
+      vidplay_seek_rel((long)(int32_t)nf_get_param(params, 0));
+      return 0;
+    case NF_VID_POS:
+      return (uae_u32)vidplay_pos_s();
+    case NF_VID_LEN:
+      return (uae_u32)vidplay_len_s();
+    case NF_VID_META: {
+      uae_u32 which = nf_get_param(params, 0);
+      uaecptr buf = nf_get_param(params, 1);
+      uae_u32 len = nf_get_param(params, 2);
+      if (!buf || len == 0)
+        return (uae_u32)-1;
+      nf_write_string(buf, len, vidplay_meta((int)which));
+      return 0;
+    }
+    case NF_VID_RECT:
+      vidplay_set_rect((int)(int32_t)nf_get_param(params, 0),
+                       (int)(int32_t)nf_get_param(params, 1),
+                       (int)(int32_t)nf_get_param(params, 2),
+                       (int)(int32_t)nf_get_param(params, 3));
+      return 0;
+    case NF_VID_VOLUME:
+      vidplay_set_volume((int)(int32_t)nf_get_param(params, 0));
+      return 0;
+    case NF_VID_INFO:
+      return (uae_u32)vidplay_info((int)nf_get_param(params, 0));
+    case NF_VID_CLIP:
+      vidplay_set_clip((int)(int32_t)nf_get_param(params, 0),
+                       (int)(int32_t)nf_get_param(params, 1),
+                       (int)(int32_t)nf_get_param(params, 2),
+                       (int)(int32_t)nf_get_param(params, 3));
+      return 0;
+  }
+  return (uae_u32)-1;
+}
+
 static uae_u32 nf_call(uaecptr stack)
 {
   uae_u32 id = nf_read_long(stack + 4);
@@ -4297,6 +4395,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_fvdi(subid, params);
     case NF_FEATURE_MP3:
       return nf_call_mp3(subid, params);
+    case NF_FEATURE_VIDEO:
+      return nf_call_video(subid, params);
   }
 
   return 0;

@@ -26,6 +26,7 @@
 #include <sys/ioctl.h>
 #include <poll.h>
 #include <stdlib.h>
+#include <math.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm_fourcc.h>
@@ -601,10 +602,172 @@ void drmpres_flip(void)
     g_back = back ^ 1;   /* the buffer being scanned is now off-limits */
 }
 
+/* ---- refresh-rate matching for video playback ------------------------------
+ *
+ * 24 fps content on a 60 Hz panel gets a 2:3 vblank cadence and 25 fps gets
+ * 2,2,3 - judder that no amount of correct pacing removes, because it is
+ * arithmetic. The cure is to run the panel at a refresh the frame rate divides
+ * into: 48 or 72 Hz for 24 fps, 50 Hz for 25, 60 Hz for 30.
+ *
+ * Only the REFRESH changes; the resolution stays put, so the guest's plane and
+ * everything scaled against it are unaffected. The original mode is kept and
+ * restored when playback stops.
+ *
+ * Caveat, and it is the reason this can be switched off: renegotiating the
+ * HDMI link can drop HDMI audio on some sinks - the same reason drmpres_open()
+ * deliberately reuses the console's existing mode rather than the EDID
+ * preferred one. PISTORM_VID_MODESET=0 disables the whole thing. */
+static drmModeModeInfo g_orig_mode;
+static int g_mode_switched;
+
+static double refresh_error(int refresh, double fps)
+{
+    double n;
+    if (refresh <= 0 || fps <= 0.0)
+        return 1e9;
+    n = (double)refresh / fps;
+    if (n < 0.99)                 /* refresh below the frame rate is no use */
+        return 1e9;
+    return fabs(n - (double)((int)(n + 0.5)));
+}
+
+int drmpres_match_refresh(double fps)
+{
+    drmModeConnector *conn;
+    drmModeModeInfo best;
+    double best_err, cur_err;
+    int i, found = 0, min_hz;
+    const char *e = getenv("PISTORM_VID_MODESET");
+
+    if (g_fd < 0 || fps <= 0.0 || (e && *e == '0'))
+        return 0;
+
+    cur_err = refresh_error(g_mode.vrefresh, fps);
+    if (cur_err < 0.01)
+        return 0;                 /* already an exact multiple */
+
+    conn = drmModeGetConnector(g_fd, g_conn_id);
+    if (!conn)
+        return -1;
+
+    /* Don't drop the whole desktop to 24 Hz just to suit one film: the guest
+     * display and the mouse run at this rate too. 48 Hz is fine, 24 is not.
+     * PISTORM_VID_MINHZ tunes the floor for anyone who disagrees. */
+    {
+        const char *mh = getenv("PISTORM_VID_MINHZ");
+        min_hz = mh && *mh ? atoi(mh) : 48;
+    }
+
+    best_err = cur_err;
+    for (i = 0; i < conn->count_modes; i++) {
+        drmModeModeInfo *m = &conn->modes[i];
+        double err;
+        if (m->hdisplay != g_mode.hdisplay || m->vdisplay != g_mode.vdisplay)
+            continue;             /* refresh only - never change resolution */
+        if ((int)m->vrefresh < min_hz)
+            continue;
+        err = refresh_error(m->vrefresh, fps);
+        /* prefer a lower error, then the higher refresh of two equals */
+        if (err < best_err - 1e-6 ||
+            (found && err < best_err + 1e-6 && m->vrefresh > best.vrefresh)) {
+            best = *m;
+            best_err = err;
+            found = 1;
+        }
+    }
+    /* If nothing suitable exists, say what the sink DOES offer - otherwise the
+     * absence of judder improvement looks like a bug rather than an EDID that
+     * simply has no 48/50 Hz mode. Printed once per resolution. */
+    if (!found || best_err >= 0.01) {
+        static int listed = 0;
+        if (!listed) {
+            char buf[256];
+            int n = 0, j;
+            listed = 1;
+            for (j = 0; j < conn->count_modes && n < (int)sizeof(buf) - 12; j++) {
+                drmModeModeInfo *m = &conn->modes[j];
+                if (m->hdisplay == g_mode.hdisplay &&
+                    m->vdisplay == g_mode.vdisplay)
+                    n += snprintf(buf + n, sizeof(buf) - n, "%s%u",
+                                  n ? ", " : "", m->vrefresh);
+            }
+            buf[n] = '\0';
+            fprintf(stderr, "[DRM] no refresh rate suits %.2f fps. %ux%u is "
+                            "offered at: %s Hz. Staying at %u Hz - expect the "
+                            "usual cadence judder for this frame rate.\n",
+                    fps, g_mode.hdisplay, g_mode.vdisplay,
+                    n ? buf : "(none)", g_mode.vrefresh);
+            /* The commonest case by far: the panel DOES offer an exact match,
+             * but it is below the floor - and the floor exists to keep the
+             * Atari desktop and mouse usable, not because the mode is bad. Say
+             * which knob to turn rather than leaving it to be guessed from a
+             * list that visibly contains the wanted number. */
+            for (j = 0; j < conn->count_modes; j++) {
+                drmModeModeInfo *m = &conn->modes[j];
+                if (m->hdisplay == g_mode.hdisplay &&
+                    m->vdisplay == g_mode.vdisplay &&
+                    (int)m->vrefresh < min_hz &&
+                    fabs((double)m->vrefresh - fps) < 0.5) {
+                    fprintf(stderr, "[DRM] %u Hz would match exactly but is "
+                                    "below the %d Hz floor (the desktop runs "
+                                    "at this rate too). Launch with "
+                                    "PISTORM_VID_MINHZ=%u to allow it.\n",
+                            m->vrefresh, min_hz, m->vrefresh);
+                    break;
+                }
+            }
+        }
+        drmModeFreeConnector(conn);
+        return 0;
+    }
+    drmModeFreeConnector(conn);
+
+    if (!g_mode_switched) {
+        g_orig_mode = g_mode;
+        g_mode_switched = 1;
+    }
+    if (drmModeSetCrtc(g_fd, g_crtc_id, g_bg_fb, 0, 0,
+                       &g_conn_id, 1, &best) < 0) {
+        fprintf(stderr, "[DRM] %uHz modeset failed: %s\n", best.vrefresh,
+                strerror(errno));
+        return -1;
+    }
+    fprintf(stderr, "[DRM] display %u -> %u Hz to match %.2f fps video "
+                    "(resolution unchanged)\n",
+            g_mode.vrefresh, best.vrefresh, fps);
+    g_mode = best;
+    return (int)best.vrefresh;
+}
+
+void drmpres_restore_refresh(void)
+{
+    if (g_fd < 0 || !g_mode_switched)
+        return;
+    if (drmModeSetCrtc(g_fd, g_crtc_id, g_bg_fb, 0, 0,
+                       &g_conn_id, 1, &g_orig_mode) < 0)
+        fprintf(stderr, "[DRM] could not restore %uHz: %s\n",
+                g_orig_mode.vrefresh, strerror(errno));
+    else
+        fprintf(stderr, "[DRM] display back to %u Hz\n", g_orig_mode.vrefresh);
+    g_mode = g_orig_mode;
+    g_mode_switched = 0;
+}
+
+/* ---- accessors for the host video player (second plane, same master fd) --- */
+
+int      drmpres_fd(void)         { return g_fd; }
+uint32_t drmpres_crtc_id(void)    { return g_crtc_id; }
+int      drmpres_crtc_index(void) { return g_crtc_index; }
+uint32_t drmpres_plane_id(void)   { return g_plane_id; }
+uint32_t drmpres_mode_w(void)     { return g_mode.hdisplay; }
+uint32_t drmpres_mode_h(void)     { return g_mode.vdisplay; }
+
 void drmpres_close(void)
 {
     if (g_fd < 0)
         return;
+
+    drmpres_restore_refresh();
 
     if (g_have_src) {
         for (int i = 0; i < g_nsrc; i++)

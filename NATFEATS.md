@@ -102,24 +102,50 @@ alongside ST/STE DMA sound, taking the whole decode load off the 68k.
     track end. Keys: space = pause, N/P = next/prev, Q = quit. Needs AES
     (FreeMiNT + XaAES); playback continues after quitting.
 
-## Audio architecture (context for MP3PLAY)
+### VIDPLAY
+Host video playback (MP4 / MKV / AVI / MOV / WebM / TS - anything libavformat
+reads). The Pi demuxes and decodes in-process with libav*, puts the picture on
+its **own DRM overlay plane above the Atari screen** in NV12/YUV420 (so the vc4
+HVS does colour conversion and scaling for free, and the guest display is never
+touched), and mixes the soundtrack into the same SDL3 device as ST/STE sound
+and MP3. H.264 uses the Pi 4's hardware decoder. Sub-ops 0-7 are identical to
+MP3PLAY on purpose.
+
+| Sub-op | Name   | Arguments / result                                          |
+|--------|--------|-------------------------------------------------------------|
+| 0      | PLAY   | ptr to path string; 0 = OK, -1 = error                       |
+| 1      | STOP   | stop, hide the overlay, free everything                      |
+| 2      | STATUS | 1 while playing/paused, else 0                               |
+| 3      | PAUSE  | param0: 1 = pause, 0 = resume                                |
+| 4      | SEEK   | param0: signed seconds relative to current position          |
+| 5      | POS    | current position in seconds (-1 if n/a)                      |
+| 6      | LEN    | duration in seconds (0 if unknown)                           |
+| 7      | META   | param0: 0=title 1=author 2=codecs; param1: buf; param2: len  |
+| 8      | RECT   | param0..3 = x,y,w,h in display pixels; all 0 = auto letterbox; negative w/h = hide the picture, keep the sound |
+| 9      | VOLUME | param0: 0..200 percent                                       |
+| 10     | INFO   | param0: 0=w 1=h 2=fps*100 3=audio 4=hwdec 5=volume 6=display width 7=display height 8=hidden |
+
+- Paths take the same forms MP3PLAY accepts (`S:\FILM\X.MKV` or `/s/film/x.mkv`)
+  and must be on a **HOSTFS drive** - the host has to open the real file.
+- Implementation: `platforms/atari/video/vidplay.c` (demux/decode/sync) and
+  `vidplane.c` (the second DRM plane). Build deps: `libavformat-dev
+  libavcodec-dev libavutil-dev libswscale-dev libswresample-dev`.
+- Decode runs on two threads that demote themselves to SCHED_OTHER off CPU 2.
+  Still no external processes - same rule as MP3, same reason.
+- Front-ends: `VIDPLAY.TTP` (source in `cdev/vidplay/`) and `VIDGEM.PRG`
+  (source in `cdev/vidgem/`), a GEM app that maps the picture onto its own
+  window - RECT + INFO 6/7 exist so it can scale Atari screen coordinates to
+  real display pixels.
+- Full documentation, including tuning and limits: **VIDEO.md**.
+
+## Audio architecture (context for MP3PLAY and VIDPLAY)
 
 ST/STE DMA sound is captured by register snooping (`dmasnd_capture.c`) and
 played through SDL3 (`dmasnd_hdmi.c`): one SDL audio device opened plainly,
-with one stream for STE sound (S8 at the live STE rate) and one for MP3 (S16 at
-the track's native rate). SDL3 performs all resampling and mixing. The display
+with one stream for STE sound (S8 at the live STE rate), one for MP3 (S16 at
+the track's native rate) and, while a film is playing, one for the video
+soundtrack (S16 at its native rate). SDL3 performs all resampling and mixing. The display
 does not use SDL (DRM/KMS direct); only the audio subsystem is initialised.
-
-## MP4 / other formats — planned
-
-Not yet implemented. The intended path follows the MP3 design:
-
-- **MP4/AAC audio**: swap in an AAC-capable in-process decoder (libmpg123 is
-  MP3-only); same NatFeat API and SDL3 mixing. External-process decoders
-  (ffmpeg) were tried and rejected: children spawned from the emulator's
-  real-time, core-pinned CPU thread inherit its affinity/scheduling and starve.
-- **MP4 video**: host decode + scale into the ET4000 framebuffer via the
-  existing DRM present path, guest controlling via PLAY/STOP/SEEK sub-ops.
 
 ## Environment variables
 
@@ -130,3 +156,7 @@ Not yet implemented. The intended path follows the MP3 design:
 | `PISTORM_HOSTFS_DEBUG=1`       | Trace HOSTFS calls                              |
 | `PISTORM_HOSTFS_DEDUP=0`       | Disable HOSTFS node dedup (debug escape hatch)  |
 | `PISTORM_FVDI_OFFSCREEN_PIXELS`| fVDI offscreen buffer size                      |
+| `PISTORM_VID_HWDEC=0`          | Force software video decode                     |
+| `PISTORM_VID_THREADS`          | Software video decoder threads (default 3)      |
+| `PISTORM_VID_CPUS`             | Hex affinity mask for the video threads         |
+| `PISTORM_VID_DEBUG=1`          | Per-second video decode/present statistics      |

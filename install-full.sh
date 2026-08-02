@@ -51,6 +51,17 @@ copy_once() {                                # src dst  (never overwrites dst)
   [ -e "$2" ] || cp "$1" "$2"
 }
 
+# copy_newer src dst
+#   For things we SHIP and expect to improve - the GEM programs. copy_once is
+#   wrong for these, because a re-run after a git pull would leave the old
+#   binary in place and the bug you just fixed still on the Atari. Plain cp is
+#   also wrong: it would flatten someone's own build of the same name. `cp -u`
+#   splits the difference by only copying when ours is newer.
+copy_newer() {
+  [ -e "$1" ] || { warn "missing $1 — skipped"; return 0; }
+  cp -u "$1" "$2"
+}
+
 # --------------------------------------------------------------------------
 # Uninstall: undo the *system* integration only. Your games/ROMs/configs and
 # the built emulator are left in place (delete $ROOT yourself for a full wipe).
@@ -186,13 +197,33 @@ no_desktop
 # --------------------------------------------------------------------------
 say "Installing dependencies"
 sudo apt-get update
-# build + runtime libs; SDL3 = audio backend (handled separately below),
-# libmpg123 = host MP3 decode, ffmpeg = screendump helper + capture muxing
-# (capmux.sh). libasound2-dev: ALSA backend for an SDL3 source build.
+# build + runtime libs. What each of the non-obvious ones is actually for:
+#   libmpg123-dev   host MP3 decode (the MP3PLAY NatFeat)
+#   libav*/libsw*   host VIDEO decode (the VIDPLAY NatFeat). The Makefile
+#                   hard-errors without these, so a BUILD=1 run used to die at
+#                   the dependency preflight - they were missing here while
+#                   being required there.
+#   libjpeg-dev     MJPEG frames in avrecord.c (screen capture)
+#   zlib1g-dev      PNG screendumps, which are written in-process - NOT by
+#                   ffmpeg, despite what this comment used to imply
+#   ffmpeg          the command-line tool, used only by capmux.sh to mux a
+#                   finished capture. Nothing in the emulator shells out to it
+#   libasound2-dev  ALSA backend, needed only for an SDL3 source build
+#
+# cifs-utils is easy to confuse with the optional Samba step further down, so:
+# Samba is the SERVER side, sharing the Pi's files OUT to your desktop.
+# cifs-utils is the CLIENT side, letting the Pi mount a share IN from a NAS or
+# PC - which is how a media library on another machine appears inside
+# atari-share, and therefore inside a HOSTFS drive. Video files are much too
+# large to want a second copy of on the SD card. Installed unconditionally
+# because it is tiny, and discovering it is missing usually happens when the Pi
+# is already sitting headless next to the Atari.
 sudo apt-get install -y \
   build-essential g++ make pkg-config cmake git \
   libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev \
-  libasound2-dev ffmpeg
+  libavformat-dev libavcodec-dev libavutil-dev \
+  libswscale-dev libswresample-dev \
+  libasound2-dev ffmpeg cifs-utils
 
 # ---- SDL3 -----------------------------------------------------------------
 # Debian ships libsdl3-dev from trixie (Raspberry Pi OS 13) onwards. On a
@@ -235,6 +266,23 @@ copy_once "$HERE/configs/720k.st"           "$ROOT/dkimages/fdd/720k.st"
 # capture muxer: shipped in configs/, run from the emulator directory
 copy_once "$HERE/configs/capmux.sh"         "$HERE/capmux.sh"
 chmod +x "$HERE/capmux.sh" 2>/dev/null || true
+
+# ---- GEM programs ---------------------------------------------------------
+# The host-side NatFeats (MP3PLAY, VIDPLAY) are useless without something on
+# the Atari to drive them, and atari-share is the one directory the guest can
+# actually reach: it is what a HOSTFS drive points at. Anywhere else and you
+# are back to writing them onto a floppy image to get them across.
+if [ -d "$HERE/configs/gem-binaries" ]; then
+  say "Installing GEM programs into $ROOT/atari-share"
+  for prg in "$HERE"/configs/gem-binaries/*.PRG "$HERE"/configs/gem-binaries/*.TTP; do
+    [ -e "$prg" ] || continue                 # nullglob is not set; skip misses
+    copy_newer "$prg" "$ROOT/atari-share/$(basename "$prg")"
+  done
+  ls "$ROOT"/atari-share/*.PRG "$ROOT"/atari-share/*.TTP 2>/dev/null \
+    | sed 's|.*/|    |' || true
+else
+  warn "no configs/gem-binaries — GEM programs not installed"
+fi
 
 # --------------------------------------------------------------------------
 # 3. Boot configuration — MERGE, don't clobber the user's settings.
@@ -358,5 +406,12 @@ else
 fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
+echo "  GEM programs : $ROOT/atari-share/   (point a HOSTFS drive here)"
+echo
+echo "  Media on another PC or NAS? cifs-utils is installed. Mount the share"
+echo "  as a subdirectory of atari-share and it appears on the HOSTFS drive:"
+echo "      mkdir -p $ROOT/atari-share/media"
+echo "  then one line in /etc/fstab - INSTALL-README.md has the full recipe,"
+echo "  including why 'nofail' is not optional on a headless Pi."
 echo
 warn "Reboot to apply the boot-file changes:  sudo reboot"

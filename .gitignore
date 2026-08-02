@@ -20,3 +20,11 @@ nprog_log.txt
 session-*.patch
 ataritest
 emulator
+# V4L2-Request FFmpeg fetched or built by `make ffmpeg` - never committed.
+# It is 25-35MB of shared objects that Git would keep a copy of forever; it
+# belongs in a release tarball, not in history.
+/ffmpeg/
+/.ffmpeg-build/
+pistorm-rpi-ffmpeg-*.tar.gz
+pistorm-rpi-ffmpeg-*.tar.gz.sha256
+/.ffmpeg-choice

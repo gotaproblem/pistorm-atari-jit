@@ -60,6 +60,25 @@ void drmpres_flip(void);
 
 void drmpres_close(void);
 
+/* --- accessors for other users of the SAME DRM master fd -------------------
+ * Only the DRM master may touch planes, and that is us. The host video player
+ * (platforms/atari/video/) puts movies on a SECOND overlay plane of this same
+ * CRTC, so it needs our fd and geometry rather than opening the card again.
+ * drmpres_fd() returns -1 until drmpres_open() has succeeded. */
+int      drmpres_fd(void);
+uint32_t drmpres_crtc_id(void);
+int      drmpres_crtc_index(void);
+uint32_t drmpres_plane_id(void);   /* the plane the GUEST image uses */
+/* Switch the display to a refresh the given frame rate divides into (48/50/60
+ * ...), keeping the resolution. Returns the new rate, 0 if nothing better is
+ * available or it is disabled, -1 on error. drmpres_restore_refresh() puts the
+ * original mode back and is also called from drmpres_close(). */
+int  drmpres_match_refresh(double fps);
+void drmpres_restore_refresh(void);
+
+uint32_t drmpres_mode_w(void);
+uint32_t drmpres_mode_h(void);
+
 #ifdef __cplusplus
 }
 #endif

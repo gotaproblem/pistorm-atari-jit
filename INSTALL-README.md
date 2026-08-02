@@ -32,7 +32,7 @@ Before touching anything, the installer verifies:
 | Check              | If it fails                                                       |
 |--------------------|------------------------------------------------------------------|
 | 64-bit (`aarch64`) | **Aborts** — re-install with 64-bit Raspberry Pi OS.              |
-| Pi model           | Warns on unrecognised/older boards (validated: Pi 4 / 3 / Zero 2 W). |
+| Pi model           | Warns on anything that is not a **Pi 4 / Pi 400 / CM4** — those are the only boards the JIT is validated on. It is a warning, not an abort. |
 | RAM                | Warns if low, suggesting `make HEAVY_OPT=-O0` / swap for building. |
 | Desktop present    | Offers to disable it (console boot); **aborts** if you decline (`KILLGUI=1` to auto-disable). |
 
@@ -66,7 +66,11 @@ BUILD=1 SERVICE=1 SAMBA=0 PISTORM_CFG=games.cfg ./install-full.sh
 | `BUILD=1`      | Run `make` (auto-detects Pi model)                  | prompt  |
 | `SERVICE=1`    | Install the systemd auto-start unit                 | prompt  |
 | `SAMBA=1`      | Install + configure the Samba share                 | prompt  |
+| `KILLGUI=1`    | Disable the desktop and switch to console boot      | prompt (declining **aborts**) |
 | `PISTORM_CFG=` | Config the auto-start service launches              | `master.cfg` |
+
+Any of these set to `1`/`y`/`yes` means yes; anything else means no. Unset means
+prompt on a TTY, or take the default when there is no TTY.
 
 ### Other commands
 
@@ -85,12 +89,35 @@ Installs the build **and** runtime libraries (the `-dev` packages pull in the
 runtime libs, so a prebuilt binary works too):
 
 ```
-build-essential  g++  make  pkg-config
-libsdl3-dev  libmpg123-dev  libjpeg-dev  libdrm-dev  libslirp-dev  zlib1g-dev
-ffmpeg           # screendump helper + capture muxing (capmux.sh)
+build-essential  g++  make  pkg-config  cmake  git
+libsdl3-dev      audio backend (see note below)
+libmpg123-dev    host MP3 decode — the MP3PLAY NatFeat
+libavformat-dev  libavcodec-dev  libavutil-dev
+libswscale-dev   libswresample-dev
+                 host video decode — the VIDPLAY NatFeat. The Makefile
+                 refuses to build without these
+libdrm-dev       KMS/DRM display and the video overlay plane
+libjpeg-dev      MJPEG frames in avrecord.c (screen capture)
+zlib1g-dev       PNG screendumps, written in-process
+libslirp-dev     user-mode networking (optional at build time)
+libasound2-dev   ALSA backend, needed only if SDL3 is built from source
+ffmpeg           the command-line tool, used only by capmux.sh to mux a
+                 finished capture
+cifs-utils       mounting a share from a NAS or PC — see below
 ```
 
-`samba` is only installed if you choose the share option.
+`libsdl3-dev` comes from apt on trixie. On an older image the package does not
+exist, so the installer builds SDL3 from source once (that is what `cmake` and
+`libasound2-dev` are for).
+
+`samba` and `samba-common-bin` are installed **only** if you choose the share
+option.
+
+> Nothing in the emulator shells out to `ffmpeg`. Video decode is in-process
+> through `libav*`; screendumps are PNGs written directly. The `ffmpeg` binary
+> is there purely for `capmux.sh`.
+
+For **hardware HEVC** the distro `libav*` is not enough — see `VIDEO.md`.
 
 ### 2. Runtime file tree
 
@@ -102,7 +129,10 @@ Created next to the repo (won't overwrite anything that already exists):
 ├── configs/         atari.cfg, master.cfg (your own .cfg files go here)
 ├── dkimages/
 │   └── fdd/         720k.st blank floppy; put disk/game images here
-├── atari-share/     scratch folder (handy target for the Samba share)
+├── atari-share/     point a HOSTFS drive here. The GEM programs
+│                    (MP3GEM.PRG, VIDGEM.PRG, VIDPLAY.TTP) are installed
+│                    into it, and it is the natural place to mount a
+│                    media share from another machine — see below
 └── screendumps/     screenshots
 ```
 
@@ -124,11 +154,19 @@ Nothing you had in those files is discarded.
 ### Build the emulator
 
 If you choose to build, the script detects your Pi model and runs
-`make PIMODEL=PI4|PI3|PI02W`. You can always build later by hand:
+`make PIMODEL=…` — `PI4` for a Pi 4 / Pi 400 / CM4, `PI3` for a Pi 3, `PI02W`
+for a Zero 2 W, and `PI4` for anything it does not recognise. Note that the
+`PI3`/`PI02W` cases exist in the script but those boards are **not currently
+supported**; the pre-flight check will already have warned you.
+
+You can always build later by hand:
 
 ```bash
-make -C pistorm-atari-jit          # add PIMODEL=PI3 etc. if needed
+make -C pistorm-atari-jit          # PIMODEL is not actually needed for a Pi 4
 ```
+
+The build stops early with a list of any missing `-dev` packages rather than
+burying you in compiler errors.
 
 ### Auto-start on boot (systemd)
 
@@ -149,6 +187,121 @@ Adds a guest-writable `[pistorm]` share pointing at the runtime tree so you can
 drop games/images onto the Pi from another machine. **This is a home-LAN
 convenience** — lock it down (real users / `smbpasswd`) if the Pi is on an
 untrusted network.
+
+---
+
+## Mounting a share from another PC or NAS (for HOSTFS)
+
+The Samba step above is the **server** side: it pushes the Pi's files out to
+your desktop. This is the opposite direction — the Pi mounts a share **from**
+another machine, so a library living on your PC or NAS shows up inside a HOSTFS
+drive on the Atari.
+
+That matters most for video. A handful of films is tens of gigabytes; nobody
+wants a second copy of that on an SD card, and copying each one across before
+watching it defeats the point. `cifs-utils` is installed for you.
+
+### Where to mount it
+
+A HOSTFS drive points at a real directory, so mount the remote share **inside**
+`atari-share` as a subdirectory:
+
+```
+<parent>/atari-share/
+├── VIDGEM.PRG          installed for you
+├── VIDPLAY.TTP
+└── media/              <- the mount point; the NAS appears here
+```
+
+The Atari then sees `MEDIA` as a folder on that drive, and nothing else needs
+configuring.
+
+**Mount the directory itself — do not symlink to a mount elsewhere.** HOSTFS
+resolves paths on the guest's behalf, and a link pointing outside the drive's
+root is exactly the sort of thing it is entitled to refuse.
+
+### Setting it up
+
+**1. Credentials, kept out of `/etc/fstab`.** fstab is world-readable; this
+file must not be:
+
+```
+sudo install -m600 /dev/null /etc/samba/nas-credentials
+sudo nano /etc/samba/nas-credentials
+```
+
+```
+username=yourname
+password=yourpassword
+domain=WORKGROUP
+```
+
+**2. The mount point:**
+
+```
+mkdir -p ~/atari-share/media          # adjust to your <parent> path
+```
+
+**3. One line in `/etc/fstab`** — all on a single line:
+
+```
+//192.168.1.10/Media  /home/pi/atari-share/media  cifs  credentials=/etc/samba/nas-credentials,uid=1000,gid=1000,iocharset=utf8,file_mode=0664,dir_mode=0775,vers=3.0,nofail,_netdev,x-systemd.automount,x-systemd.idle-timeout=600  0  0
+```
+
+**4. Apply it:**
+
+```
+sudo systemctl daemon-reload
+sudo mount -a
+ls ~/atari-share/media
+```
+
+### What those options are actually for
+
+| Option | Why it is there |
+|---|---|
+| `credentials=` | Keeps the password out of the world-readable fstab |
+| `uid=` / `gid=` | CIFS has no shared user database, so ownership is decided at mount time. Use your own IDs (`id -u`, `id -g`) so files the Atari writes come back owned by you |
+| `nofail` | **Do not skip this.** Without it, a NAS that is switched off stops the Pi booting — a miserable thing to debug on a headless machine |
+| `_netdev` | Wait for the network before trying |
+| `x-systemd.automount` | Mount on first access rather than at boot. If the NAS is off you get an empty directory instead of a hang |
+| `x-systemd.idle-timeout` | Unmount after ten idle minutes, so a NAS that spins down does not leave a stale handle behind |
+| `vers=3.0` | Modern SMB. Some elderly NAS boxes only speak `vers=1.0`; it works, but SMB1 is long deprecated and worth avoiding |
+| `iocharset=utf8` | Sane handling of accented filenames |
+
+### Checking it before blaming the emulator
+
+```
+findmnt ~/atari-share/media           # is it actually mounted?
+dd if=~/atari-share/media/somefilm.mkv of=/dev/null bs=1M count=500
+```
+
+The second one is worth doing before concluding that video playback is broken.
+It reports a throughput figure; compare that against the file's bitrate, which
+`ffprobe` will tell you. 4K HEVC runs at roughly 50–80 Mbit/s — comfortable
+over the Pi 4's gigabit ethernet, marginal over Wi-Fi. Playback that stutters
+at a *steady* rate is usually decode; playback that is fine and then hitches in
+bursts is usually the network.
+
+### Filenames
+
+HOSTFS passes names through to the guest, so what survives depends on the
+Atari's filesystem layer. Under MiNT, long names are fine. Under plain TOS you
+get 8.3, and a film called `Some.Very.Long.Release.Name.2160p.HDR.mkv` will not
+make the trip intact — rename it, or keep those files in a subdirectory you
+browse from a MiNT-aware program.
+
+### NFS instead
+
+If the far end is Linux, NFS skips the credentials file entirely:
+
+```
+sudo apt install nfs-common
+```
+
+```
+192.168.1.10:/export/media  /home/pi/atari-share/media  nfs  nofail,_netdev,x-systemd.automount  0  0
+```
 
 ---
 

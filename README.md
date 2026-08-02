@@ -16,6 +16,7 @@ Then add-ons can be developed, such as
 - [x] FDD Emulation [implemented]
 - [x] Host MP3 playback via NatFeats (mixed with ST sound, SDL3) [implemented]
 - [x] A/V screen recording (hardware H.264 + sound, see capmux.sh) [implemented]
+- [x] Host VIDEO playback via NatFeats - MP4/MKV/AVI, hardware H.264, own DRM overlay plane (see VIDEO.md) [implemented]
 - [ ] Additional SVGA Cards
 ## Requirements
 This is not for newbies, a good amount of linux development knowledge is needed.
@@ -38,7 +39,9 @@ Before starting the process in earnest, make sure your O/S is current.
 sudo apt upgrade
 
 As is always the case, you must install a bunch of packages and libraries to build the binaries.
->sudo apt install build-essential git libsdl3-dev libmpg123-dev libjpeg-dev libzstd-dev libcurl4-openssl-dev libdrm-dev ffmpeg
+>sudo apt install build-essential g++ make pkg-config cmake git libsdl3-dev libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libasound2-dev ffmpeg cifs-utils
+
+*(**install-full.sh** installs exactly this list for you. **libzstd-dev** and **libcurl4-openssl-dev** used to be listed here and are not used by anything - dropped. **cifs-utils** is for mounting a media share from a NAS or PC; see INSTALL-README.md.)*
 
 ##### Clone
 Everything is ready to clone this repository
@@ -53,6 +56,21 @@ To build, simply make. Be warned first build from clean will take over 20 minute
 make PIMODEL=PI4
 
 PIMODEL isn't actually needed for PI4, but it's included for clarity if and when PI3 builds start
+
+##### Optional - hardware HEVC for video playback
+Everything plays out of the box: H.264 in hardware, the rest in software. Hardware **H.265/HEVC** additionally needs the rpivid decoder enabled in the kernel, and an FFmpeg carrying the V4L2 Request API hwaccels, which Debian does not ship.
+>echo 'dtoverlay=rpivid-v4l2' | sudo tee -a /boot/firmware/config.txt
+
+Reboot, then
+>make ffmpeg
+make
+
+**make ffmpeg** fetches a prebuilt tarball into **ffmpeg/** if one has been published for your Debian release and architecture, and otherwise builds it from source - 40 to 90 minutes on a Pi 4. Nothing is installed system-wide and nothing is added to the linker cache: trixie ships the same FFmpeg *version*, so the library filenames are identical and only an rpath keeps the two apart. To see which one you have:
+>make ffmpeg-status
+ldd ./emulator | grep libav
+
+See **VIDEO.md** for the full story, including how to publish a build for other people.
+
 ## Configuring
 Run the install.sh script to build the file tree and to copy files in to place
 >bash install.sh

@@ -36,6 +36,7 @@
  */
 
 #include "et4000.h"
+#include "../video/vidplay.h"
 #include "../../../config_file/config_file.h"
 
 #include <stdio.h>
@@ -1118,6 +1119,7 @@ static void sdl_close(ET4000State *s)
 {
     if (g_drm_mode)
     {
+        vidplay_shutdown();    /* drop the video overlay before the CRTC goes */
         drmpres_close();       /* restores the previous CRTC config */
         g_drm_mode = 0;
         if (g_logical)
@@ -2356,7 +2358,8 @@ void *render_frame(void *vptr)
                 asm volatile ("yield" ::: "memory");
         } 
         while (took < remaining);//FRAME_RATE);
-
+/* remove annoying messages */
+#if (0)
         /* check for overruns - only meaningful when we actually rendered this
          * frame. On skipped frames (dirty gate -> render_source=="none") a
          * "took > budget" is just frame-pacing usleep jitter, not a render
@@ -2374,7 +2377,7 @@ void *render_frame(void *vptr)
              * their budget. */
            // usleep((useconds_t)FRAME_RATE);
         }
-
+#endif
         /* frame counter - currently unused */
         frames++;
         pistorm_vga_bank_profile_poll();

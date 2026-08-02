@@ -41,6 +41,8 @@ CFILES = config_file/config_file.c \
          platforms/atari/audio/ym2149.c \
          platforms/atari/st_blitter.c \
          platforms/atari/avrecord.c \
+         platforms/atari/video/vidplane.c \
+         platforms/atari/video/vidplay.c \
          platforms/atari/kbd_usb.c
 
 # -----------------------------------------------------------------
@@ -113,6 +115,59 @@ CXX = g++
 # The display no longer uses SDL (DRM/fbdev + no-op SDL2 shim), so no SDL2 here.
 SDL3_CFLAGS = $(shell pkg-config sdl3 --cflags)
 SDL3_LIBS   = $(shell pkg-config sdl3 --libs)
+# FFmpeg libraries for host video playback (platforms/atari/video/vidplay.c).
+# IN-PROCESS decode only - the emulator never spawns an ffmpeg child (see the
+# comment at the top of avrecord.c for why).
+AV_PKGS   = libavformat libavcodec libavutil libswscale libswresample
+#
+# WHICH FFmpeg, and why it is worth this much comment. Debian trixie ships
+# FFmpeg 7.1.3 and the V4L2-Request build is also FFmpeg 7.1.3, so every soname
+# is identical - libavcodec.so.61 either way. Nothing in the filename tells them
+# apart, and the distro one works perfectly except that hardware HEVC is
+# missing, which is the most annoying failure available: everything runs, and
+# nothing is fast. So the choice gets recorded in the binary as an rpath rather
+# than left to library search order. Verify with:
+#     ldd ./emulator | grep libav
+#
+# Three places are searched, in this order:
+#   ./ffmpeg          an unpacked release tarball, or the result of
+#                     `make ffmpeg`. Linked with an $ORIGIN-relative rpath, so
+#                     the tree can be moved or copied to another Pi and still
+#                     resolve, and so sudo cannot interfere.
+#   /opt/rpi-ffmpeg   a system-wide build from tools/build-rpi-ffmpeg.sh.
+#   the distro        builds and runs, but software HEVC only.
+#
+FFMPEG_LOCAL  ?= $(CURDIR)/ffmpeg
+FFMPEG_PREFIX ?= /opt/rpi-ffmpeg
+
+ifneq ($(wildcard $(FFMPEG_LOCAL)/lib/pkgconfig/libavcodec.pc),)
+  AV_PREFIX = $(FFMPEG_LOCAL)
+  # $$ORIGIN survives Make (becoming $ORIGIN) and the single quotes stop the
+  # shell touching it, so ld.so expands it at RUN time against the binary's own
+  # directory. That is also what makes it work under sudo, which resets the
+  # environment and would throw away LD_LIBRARY_PATH.
+  AV_RPATH  = -Wl,-rpath,'$$ORIGIN/ffmpeg/lib'
+  # Same thing without the quoting, purely so ffmpeg-status can print it:
+  # echoing AV_RPATH itself would nest single quotes and the shell would eat
+  # the very $ORIGIN we are trying to show.
+  AV_RPATH_SHOW = $$ORIGIN/ffmpeg/lib (resolved against the binary at run time)
+  $(info NOTE: linking against the V4L2-Request FFmpeg in ./ffmpeg)
+else ifneq ($(wildcard $(FFMPEG_PREFIX)/lib/pkgconfig/libavcodec.pc),)
+  AV_PREFIX = $(FFMPEG_PREFIX)
+  AV_RPATH  = -Wl,-rpath,$(FFMPEG_PREFIX)/lib
+  AV_RPATH_SHOW = $(FFMPEG_PREFIX)/lib
+  $(info NOTE: linking against the V4L2-Request FFmpeg in $(FFMPEG_PREFIX))
+else
+  AV_PREFIX =
+  AV_RPATH  =
+  AV_RPATH_SHOW = (none - resolved by soname from the system paths)
+  $(info NOTE: using the distro FFmpeg. H.265 will decode in SOFTWARE - run)
+  $(info NOTE: 'make ffmpeg' to get the hardware HEVC path on a Pi 4.)
+endif
+
+AV_PKGCONFIG = PKG_CONFIG_PATH=$(if $(AV_PREFIX),$(AV_PREFIX)/lib/pkgconfig:)$$PKG_CONFIG_PATH pkg-config
+AV_CFLAGS = $(shell $(AV_PKGCONFIG) --cflags $(AV_PKGS))
+AV_LIBS   = $(shell $(AV_PKGCONFIG) --libs $(AV_PKGS)) $(AV_RPATH)
 SLIRP_CFLAGS = $(shell pkg-config --cflags libslirp 2>/dev/null || pkg-config --cflags slirp 2>/dev/null)
 SLIRP_LIBS   = $(shell pkg-config --libs libslirp 2>/dev/null || pkg-config --libs slirp 2>/dev/null)
 
@@ -121,7 +176,10 @@ SLIRP_LIBS   = $(shell pkg-config --libs libslirp 2>/dev/null || pkg-config --li
 # pages of compiler/linker errors. Skipped for `make clean`.
 # (libslirp stays optional: networking is disabled without it.)
 # -----------------------------------------------------------------
-ifeq ($(filter clean,$(MAKECMDGOALS)),)
+# `make ffmpeg` is how you SATISFY the FFmpeg dependency, so refusing to run it
+# because that dependency is missing would be a closed loop. ffmpeg-status has
+# to work on a broken system too - that is when you need it most.
+ifeq ($(filter clean ffmpeg ffmpeg-status,$(MAKECMDGOALS)),)
 
 ifeq ($(shell command -v pkg-config 2>/dev/null),)
 $(error pkg-config not found. Install the build tools first: sudo apt install build-essential pkg-config)
@@ -142,6 +200,18 @@ MISSING_DEPS += zlib1g-dev
 endif
 ifeq ($(shell pkg-config --exists libjpeg && echo ok),)
 MISSING_DEPS += libjpeg-dev
+endif
+ifeq ($(shell $(AV_PKGCONFIG) --exists libavformat && echo ok),)
+MISSING_DEPS += libavformat-dev
+endif
+ifeq ($(shell $(AV_PKGCONFIG) --exists libavcodec && echo ok),)
+MISSING_DEPS += libavcodec-dev
+endif
+ifeq ($(shell pkg-config --exists libswscale && echo ok),)
+MISSING_DEPS += libswscale-dev
+endif
+ifeq ($(shell pkg-config --exists libswresample && echo ok),)
+MISSING_DEPS += libswresample-dev
 endif
 ifneq ($(strip $(MISSING_DEPS)),)
 $(error Missing build dependencies: $(MISSING_DEPS)  ->  sudo apt install $(MISSING_DEPS))
@@ -233,15 +303,41 @@ HEAVY_OBJS = $(CPU_CPP:.cpp=.o) $(JIT_CPP:.cpp=.o)
 $(HEAVY_OBJS): OPT := $(HEAVY_OPT)
 
 DELETEFILES = $(COBJS) $(CPPOBJS) $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d) \
-              $(TARGET) ataritest
+              $(TARGET) ataritest .ffmpeg-choice
 
 # -----------------------------------------------------------------
 # Rules
 # -----------------------------------------------------------------
 all: $(TARGET) ataritest
 
-$(TARGET): $(COBJS) $(CPPOBJS)
-	$(CXX) -o $@ $^ $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SLIRP_LIBS) -lz $(SDL3_LIBS) -lmpg123 -ljpeg
+# WHY THE STAMP FILE. Which FFmpeg gets linked is decided by an rpath, and an
+# rpath is baked in at LINK time - but nothing in the object files changes when
+# you unpack ./ffmpeg or remove it. So `make` after either would say there was
+# nothing to do, leave the old rpath in place, and the emulator would carry on
+# resolving libraries from wherever it was told LAST time. Move that directory
+# away afterwards and it falls back to the distro build: software HEVC, about
+# 3 fps for 4K, and no error anywhere to explain it.
+#
+# The stamp records which FFmpeg was chosen and is only rewritten when that
+# answer changes, so the relink happens exactly when it needs to and never
+# otherwise. Note the explicit object list below rather than $^ - the stamp is
+# a prerequisite and must not be handed to the linker.
+AV_STAMP := .ffmpeg-choice
+.PHONY: FORCE
+FORCE:
+$(AV_STAMP): FORCE
+	@echo '$(AV_PREFIX) | $(AV_RPATH_SHOW)' | cmp -s - $@ 2>/dev/null || { \
+	   echo '$(AV_PREFIX) | $(AV_RPATH_SHOW)' > $@; \
+	   echo "NOTE: FFmpeg choice changed - the emulator will be relinked"; }
+
+$(TARGET): $(COBJS) $(CPPOBJS) $(AV_STAMP)
+	$(CXX) -o $@ $(COBJS) $(CPPOBJS) $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SLIRP_LIBS) -lz $(SDL3_LIBS) -lmpg123 -ljpeg $(AV_LIBS)
+	@ldd $@ 2>/dev/null | grep -qE '/usr/lib.*libavcodec' && { \
+	   echo; \
+	   echo "WARNING: this build resolves libavcodec from /usr/lib - the DISTRO"; \
+	   echo "         FFmpeg. H.265 will decode in software (~3 fps for 4K)."; \
+	   echo "         Check with: make ffmpeg-status"; \
+	   echo; } || true
 
 # emulator.c built as C++
 emulator.o: emulator.c
@@ -262,6 +358,14 @@ platforms/atari/audio/dmasnd_hdmi.o: platforms/atari/audio/dmasnd_hdmi.c
 platforms/atari/audio/ym2149.o: platforms/atari/audio/ym2149.c
 	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
 
+# Host video player: SDL3 (audio stream on the shared device) + FFmpeg libs.
+platforms/atari/video/vidplay.o: platforms/atari/video/vidplay.c
+	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) $(AV_CFLAGS) -MMD -MP -c -o $@ $<
+
+# The video overlay plane only needs libdrm (already on the include path).
+platforms/atari/video/vidplane.o: platforms/atari/video/vidplane.c
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
 ataritest: ataritest.c gpio/ps_protocol.c
 	$(CC) $^ -o $@ $(CFLAGS)
 
@@ -273,5 +377,29 @@ ataritest: ataritest.c gpio/ps_protocol.c
 
 clean:
 	rm -f $(DELETEFILES)
+
+# Fetch (or, failing that, build) the V4L2-Request FFmpeg into ./ffmpeg, which
+# is what gives the Pi 4 hardware HEVC. Deliberately NOT a dependency of `all`:
+# it reaches the network and can take an hour, and the emulator builds fine
+# without it. Deliberately not `.PHONY` either - the directory IS the target,
+# so a second `make ffmpeg` costs nothing.
+ffmpeg:
+	@bash tools/get-rpi-ffmpeg.sh
+
+# Say which FFmpeg a build would actually use, without building anything.
+# Single quotes throughout: AV_RPATH contains a literal $ORIGIN that the shell
+# must not expand, here or in the link line.
+ffmpeg-status:
+	@echo 'prefix : $(if $(AV_PREFIX),$(AV_PREFIX),(distro FFmpeg))'
+	@echo 'rpath  : $(AV_RPATH_SHOW)'
+	@for m in $(AV_PKGS); do \
+	    v=`$(AV_PKGCONFIG) --modversion $$m 2>/dev/null` || v='not found'; \
+	    echo "  $$m $$v"; \
+	 done
+	@if [ -x ./emulator ]; then \
+	    echo 'linked :'; ldd ./emulator | grep -E 'libav|libsw' || true; \
+	 else echo 'linked : (no emulator binary yet - run make)'; fi
+
+.PHONY: all clean ffmpeg-status
 
 -include $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d)

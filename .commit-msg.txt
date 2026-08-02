@@ -1,0 +1,76 @@
+Add host video playback (VIDPLAY NatFeat) on a DRM overlay plane
+
+The guest asks the Pi to decode MP4/MKV/AVI/MPEG and the picture is
+composited by the display hardware above the Atari screen, in the same
+spirit as the existing MP3PLAY NatFeat. Sub-ops 0-7 are deliberately
+identical to MP3PLAY so a front-end can share its transport code.
+
+Nothing is drawn into the Atari framebuffer, so the screen driver is
+irrelevant - ST low/medium/high, ET4000, fVDI and NOVA are all the same
+to it. What it does need is the emulator's DRM display path, because the
+overlay borrows that CRTC.
+
+Decode paths on a Pi 4:
+  H.264 up to 1080p   h264_v4l2m2m, hardware
+  H.265 any size      v4l2request + rpivid, zero copy via DRM_PRIME
+  H.264 4K            software only - no stateless H.264 device exists
+  MPEG-2 and friends  software, fine at DVD sizes
+
+Notes on the parts that were not obvious:
+
+- Media threads are created with PTHREAD_EXPLICIT_SCHED. Inheriting the
+  68k thread's SCHED_FIFO and core pinning starves them completely, and
+  libavcodec's own worker threads hit the same trap one level down, so
+  codecs are opened on the decode thread rather than the caller's.
+
+- The scanout ring reserves two buffers, not one: the on-screen buffer
+  and the one being written. Reserving one lets the decoder write into
+  the buffer the CRTC is scanning, which is visible as tearing.
+
+- The overlay cannot be drawn arbitrarily small. Downscaling forces the
+  HVS to read every source line within one output line's time, and the
+  vc4 memory-bus budget is finite; exceeding it produces a black plane
+  with no error at all, so the limit is computed up front instead of
+  detected. INFO 11/12 report it, and return -1 until the first frame
+  has settled what the source actually is.
+
+- A second overlay plane holds one full-screen black frame between the
+  guest plane and the picture, so letterbox bars in fullscreen are black
+  rather than a view of the desktop.
+
+- The display refresh is matched to the film's frame rate where the sink
+  offers a suitable mode, and restored on stop.
+
+Atari side: VIDPLAY.TTP and VIDGEM.PRG, installed into atari-share.
+VIDGEM maps the picture onto its own window and follows it, resizes the
+window up to the smallest size the overlay can actually draw and refuses
+to shrink past it, clips to the visible region so other windows stay in
+front, and puts the picture away entirely while the file selector is up.
+
+Packaging for hardware HEVC, which the distro FFmpeg cannot do:
+
+- tools/build-rpi-ffmpeg.sh builds the V4L2-Request FFmpeg from a pinned
+  commit into an isolated prefix.
+- tools/package-rpi-ffmpeg.sh turns that into a release tarball, with
+  relocatable .pc files, library runpaths set to $ORIGIN, the LGPL text
+  and the upstream commit.
+- tools/get-rpi-ffmpeg.sh, behind `make ffmpeg`, fetches that tarball
+  and verifies its checksum, or builds from source if none is published.
+
+Trixie ships FFmpeg 7.1.3 and so does this, so every soname is identical
+and the distro build works perfectly except that the hwaccel is missing.
+Nothing is added to the linker cache and the choice is recorded as an
+rpath; `make ffmpeg-status` and `ldd ./emulator` are how you confirm it.
+The link step now depends on that choice, because changing it alters no
+object file and the stale binary would otherwise keep its old rpath.
+
+Also:
+
+- install-full.sh was missing the libav*-dev packages the Makefile
+  requires, so a BUILD=1 run died at the dependency preflight. Fixed,
+  along with adding cifs-utils for mounting a media share.
+- INSTALL-README.md said ffmpeg was used for screendumps (they are PNGs
+  written in-process), listed board support that contradicted both the
+  code and its own requirements section, and omitted KILLGUI. README.md
+  listed libzstd-dev and libcurl4-openssl-dev, neither of which is used
+  anywhere in the build.
