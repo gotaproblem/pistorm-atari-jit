@@ -3439,6 +3439,47 @@ void build_comp(void)
             nfcpufunctbl[cft_map(tbl[i].opcode)] = nfctbl[i].handler_ff;
     }
 
+    /* ------------------------------------------------------------------
+     * ARAnyM NatFeat opcodes 0x7300 (NF_GET_ID) / 0x7301 (NF_CALL).
+     *
+     * These are i_ILLG in table68k, so every loop above skips them and they
+     * kept the reset defaults: cflow = fl_trap, use_flags = set_flags =
+     * FLAG_ALL. That cost twice over on the fVDI path, which issues these
+     * thousands of times a second:
+     *
+     *  1. fl_trap satisfies end_block(), so a NatFeat call always terminated
+     *     its block. The block tail then had no registered branch and no
+     *     const PC, so it fell to the unchained cache_tags indirect dispatch
+     *     - an unpredictable BR plus a PC compare on re-entry, forever, on
+     *     every call. Splitting the caller's loop this way also prevented
+     *     create_jmpdep() from ever chaining across the call site.
+     *  2. use_flags = FLAG_ALL propagates backwards through the liveflags
+     *     pass, so liveflags[] is FLAG_ALL for *every* instruction preceding
+     *     the call in that block and dont_care_flags() can never fire there.
+     *
+     * Neither is true of the instruction: a NatFeat call touches no CCR bit
+     * and always resumes at PC+2 (atari_natfeat_handle_opcode() ends with
+     * m68k_incpc_normal(2)); it never branches and never raises. So it is an
+     * ordinary straight-line instruction that happens to have no compfunc,
+     * exactly like the many other uncompilable opcodes that compile_block()
+     * handles mid-block via the `failure` path - flush(1), a direct host call
+     * to cputbl[opcode], then an SPCFLAG poll before compilation resumes with
+     * a fresh init_comp() at the next instruction (which reloads every guest
+     * register from the regs struct, so the handler's writes to D0 and pc_p
+     * are picked up correctly).
+     *
+     * Declaring that here removes the forced block break and restores flag
+     * liveness optimisation for the surrounding code. nfcpufunctbl is also
+     * pointed at the dedicated entry so the no-flags path does not fall back
+     * to the generic op_illg prologue. */
+    for (unsigned nfop = 0x7300; nfop <= 0x7301; nfop++) {
+        prop[cft_map(nfop)].cflow = fl_normal;
+        prop[cft_map(nfop)].use_flags = 0;
+        prop[cft_map(nfop)].set_flags = 0;
+        prop[cft_map(nfop)].is_addx = 0;
+        nfcpufunctbl[cft_map(nfop)] = op_natfeat_1;
+    }
+
     int count = 0;
     for (opcode = 0; opcode < 65536; opcode++) {
         if (compfunctbl[cft_map(opcode)])

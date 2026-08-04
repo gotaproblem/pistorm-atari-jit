@@ -187,6 +187,9 @@ static int         g_wav_freq = 48000, g_wav_ch = 2;
 
 int avrecord_active(void) { return atomic_load(&g_armed) || atomic_load(&g_running); }
 int avrecord_ok(void)     { return atomic_load(&g_ok); }
+/* g_fps is only meaningful once the first frame has fixed the geometry and
+ * started the writer; before that there is no answer, and 0 says so. */
+int avrecord_fps(void)    { return atomic_load(&g_running) ? g_fps : 0; }
 
 void avrecord_arm(const char *dir, int seconds)
 {

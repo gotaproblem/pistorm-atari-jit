@@ -69,6 +69,70 @@ static int g_flip_pending;       /* an async commit is in flight (awaiting event
 static int g_first_flip = 1;     /* first atomic commit: blocking + ALLOW_MODESET */
 static int g_last_committed = -1;/* buffer index of the previous successful commit */
 /* plane atomic property ids */
+/* WHERE THE GUEST IMAGE LANDS ON THE DISPLAY.
+ *
+ * This used to be "the whole thing, always": src 640x400 stretched to
+ * 1920x1080. The scaling filter is Nearest Neighbor (deliberately - it keeps
+ * pixel art crisp), and 1080/400 is 2.7, so nearest-neighbour duplicates some
+ * source rows twice and some three times. On graphics nobody notices. On an
+ * 8-pixel-tall font it means some scanlines of a character are twice as thick
+ * as others, which is exactly the "distorted, hard to read" text.
+ *
+ * The cure is to scale by a whole number, so every source pixel becomes the
+ * same size square, and centre what is left over. 640x400 goes to 1280x800 in
+ * a 1920x1080 frame with a black border; 1280x960 goes 1:1. Text becomes
+ * exactly as sharp as the guest drew it.
+ *
+ * PISTORM_VGA_SCALE picks the policy:
+ *   integer   largest whole multiple that fits, centred  (default)
+ *   aspect    fit preserving the source aspect ratio, centred
+ *   stretch   fill the display - the old behaviour
+ */
+static int g_dst_x, g_dst_y, g_dst_w, g_dst_h;
+
+static void compute_dst(void)
+{
+    static int said = 0;
+    const char *e = getenv("PISTORM_VGA_SCALE");
+    int mw = (int)g_mode.hdisplay, mh = (int)g_mode.vdisplay;
+    int sw = (int)g_src_w, sh = (int)g_src_h;
+    int mode_integer = 1, mode_stretch = 0;
+
+    if (e && *e) {
+        if (!strcasecmp(e, "stretch"))     { mode_stretch = 1; mode_integer = 0; }
+        else if (!strcasecmp(e, "aspect")) { mode_integer = 0; }
+    }
+    if (mw <= 0 || mh <= 0 || sw <= 0 || sh <= 0) {
+        g_dst_x = g_dst_y = 0; g_dst_w = mw; g_dst_h = mh;
+        return;
+    }
+    if (mode_stretch) {
+        g_dst_x = g_dst_y = 0; g_dst_w = mw; g_dst_h = mh;
+    } else if (mode_integer && sw <= mw && sh <= mh) {
+        int n = mw / sw;
+        if (mh / sh < n) n = mh / sh;
+        if (n < 1) n = 1;
+        g_dst_w = sw * n; g_dst_h = sh * n;
+        g_dst_x = (mw - g_dst_w) / 2; g_dst_y = (mh - g_dst_h) / 2;
+    } else {
+        /* Source bigger than the display, or aspect mode: fit and centre. */
+        long w = mw, h = (long)mw * sh / sw;
+        if (h > mh) { h = mh; w = (long)mh * sw / sh; }
+        g_dst_w = (int)w; g_dst_h = (int)h;
+        g_dst_x = (mw - g_dst_w) / 2; g_dst_y = (mh - g_dst_h) / 2;
+    }
+    if (!said || 1) {
+        static int lw, lh, lx, ly;
+        if (lw != g_dst_w || lh != g_dst_h || lx != g_dst_x || ly != g_dst_y) {
+            lw = g_dst_w; lh = g_dst_h; lx = g_dst_x; ly = g_dst_y; said = 1;
+            fprintf(stderr, "[DRM] guest %ux%u -> %dx%d at %d,%d (%s)\n",
+                    g_src_w, g_src_h, g_dst_w, g_dst_h, g_dst_x, g_dst_y,
+                    mode_stretch ? "stretch" :
+                    (g_dst_w % sw == 0 && g_dst_h % sh == 0) ? "integer" : "aspect");
+        }
+    }
+}
+
 static uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h,
                 p_src_x, p_src_y, p_src_w, p_src_h;
 
@@ -411,6 +475,64 @@ int drmpres_open(void)
     if (g_saved_crtc && g_saved_crtc->mode_valid)
         g_mode = g_saved_crtc->mode;
 
+    /* ...unless asked to do otherwise.
+     *
+     * Inheriting the console mode is the safe default, but it means the guest
+     * is scaled by the DISPLAY whenever the console is not already at the
+     * panel's native resolution - a 1920x1080 console on a 3440x1440 monitor
+     * gets stretched by the monitor's own scaler, and no amount of care on our
+     * side survives that. Fixing it in cmdline.txt works but names one
+     * resolution, so it has to be edited every time the machine is plugged
+     * into a different screen.
+     *
+     *   PISTORM_VGA_MODE=preferred   use whatever the attached display says it
+     *                                prefers (its native mode). Follows the
+     *                                monitor around; nothing to edit.
+     *   PISTORM_VGA_MODE=3440x1440   force one specific mode.
+     *
+     * Left unset, behaviour is exactly as before. The caution in the comment
+     * above is real: changing the mode renegotiates the link and CAN drop HDMI
+     * audio on some sinks, which is why this is opt-in and why it says loudly
+     * what it did. */
+    {
+        const char *want = getenv("PISTORM_VGA_MODE");
+        if (want && *want && conn->count_modes > 0) {
+            drmModeModeInfo *pick = NULL;
+            unsigned w = 0, h = 0;
+            int i;
+            if (!strcasecmp(want, "preferred") || !strcasecmp(want, "native")) {
+                for (i = 0; i < conn->count_modes; i++)
+                    if (conn->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
+                        pick = &conn->modes[i]; break;
+                    }
+                if (!pick)
+                    pick = &conn->modes[0];   /* EDID lists preferred first */
+            } else if (sscanf(want, "%ux%u", &w, &h) == 2) {
+                for (i = 0; i < conn->count_modes; i++)
+                    if (conn->modes[i].hdisplay == w &&
+                        conn->modes[i].vdisplay == h) {
+                        /* highest refresh that matches, first match wins */
+                        pick = &conn->modes[i]; break;
+                    }
+                if (!pick)
+                    fprintf(stderr, "[DRM] PISTORM_VGA_MODE=%s is not offered "
+                                    "by this display; keeping %ux%u\n",
+                            want, g_mode.hdisplay, g_mode.vdisplay);
+            }
+            if (pick && (pick->hdisplay != g_mode.hdisplay ||
+                         pick->vdisplay != g_mode.vdisplay ||
+                         pick->vrefresh != g_mode.vrefresh)) {
+                fprintf(stderr, "[DRM] switching %ux%u@%u -> %ux%u@%u "
+                                "(PISTORM_VGA_MODE=%s). If HDMI audio stops, "
+                                "this is why - unset it and set the console "
+                                "mode in cmdline.txt instead.\n",
+                        g_mode.hdisplay, g_mode.vdisplay, g_mode.vrefresh,
+                        pick->hdisplay, pick->vdisplay, pick->vrefresh, want);
+                g_mode = *pick;
+            }
+        }
+    }
+
     /* black mode-size primary for SetCrtc (built via a temp srcbuf) */
     {
         struct srcbuf bg;
@@ -543,10 +665,11 @@ void drmpres_flip(void)
             return;
         drmModeAtomicAddProperty(req, g_plane_id, p_fb_id,   g_src[back].fb);
         drmModeAtomicAddProperty(req, g_plane_id, p_crtc_id, g_crtc_id);
-        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_x,  0);
-        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_y,  0);
-        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_w,  g_mode.hdisplay);
-        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_h,  g_mode.vdisplay);
+        compute_dst();
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_x,  g_dst_x);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_y,  g_dst_y);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_w,  g_dst_w);
+        drmModeAtomicAddProperty(req, g_plane_id, p_crtc_h,  g_dst_h);
         drmModeAtomicAddProperty(req, g_plane_id, p_src_x,   0);
         drmModeAtomicAddProperty(req, g_plane_id, p_src_y,   0);
         drmModeAtomicAddProperty(req, g_plane_id, p_src_w,   (uint64_t)g_src_w << 16);
@@ -587,8 +710,9 @@ void drmpres_flip(void)
 
     /* legacy blocking present (default): SetPlane latches at vblank. */
     int back = g_back;
+    compute_dst();
     if (drmModeSetPlane(g_fd, g_plane_id, g_crtc_id, g_src[back].fb, 0,
-                        0, 0, g_mode.hdisplay, g_mode.vdisplay,
+                        g_dst_x, g_dst_y, g_dst_w, g_dst_h,
                         0, 0, g_src_w << 16, g_src_h << 16) < 0) {
         static int warned = 0;
         if (!warned) {
@@ -759,6 +883,14 @@ int      drmpres_fd(void)         { return g_fd; }
 uint32_t drmpres_crtc_id(void)    { return g_crtc_id; }
 int      drmpres_crtc_index(void) { return g_crtc_index; }
 uint32_t drmpres_plane_id(void)   { return g_plane_id; }
+/* Where the guest image actually sits on the display. A front-end mapping its
+ * own window coordinates onto display pixels has to go through this now that
+ * the image no longer fills the screen. */
+int drmpres_dst_x(void) { return g_dst_x; }
+int drmpres_dst_y(void) { return g_dst_y; }
+int drmpres_dst_w(void) { return g_dst_w ? g_dst_w : (int)g_mode.hdisplay; }
+int drmpres_dst_h(void) { return g_dst_h ? g_dst_h : (int)g_mode.vdisplay; }
+
 uint32_t drmpres_mode_w(void)     { return g_mode.hdisplay; }
 uint32_t drmpres_mode_h(void)     { return g_mode.vdisplay; }
 

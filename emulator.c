@@ -801,8 +801,27 @@ int main (int argc, char *argv[])
     fprintf(stderr, "[DBG] crash handler installed\n"); /* sanity check */
   }
 
-  /* assign signal handlers */
-  signal(SIGINT, sigint_handler);
+  /* assign signal handlers
+   *
+   * SIGHUP and SIGTERM go to the same place as SIGINT, and that matters more
+   * than it looks. SIGHUP is what closing a terminal window sends, and its
+   * default action is to terminate immediately - no orderly shutdown at all,
+   * while the JIT is mid-block, a film's decode and present threads are
+   * running and the SDL audio callback is live. SIGTERM is what systemd sends
+   * to stop the service, and had the same problem.
+   *
+   * sigint_handler() clears cpu_emulation_running, restores the tty and
+   * _exit()s: the path that is actually exercised every time anyone presses
+   * Ctrl-C. Routing all three there makes "close the window" and
+   * "systemctl stop" behave the same way.
+   *
+   * SIGPIPE is ignored rather than handled. Once the terminal has gone, a
+   * write to the old stdout raises it, and the default action would kill the
+   * process during the very shutdown this is trying to make orderly. */
+  signal(SIGINT,  sigint_handler);
+  signal(SIGHUP,  sigint_handler);
+  signal(SIGTERM, sigint_handler);
+  signal(SIGPIPE, SIG_IGN);
 
   /*
    * save stdio tty properties and ammend for emulator use

@@ -34,6 +34,13 @@ void avrecord_stop(void);
 int avrecord_active(void);   /* armed or running */
 int avrecord_ok(void);       /* 0 after an ffmpeg/write failure */
 
+/* Frames per second the writer thread actually encodes at, or 0 before the
+ * first frame has settled it. Frames are OFFERED at the RENDER rate, which can
+ * be a good deal higher, and everything offered between two writer ticks is
+ * simply overwritten - so expensive work done to prepare a frame is worth
+ * pacing against this rather than against the render loop. */
+int avrecord_fps(void);
+
 #ifdef __cplusplus
 }
 #endif

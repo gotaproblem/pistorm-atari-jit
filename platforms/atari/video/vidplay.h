@@ -48,6 +48,33 @@ void vidplay_set_volume(int percent);   /* 0..200, default 100 */
  * is to appear in front of the picture. w or h <= 0 = no clip. */
 void vidplay_set_clip(int x, int y, int w, int h);
 
+/* SCREEN CAPTURE.
+ *
+ * The picture is a hardware overlay plane, composited by the display
+ * controller above the Atari framebuffer. The recorder captures that
+ * framebuffer, so on its own it records everything EXCEPT the film: a hole
+ * where the picture should be, with the soundtrack present, because audio is
+ * tapped from the SDL3 mixer and that IS shared.
+ *
+ * vidplay_capture_blend() draws the current frame into a caller-owned COPY of
+ * the framebuffer so the capture matches what is on screen. It must be a copy:
+ * writing into the live framebuffer would put the film on the real Atari
+ * monitor as well.
+ *
+ * Returns 1 if it drew something, 0 if there was nothing to draw (stopped,
+ * hidden, no frame yet), and -1 if this decode path cannot be captured at all -
+ * zero-copy HEVC hands us Broadcom SAND-tiled dmabufs which the CPU cannot read
+ * linearly, and that is precisely why that path is fast.
+ *
+ * dst is ARGB8888, dst_stride in BYTES. Safe to call from another thread. */
+int vidplay_capture_blend(void *dst, int dst_stride, int dst_w, int dst_h);
+
+/* 1 while there is a picture on screen worth blending, 0 when there is not,
+ * and -1 when there is one but this decode path cannot be read by the CPU.
+ * The -1 lets a caller skip the framebuffer copy entirely and still say once
+ * why the recording will have a hole in it. */
+int vidplay_capture_pending(void);
+
 void vidplay_shutdown(void);            /* called from the emulator teardown */
 
 #ifdef __cplusplus

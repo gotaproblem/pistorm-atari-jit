@@ -60,6 +60,7 @@
 #include "vidplane.h"
 #include "../et4000/et4000_drm.h"
 #include "../audio/dmasnd.h"
+#include "../avrecord.h"    /* only to know whether to keep a frame for capture */
 
 #if LIBAVUTIL_VERSION_MAJOR >= 57
 #define VP_NEW_CHLAYOUT 1
@@ -198,6 +199,16 @@ static int g_min_dw, g_min_dh;   /* smallest rect the HVS will actually take */
  * overlapping the video really does sit in front of it. w<=0 means no clip. */
 static int g_clip_x, g_clip_y, g_clip_w, g_clip_h;
 static int g_want_backdrop;   /* fullscreen with bars: black them out */
+
+/* Last decoded frame, kept for the screen recorder - see vidplay_capture_blend.
+ * Only ever populated on the dumb-buffer path: a zero-copy frame is a SAND-
+ * tiled dmabuf and there is nothing the CPU can do with it. Held by reference,
+ * so this costs a refcount rather than a copy. */
+static pthread_mutex_t g_cap_lock = PTHREAD_MUTEX_INITIALIZER;
+static AVFrame        *g_cap_frame;
+static struct SwsContext *g_cap_sws;
+static int g_cap_sw, g_cap_sh, g_cap_sfmt;   /* what g_cap_sws was built for */
+static int g_cap_dw, g_cap_dh;
 
 /* Intersect the destination with the clip and take the matching slice of the
  * source, so the visible part is not stretched to fill the smaller rectangle.
@@ -461,7 +472,10 @@ static void resolve_rect(void)
     int mh = (int)vidplane_mode_h();
 
     if (g_rect_w > 0 && g_rect_h > 0) {
-        g_dx = g_rect_x; g_dy = g_rect_y;
+        /* The front-end works in guest-image pixels (INFO 6/7); the plane
+         * works in display pixels. They differ by the letterbox origin. */
+        g_dx = g_rect_x + drmpres_dst_x();
+        g_dy = g_rect_y + drmpres_dst_y();
         g_dw = g_rect_w; g_dh = g_rect_h;
         /* A window has its own background; the bars there belong to the app. */
         g_want_backdrop = 0;
@@ -1197,8 +1211,23 @@ static int publish_frame(AVFrame *frm)
             g_degrade = want;
         }
     }
-    if (upload_frame(frm, idx) == 0)
+    if (upload_frame(frm, idx) == 0) {
+        /* Keep a reference for the screen recorder. A refcount, not a copy,
+         * and only on this path - the zero-copy branch above returns before
+         * here because its frames are unreadable by the CPU. */
+        if (avrecord_active()) {
+            pthread_mutex_lock(&g_cap_lock);
+            if (!g_cap_frame)
+                g_cap_frame = av_frame_alloc();
+            if (g_cap_frame) {
+                av_frame_unref(g_cap_frame);
+                if (av_frame_ref(g_cap_frame, frm) < 0)
+                    av_frame_unref(g_cap_frame);
+            }
+            pthread_mutex_unlock(&g_cap_lock);
+        }
         ring_publish(idx, 0, NULL, pts >= 0 ? pts : master_clock());
+    }
     return 1;
 }
 
@@ -2030,6 +2059,12 @@ static void teardown(void)
     }
     if (g_swr)  swr_free(&g_swr);
     if (g_sws)  { sws_freeContext(g_sws); g_sws = NULL; }
+    pthread_mutex_lock(&g_cap_lock);
+    if (g_cap_sws)   { sws_freeContext(g_cap_sws); g_cap_sws = NULL; }
+    if (g_cap_frame) { av_frame_free(&g_cap_frame); }
+    g_cap_sw = g_cap_sh = g_cap_dw = g_cap_dh = 0;
+    g_cap_sfmt = -1;
+    pthread_mutex_unlock(&g_cap_lock);
     if (g_vctx) avcodec_free_context(&g_vctx);
     if (g_actx) avcodec_free_context(&g_actx);
     if (g_fmt)  avformat_close_input(&g_fmt);
@@ -2269,8 +2304,12 @@ long vidplay_info(int what)
              * idempotent - so this works before the first PLAY. */
             if (vidplane_mode_w() == 0)
                 vidplane_open();
-            return (what == 6) ? (long)vidplane_mode_w()
-                               : (long)vidplane_mode_h();
+            /* The GUEST IMAGE size, not the display size. A front-end scales
+             * its window coordinates by (this / Atari screen size), and the
+             * Atari screen is now drawn into a centred sub-rectangle rather
+             * than the whole panel. resolve_rect() adds the origin back. */
+            return (what == 6) ? (long)drmpres_dst_w()
+                               : (long)drmpres_dst_h();
         }
         case 8: return atomic_load(&g_hidden);
         /* Smallest rectangle the overlay can actually scan out. A front-end
@@ -2327,6 +2366,98 @@ void vidplay_set_clip(int x, int y, int w, int h)
     g_clip_w = (w > 0 && h > 0) ? w : 0;
     g_clip_h = (w > 0 && h > 0) ? h : 0;
     atomic_fetch_add(&g_geom_gen, 1);
+}
+
+/* ------------------------------------------------------------ capture blend */
+
+int vidplay_capture_pending(void)
+{
+    if (!atomic_load(&g_on) || atomic_load(&g_hidden) || !g_configured)
+        return 0;
+    /* Distinguished from 0 so the caller can skip the framebuffer copy AND
+     * still explain itself once, rather than quietly recording a hole. */
+    return g_zerocopy ? -1 : 1;
+}
+
+int vidplay_capture_blend(void *dstv, int dst_stride, int dst_w, int dst_h)
+{
+    int mw = (int)vidplane_mode_w();
+    int mh = (int)vidplane_mode_h();
+    int dx, dy, dw, dh, sx, sy, sw, sh;
+    uint8_t *dst_planes[4] = { NULL, NULL, NULL, NULL };
+    int dst_lines[4] = { 0, 0, 0, 0 };
+    AVFrame *f;
+    int rc = 0;
+
+    if (!dstv || dst_stride <= 0 || dst_w <= 0 || dst_h <= 0)
+        return 0;
+    if (!vidplay_capture_pending())
+        return 0;
+    if (g_zerocopy)
+        return -1;                     /* SAND-tiled dmabuf: unreadable here */
+    if (mw <= 0 || mh <= 0)
+        return 0;
+
+    /* Same geometry the plane is using, including the clip, so the recording
+     * shows what the screen showed - a window in front of the picture stays in
+     * front of it in the capture too. */
+    dx = g_dx; dy = g_dy; dw = g_dw; dh = g_dh;
+    if (!clip_rect(&dx, &dy, &dw, &dh, &sx, &sy, &sw, &sh))
+        return 0;                      /* entirely covered */
+
+    /* Display pixels -> framebuffer pixels. The DRM presenter scales the guest
+     * plane across the whole display, so this is a straight ratio. Done in
+     * 64-bit because 4K x a framebuffer width overflows 32. */
+    {
+        long long fx = (long long)dx * dst_w / mw;
+        long long fy = (long long)dy * dst_h / mh;
+        long long fw = (long long)dw * dst_w / mw;
+        long long fh = (long long)dh * dst_h / mh;
+        if (fw < 1 || fh < 1)
+            return 0;
+        if (fx < 0) { fw += fx; fx = 0; }
+        if (fy < 0) { fh += fy; fy = 0; }
+        if (fx + fw > dst_w) fw = dst_w - fx;
+        if (fy + fh > dst_h) fh = dst_h - fy;
+        if (fw < 1 || fh < 1)
+            return 0;
+        dx = (int)fx; dy = (int)fy; dw = (int)fw; dh = (int)fh;
+    }
+
+    pthread_mutex_lock(&g_cap_lock);
+    f = g_cap_frame;
+    if (!f || !f->data[0] || f->width <= 0 || f->height <= 0) {
+        pthread_mutex_unlock(&g_cap_lock);
+        return 0;
+    }
+
+    /* Rebuild the scaler whenever the source or the destination rect changes -
+     * moving the window changes the latter on every drag. */
+    if (!g_cap_sws || g_cap_sw != f->width || g_cap_sh != f->height ||
+        g_cap_sfmt != f->format || g_cap_dw != dw || g_cap_dh != dh) {
+        if (g_cap_sws)
+            sws_freeContext(g_cap_sws);
+        /* AV_PIX_FMT_BGRA is B,G,R,A in memory, which is what a little-endian
+         * 0xAARRGGBB word looks like - i.e. the ARGB8888 framebuffer. */
+        g_cap_sws = sws_getContext(f->width, f->height,
+                                   (enum AVPixelFormat)f->format,
+                                   dw, dh, AV_PIX_FMT_BGRA,
+                                   SWS_FAST_BILINEAR, NULL, NULL, NULL);
+        g_cap_sw = f->width; g_cap_sh = f->height; g_cap_sfmt = f->format;
+        g_cap_dw = dw;       g_cap_dh = dh;
+    }
+    if (g_cap_sws) {
+        /* Write straight into the destination rect: offset the pointer, keep
+         * the full stride. No intermediate buffer, no second copy. */
+        dst_planes[0] = (uint8_t *)dstv + (size_t)dy * dst_stride
+                                        + (size_t)dx * 4;
+        dst_lines[0]  = dst_stride;
+        sws_scale(g_cap_sws, (const uint8_t * const *)f->data, f->linesize,
+                  0, f->height, dst_planes, dst_lines);
+        rc = 1;
+    }
+    pthread_mutex_unlock(&g_cap_lock);
+    return rc;
 }
 
 void vidplay_set_volume(int percent)
