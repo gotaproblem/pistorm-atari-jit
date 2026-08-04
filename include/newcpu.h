@@ -106,6 +106,12 @@ void REGPARAM3 op_illg_1_noret(uae_u32 opcode) REGPARAM;
 extern void REGPARAM3 op_unimpl(uae_u32) REGPARAM;
 void REGPARAM3 op_unimpl_1_noret(uae_u32 opcode) REGPARAM;
 extern bool atari_natfeat_handle_opcode(uae_u32 opcode, uae_u32 *cycles);
+/* Dedicated handlers for the ARAnyM NatFeat opcodes 0x7300/0x7301. Installed
+ * directly into cpufunctbl[]/nfcpufunctbl[] so a NatFeat call does not have
+ * to walk the whole op_illg() prologue (ROM/RTAREA tests, BKPT range test,
+ * debugmem hook, ...) before reaching the handler. See build_cpufunctbl(). */
+extern uae_u32 REGPARAM3 op_natfeat_1(uae_u32 opcode) REGPARAM;
+extern void REGPARAM3 op_natfeat_1_noret(uae_u32 opcode) REGPARAM;
 extern void atari_request_irq_level(uae_u8 level);
 
 typedef uae_u8 flagtype;

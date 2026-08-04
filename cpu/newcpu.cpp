@@ -2104,6 +2104,28 @@ void REGPARAM2 op_illg_1_noret(uae_u32 opcode)
 {
 	op_illg_1(opcode);
 }
+/* ARAnyM NatFeat fast entry (PiStorm).
+ *
+ * 0x7300/0x7301 are i_ILLG in table68k, so they used to arrive at the handler
+ * through op_illg_1 -> op_illg, paying for the whole illegal-instruction
+ * prologue (m68k_getpc, in_rom/in_rtarea, the 0x4afc probe, the BKPT range
+ * test, debugmem_illg) on every single call. fVDI issues thousands of these
+ * per second, so the prologue is pure overhead on a hot path. Installing this
+ * directly in cpufunctbl[]/nfcpufunctbl[] jumps straight at the dispatcher and
+ * keeps op_illg as the fallback for the (impossible) unhandled case. */
+uae_u32 REGPARAM2 op_natfeat_1(uae_u32 opcode)
+{
+	opcode = opcode_swap(opcode);
+	uae_u32 cycles = 4;
+	if (atari_natfeat_handle_opcode(opcode, &cycles))
+		return cycles;
+	op_illg(opcode);
+	return 4;
+}
+void REGPARAM2 op_natfeat_1_noret(uae_u32 opcode)
+{
+	op_natfeat_1(opcode);
+}
 uae_u32 REGPARAM2 op_unimpl_1(uae_u32 opcode)
 {
 	opcode = opcode_swap(opcode);
@@ -2309,6 +2331,15 @@ static void build_cpufunctbl()
 			loop_mode_table[opcode] = cpufunctbl[opcode];
 		}
 	}
+
+	/* NatFeat fast entry: bypass the op_illg prologue for 0x7300/0x7301.
+	 * Done after every table pass above (the i_ILLG entries are skipped by
+	 * all of them, but this keeps the override unconditional) and before the
+	 * unswapped-opcode remap below so it is relocated with everything else. */
+	cpufunctbl[0x7300] = op_natfeat_1;
+	cpufunctbl[0x7301] = op_natfeat_1;
+	cpufunctbl_noret[0x7300] = op_natfeat_1_noret;
+	cpufunctbl_noret[0x7301] = op_natfeat_1_noret;
 
 	need_opcode_swap = false;
 #ifdef HAVE_GET_WORD_UNSWAPPED
@@ -7786,7 +7817,7 @@ static void m68k_run_jit(void)
 					//	fprintf(stderr, "[PROBE] run_jit dispatch: pc=0x%08x natmem=%p pushall=%p\n",
 					//		(unsigned)m68k_getpc(), natmem_offset, pushall_call_handler); } }
 
-#ifdef PISTORM_ATARI_
+#ifdef PISTORM_ATARI
 					if (regs.stopped)
 					{
 						do_cycles_stop(4);

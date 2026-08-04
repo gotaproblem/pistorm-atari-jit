@@ -76,6 +76,14 @@ uint32_t drmpres_plane_id(void);   /* the plane the GUEST image uses */
 int  drmpres_match_refresh(double fps);
 void drmpres_restore_refresh(void);
 
+/* Where the guest image sits on the display. It no longer fills the screen by
+ * default (integer scaling, centred), so anything mapping guest coordinates to
+ * display pixels must go through these rather than assuming 0,0..mode_w,mode_h. */
+int drmpres_dst_x(void);
+int drmpres_dst_y(void);
+int drmpres_dst_w(void);
+int drmpres_dst_h(void);
+
 uint32_t drmpres_mode_w(void);
 uint32_t drmpres_mode_h(void);
 

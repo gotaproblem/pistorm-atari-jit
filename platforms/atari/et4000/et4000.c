@@ -759,6 +759,109 @@ static void et4000_start_screenrecord(int seconds)
     printf("[ET4K] Recording %d seconds -> %s\n", seconds, g_screenrecord_dir);
 }
 
+/* THE VIDEO OVERLAY IS NOT IN THE FRAMEBUFFER.
+ *
+ * s->fb_mem is the Atari screen. A film plays on a separate DRM plane which the
+ * display controller composites above it at scanout, so a recording taken
+ * straight from fb_mem contains everything except the film - and the
+ * soundtrack, because audio is tapped from the SDL3 mixer and that IS shared.
+ * The result is a recording with sound and a hole where the picture should be.
+ *
+ * So while something is playing, take a COPY of the framebuffer and let vidplay
+ * draw the current frame into it. A copy specifically: blending into fb_mem
+ * would put the film on the real Atari monitor too.
+ *
+ * Returns the buffer to hand to the recorder - fb_mem itself when there is
+ * nothing to blend, which is the usual case and costs nothing. */
+static uint8_t *g_rec_scratch;
+static size_t   g_rec_scratch_sz;
+
+static const void *et4000_record_compose(ET4000State *s, int *full_frame)
+{
+    size_t need;
+    int rc;
+
+    int pending = vidplay_capture_pending();
+
+    *full_frame = 0;
+    if (pending == 0)
+        return s->fb_mem;
+    if (pending < 0) {
+        /* Zero-copy HEVC: the frames are Broadcom SAND-tiled dmabufs and the
+         * CPU cannot read them, which is exactly why that path is fast enough
+         * for 4K. Nothing to composite, so skip the copy entirely - but say so
+         * once, because a silent hole in the recording looks like a bug in the
+         * recorder and is not one. */
+        static int said = 0;
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[AVREC] this film decodes straight into the "
+                            "display hardware (zero-copy HEVC), so the CPU "
+                            "cannot read its frames - the recording will have "
+                            "sound but no picture where the film is.\n");
+        }
+        return s->fb_mem;
+    }
+
+    /* PACE AGAINST THE WRITER, NOT THE RENDER LOOP.
+     *
+     * Frames are offered here at the render rate - `fps` in the config, up to
+     * 60 - but the recorder's writer thread samples the shared buffer on its
+     * own fixed interval and everything offered in between is overwritten. At
+     * fps 60 recording at 25 that is more than half of this work thrown away,
+     * and this work is a full-framebuffer copy plus a scale: about 8 MB per
+     * frame at 1080p, which is real money on a Pi 4.
+     *
+     * So compose no faster than the recorder can consume. The composited
+     * picture can end up one interval behind the desktop underneath it; at
+     * film frame rates that is invisible, and it is the same staleness the
+     * recorder already has for everything else. */
+    need = (size_t)s->fb_stride * s->fb_height;
+
+    {
+        int rfps = avrecord_fps();
+        if (rfps > 0 && g_rec_scratch && g_rec_scratch_sz >= need) {
+            static uint64_t last_us = 0;
+            uint64_t now  = et4000_wall_us();
+            uint64_t step = 1000000u / (unsigned)rfps;
+            /* Half an interval of slack: the render tick and the writer tick
+             * are not phase-locked, and insisting on a full interval would
+             * drop every other frame whenever they nearly coincide. */
+            if (last_us && now - last_us < step - step / 2) {
+                /* Hand back the PREVIOUS composite untouched rather than the
+                 * raw framebuffer. Returning fb_mem here would blank the film
+                 * out of the recorder's buffer until the next composite - a
+                 * flicker, which is worse than the staleness this avoids. The
+                 * whole frame is then up to one writer interval old, uniformly
+                 * so, which is precisely what the writer would have sampled
+                 * anyway. */
+                *full_frame = 1;
+                return g_rec_scratch;
+            }
+            last_us = now;
+        }
+    }
+
+    if (g_rec_scratch_sz < need) {
+        uint8_t *p = (uint8_t *)realloc(g_rec_scratch, need);
+        if (!p)
+            return s->fb_mem;               /* no scratch: capture without it */
+        g_rec_scratch = p;
+        g_rec_scratch_sz = need;
+    }
+    memcpy(g_rec_scratch, s->fb_mem, need);
+
+    rc = vidplay_capture_blend(g_rec_scratch, (int)s->fb_stride,
+                               (int)s->fb_width, (int)s->fb_height);
+    if (rc <= 0)
+        return s->fb_mem;   /* nothing drawn (fully clipped, or it just went) */
+
+    /* The blended region changes every frame and the guest knows nothing about
+     * it, so the dirty rect fvdi publishes no longer describes the screen. */
+    *full_frame = 1;
+    return g_rec_scratch;
+}
+
 static void et4000_record_frame(ET4000State *s)
 {
     if (!g_screenrecord_active)
@@ -773,14 +876,18 @@ static void et4000_record_frame(ET4000State *s)
          * thread and ffmpeg do the rest. Audio arrives via the SDL3 postmix
          * tap in dmasnd_hdmi.c. */
         /* pass the frame's dirty rect (fvdi publishes it) so the recorder
-         * copies only what changed; full frame when unknown */
-        if (g_fvdi_up_partial)
-            avrecord_video_frame(s->fb_mem, (int)s->fb_stride,
+         * copies only what changed; full frame when unknown, and always when
+         * a film has been composited in */
+        int rec_full = 0;
+        const void *rec_fb = et4000_record_compose(s, &rec_full);
+
+        if (g_fvdi_up_partial && !rec_full)
+            avrecord_video_frame(rec_fb, (int)s->fb_stride,
                                  (int)s->fb_width, (int)s->fb_height,
                                  (int)g_fvdi_up_x0, (int)g_fvdi_up_y0,
                                  (int)g_fvdi_up_x1, (int)g_fvdi_up_y1);
         else
-            avrecord_video_frame(s->fb_mem, (int)s->fb_stride,
+            avrecord_video_frame(rec_fb, (int)s->fb_stride,
                                  (int)s->fb_width, (int)s->fb_height,
                                  0, 0, (int)s->fb_width - 1, (int)s->fb_height - 1);
         /* The writer self-stops at the duration (works even if the display
@@ -796,10 +903,14 @@ static void et4000_record_frame(ET4000State *s)
     }
 
     char path[640];
+    int png_full = 0;   /* PNG mode writes whole frames; nothing to tell it */
+    const void *png_fb = et4000_record_compose(s, &png_full);
+    (void)png_full;
+
     snprintf(path, sizeof(path), "%s/frame_%04u.png",
              g_screenrecord_dir, g_screenrecord_frame++);
 
-    if (write_png_rgb(path, (const uint32_t *)s->fb_mem,
+    if (write_png_rgb(path, (const uint32_t *)png_fb,
                       s->fb_width, s->fb_height, s->fb_stride / 4) != 0)
     {
         fprintf(stderr, "[ET4000] capture frame write failed: %s\n", path);

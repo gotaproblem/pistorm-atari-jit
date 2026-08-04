@@ -49,6 +49,9 @@
 #define HOSTFS_PATHCONF_MAX 9
 #define FVDI_MAX_ACCEL_PIXELS (4096 * 4096)
 #define FVDI_MAX_ACCEL_SPAN 8192
+/* Vertex / move-index / crossing cap for FILL_POLYGON. Was an inline 4096
+ * with malloc'd scratch; now also sizes the static scratch arrays. */
+#define FVDI_POLY_MAX 4096
 #define NF_ST_RAM_SIZE 0x00400000u
 #define NF_TT_RAM_BASE 0x01000000u
 #define TOS_E_OK ((uae_u32)0)
@@ -1338,13 +1341,101 @@ static uint32_t fvdi_bytes_per_pixel(void)
   return 0;
 }
 
+/* --- MFDB header cache ---------------------------------------------------
+ * Every leaf accessor below used to re-read the guest MFDB header: bpp is a
+ * word, pixel_bytes calls bpp again, addressable_direct is a long + three
+ * words + two bpp reads (~7 guest reads), supported_direct ~9, pixel_addr
+ * ~13 - so resolving a single pixel address cost over twenty guest memory
+ * accesses, each one a bank-indexed indirect call. In the row fast paths
+ * that is ~26 header reads per row, and the two-pass ROP blitter resolves
+ * every row twice, so a 1080-row blit re-read the same six fields ~100k
+ * times for values that cannot change while it runs.
+ *
+ * A NatFeat call is a single guest instruction executed on the CPU thread,
+ * so nothing can mutate an MFDB header underneath us for its duration. The
+ * cache is therefore keyed only on the MFDB address and reset at the top of
+ * every fVDI call. Three distinct MFDBs per call (source, destination, the
+ * workstation's screen MFDB) is the practical maximum; a fourth falls back
+ * to an uncached parse rather than evicting.
+ *
+ * Values are byte-identical to what the old accessors computed. */
+typedef struct fvdi_mfdb_info {
+  uaecptr mfdb;
+  uae_u32 base;
+  uint32_t width;
+  uint32_t height;
+  uint32_t wdwidth;
+  uint32_t standard;
+  uint32_t bpp;
+  uint32_t pixel_bytes;
+  uint32_t row_bytes;
+  bool screen;
+  bool addressable;
+} fvdi_mfdb_info_t;
+
+#define FVDI_MFDB_CACHE_SLOTS 4
+static fvdi_mfdb_info_t g_fvdi_mfdb_cache[FVDI_MFDB_CACHE_SLOTS];
+static unsigned g_fvdi_mfdb_cache_used;
+
+static void fvdi_mfdb_cache_reset(void)
+{
+  g_fvdi_mfdb_cache_used = 0;
+}
+
+static void fvdi_mfdb_parse(uaecptr mfdb, fvdi_mfdb_info_t *out)
+{
+  out->mfdb = mfdb;
+  out->base = nf_read_long(mfdb + 0);
+  out->width = nf_read_word(mfdb + 4);
+  out->height = nf_read_word(mfdb + 6);
+  out->wdwidth = nf_read_word(mfdb + 8);
+  out->standard = nf_read_word(mfdb + 10);
+
+  uint32_t bpp = nf_read_word(mfdb + 12);
+  if (bpp == 15)
+    bpp = 16;
+  if (!bpp)
+    bpp = pistorm_fvdi_bpp();
+  out->bpp = bpp;
+
+  out->pixel_bytes = (bpp == 16) ? 2u : (bpp == 24) ? 3u : (bpp == 32) ? 4u : 0u;
+  out->row_bytes = out->wdwidth * 2u * bpp;
+  out->screen = (out->base == 0 || out->base == pistorm_fvdi_fb_base());
+
+  out->addressable =
+      out->screen ||
+      (out->base && out->width && out->height && out->wdwidth &&
+       out->pixel_bytes && (bpp == 16 || bpp == 24 || bpp == 32) &&
+       out->row_bytes >= out->width * out->pixel_bytes);
+}
+
+/* NULL for the screen (mfdb == 0); never NULL otherwise. */
+static const fvdi_mfdb_info_t *fvdi_mfdb_info(uaecptr mfdb)
+{
+  static fvdi_mfdb_info_t scratch;
+
+  if (!mfdb)
+    return NULL;
+
+  for (unsigned i = 0; i < g_fvdi_mfdb_cache_used; i++) {
+    if (g_fvdi_mfdb_cache[i].mfdb == mfdb)
+      return &g_fvdi_mfdb_cache[i];
+  }
+
+  if (g_fvdi_mfdb_cache_used < FVDI_MFDB_CACHE_SLOTS) {
+    fvdi_mfdb_info_t *slot = &g_fvdi_mfdb_cache[g_fvdi_mfdb_cache_used++];
+    fvdi_mfdb_parse(mfdb, slot);
+    return slot;
+  }
+
+  fvdi_mfdb_parse(mfdb, &scratch);
+  return &scratch;
+}
+
 static bool fvdi_mfdb_is_screen(uaecptr mfdb)
 {
-  if (!mfdb)
-    return true;
-
-  uae_u32 addr = nf_read_long(mfdb + 0);
-  return addr == 0 || addr == pistorm_fvdi_fb_base();
+  const fvdi_mfdb_info_t *info = fvdi_mfdb_info(mfdb);
+  return !info || info->screen;
 }
 
 /* --- Destination redirection for fill / line / polygon -------------------
@@ -1378,75 +1469,52 @@ static int32_t fvdi_dest_height(void)
 }
 
 
-static uint32_t fvdi_mfdb_bpp(uaecptr mfdb)
-{
-  if (!mfdb)
-    return pistorm_fvdi_bpp();
-  uint32_t bpp = nf_read_word(mfdb + 12);
-  if (bpp == 15)
-    bpp = 16;
-  return bpp ? bpp : pistorm_fvdi_bpp();
-}
+/* (fvdi_mfdb_bpp() / fvdi_mfdb_addressable_direct() are gone: every caller
+ * now reads ->bpp / ->addressable straight off the cached header.) */
 
 static uint32_t fvdi_mfdb_pixel_bytes(uaecptr mfdb)
 {
-  uint32_t bpp = fvdi_mfdb_bpp(mfdb);
-  if (bpp == 16)
-    return 2;
-  if (bpp == 24)
-    return 3;
-  if (bpp == 32)
-    return 4;
-  return 0;
-}
-
-static bool fvdi_mfdb_addressable_direct(uaecptr mfdb)
-{
-  if (!mfdb || fvdi_mfdb_is_screen(mfdb))
-    return true;
-
-  uaecptr base = nf_read_long(mfdb + 0);
-  uint32_t width = nf_read_word(mfdb + 4);
-  uint32_t height = nf_read_word(mfdb + 6);
-  uint32_t wdwidth = nf_read_word(mfdb + 8);
-  uint32_t bpp = fvdi_mfdb_bpp(mfdb);
-  uint32_t pixel_bytes = fvdi_mfdb_pixel_bytes(mfdb);
-  uint32_t row_bytes = wdwidth * 2u * bpp;
-
-  if (!base || !width || !height || !wdwidth || !pixel_bytes)
-    return false;
-  if (bpp != 16 && bpp != 24 && bpp != 32)
-    return false;
-  return row_bytes >= width * pixel_bytes;
+  const fvdi_mfdb_info_t *info = fvdi_mfdb_info(mfdb);
+  if (info)
+    return info->pixel_bytes;
+  uint32_t bpp = pistorm_fvdi_bpp();
+  return (bpp == 16) ? 2u : (bpp == 24) ? 3u : (bpp == 32) ? 4u : 0u;
 }
 
 static bool fvdi_mfdb_supported_direct(uaecptr mfdb)
 {
-  if (!fvdi_mfdb_addressable_direct(mfdb))
-    return false;
-  if (!mfdb || fvdi_mfdb_is_screen(mfdb))
+  const fvdi_mfdb_info_t *info = fvdi_mfdb_info(mfdb);
+  if (!info)
     return true;
-  return nf_read_word(mfdb + 10) == 0;
+  if (!info->addressable)
+    return false;
+  if (info->screen)
+    return true;
+  return info->standard == 0;
+}
+
+/* Row base address for a directly addressable MFDB, or 0. Callers that walk
+ * a row want this once instead of per pixel. */
+static uaecptr fvdi_mfdb_row_addr(const fvdi_mfdb_info_t *info, int32_t y)
+{
+  if (!info || y < 0 || !info->addressable ||
+      !info->base || !info->width || !info->height || !info->wdwidth ||
+      !info->pixel_bytes || (uint32_t)y >= info->height)
+    return 0;
+  return info->base + (uaecptr)y * info->row_bytes;
 }
 
 static uaecptr fvdi_mfdb_pixel_addr(uaecptr mfdb, int32_t x, int32_t y)
 {
-  if (!mfdb || x < 0 || y < 0)
+  const fvdi_mfdb_info_t *info = fvdi_mfdb_info(mfdb);
+  if (!info || x < 0 || (uint32_t)x >= info->width)
     return 0;
 
-  uaecptr base = nf_read_long(mfdb + 0);
-  uint32_t width = nf_read_word(mfdb + 4);
-  uint32_t height = nf_read_word(mfdb + 6);
-  uint32_t wdwidth = nf_read_word(mfdb + 8);
-  uint32_t bpp = fvdi_mfdb_bpp(mfdb);
-  uint32_t pixel_bytes = fvdi_mfdb_pixel_bytes(mfdb);
-
-  if (!fvdi_mfdb_addressable_direct(mfdb) ||
-      !base || !width || !height || !wdwidth || !pixel_bytes ||
-      (uint32_t)x >= width || (uint32_t)y >= height)
+  uaecptr row = fvdi_mfdb_row_addr(info, y);
+  if (!row)
     return 0;
 
-  return base + (uaecptr)y * wdwidth * 2u * bpp + (uaecptr)x * pixel_bytes;
+  return row + (uaecptr)x * info->pixel_bytes;
 }
 
 static uint32_t fvdi_mfdb_get_pixel(uaecptr mfdb, int32_t x, int32_t y)
@@ -1560,6 +1628,52 @@ static uint8_t *fvdi_screen_span_ptr(int32_t x, int32_t y, int32_t w)
          ((size_t)(uint32_t)y * pistorm_fvdi_width() + (uint32_t)x) * bytes;
 }
 
+/* Host pointer to a horizontal run of the *current fill/line/polygon
+ * destination* - the framebuffer normally, the redirected off-screen MFDB
+ * when g_fvdi_dest_mfdb is armed. NULL when the run is not directly
+ * addressable (ST-RAM MFDB, 24bpp, out of bounds), in which case callers
+ * must use the per-pixel path.
+ *
+ * This exists because the fill fast paths used fvdi_screen_span_ptr(), which
+ * has no g_fvdi_dest_mfdb check. With the redirection armed (v_opnbm - the
+ * GEM Elite case the redirection was added for) a solid fill wrote row 0
+ * into the bitmap via fvdi_fill_solid_span() and then memcpy'd *screen*
+ * content over rows 1..h-1 of the visible framebuffer; the patterned row
+ * path painted the whole rect onto the screen instead of the bitmap. Dirty
+ * marking is suppressed while redirected, so the damage was not even
+ * presented until something else touched those rows. */
+static uint8_t *fvdi_dest_span_ptr(int32_t x, int32_t y, int32_t w,
+                                   uint32_t *bytes_out)
+{
+  if (w <= 0)
+    return NULL;
+
+  if (!g_fvdi_dest_mfdb) {
+    uint32_t bytes = fvdi_bytes_per_pixel();
+    uint8_t *p = fvdi_screen_span_ptr(x, y, w);
+    if (!p || (bytes != 2 && bytes != 4))
+      return NULL;
+    if (bytes_out)
+      *bytes_out = bytes;
+    return p;
+  }
+
+  const uint32_t mb = fvdi_mfdb_pixel_bytes(g_fvdi_dest_mfdb);
+  if ((mb != 2 && mb != 4) || !fvdi_mfdb_supported_direct(g_fvdi_dest_mfdb))
+    return NULL;
+
+  const uaecptr a0 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x, y);
+  const uaecptr a1 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x + w - 1, y);
+  uae_u8 *rp;
+  if (!a0 || !a1 || a1 != a0 + (uaecptr)(w - 1) * mb || a0 < NF_ST_RAM_SIZE ||
+      !nf_host_ram_ptr(a0, (uint32_t)((size_t)w * mb), &rp))
+    return NULL;
+
+  if (bytes_out)
+    *bytes_out = mb;
+  return rp;
+}
+
 static bool fvdi_screen_copy_rows(int32_t src_x, int32_t src_y,
                                   int32_t dst_x, int32_t dst_y,
                                   int32_t w, int32_t h)
@@ -1655,66 +1769,72 @@ static void fvdi_note_screen_span(int32_t x, int32_t y, int32_t w)
                                (uint32_t)w * bytes);
 }
 
+/* Guest pixels are stored big-endian in host memory, so a whole pixel can be
+ * written with one store of the byte-swapped value. Alignment is not
+ * guaranteed (an MFDB base only has to be word aligned, and 24bpp rows make
+ * odd strides possible), hence the aligned(1) typedefs - AArch64 handles
+ * unaligned stores to normal memory natively and the compiler still
+ * auto-vectorises these loops. */
+typedef uint16_t fvdi_u16_una __attribute__((aligned(1), may_alias));
+typedef uint32_t fvdi_u32_una __attribute__((aligned(1), may_alias));
+
+static inline void fvdi_store_px(uint8_t *p, uint32_t bytes, uint32_t colour)
+{
+  if (bytes == 2)
+    *(fvdi_u16_una *)p = (uint16_t)__builtin_bswap16((uint16_t)colour);
+  else
+    *(fvdi_u32_una *)p = __builtin_bswap32(colour);
+}
+
+static inline uint32_t fvdi_load_px(const uint8_t *p, uint32_t bytes)
+{
+  if (bytes == 2)
+    return __builtin_bswap16(*(const fvdi_u16_una *)p);
+  return __builtin_bswap32(*(const fvdi_u32_una *)p);
+}
+
+/* Fill a run of one row with a constant colour, through a host pointer when
+ * the run is directly addressable. The stores are whole-pixel and uniform,
+ * so -O3 turns both loops into NEON stores; the old byte-at-a-time version
+ * defeated vectorisation entirely. */
+static void fvdi_fill_solid_span_ptr(uint8_t *p, uint32_t bytes, int32_t w,
+                                     uint32_t colour)
+{
+  if (bytes == 2) {
+    fvdi_u16_una *q = (fvdi_u16_una *)p;
+    const uint16_t v = (uint16_t)__builtin_bswap16((uint16_t)colour);
+    for (int32_t i = 0; i < w; i++)
+      q[i] = v;
+  } else {
+    fvdi_u32_una *q = (fvdi_u32_una *)p;
+    const uint32_t v = __builtin_bswap32(colour);
+    for (int32_t i = 0; i < w; i++)
+      q[i] = v;
+  }
+}
+
 static void fvdi_fill_solid_span(int32_t x, int32_t y, int32_t w, uint32_t colour)
 {
+  if (w <= 0)
+    return;
+
+  uint32_t bytes = 0;
+  uint8_t *p = fvdi_dest_span_ptr(x, y, w, &bytes);
+  if (p) {
+    fvdi_fill_solid_span_ptr(p, bytes, w, colour);
+    fvdi_note_screen_span(x, y, w);
+    return;
+  }
+
   if (g_fvdi_dest_mfdb) {
-    if (w <= 0)
-      return;
-    /* Fill the row through a host pointer when the bitmap is contiguous
-     * fast RAM; per-pixel nf_write fallback otherwise. */
-    const uint32_t mb = fvdi_mfdb_pixel_bytes(g_fvdi_dest_mfdb);
-    const uaecptr a0 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x, y);
-    const uaecptr a1 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x + w - 1, y);
-    uae_u8 *rp;
-    if ((mb == 2 || mb == 4) && a0 && a1 &&
-        a1 == a0 + (uaecptr)(w - 1) * mb && a0 >= NF_ST_RAM_SIZE &&
-        nf_host_ram_ptr(a0, (uint32_t)((size_t)w * mb), &rp)) {
-      if (mb == 4) {
-        for (int32_t i = 0; i < w; i++) {
-          rp[i * 4 + 0] = (uint8_t)(colour >> 24);
-          rp[i * 4 + 1] = (uint8_t)(colour >> 16);
-          rp[i * 4 + 2] = (uint8_t)(colour >> 8);
-          rp[i * 4 + 3] = (uint8_t)colour;
-        }
-      } else {
-        for (int32_t i = 0; i < w; i++) {
-          rp[i * 2 + 0] = (uint8_t)(colour >> 8);
-          rp[i * 2 + 1] = (uint8_t)colour;
-        }
-      }
-      return;
-    }
     for (int32_t i = 0; i < w; i++)
       fvdi_mfdb_put_pixel(g_fvdi_dest_mfdb, x + i, y, colour);
     return;
   }
 
-  uint8_t *p = fvdi_pixel_ptr(x, y);
-  uint32_t bytes = fvdi_bytes_per_pixel();
-
-  if (!p || w <= 0)
-    return;
-
-  if (bytes == 2) {
-    uint8_t hi = (uint8_t)(colour >> 8);
-    uint8_t lo = (uint8_t)colour;
-    for (int32_t i = 0; i < w; i++) {
-      p[i * 2] = hi;
-      p[i * 2 + 1] = lo;
-    }
-  } else {
-    uint8_t a = (uint8_t)(colour >> 24);
-    uint8_t r = (uint8_t)(colour >> 16);
-    uint8_t g = (uint8_t)(colour >> 8);
-    uint8_t b = (uint8_t)colour;
-    for (int32_t i = 0; i < w; i++) {
-      p[i * 4] = a;
-      p[i * 4 + 1] = r;
-      p[i * 4 + 2] = g;
-      p[i * 4 + 3] = b;
-    }
-  }
-
+  /* Screen, but not a directly addressable run (24bpp / clipped away). */
+  for (int32_t i = 0; i < w; i++)
+    fvdi_put_raw_pixel_marked(x + i, y, colour, false);
   fvdi_note_screen_span(x, y, w);
 }
 
@@ -1803,14 +1923,17 @@ static uae_u32 fvdi_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
 
   if (!pattern && (mode == 1 || mode == 2)) {
     /* Solid fill via row replication: build the first row once, memcpy the
-     * rest (a full-screen 1080p32 fill through the span loop was 7-11ms). */
+     * rest (a full-screen 1080p32 fill through the span loop was 7-11ms).
+     * fvdi_dest_span_ptr() rather than fvdi_screen_span_ptr() so an armed
+     * off-screen redirection stays inside the bitmap - see the comment on
+     * fvdi_dest_span_ptr(). */
+    uint32_t fbytes = 0;
     fvdi_fill_solid_span(x, y, w, fg);
-    const uint8_t *first = fvdi_screen_span_ptr(x, y, w);
-    const uint32_t fbytes = fvdi_bytes_per_pixel();
+    const uint8_t *first = fvdi_dest_span_ptr(x, y, w, &fbytes);
     if (first && fbytes) {
       const size_t frow = (size_t)w * fbytes;
       for (int32_t yy = 1; yy < h; yy++) {
-        uint8_t *dst = fvdi_screen_span_ptr(x, y + yy, w);
+        uint8_t *dst = fvdi_dest_span_ptr(x, y + yy, w, NULL);
         if (dst) {
           memcpy(dst, first, frow);
           fvdi_note_screen_span(x, y + yy, w);
@@ -1841,21 +1964,35 @@ static uae_u32 fvdi_fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
      * 4-14ms uninterruptible natfeat op (the Boing saturation signature).
      * Same logic on a hoisted row pointer is ~20x faster; per-pixel loop
      * kept below as the fallback. */
-    uint8_t *rp = fvdi_screen_span_ptr(x, y + yy, w);
-    uint32_t rbytes = fvdi_bytes_per_pixel();
-    if (rp && (rbytes == 2 || rbytes == 4)) {
-      for (int32_t xx = 0; xx < w; xx++) {
-        uint8_t *pp = rp + (size_t)xx * rbytes;
-        uint32_t dst = (rbytes == 2)
-          ? (((uint32_t)pp[0] << 8) | pp[1])
-          : (((uint32_t)pp[0] << 24) | ((uint32_t)pp[1] << 16) |
-             ((uint32_t)pp[2] << 8) | pp[3]);
-        uint32_t v = fvdi_apply_logic(dst, fg, bg, pat, x + xx, mode);
-        if (rbytes == 2) {
-          pp[0] = (uint8_t)(v >> 8);  pp[1] = (uint8_t)v;
-        } else {
-          pp[0] = (uint8_t)(v >> 24); pp[1] = (uint8_t)(v >> 16);
-          pp[2] = (uint8_t)(v >> 8);  pp[3] = (uint8_t)v;
+    uint32_t rbytes = 0;
+    uint8_t *rp = fvdi_dest_span_ptr(x, y + yy, w, &rbytes);
+    if (rp) {
+      if (mode == 1) {
+        /* MD_REPLACE: the destination is never read, and fvdi_apply_logic()
+         * indexes the pattern with (x & 0x0f) - so the row is exactly a
+         * 16-pixel tile repeated. Build one tile, then replicate it with
+         * memcpy (doubling, so the copies grow geometrically). The old loop
+         * recomputed the pattern bit and issued a separate store for every
+         * pixel of a 1920-pixel row. */
+        const int32_t tile = w < 16 ? w : 16;
+        for (int32_t xx = 0; xx < tile; xx++) {
+          const bool bit = (pat & (1u << ((x + xx) & 0x0f))) != 0;
+          fvdi_store_px(rp + (size_t)xx * rbytes, rbytes, bit ? fg : bg);
+        }
+        int32_t done = tile;
+        while (done < w) {
+          int32_t n = done;
+          if (n > w - done)
+            n = w - done;
+          memcpy(rp + (size_t)done * rbytes, rp, (size_t)n * rbytes);
+          done += n;
+        }
+      } else {
+        for (int32_t xx = 0; xx < w; xx++) {
+          uint8_t *pp = rp + (size_t)xx * rbytes;
+          uint32_t dst = fvdi_load_px(pp, rbytes);
+          fvdi_store_px(pp, rbytes,
+                        fvdi_apply_logic(dst, fg, bg, pat, x + xx, mode));
         }
       }
     } else {
@@ -1879,6 +2016,182 @@ static void fvdi_dump_mfdb_miss(const char *tag, unsigned op,
                                 uaecptr src_mfdb, uaecptr dst_mfdb,
                                 int32_t w, int32_t h);
 
+/* --- 8-bit chunky (antialiased) expand -----------------------------------
+ * fVDI's FreeType module renders every antialiased glyph into an MFDB with
+ * standard = 0x0100 (chunky) and bitplanes = 8, where each source byte is a
+ * coverage/alpha value, and pushes it through vrt_cpyfm -> EXPAND_AREA
+ * (modules/ft2/ft2.c: "This MFDB is only supported by the aranym driver").
+ *
+ * This backend used to reject that shape by returning 1 - i.e. claiming the
+ * operation was done - so with `antialias` enabled in fvdi.sys every
+ * antialiased glyph was silently dropped and the text simply did not appear.
+ * Returning 0 instead would be no better: fVDI's fallback is _default_expand,
+ * a *mono* expander, which would read the coverage bytes as bitmap bits and
+ * draw noise.
+ *
+ * Semantics follow ARAnyM's SoftVdiDriver::expandArea, which builds an
+ * alpha surface and lets SDL blend it (out = src*a + dst*(255-a)):
+ *
+ *   MD_REPLACE  blend(bg,  fg,     a)      - destination not read
+ *   MD_TRANS    blend(dst, fg,     a)
+ *   MD_XOR      blend(dst, ~dst,   a)
+ *   MD_ERASE    blend(dst, bg,     255-a)
+ *
+ * ARAnyM restricts this to 32bpp screen surfaces; 16bpp is handled here too,
+ * blended in the native RGB565 field widths. */
+static inline uint32_t fvdi_blend_ch(uint32_t d, uint32_t s, uint32_t a)
+{
+  const uint32_t t = s * a + d * (255u - a) + 128u;
+  return (t + (t >> 8)) >> 8;   /* rounded /255 */
+}
+
+static inline uint32_t fvdi_blend_px(uint32_t dst, uint32_t src, uint32_t a,
+                                     uint32_t bytes)
+{
+  if (a == 0)
+    return dst;
+  if (a >= 255)
+    return src;
+
+  if (bytes == 2) {
+    return (fvdi_blend_ch((dst >> 11) & 0x1fu, (src >> 11) & 0x1fu, a) << 11) |
+           (fvdi_blend_ch((dst >> 5) & 0x3fu, (src >> 5) & 0x3fu, a) << 5) |
+            fvdi_blend_ch(dst & 0x1fu, src & 0x1fu, a);
+  }
+  return (fvdi_blend_ch((dst >> 16) & 0xffu, (src >> 16) & 0xffu, a) << 16) |
+         (fvdi_blend_ch((dst >> 8) & 0xffu, (src >> 8) & 0xffu, a) << 8) |
+          fvdi_blend_ch(dst & 0xffu, src & 0xffu, a);
+}
+
+/* Host pointer to one destination row of an expand, or NULL for the
+ * per-pixel fallback. Screen rows come straight out of the shadow
+ * framebuffer; off-screen MFDBs are host-direct in TT-RAM, while ST-RAM
+ * destinations decline because writes there have to go through DMA. */
+static uint8_t *fvdi_expand_dst_row(uaecptr dst_mfdb, bool dst_screen,
+                                    int32_t dst_x, int32_t row_y, int32_t w,
+                                    uint32_t *bytes_io)
+{
+  if (dst_screen)
+    return fvdi_screen_span_ptr(dst_x, row_y, w);
+
+  const uint32_t mb = fvdi_mfdb_pixel_bytes(dst_mfdb);
+  if ((mb != 2 && mb != 4) || !fvdi_mfdb_supported_direct(dst_mfdb))
+    return NULL;
+
+  const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, row_y);
+  const uaecptr de = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x + w - 1, row_y);
+  uae_u8 *p;
+  if (!da || !de || de != da + (uaecptr)(w - 1) * mb || da < NF_ST_RAM_SIZE ||
+      !nf_host_ram_ptr(da, (uint32_t)((size_t)w * mb), &p))
+    return NULL;
+
+  *bytes_io = mb;
+  return p;
+}
+
+static uae_u32 fvdi_expand_chunky_rows(uaecptr dst_mfdb, bool dst_screen,
+                                       uint32_t dst_bytes, uaecptr data,
+                                       uint32_t pitch, int32_t src_x,
+                                       int32_t dst_x, int32_t dst_y,
+                                       int32_t w, int32_t h, unsigned mode,
+                                       uint32_t fg, uint32_t bg)
+{
+  for (int32_t yy = 0; yy < h; yy++) {
+    uint32_t rb = dst_bytes;
+    uint8_t *rp = fvdi_expand_dst_row(dst_mfdb, dst_screen, dst_x, dst_y + yy,
+                                      w, &rb);
+    const uaecptr srow = data + (uaecptr)yy * pitch + (uaecptr)src_x;
+
+    /* Coverage bytes come from the FreeType glyph buffer in guest RAM; take
+     * a host pointer for the row when we can, so the inner loop is not one
+     * bank-dispatched guest read per pixel. Reads from ST-RAM through the
+     * mirror are fine - only writes have to go via DMA. */
+    const uae_u8 *sp = NULL;
+    uae_u8 *sq;
+    if (nf_host_ram_ptr(srow, (uint32_t)w, &sq))
+      sp = sq;
+
+    if (rp && (rb == 2 || rb == 4)) {
+      for (int32_t xx = 0; xx < w; xx++) {
+        const uint32_t a = sp ? sp[xx] : nf_read_byte(srow + (uaecptr)xx);
+        uint8_t *pp = rp + (size_t)xx * rb;
+        uint32_t out;
+
+        switch (mode) {
+          case 1: /* MD_REPLACE */
+            out = fvdi_blend_px(bg, fg, a, rb);
+            break;
+          case 3: /* MD_XOR */
+            if (!a)
+              continue;
+            {
+              const uint32_t d = fvdi_load_px(pp, rb);
+              const uint32_t inv = (rb == 2) ? (~d & 0xffffu) : (~d & 0xffffffu);
+              out = fvdi_blend_px(d, inv, a, rb);
+            }
+            break;
+          case 4: /* MD_ERASE */
+            if (a >= 255)
+              continue;
+            out = fvdi_blend_px(fvdi_load_px(pp, rb), bg, 255u - a, rb);
+            break;
+          case 2: /* MD_TRANS */
+          default:
+            if (!a)
+              continue;
+            out = (a >= 255) ? fg : fvdi_blend_px(fvdi_load_px(pp, rb), fg, a, rb);
+            break;
+        }
+        fvdi_store_px(pp, rb, out);
+      }
+    } else {
+      for (int32_t xx = 0; xx < w; xx++) {
+        const uint32_t a = sp ? sp[xx] : nf_read_byte(srow + (uaecptr)xx);
+        const int32_t px = dst_x + xx;
+        const int32_t py = dst_y + yy;
+        uint32_t out;
+
+        switch (mode) {
+          case 1:
+            out = fvdi_blend_px(bg, fg, a, dst_bytes);
+            break;
+          case 3:
+            if (!a)
+              continue;
+            {
+              const uint32_t d = fvdi_target_get_pixel(dst_mfdb, px, py);
+              const uint32_t inv =
+                  (dst_bytes == 2) ? (~d & 0xffffu) : (~d & 0xffffffu);
+              out = fvdi_blend_px(d, inv, a, dst_bytes);
+            }
+            break;
+          case 4:
+            if (a >= 255)
+              continue;
+            out = fvdi_blend_px(fvdi_target_get_pixel(dst_mfdb, px, py), bg,
+                                255u - a, dst_bytes);
+            break;
+          case 2:
+          default:
+            if (!a)
+              continue;
+            out = (a >= 255)
+                      ? fg
+                      : fvdi_blend_px(fvdi_target_get_pixel(dst_mfdb, px, py),
+                                      fg, a, dst_bytes);
+            break;
+        }
+        fvdi_target_put_pixel(dst_mfdb, px, py, out, false);
+      }
+    }
+
+    if (dst_screen)
+      fvdi_note_screen_span(dst_x, dst_y + yy, w);
+  }
+
+  return 1;
+}
+
 static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
                                 int32_t src_x, int32_t src_y,
                                 int32_t dst_x, int32_t dst_y, int32_t w, int32_t h,
@@ -1890,13 +2203,30 @@ static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
   uaecptr data_base = nf_read_long(src + 0);
   int32_t src_w = (int32_t)nf_read_word(src + 4);
   int32_t src_h = (int32_t)nf_read_word(src + 6);
-  uint32_t pitch = (uint32_t)nf_read_word(src + 8) * 2u; /* monochrome MFDB */
+  uint32_t pitch = (uint32_t)nf_read_word(src + 8) * 2u;
   uint32_t src_planes = (uint32_t)nf_read_word(src + 12);
   uint32_t src_standard = (uint32_t)nf_read_word(src + 10);
   if (!data_base || pitch == 0)
     return 1;
-  if ((src_standard & 0x100u) != 0 || (src_planes != 0 && src_planes != 1))
+
+  /* MFDB_STAND bit 0x1000 = "does not wrap on words" (ARAnyM applies the
+   * same halving in expandArea). Without it a source that sets the bit is
+   * read a row out of step. */
+  if ((src_standard & 0x1000u) != 0)
+    pitch >>= 1;
+  if (pitch == 0)
     return 1;
+
+  /* 0x100 = chunky. Combined with 8 planes that is fVDI's antialiased-glyph
+   * shape and is handled below; anything else chunky, or a plane count that
+   * is not mono, we still decline. */
+  const bool chunky = (src_standard & 0x100u) != 0;
+  if (chunky) {
+    if (src_planes != 8)
+      return 1;
+  } else if (src_planes != 0 && src_planes != 1) {
+    return 1;
+  }
 
   int32_t dst_w;
   int32_t dst_h;
@@ -1954,53 +2284,95 @@ static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
   const bool exp_dst_screen = fvdi_mfdb_is_screen(dst_mfdb);
   const uint32_t exp_bytes = fvdi_bytes_per_pixel();
 
+  if (chunky)
+    return fvdi_expand_chunky_rows(dst_mfdb, exp_dst_screen, exp_bytes,
+                                   data, pitch, src_x, dst_x, dst_y, w, h,
+                                   mode, fg, bg);
+
   /* (diagnostic moved into the per-row fallback below so it only fires
    * when the row fast path genuinely declined) */
 
   for (int32_t yy = 0; yy < h; yy++) {
     uint16_t word = 0;
     int32_t word_base = -1;
-    uint8_t *rp = NULL;
     uint32_t rb = exp_bytes;
-    if (exp_dst_screen) {
-      rp = fvdi_screen_span_ptr(dst_x, dst_y + yy, w);
-    } else {
-      /* offscreen dst (phase 4): TT-RAM MFDBs are host-direct, so expand
-       * rows there too; ST-RAM destinations keep the per-pixel fallback. */
-      const uint32_t mb = fvdi_mfdb_pixel_bytes(dst_mfdb);
-      if ((mb == 2 || mb == 4) && fvdi_mfdb_supported_direct(dst_mfdb)) {
-        const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, dst_y + yy);
-        const uaecptr de = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x + w - 1, dst_y + yy);
-        uae_u8 *p;
-        if (da && de && de == da + (uaecptr)(w - 1) * mb &&
-            da >= NF_ST_RAM_SIZE &&
-            nf_host_ram_ptr(da, (uint32_t)((size_t)w * mb), &p)) {
-          rp = p;
-          rb = mb;
-        }
-      }
-    }
+    uint8_t *rp = fvdi_expand_dst_row(dst_mfdb, exp_dst_screen, dst_x,
+                                      dst_y + yy, w, &rb);
     if (rp && (rb == 2 || rb == 4)) {
-      for (int32_t xx = 0; xx < w; xx++) {
-        int32_t sx = src_x + xx;
-        int32_t base = sx & ~15;
-        if (base != word_base) {
-          word_base = base;
-          word = nf_read_word(data + (uaecptr)yy * pitch + (uaecptr)((sx >> 3) & ~1));
+      /* Walk the row a source word at a time instead of a pixel at a time.
+       * Two things fall out of that:
+       *
+       *  - MD_REPLACE never reads the destination, so the read-modify-write
+       *    collapses to a pure store. The old loop loaded the destination
+       *    pixel even in mode 1, where the value is discarded.
+       *  - A uniform source word (0xffff / 0x0000) makes the whole 16-pixel
+       *    run one action: a solid span, or nothing at all. Glyph and icon
+       *    bitmaps - the traffic this op actually carries, since fVDI turns
+       *    every string into vrt_cpyfm - are mostly uniform words, and in
+       *    MD_TRANS an all-zero word means the run can be skipped outright.
+       */
+      const uaecptr srow = data + (uaecptr)yy * pitch;
+      int32_t xx = 0;
+      while (xx < w) {
+        const int32_t sx = src_x + xx;
+        const int32_t bit = sx & 0x0f;
+        if ((sx & ~15) != word_base) {
+          word_base = sx & ~15;
+          word = nf_read_word(srow + (uaecptr)((sx >> 3) & ~1));
         }
-        uint16_t bit_pattern = ((word >> (15 - (sx & 0x0f))) & 1u) ? 0xffffu : 0x0000u;
-        uint8_t *pp = rp + (size_t)xx * rb;
-        uint32_t dst = (rb == 2)
-          ? (((uint32_t)pp[0] << 8) | pp[1])
-          : (((uint32_t)pp[0] << 24) | ((uint32_t)pp[1] << 16) |
-             ((uint32_t)pp[2] << 8) | pp[3]);
-        uint32_t v = fvdi_apply_mono_logic(dst, fg, bg, bit_pattern, mode);
-        if (rb == 2) {
-          pp[0] = (uint8_t)(v >> 8);  pp[1] = (uint8_t)v;
+
+        int32_t run = 16 - bit;
+        if (run > w - xx)
+          run = w - xx;
+        uint8_t *rowp = rp + (size_t)xx * rb;
+
+        if (word == 0xffffu || word == 0x0000u) {
+          const bool set = (word != 0);
+          switch (mode) {
+            case 1: /* MD_REPLACE */
+              fvdi_fill_solid_span_ptr(rowp, rb, run, set ? fg : bg);
+              xx += run;
+              continue;
+            case 2: /* MD_TRANS: clear bits leave the destination alone */
+              if (set)
+                fvdi_fill_solid_span_ptr(rowp, rb, run, fg);
+              xx += run;
+              continue;
+            case 3: /* MD_XOR: clear bits leave the destination alone */
+              if (!set) {
+                xx += run;
+                continue;
+              }
+              break;
+            case 4: /* MD_ERASE: set bits leave the destination alone */
+              if (set) {
+                xx += run;
+                continue;
+              }
+              fvdi_fill_solid_span_ptr(rowp, rb, run, bg);
+              xx += run;
+              continue;
+            default:
+              break;
+          }
+        }
+
+        if (mode == 1) {
+          for (int32_t i = 0; i < run; i++) {
+            const bool set = ((word >> (15 - (bit + i))) & 1u) != 0;
+            fvdi_store_px(rowp + (size_t)i * rb, rb, set ? fg : bg);
+          }
         } else {
-          pp[0] = (uint8_t)(v >> 24); pp[1] = (uint8_t)(v >> 16);
-          pp[2] = (uint8_t)(v >> 8);  pp[3] = (uint8_t)v;
+          for (int32_t i = 0; i < run; i++) {
+            const uint16_t bit_pattern =
+                ((word >> (15 - (bit + i))) & 1u) ? 0xffffu : 0x0000u;
+            uint8_t *pp = rowp + (size_t)i * rb;
+            fvdi_store_px(pp, rb,
+                          fvdi_apply_mono_logic(fvdi_load_px(pp, rb), fg, bg,
+                                                bit_pattern, mode));
+          }
         }
+        xx += run;
       }
     } else {
       if (yy == 0 && (int64_t)w * (int64_t)h >= 4096)
@@ -2028,11 +2400,22 @@ static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
   return 1;
 }
 
-static int fvdi_compare_int16(const void *a, const void *b)
+/* Crossing lists are a handful of entries per scanline, so an insertion sort
+ * beats qsort's function-pointer comparator by a wide margin - and qsort was
+ * being called once per scanline of every polygon. The engine synthesises
+ * circles, ellipses, arcs, thick lines and bezier fills as polygons, so this
+ * runs far more often than "fill polygon" suggests. */
+static void fvdi_sort_int16(int16_t *v, int32_t n)
 {
-  int av = *(const int16_t *)a;
-  int bv = *(const int16_t *)b;
-  return (av > bv) - (av < bv);
+  for (int32_t i = 1; i < n; i++) {
+    const int16_t key = v[i];
+    int32_t j = i - 1;
+    while (j >= 0 && v[j] > key) {
+      v[j + 1] = v[j];
+      j--;
+    }
+    v[j + 1] = key;
+  }
 }
 
 static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
@@ -2042,7 +2425,7 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
 {
   if (!points || count <= 0)
     return 1;
-  if (count > 4096 || moves > 4096)
+  if (count > FVDI_POLY_MAX || moves > FVDI_POLY_MAX)
     return (uae_u32)-1;
 
   int32_t min_x = 0;
@@ -2068,16 +2451,16 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
   if (min_x > max_x || min_y > max_y)
     return 1;
 
-  int16_t *px = (int16_t *)malloc((size_t)count * sizeof(*px));
-  int16_t *py = (int16_t *)malloc((size_t)count * sizeof(*py));
+  /* Scratch is static rather than malloc'd: count and moves are already
+   * capped at FVDI_POLY_MAX above, this runs only on the CPU thread inside a
+   * single guest instruction, and the old code did three or four
+   * malloc/free pairs per polygon call. Same precedent as the ROP blitter's
+   * static row buffers. */
+  static int16_t px[FVDI_POLY_MAX];
+  static int16_t py[FVDI_POLY_MAX];
+  static int16_t indices_buf[FVDI_POLY_MAX];
+  static int16_t crossings[FVDI_POLY_MAX];
   int16_t *indices = NULL;
-  int16_t *crossings = (int16_t *)malloc((size_t)count * sizeof(*crossings));
-  if (!px || !py || !crossings) {
-    free(px);
-    free(py);
-    free(crossings);
-    return (uae_u32)-1;
-  }
 
   for (int32_t i = 0; i < count; i++) {
     px[i] = (int16_t)nf_read_word(points + (uaecptr)i * 4u);
@@ -2086,13 +2469,7 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
 
   bool use_indices = moves > 0 && index_addr != 0;
   if (use_indices) {
-    indices = (int16_t *)malloc((size_t)moves * sizeof(*indices));
-    if (!indices) {
-      free(px);
-      free(py);
-      free(crossings);
-      return (uae_u32)-1;
-    }
+    indices = indices_buf;
     for (int32_t i = 0; i < moves; i++)
       indices[i] = (int16_t)nf_read_word(index_addr + (uaecptr)i * 2u);
     while (moves > 0 && indices[moves - 1] == -4)
@@ -2104,13 +2481,8 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
 
   if (!use_indices && count > 1 && px[0] == px[count - 1] && py[0] == py[count - 1])
     count--;
-  if (count <= 0) {
-    free(indices);
-    free(crossings);
-    free(px);
-    free(py);
+  if (count <= 0)
     return 1;
-  }
 
   int32_t poly_min_y = py[0];
   int32_t poly_max_y = py[0];
@@ -2173,7 +2545,7 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
       }
     }
 
-    qsort(crossings, (size_t)ints, sizeof(*crossings), fvdi_compare_int16);
+    fvdi_sort_int16(crossings, ints);
     for (int32_t i = 0; i < ints - 1; i += 2) {
       int32_t span_x1 = crossings[i];
       int32_t span_x2 = crossings[i + 1];
@@ -2186,10 +2558,6 @@ static uae_u32 fvdi_fill_polygon(uaecptr points, int32_t count,
     }
   }
 
-  free(indices);
-  free(crossings);
-  free(px);
-  free(py);
   return 1;
 }
 
@@ -2218,11 +2586,64 @@ static uae_u32 fvdi_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
     max_y = (int32_t)nf_read_long(clip + 12);
   }
 
+  /* Horizontal solid run. fVDI emits a lot of these - window frames, widget
+   * separators, and everything the engine decomposes into single-row spans -
+   * and they are exactly a solid span fill, which is a vectorised store loop
+   * instead of a Bresenham walk. */
+  if (y1 == y2 && pattern == 0xffffu && (mode == 1 || mode == 2) &&
+      y1 >= min_y && y1 <= max_y) {
+    int32_t lx = x1 < x2 ? x1 : x2;
+    int32_t rx = x1 < x2 ? x2 : x1;
+    if (lx < min_x)
+      lx = min_x;
+    if (rx > max_x)
+      rx = max_x;
+    if (lx <= rx)
+      fvdi_fill_solid_span(lx, y1, rx - lx + 1, fg);
+    return 1;
+  }
+
+  /* General case. The old loop went through fvdi_get_raw_pixel /
+   * fvdi_put_raw_pixel per pixel: each call re-derived the framebuffer base,
+   * width and depth, and put_raw_pixel marked the dirty rect once *per
+   * pixel*. Hoisting the destination row pointer and accumulating one dirty
+   * span per row removes both. */
+  const int32_t dest_w = fvdi_dest_width();
+  uint8_t *rowp = NULL;
+  uint32_t rbytes = 0;
+  int32_t row_y = -1;
+  int32_t run_x0 = 0;
+  int32_t run_x1 = -1;
+
   for (;;) {
-    if (x1 >= min_x && x1 <= max_x && y1 >= min_y && y1 <= max_y) {
-      uint32_t dst = fvdi_get_raw_pixel(x1, y1);
-      uint16_t pat = (pattern & (1u << (15 - (step & 0x0f)))) ? 0xffffu : 0u;
-      fvdi_put_raw_pixel(x1, y1, fvdi_apply_logic(dst, fg, bg, pat, 0, mode));
+    if (x1 >= min_x && x1 <= max_x && y1 >= min_y && y1 <= max_y &&
+        fvdi_xy_in_bounds(x1, y1)) {
+      if (y1 != row_y) {
+        if (run_x1 >= run_x0)
+          fvdi_note_screen_span(run_x0, row_y, run_x1 - run_x0 + 1);
+        row_y = y1;
+        run_x0 = x1;
+        run_x1 = x1 - 1;
+        rowp = fvdi_dest_span_ptr(0, y1, dest_w, &rbytes);
+      }
+
+      const uint16_t pat = (pattern & (1u << (15 - (step & 0x0f)))) ? 0xffffu : 0u;
+      if (rowp) {
+        uint8_t *pp = rowp + (size_t)x1 * rbytes;
+        fvdi_store_px(pp, rbytes,
+                      fvdi_apply_logic(fvdi_load_px(pp, rbytes), fg, bg, pat, 0,
+                                       mode));
+      } else {
+        uint32_t dst = fvdi_get_raw_pixel(x1, y1);
+        fvdi_put_raw_pixel_marked(x1, y1,
+                                  fvdi_apply_logic(dst, fg, bg, pat, 0, mode),
+                                  false);
+      }
+
+      if (x1 < run_x0)
+        run_x0 = x1;
+      if (x1 > run_x1)
+        run_x1 = x1;
     }
     if (x1 == x2 && y1 == y2)
       break;
@@ -2237,6 +2658,9 @@ static uae_u32 fvdi_draw_line(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
     }
     step++;
   }
+
+  if (run_x1 >= run_x0)
+    fvdi_note_screen_span(run_x0, row_y, run_x1 - run_x0 + 1);
 
   return 1;
 }
@@ -2915,11 +3339,25 @@ static void fvdi_mouse_hide(void)
   if (!g_fvdi_mouse.visible)
     return;
 
+  /* Row-hoisted: hide/show run on every cursor move *and* around every
+   * drawing op whose rectangle intersects the cursor, so 256 dispatcher
+   * round-trips with a dirty-rect mark per pixel was a fixed tax on the
+   * whole fVDI path. One span mark per row now. */
+  const int32_t bx = g_fvdi_mouse.backup_x;
+  const int32_t by = g_fvdi_mouse.backup_y;
+  const int32_t bw = g_fvdi_mouse.backup_w;
+  const uint32_t bytes = fvdi_bytes_per_pixel();
+
   for (int32_t yy = 0; yy < g_fvdi_mouse.backup_h; yy++) {
-    for (int32_t xx = 0; xx < g_fvdi_mouse.backup_w; xx++) {
-      fvdi_put_raw_pixel(g_fvdi_mouse.backup_x + xx,
-                         g_fvdi_mouse.backup_y + yy,
-                         g_fvdi_mouse.backup[yy * 16 + xx]);
+    uint8_t *rp = g_fvdi_dest_mfdb ? NULL : fvdi_screen_span_ptr(bx, by + yy, bw);
+    if (rp && (bytes == 2 || bytes == 4)) {
+      for (int32_t xx = 0; xx < bw; xx++)
+        fvdi_store_px(rp + (size_t)xx * bytes, bytes,
+                      g_fvdi_mouse.backup[yy * 16 + xx]);
+      fvdi_note_screen_span(bx, by + yy, bw);
+    } else {
+      for (int32_t xx = 0; xx < bw; xx++)
+        fvdi_put_raw_pixel(bx + xx, by + yy, g_fvdi_mouse.backup[yy * 16 + xx]);
     }
   }
 
@@ -2959,18 +3397,41 @@ static void fvdi_mouse_show(int32_t x, int32_t y)
   g_fvdi_mouse.backup_w = w;
   g_fvdi_mouse.backup_h = h;
 
+  const uint32_t bytes = fvdi_bytes_per_pixel();
+
   for (int32_t yy = 0; yy < h; yy++) {
     uint16_t mask = g_fvdi_mouse.mask[sy + yy] << sx;
     uint16_t data = g_fvdi_mouse.data[sy + yy] << sx;
-    for (int32_t xx = 0; xx < w; xx++) {
-      uint32_t dst = fvdi_get_raw_pixel(dx + xx, dy + yy);
-      g_fvdi_mouse.backup[yy * 16 + xx] = dst;
-      if (data & 0x8000u)
-        fvdi_put_raw_pixel(dx + xx, dy + yy, g_fvdi_mouse.fg);
-      else if (mask & 0x8000u)
-        fvdi_put_raw_pixel(dx + xx, dy + yy, g_fvdi_mouse.bg);
-      mask <<= 1;
-      data <<= 1;
+    uint8_t *rp = g_fvdi_dest_mfdb ? NULL : fvdi_screen_span_ptr(dx, dy + yy, w);
+
+    if (rp && (bytes == 2 || bytes == 4)) {
+      bool touched = false;
+      for (int32_t xx = 0; xx < w; xx++) {
+        uint8_t *pp = rp + (size_t)xx * bytes;
+        g_fvdi_mouse.backup[yy * 16 + xx] = fvdi_load_px(pp, bytes);
+        if (data & 0x8000u) {
+          fvdi_store_px(pp, bytes, g_fvdi_mouse.fg);
+          touched = true;
+        } else if (mask & 0x8000u) {
+          fvdi_store_px(pp, bytes, g_fvdi_mouse.bg);
+          touched = true;
+        }
+        mask <<= 1;
+        data <<= 1;
+      }
+      if (touched)
+        fvdi_note_screen_span(dx, dy + yy, w);
+    } else {
+      for (int32_t xx = 0; xx < w; xx++) {
+        uint32_t dst = fvdi_get_raw_pixel(dx + xx, dy + yy);
+        g_fvdi_mouse.backup[yy * 16 + xx] = dst;
+        if (data & 0x8000u)
+          fvdi_put_raw_pixel(dx + xx, dy + yy, g_fvdi_mouse.fg);
+        else if (mask & 0x8000u)
+          fvdi_put_raw_pixel(dx + xx, dy + yy, g_fvdi_mouse.bg);
+        mask <<= 1;
+        data <<= 1;
+      }
     }
   }
 
@@ -3103,6 +3564,11 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params);
 
 static uae_u32 nf_call_fvdi(uae_u32 subid, uaecptr params)
 {
+  /* MFDB headers cannot change while a NatFeat call runs (one guest
+   * instruction, CPU thread), so the header cache is valid for exactly the
+   * span of this call and is dropped on entry to the next one. */
+  fvdi_mfdb_cache_reset();
+
 #ifndef ATARI_LAT_DIAG
   return nf_call_fvdi_inner(subid, params);
 #else
@@ -3403,6 +3869,26 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
 
     case FVDI_TEXT_AREA:
     {
+      /* Deliberately declined (fvdi_text_area() below is kept but unused).
+       *
+       * Returning 0 makes the fVDI engine render the whole string into a
+       * temporary mono buffer and issue ONE vrt_cpyfm, i.e. one
+       * FVDI_EXPAND_AREA per string - which after the run-oriented expand
+       * loop above is faster than the per-pixel text_area() renderer would
+       * be. aranym.sys also pre-filters this call hard (drivers/aranym/
+       * dispatch.c: no text effects, no offset table, unpacked bitmap font,
+       * cell width exactly 8), so implementing it host-side would only ever
+       * capture the GEM system font and never the antialiased FreeType text
+       * that XaAES actually draws. ARAnyM declines it for the same reason.
+       *
+       * Two caveats worth knowing if this is ever revisited:
+       *  - the engine falls back to one vrt_cpyfm *per character* when
+       *    asm_allocate_block() fails, so `blocks` / `blocksize` in fvdi.sys
+       *    matter for text throughput;
+       *  - antialiased FT2 text is always one EXPAND_AREA per glyph with
+       *    standard=0x0100 / nplanes=8 (chunky alpha), which fvdi_expand_mono
+       *    rejects - collapsing that would need a guest-driver change, not a
+       *    host one. */
       return 0;
     }
 
@@ -4402,6 +4888,13 @@ static uae_u32 nf_call(uaecptr stack)
   return 0;
 }
 
+/* INVARIANT (relied on by the JIT): this must behave as an ordinary
+ * straight-line instruction. It may not modify the PC other than the +2
+ * below, may not branch, and may not raise a 68k exception. build_comp()
+ * declares 0x7300/0x7301 as cflow = fl_normal on the strength of that, which
+ * lets a NatFeat call sit in the middle of a translated block instead of
+ * terminating it. A future sub-handler that needs to change control flow
+ * must revert that declaration to fl_trap. */
 bool atari_natfeat_handle_opcode(uae_u32 opcode, uae_u32 *cycles)
 {
   if (opcode != NF_ID_OPCODE && opcode != NF_CALL_OPCODE)
