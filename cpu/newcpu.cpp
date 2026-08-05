@@ -64,6 +64,7 @@
 #include "x86.h"
 #endif
 #include "devices.h"
+#include "platforms/atari/psctrl/psctrl.h"
 
 extern void warpmode(int mode);
 
@@ -7525,6 +7526,8 @@ void execute_normal(void)
 	if (check_for_cache_miss())
 		return;
 
+	psctrl_ctr_interp_calls++;			/* PSCTRL statistics */
+
 	total_cycles = 0;
 	blocklen = 0;
 	start_pc_p = r->pc_oldp;
@@ -7820,6 +7823,7 @@ static void m68k_run_jit(void)
 #ifdef PISTORM_ATARI
 					if (regs.stopped)
 					{
+						psctrl_ctr_stop_iters++;	/* PSCTRL statistics */
 						do_cycles_stop(4);
 						const uae_u8 pending_irq = g_irq;
 						if (pending_irq > regs.intmask)

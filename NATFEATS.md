@@ -138,6 +138,27 @@ MP3PLAY on purpose.
   real display pixels.
 - Full documentation, including tuning and limits: **VIDEO.md**.
 
+### PSCTRL
+Read-only PiStorm status (phase 1 of `PSCTRL-DESIGN.md` / `PSMON-DESIGN.md`).
+A host-side sampler thread (started lazily on first use) snapshots JIT and
+host statistics every 500 ms; guest reads are O(1) and side-effect free.
+
+| Sub-op | Name    | Arguments / result                                  |
+|--------|---------|-----------------------------------------------------|
+| 0      | VERSION | returns PSCTRL API version                          |
+| 1      | GETINT  | param0 = index; returns value, -1 = unknown index   |
+
+GETINT index namespace (full list in `platforms/atari/psctrl/psctrl.h`):
+0-31 configuration (JIT enabled, cache size KB, CPU/FPU model, TT-RAM);
+32-63 sampled guest/JIT statistics (epoch, cache used/total bytes, blocks
+compiled, hard flushes, `execute_normal()` calls and STOP-state iterations
+per 500 ms window); 64+ host statistics (SoC temperature in millidegrees C,
+ARM clock kHz, 1-minute load average x100, uptime seconds).
+
+Strictly read-only: no JIT state is mutated from the handler (see the JIT
+invariant note above `atari_natfeat_handle_opcode`). Test tool:
+`PSCHK.TTP` (source in `cdev/psctrl/`).
+
 ## Audio architecture (context for MP3PLAY and VIDPLAY)
 
 ST/STE DMA sound is captured by register snooping (`dmasnd_capture.c`) and

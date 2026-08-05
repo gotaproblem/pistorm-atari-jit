@@ -58,6 +58,7 @@
 
 #include "options.h"
 #include "events.h"
+#include "platforms/atari/psctrl/psctrl.h"
 #include "include/memory.h"
 #include "newcpu.h"
 #include "comptbl_arm.h"
@@ -2726,6 +2727,24 @@ uae_u32 get_jitted_size(void)
 	return 0;
 }
 
+/* PSCTRL read-only accessors (see platforms/atari/psctrl/psctrl.h).
+ * extern "C" so the PSCTRL sampler can link against them without pulling
+ * in JIT headers; all three are plain loads of existing state. */
+extern "C" uint32_t psctrl_jit_cache_used(void)
+{
+	return get_jitted_size();
+}
+
+extern "C" uint32_t psctrl_jit_cache_total(void)
+{
+	return cache_size;
+}
+
+extern "C" int psctrl_jit_enabled(void)
+{
+	return cache_enabled;
+}
+
 static uint8 *do_alloc_code(uint32 size, int depth)
 {
 	UNUSED(depth);
@@ -3520,6 +3539,7 @@ void flush_icache_hard(int n)
 #ifdef ATARI_LAT_DIAG
     g_jp_hard++;
 #endif
+    psctrl_ctr_flushes++;               /* PSCTRL statistics */
 
     bi = active;
     while (bi) {
@@ -3621,6 +3641,7 @@ void compile_block(cpu_history* pc_hist, int blocklen, int totcycles)
         compile_count++;
         clock_t start_time = clock();
 #endif
+        psctrl_ctr_compiles++;          /* PSCTRL statistics */
 
         /* OK, here we need to 'compile' a block */
         int i;

@@ -5,6 +5,7 @@
 
 #include "platforms/atari/network/atari_natfeat.h"
 #include "platforms/atari/network/pistorm_net.h"
+#include "platforms/atari/psctrl/psctrl.h"
 
 #include "options.h"
 #include "memory.h"
@@ -94,6 +95,7 @@ enum nf_feature_index {
   NF_FEATURE_FVDI,
   NF_FEATURE_MP3,
   NF_FEATURE_VIDEO,
+  NF_FEATURE_PSCTRL,
   NF_FEATURE_COUNT
 };
 
@@ -220,7 +222,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "HOSTFS",
   "fVDI",
   "MP3PLAY",
-  "VIDPLAY"
+  "VIDPLAY",
+  "PSCTRL"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -4856,6 +4859,24 @@ static uae_u32 nf_call_video(uae_u32 subid, uaecptr params)
   return (uae_u32)-1;
 }
 
+/* PSCTRL — read-only PiStorm status (see platforms/atari/psctrl/psctrl.h).
+ * Strictly straight-line and side-effect free towards the guest, so it is
+ * safe under the JIT invariant documented above atari_natfeat_handle_opcode.
+ * The sampler thread is started lazily on first use. */
+static uae_u32 nf_call_psctrl(uae_u32 subid, uaecptr params)
+{
+  psctrl_sampler_start();
+
+  switch (subid) {
+    case PSCTRL_VERSION:
+      return PSCTRL_API_VERSION;
+    case PSCTRL_GETINT:
+      return psctrl_getint(nf_get_param(params, 0));
+  }
+
+  return (uae_u32)-1;
+}
+
 static uae_u32 nf_call(uaecptr stack)
 {
   uae_u32 id = nf_read_long(stack + 4);
@@ -4883,6 +4904,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_mp3(subid, params);
     case NF_FEATURE_VIDEO:
       return nf_call_video(subid, params);
+    case NF_FEATURE_PSCTRL:
+      return nf_call_psctrl(subid, params);
   }
 
   return 0;
