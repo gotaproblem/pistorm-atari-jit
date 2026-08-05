@@ -2737,7 +2737,8 @@ extern "C" uint32_t psctrl_jit_cache_used(void)
 
 extern "C" uint32_t psctrl_jit_cache_total(void)
 {
-	return cache_size;
+	return cache_size * 1024;	/* cache_size is kept in KB; report bytes
+					 * to match psctrl_jit_cache_used() */
 }
 
 extern "C" int psctrl_jit_enabled(void)
