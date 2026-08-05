@@ -6,6 +6,7 @@
 #include "platforms/atari/network/atari_natfeat.h"
 #include "platforms/atari/network/pistorm_net.h"
 #include "platforms/atari/psctrl/psctrl.h"
+#include "platforms/atari/psimg/psimg.h"
 
 #include "options.h"
 #include "memory.h"
@@ -96,6 +97,7 @@ enum nf_feature_index {
   NF_FEATURE_MP3,
   NF_FEATURE_VIDEO,
   NF_FEATURE_PSCTRL,
+  NF_FEATURE_PSIMG,
   NF_FEATURE_COUNT
 };
 
@@ -223,7 +225,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "fVDI",
   "MP3PLAY",
   "VIDPLAY",
-  "PSCTRL"
+  "PSCTRL",
+  "PSIMG"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -4877,6 +4880,81 @@ static uae_u32 nf_call_psctrl(uae_u32 subid, uaecptr params)
   return (uae_u32)-1;
 }
 
+/* PSIMG — host-side image decoding (see platforms/atari/psimg/psimg.h).
+ * The path may be in GEMDOS (S:\PIX\WALL.JPG) or MiNT (/s/pix/wall.jpg)
+ * form on a HOSTFS drive, like MP3PLAY/VIDPLAY paths, or a plain host
+ * (Pi) path such as /home/pistorm/wall.png. The decoded, scaled and
+ * format-converted image is written into the guest buffer. The call is
+ * straight-line and raises no guest exceptions, so the JIT invariant
+ * below holds; it merely takes some tens of milliseconds. */
+static uae_u32 nf_call_psimg(uae_u32 subid, uaecptr params)
+{
+  char gpath[512];
+  char host[PATH_MAX];
+
+  switch (subid) {
+    case PSIMG_VERSION:
+      return PSIMG_API_VERSION;
+
+    case PSIMG_LOAD: {
+      uaecptr pathp = nf_get_param(params, 0);
+      uaecptr dest = nf_get_param(params, 1);
+      int w = (int)nf_get_param(params, 2);
+      int h = (int)nf_get_param(params, 3);
+      int bpp = (int)nf_get_param(params, 4);
+      int mode = (int)nf_get_param(params, 5);
+      uint8_t *buf = NULL;
+      size_t len = 0;
+
+      if (!pathp || !dest)
+        return (uae_u32)-1;
+
+      nf_read_string(pathp, gpath, sizeof(gpath));
+
+      if (!mp3_gemdos_to_host(gpath, host, sizeof(host))) {
+        if (gpath[0] == '/')
+          snprintf(host, sizeof(host), "%s", gpath);   /* raw host path */
+        else
+          return (uae_u32)-1;
+      }
+
+      if (psimg_load_scaled(host, w, h, bpp, mode, &buf, &len) != 0)
+        return (uae_u32)-1;
+
+      nf_write_buffer(dest, buf, (uae_u32)len);
+      psimg_free(buf);
+
+      printf("[PSIMG] loaded %s as %dx%d@%dbpp\n", host, w, h, bpp);
+      return 0;
+    }
+
+    case PSIMG_INFO: {
+      uaecptr pathp = nf_get_param(params, 0);
+      uae_u32 which = nf_get_param(params, 1);
+      int w, h;
+
+      if (!pathp)
+        return (uae_u32)-1;
+
+      nf_read_string(pathp, gpath, sizeof(gpath));
+
+      if (!mp3_gemdos_to_host(gpath, host, sizeof(host))) {
+        if (gpath[0] == '/')
+          snprintf(host, sizeof(host), "%s", gpath);
+        else
+          return (uae_u32)-1;
+      }
+
+      if (psimg_probe(host, &w, &h) != 0)
+        return (uae_u32)-1;
+
+      return (which == 0) ? (uae_u32)w : (uae_u32)h;
+    }
+  }
+
+  return (uae_u32)-1;
+}
+
 static uae_u32 nf_call(uaecptr stack)
 {
   uae_u32 id = nf_read_long(stack + 4);
@@ -4906,6 +4984,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_video(subid, params);
     case NF_FEATURE_PSCTRL:
       return nf_call_psctrl(subid, params);
+    case NF_FEATURE_PSIMG:
+      return nf_call_psimg(subid, params);
   }
 
   return 0;

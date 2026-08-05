@@ -63,6 +63,7 @@ PISTORM_CPP = emulator.c \
               platforms/atari/et4000/pcem/et4000_engine.c \
               platforms/atari/network/atari_natfeat.cpp \
               platforms/atari/psctrl/psctrl.cpp \
+              platforms/atari/psimg/psimg.cpp \
               jit_glue.cpp \
               pistorm_natmem.cpp \
               pistorm_stubs.cpp

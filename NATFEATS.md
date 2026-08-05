@@ -159,6 +159,26 @@ Strictly read-only: no JIT state is mutated from the handler (see the JIT
 invariant note above `atari_natfeat_handle_opcode`). Test tool:
 `PSCHK.TTP` (source in `cdev/psctrl/`).
 
+### PSIMG
+Host-side image decoding (PNG / JPG via the vendored stb libraries in
+`third_party/stb/`). The guest names a file and a target geometry; the Pi
+decodes, scales (stretch or aspect-fit with black letterboxing) and converts
+to the fVDI pixel format (32bpp `00 RR GG BB` or big-endian RGB565), writing
+the result into a guest-supplied buffer. Used by the Bespoke Desktop for
+PNG/JPG wallpapers; a 1920x1080 JPEG decodes in tens of milliseconds host-side
+versus tens of seconds on the 68k.
+
+| Sub-op | Name    | Arguments / result                                        |
+|--------|---------|-----------------------------------------------------------|
+| 0      | VERSION | returns PSIMG API version                                 |
+| 1      | LOAD    | p0 path, p1 dest buffer, p2 width, p3 height, p4 bpp (16/32), p5 mode (0 stretch, 1 fit); 0 = OK, -1 = error |
+| 2      | INFO    | p0 path, p1 which (0 = width, 1 = height); dimension or -1 |
+
+Paths take the MP3PLAY forms (`S:\PIX\WALL.JPG` or `/s/pix/wall.jpg` on a
+**HOSTFS drive**) or a plain host path on the Pi (`/home/pistorm/wall.png`).
+Implementation: `platforms/atari/psimg/psimg.cpp` (decode/scale/convert) and
+the `nf_call_psimg()` handler in `atari_natfeat.cpp`.
+
 ## Audio architecture (context for MP3PLAY and VIDPLAY)
 
 ST/STE DMA sound is captured by register snooping (`dmasnd_capture.c`) and
