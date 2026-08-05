@@ -207,6 +207,23 @@ uint32_t psctrl_getint(uint32_t index)
       return g_snap.loadavg_x100;
     case PS_HOST_UPTIME_S:
       return g_snap.uptime_s;
+
+    /* Pi wall clock, computed on demand (the Pi is NTP-synced; the
+     * Atari has no battery RTC, so the guest can set its GEMDOS clock
+     * from these) */
+    case PS_HOST_TIME_DOS:
+    case PS_HOST_DATE_DOS: {
+      time_t now = time(NULL);
+      struct tm lt;
+
+      if (localtime_r(&now, &lt) == NULL)
+        return (uint32_t)-1;
+
+      if (index == PS_HOST_TIME_DOS)
+        return (uint32_t)((lt.tm_hour << 11) | (lt.tm_min << 5) | (lt.tm_sec / 2));
+
+      return (uint32_t)(((lt.tm_year - 80) << 9) | ((lt.tm_mon + 1) << 5) | lt.tm_mday);
+    }
   }
 
   return (uint32_t)-1;

@@ -51,7 +51,11 @@ enum psctrl_stat_index {
   PS_HOST_SOC_TEMP_MC   = 64,   /* SoC temperature, millidegrees C     */
   PS_HOST_ARM_FREQ_KHZ  = 65,   /* current ARM core clock, kHz         */
   PS_HOST_LOADAVG_X100  = 66,   /* 1-minute load average x 100         */
-  PS_HOST_UPTIME_S      = 67    /* host uptime, seconds                */
+  PS_HOST_UPTIME_S      = 67,   /* host uptime, seconds                */
+  PS_HOST_TIME_DOS      = 68,   /* Pi local time, GEMDOS packed format
+                                 * (hhhhhmmm mmmsssss, seconds / 2)    */
+  PS_HOST_DATE_DOS      = 69    /* Pi local date, GEMDOS packed format
+                                 * (yyyyyyym mmmddddd, year - 1980)    */
 };
 
 /* Idempotent; spawns the sampler thread on first use (called lazily from
