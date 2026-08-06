@@ -17,10 +17,12 @@
 #include "config_file/config_file.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 /* --- counters bumped by the CPU/JIT core ------------------------------- */
 
@@ -129,6 +131,27 @@ static void *psctrl_sampler_thread(void *arg)
 {
   (void)arg;
 
+  /* Belt and braces (see spawn below): this thread is created from the
+   * CPU thread, which runs SCHED_FIFO pinned to an isolated core. If it
+   * inherited that, it would stand behind a 100%-busy JIT loop and never
+   * run again - the bug signature is host statistics frozen at their
+   * boot-time values. Demote to SCHED_OTHER on the non-isolated cores,
+   * same rules as the VIDPLAY media threads. */
+  {
+    struct sched_param sp;
+    cpu_set_t set;
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+
+    memset(&sp, 0, sizeof(sp));
+    sched_setscheduler(0, SCHED_OTHER, &sp);
+
+    CPU_ZERO(&set);
+    for (long i = 0; i < n && i < CPU_SETSIZE; i++)
+      if (i != 2)                      /* core 2 is the emulation core */
+        CPU_SET((int)i, &set);
+    sched_setaffinity(0, sizeof(set), &set);
+  }
+
   struct timespec ts = { 0, 500000000L };  /* 500 ms */
 
   for (;;) {
@@ -144,9 +167,28 @@ static void psctrl_sampler_start_once(void)
   /* one synchronous sample so the very first guest read is not all zeros */
   psctrl_sample_once();
 
+  /* Create the thread explicitly SCHED_OTHER: without EXPLICIT_SCHED the
+   * creator's SCHED_FIFO policy and core pinning are inherited and the
+   * sampler starves behind the JIT loop (values frozen at boot). */
   pthread_t t;
+  pthread_attr_t attr;
+  struct sched_param sp;
+  int rc;
 
-  if (pthread_create(&t, NULL, psctrl_sampler_thread, NULL) == 0) {
+  memset(&sp, 0, sizeof(sp));
+
+  pthread_attr_init(&attr);
+  pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+  pthread_attr_setschedpolicy(&attr, SCHED_OTHER);
+  pthread_attr_setschedparam(&attr, &sp);
+
+  rc = pthread_create(&t, &attr, psctrl_sampler_thread, NULL);
+  pthread_attr_destroy(&attr);
+
+  if (rc != 0)                          /* some setups refuse explicit sched */
+    rc = pthread_create(&t, NULL, psctrl_sampler_thread, NULL);
+
+  if (rc == 0) {
     pthread_setname_np(t, "psctrl-sampler");
     pthread_detach(t);
     printf("[PSCTRL] sampler started (500 ms tick)\n");
