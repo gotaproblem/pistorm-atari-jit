@@ -45,6 +45,7 @@ struct psctrl_snapshot {
   volatile uint32_t arm_freq_khz;
   volatile uint32_t loadavg_x100;
   volatile uint32_t uptime_s;
+  volatile uint32_t throttled;
 };
 
 static struct psctrl_snapshot g_snap;
@@ -59,6 +60,32 @@ static uint32_t s_prev_stop_iters;
 
 /* Read the first numeric token of a small sysfs/proc file.
  * Returns 0 and leaves *out untouched on any failure. */
+/* Read a small sysfs file holding a hex value (e.g. get_throttled).
+ * Returns 0 and leaves *out untouched on any failure. */
+static int read_file_hex(const char *path, unsigned long *out)
+{
+  FILE *f = fopen(path, "r");
+  char buf[64];
+
+  if (!f)
+    return 0;
+
+  if (!fgets(buf, sizeof(buf), f)) {
+    fclose(f);
+    return 0;
+  }
+  fclose(f);
+
+  char *end = NULL;
+  unsigned long v = strtoul(buf, &end, 16);
+
+  if (end == buf)
+    return 0;
+
+  *out = v;
+  return 1;
+}
+
 static int read_file_number(const char *path, double *out)
 {
   FILE *f = fopen(path, "r");
@@ -122,6 +149,13 @@ static void psctrl_sample_once(void)
 
   if (read_file_number("/proc/uptime", &v))
     g_snap.uptime_s = (uint32_t)v;
+
+  {
+    unsigned long thr;
+
+    if (read_file_hex("/sys/devices/platform/soc/soc:firmware/get_throttled", &thr))
+      g_snap.throttled = (uint32_t)thr;
+  }
 
   /* bump last so a reader that keys on the epoch sees finished values */
   g_snap.epoch = g_snap.epoch + 1;
@@ -249,6 +283,8 @@ uint32_t psctrl_getint(uint32_t index)
       return g_snap.loadavg_x100;
     case PS_HOST_UPTIME_S:
       return g_snap.uptime_s;
+    case PS_HOST_THROTTLED:
+      return g_snap.throttled;
 
     /* Pi wall clock, computed on demand (the Pi is NTP-synced; the
      * Atari has no battery RTC, so the guest can set its GEMDOS clock

@@ -54,8 +54,13 @@ enum psctrl_stat_index {
   PS_HOST_UPTIME_S      = 67,   /* host uptime, seconds                */
   PS_HOST_TIME_DOS      = 68,   /* Pi local time, GEMDOS packed format
                                  * (hhhhhmmm mmmsssss, seconds / 2)    */
-  PS_HOST_DATE_DOS      = 69    /* Pi local date, GEMDOS packed format
+  PS_HOST_DATE_DOS      = 69,   /* Pi local date, GEMDOS packed format
                                  * (yyyyyyym mmmddddd, year - 1980)    */
+  PS_HOST_THROTTLED     = 70    /* firmware get_throttled register:
+                                 * bit0 undervoltage now, bit1 freq
+                                 * capped now, bit2 throttled now,
+                                 * bit3 soft temp limit now; bits
+                                 * 16-19 = same, has occurred         */
 };
 
 /* Idempotent; spawns the sampler thread on first use (called lazily from
