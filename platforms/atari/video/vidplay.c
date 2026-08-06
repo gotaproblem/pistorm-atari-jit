@@ -296,14 +296,17 @@ static void sleep_until(double when)
 
 /* The CPU set the media threads are allowed to run on.
  *
- * Two cores are spoken for and we stay off both:
+ * Three cores are spoken for and we stay off all of them:
  *   CPU 2 - the 68k CPU thread, SCHED_FIFO. Anything sharing it is starved.
+ *   CPU 3 - the IPL poller (also isolated by cmdline isolcpus=2,3). It is
+ *           SCHED_OTHER, so a decoder landing there time-shares 50/50 with
+ *           it and directly degrades interrupt latency (ACIA/mouse bytes).
  *   CPU 0 - the et4000 display render thread, SCHED_IDLE. A nice-5 SCHED_OTHER
  *           decoder would trivially preempt it, and that thread is already
  *           printing "render overrun ... budget=16ms" without our help.
- * That leaves CPUs 1 and 3 on a Pi 4, which is plenty for hardware-decoded
- * H.264 and adequate for software decode. PISTORM_VID_CPUS=<hex> overrides -
- * e.g. PISTORM_VID_CPUS=b adds CPU 0 back if you would rather have smoother
+ * That leaves CPU 1 on a Pi 4, which is plenty for hardware-decoded H.264
+ * and adequate for software decode. PISTORM_VID_CPUS=<hex> overrides -
+ * e.g. PISTORM_VID_CPUS=3 adds CPU 0 back if you would rather have smoother
  * software decode than a smooth guest display. */
 static void media_cpuset(cpu_set_t *set)
 {
@@ -314,7 +317,7 @@ static void media_cpuset(cpu_set_t *set)
     if (!mask) {
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         for (long i = 0; i < n && i < CPU_SETSIZE; i++)
-            if (i != 2 && !(n >= 4 && i == 0))
+            if (i != 2 && !(n >= 4 && (i == 0 || i == 3)))
                 CPU_SET((int)i, set);
     } else {
         for (int i = 0; i < 64 && i < CPU_SETSIZE; i++)

@@ -542,12 +542,25 @@ static int enc_feed(const uint8_t *bgra, int w, int h, int index)
 static void *writer_thread(void *arg)
 {
     (void)arg;
-    {   /* escape inherited pinning / RT class */
-        cpu_set_t all; CPU_ZERO(&all);
+    {   /* Escape inherited pinning / RT class - but stay OFF the reserved
+         * cores. The old "all cores" mask included the isolated cores, and
+         * under CFS the balancer favoured core 3 (cores 0-1 look busy), so
+         * JPEG encode bursts time-shared with the IPL poller and taxed
+         * interrupt latency exactly while recording. Rules:
+         *   CPU 2 - JIT CPU thread (FIFO 99): pointless, FIFO always wins.
+         *   CPU 3 - IPL poller: sharing it costs ACIA/mouse latency.
+         *   CPU 0 - SCHED_IDLE render thread that FEEDS us frames; a nice-10
+         *           encoder there would starve its own frame source.
+         * Leaves core 1 on a Pi 4, alongside the light helper threads. */
+        cpu_set_t set; CPU_ZERO(&set);
         long n = sysconf(_SC_NPROCESSORS_CONF);
         if (n < 1) n = 4;
-        for (long i = 0; i < n && i < CPU_SETSIZE; i++) CPU_SET((int)i, &all);
-        sched_setaffinity(0, sizeof(all), &all);
+        for (long i = 0; i < n && i < CPU_SETSIZE; i++)
+            if (i != 2 && !(n >= 4 && (i == 0 || i == 3)))
+                CPU_SET((int)i, &set);
+        if (CPU_COUNT(&set) == 0)
+            CPU_SET(0, &set);
+        sched_setaffinity(0, sizeof(set), &set);
         struct sched_param sp; memset(&sp, 0, sizeof(sp));
         sched_setscheduler(0, SCHED_OTHER, &sp);
     }

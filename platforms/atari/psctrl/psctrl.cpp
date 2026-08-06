@@ -181,7 +181,8 @@ static void *psctrl_sampler_thread(void *arg)
 
     CPU_ZERO(&set);
     for (long i = 0; i < n && i < CPU_SETSIZE; i++)
-      if (i != 2)                      /* core 2 is the emulation core */
+      if (i != 2 && i != 3)            /* 2 = JIT CPU, 3 = IPL poller (both
+                                        * isolated); helpers stay on 0-1 */
         CPU_SET((int)i, &set);
     sched_setaffinity(0, sizeof(set), &set);
   }
