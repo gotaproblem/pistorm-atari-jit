@@ -294,20 +294,21 @@ static void sleep_until(double when)
         ;
 }
 
-/* The CPU set the media threads are allowed to run on.
+/* The CPU set the media threads are allowed to run on: {1,3} on a Pi 4.
  *
- * Two cores are spoken for and we stay off both:
- *   CPU 2 - the 68k CPU thread, SCHED_FIFO. Anything sharing it is starved.
- *   CPU 3 - the IPL poller (also isolated by cmdline isolcpus=2,3). It is
- *           SCHED_OTHER, so a decoder landing there time-shares 50/50 with
- *           it and directly degrades interrupt latency (ACIA/mouse bytes).
- * That leaves CPUs 0 and 1 on a Pi 4. Core 1 ALONE is not enough: decode +
- * present + libav workers on one core starves the audio ring first (field
- * report: severe A/V stutter) - so core 0 stays in the pool even though the
- * SCHED_IDLE et4000 mirror thread lives there and gets preempted during
- * playback. A slightly janky mirror beats starved audio.
- * PISTORM_VID_CPUS=<hex> overrides - e.g. PISTORM_VID_CPUS=2 confines media
- * to core 1 if you would rather protect the mirror than the film. */
+ * This default is EMPIRICAL - every alternative was field-tested and lost:
+ *   {1,3} (this) - smooth playback, months of field use, no observed input
+ *           problems. Sharing core 3 with the SCHED_OTHER IPL poller is
+ *           benign in practice: CFS round-robins them and the poller's
+ *           latency stays well inside the ACIA byte budget.
+ *   {0,1} - JERKY video at low CPU use. irqaffinity=0,1 routes every
+ *           hardware IRQ to these cores, and the present thread's frame
+ *           timing visibly suffers (worse at 24 Hz, where a late frame
+ *           costs 42 ms). Do not "clean this up" back to {0,1}.
+ *   {1}   - starves the SDL audio callback behind decode work (severe A/V
+ *           stutter with software decode).
+ * Core 2 (the 68k CPU thread, SCHED_FIFO) stays absolutely off-limits.
+ * PISTORM_VID_CPUS=<hex> overrides - e.g. PISTORM_VID_CPUS=3 for {0,1}. */
 static void media_cpuset(cpu_set_t *set)
 {
     const char *e = getenv("PISTORM_VID_CPUS");
@@ -317,7 +318,7 @@ static void media_cpuset(cpu_set_t *set)
     if (!mask) {
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         for (long i = 0; i < n && i < CPU_SETSIZE; i++)
-            if (i != 2 && !(n >= 4 && i == 3))
+            if (i != 2 && !(n >= 4 && i == 0))
                 CPU_SET((int)i, set);
     } else {
         for (int i = 0; i < 64 && i < CPU_SETSIZE; i++)
