@@ -296,18 +296,18 @@ static void sleep_until(double when)
 
 /* The CPU set the media threads are allowed to run on.
  *
- * Three cores are spoken for and we stay off all of them:
+ * Two cores are spoken for and we stay off both:
  *   CPU 2 - the 68k CPU thread, SCHED_FIFO. Anything sharing it is starved.
  *   CPU 3 - the IPL poller (also isolated by cmdline isolcpus=2,3). It is
  *           SCHED_OTHER, so a decoder landing there time-shares 50/50 with
  *           it and directly degrades interrupt latency (ACIA/mouse bytes).
- *   CPU 0 - the et4000 display render thread, SCHED_IDLE. A nice-5 SCHED_OTHER
- *           decoder would trivially preempt it, and that thread is already
- *           printing "render overrun ... budget=16ms" without our help.
- * That leaves CPU 1 on a Pi 4, which is plenty for hardware-decoded H.264
- * and adequate for software decode. PISTORM_VID_CPUS=<hex> overrides -
- * e.g. PISTORM_VID_CPUS=3 adds CPU 0 back if you would rather have smoother
- * software decode than a smooth guest display. */
+ * That leaves CPUs 0 and 1 on a Pi 4. Core 1 ALONE is not enough: decode +
+ * present + libav workers on one core starves the audio ring first (field
+ * report: severe A/V stutter) - so core 0 stays in the pool even though the
+ * SCHED_IDLE et4000 mirror thread lives there and gets preempted during
+ * playback. A slightly janky mirror beats starved audio.
+ * PISTORM_VID_CPUS=<hex> overrides - e.g. PISTORM_VID_CPUS=2 confines media
+ * to core 1 if you would rather protect the mirror than the film. */
 static void media_cpuset(cpu_set_t *set)
 {
     const char *e = getenv("PISTORM_VID_CPUS");
@@ -317,7 +317,7 @@ static void media_cpuset(cpu_set_t *set)
     if (!mask) {
         long n = sysconf(_SC_NPROCESSORS_ONLN);
         for (long i = 0; i < n && i < CPU_SETSIZE; i++)
-            if (i != 2 && !(n >= 4 && (i == 0 || i == 3)))
+            if (i != 2 && !(n >= 4 && i == 3))
                 CPU_SET((int)i, set);
     } else {
         for (int i = 0; i < 64 && i < CPU_SETSIZE; i++)
