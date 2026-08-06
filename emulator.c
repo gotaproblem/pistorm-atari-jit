@@ -98,6 +98,7 @@ bool tt_ram_available;
 
 /* FDD setup */
 extern "C" void *fdd_vbl_thread(void *arg);
+extern "C" void fdd_vbl(void);
 bool FDD_enabled;
 
 /* ATARI RAM cache setup */
@@ -446,8 +447,36 @@ static void *ipl_task(void *)
 
   usleep(1000000);
 
+  /* FDD 50 Hz "VBL" tick pacing, folded in from the old fdd_vbl_thread:
+   * this loop owns core 3 outright and mostly burns it in wait_ns, so the
+   * spare time services the tick for free. Paced on the arch timer
+   * (CNTVCT_EL0, same clock as wait_ns) - no syscalls on the isolated core. */
+  uint64_t fdd_freq;
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(fdd_freq));
+  if (!fdd_freq)
+    fdd_freq = 54000000ULL;                 /* Pi 4 arch-timer fallback */
+  const uint64_t fdd_step = fdd_freq / 50;  /* 20 ms */
+  uint64_t fdd_next = 0;                    /* 0 = tick on first pass */
+
   while (cpu_emulation_running)
   {
+    /* Housekeeping slot, checked before the bus-busy branch so a busy
+     * stretch cannot stall it. fdd_vbl() is pure memory work (motor
+     * timeout counters - no syscalls, no locks, tens of ns) and its timing
+     * needs are loose, so the IPL sample below is never meaningfully
+     * delayed. Admission rule for anything else added here: no syscalls,
+     * no locks, bounded sub-microsecond work only. */
+    if (FDD_enabled)
+    {
+      uint64_t hk_now;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(hk_now));
+      if (hk_now >= fdd_next)
+      {
+        fdd_vbl();
+        fdd_next = hk_now + fdd_step;
+      }
+    }
+
     /* read IPL lines only when bus transaction has ended */
     if ((status = *ioread) & 0x01)
     {
@@ -1116,7 +1145,8 @@ int main (int argc, char *argv[])
   
   if ( FDD_enabled )
   {
-    // Start VBL timer thread
+#if PISTORM_SERIAL_IRQ
+    /* No IPL task in this build to host the tick: keep the VBL thread. */
     err = pthread_create ( &vbl_id, NULL, &fdd_vbl_thread, NULL );
 
     if ( err != 0 )
@@ -1127,6 +1157,11 @@ int main (int argc, char *argv[])
       pthread_setname_np ( vbl_id, "pistorm: vbl" );
       printf ( "[MAIN] VBL thread created successfully\n" );
     }
+#else
+    /* The 50 Hz FDD tick rides the IPL poll loop on core 3 (see ipl_task);
+     * the dedicated VBL thread is gone. */
+    printf ( "[MAIN] FDD VBL tick folded into IPL task (no VBL thread)\n" );
+#endif
   }
 //FDD_enabled = false;
   time(&t); /* get date and time */
