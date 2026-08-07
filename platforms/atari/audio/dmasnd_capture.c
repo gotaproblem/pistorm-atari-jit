@@ -26,6 +26,8 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include "dmasnd.h"
 
 #define DMASND_DEBUG 0
@@ -53,7 +55,7 @@ static const unsigned ste_rates[4] = { 6258, 12517, 25033, 50066 };
 #define ADDR_MASK   0x003FFFFEu
 #define MAX_FRAME   0x00040000u          /* sanity cap on one commit (256 KB) -
                                             MiNT players use ~180 KB buffers */
-#define PUMP_US     500                  /* poll faster than the 20 ms VBL */
+#define PUMP_US     500                  /* FALLBACK poll only (no eventfd) */
 
 static uint8_t      reg[0x26];
 static atomic_int   g_enabled = 0;
@@ -62,6 +64,7 @@ static atomic_int   g_repeat  = 0;   /* current $FF8901 repeat bit */
 
 static pthread_t    pump_tid;
 static atomic_int   pump_run = 0;
+static int          pump_evfd = -1;  /* commit -> pump wakeup (eventfd) */
 
 static uint32_t start_addr(void)
 { return (((uint32_t)reg[0x03]<<16)|((uint32_t)reg[0x05]<<8)|reg[0x07]) & ADDR_MASK; }
@@ -74,6 +77,15 @@ static void dmasnd_commit(const char *why)
         fprintf(stderr, "[dmasnd] commit (%s) en=%d rpt=%d\n", why,
                 atomic_load(&g_enabled), atomic_load(&g_repeat));
     atomic_fetch_add(&g_gen, 1);
+    /* Wake the pump. This runs on the CPU thread, but commits only happen on
+     * guest writes to the sound registers (~50/s while sound plays, zero
+     * otherwise), so one non-blocking write() here is nowhere near the JIT
+     * hot path - and it lets the pump block instead of polling at 2 kHz. */
+    if (pump_evfd >= 0) {
+        uint64_t one = 1;
+        ssize_t r = write(pump_evfd, &one, sizeof one);
+        (void)r;                         /* EAGAIN = already signalled: fine */
+    }
 }
 
 /* =================== snoop (cpu_task thread) =========================== */
@@ -142,9 +154,10 @@ static void *pump_thread(void *arg)
         unsigned gen = atomic_load_explicit(&g_gen, memory_order_acquire);
         if (gen != last_gen) {
             /* New commit(s): copy the CURRENT buffer once, now, while it still
-               holds this frame's audio. We capture one buffer per poll where a
-               commit happened; at 50 commits/sec vs a 0.5 ms poll there is one
-               commit per poll, so nothing is duplicated or (in practice) missed.
+               holds this frame's audio. The eventfd wakes us within scheduler
+               latency of the commit (was: a 0.5 ms poll, 2,000 wakeups/s for
+               events that occur at most ~50/s), so at 50 commits/sec there is
+               one commit per wakeup and nothing is duplicated or missed.
                Reading here (not in the snoop) means the player's pointer-write
                burst has settled, so start/end are coherent. */
             last_gen = gen;
@@ -169,7 +182,20 @@ static void *pump_thread(void *arg)
                 }
             }
         }
-        usleep(PUMP_US);
+        /* Block until the next commit signals the eventfd. The 100 ms timeout
+         * is a safety net (missed wakeup, shutdown responsiveness), not a
+         * poll rate - the real wakeup is the write() in dmasnd_commit().
+         * Without an eventfd (creation failed) fall back to the old poll. */
+        if (pump_evfd >= 0) {
+            struct pollfd pf = { .fd = pump_evfd, .events = POLLIN, .revents = 0 };
+            if (poll(&pf, 1, 100) > 0 && (pf.revents & POLLIN)) {
+                uint64_t n;
+                ssize_t r = read(pump_evfd, &n, sizeof n);   /* clear counter */
+                (void)r;
+            }
+        } else {
+            usleep(PUMP_US);
+        }
     }
     return NULL;
 }
@@ -200,6 +226,12 @@ static void *dbg_thread(void *arg)
 int dmasnd_capture_start(void)
 {
     if (atomic_load(&pump_run)) return 0;
+    if (pump_evfd < 0) {
+        pump_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (pump_evfd < 0)
+            fprintf(stderr, "[dmasnd] eventfd unavailable - pump falls back "
+                            "to %dus polling\n", PUMP_US);
+    }
     atomic_store(&pump_run, 1);
     if (pthread_create(&pump_tid, NULL, pump_thread, NULL) != 0) {
         atomic_store(&pump_run, 0); return -1;
@@ -220,6 +252,11 @@ void dmasnd_capture_stop(void)
     pthread_join(dbg_tid, NULL);
 #endif
     atomic_store(&pump_run, 0);
+    if (pump_evfd >= 0) {                /* wake the pump so join is instant */
+        uint64_t one = 1;
+        ssize_t r = write(pump_evfd, &one, sizeof one);
+        (void)r;
+    }
     pthread_join(pump_tid, NULL);
 }
 
