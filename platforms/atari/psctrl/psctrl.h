@@ -56,11 +56,22 @@ enum psctrl_stat_index {
                                  * (hhhhhmmm mmmsssss, seconds / 2)    */
   PS_HOST_DATE_DOS      = 69,   /* Pi local date, GEMDOS packed format
                                  * (yyyyyyym mmmddddd, year - 1980)    */
-  PS_HOST_THROTTLED     = 70    /* firmware get_throttled register:
+  PS_HOST_THROTTLED     = 70,   /* firmware get_throttled register:
                                  * bit0 undervoltage now, bit1 freq
                                  * capped now, bit2 throttled now,
                                  * bit3 soft temp limit now; bits
                                  * 16-19 = same, has occurred         */
+
+  /* Phase 4: JIT engine figures, computed by the sampler from state the
+   * emulator already maintains (zero new work on the hot path - see the
+   * project's phase4-impact-report). Speed is cycle-accounted against
+   * the 8 MHz ST reference (one 68k cycle = CYCLE_UNIT/2 clock units),
+   * so in governed m68k_speed=0 mode it honestly reads ~8000. */
+  PS_JIT_EFF_KHZ        = 71,   /* effective 68k speed, kHz            */
+  PS_JIT_HITRATE_X10    = 72,   /* cycle-weighted JIT hit rate,
+                                 * tenths of a percent (0-1000)        */
+  PS_JIT_IDLE_X10       = 73    /* true idle (STOP) share of the
+                                 * clock, tenths of a percent          */
 };
 
 /* Idempotent; spawns the sampler thread on first use (called lazily from
@@ -78,6 +89,7 @@ extern volatile uint32_t psctrl_ctr_compiles;
 extern volatile uint32_t psctrl_ctr_flushes;
 extern volatile uint32_t psctrl_ctr_interp_calls;
 extern volatile uint32_t psctrl_ctr_stop_iters;
+extern volatile uint32_t psctrl_ctr_interp_cycles;	/* CYCLE_UNIT-weighted */
 
 /* Implemented in jit/arm/compemu_support_arm.cpp */
 uint32_t psctrl_jit_cache_used(void);

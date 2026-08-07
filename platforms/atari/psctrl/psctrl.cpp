@@ -32,6 +32,12 @@ volatile uint32_t psctrl_ctr_compiles = 0;
 volatile uint32_t psctrl_ctr_flushes = 0;
 volatile uint32_t psctrl_ctr_interp_calls = 0;
 volatile uint32_t psctrl_ctr_stop_iters = 0;
+volatile uint32_t psctrl_ctr_interp_cycles = 0;
+
+/* The JIT's cycle clock (cpu/events.cpp) and the current 68k cycle length
+ * in clock units. Global data symbols, no C++ mangling to worry about. */
+extern signed long long currcycle;
+extern int cpucycleunit;
 
 /* --- published snapshot ------------------------------------------------ */
 
@@ -48,6 +54,9 @@ struct psctrl_snapshot {
   volatile uint32_t loadavg_x100;
   volatile uint32_t uptime_s;
   volatile uint32_t throttled;
+  volatile uint32_t jit_eff_khz;
+  volatile uint32_t jit_hit_x10;
+  volatile uint32_t jit_idle_x10;
 };
 
 static struct psctrl_snapshot g_snap;
@@ -264,6 +273,65 @@ static void psctrl_sample_once(void)
     }
   }
 
+  /* Phase 4: JIT engine figures, entirely from state the emulator already
+   * maintains (design: the project's phase4-impact-report - nothing new on
+   * the hot path, the sampler just differences existing globals).
+   *   speed   : Delta(currcycle) at the 8 MHz reference (one 68k cycle =
+   *             CYCLE_UNIT/2 clock units = 125 ns) over measured wall time
+   *   hit rate: 1 - interpreted cycles / all cycles (cycle-weighted, so a
+   *             million cheap interpreted instructions don't hide)
+   *   idle    : STOP iterations x 4 x cpucycleunit / all cycles - true
+   *             MiNT idle, since do_cycles_stop feeds the same clock
+   * PISTORM_NOSTATS=1 skips the arithmetic entirely (A/B benchmarking). */
+  {
+    static int nostats = -1;
+    static signed long long prev_cc;
+    static uint32_t prev_ic, prev_si;
+    static struct timespec prev_ts;
+    signed long long cc = currcycle;
+    uint32_t ic = psctrl_ctr_interp_cycles;
+    uint32_t si = psctrl_ctr_stop_iters;
+    struct timespec ts;
+
+    if (nostats < 0) {
+      const char *e = getenv("PISTORM_NOSTATS");
+      nostats = (e && *e == '1') ? 1 : 0;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    if (!nostats && prev_ts.tv_sec != 0) {
+      double dt = (double)(ts.tv_sec - prev_ts.tv_sec) +
+                  (double)(ts.tv_nsec - prev_ts.tv_nsec) / 1e9;
+      signed long long dcc = cc - prev_cc;
+
+      if (dt > 0.05 && dcc > 0) {
+        double cyc68k = (double)dcc / (double)(CYCLE_UNIT / 2);
+        double share;
+        long v;
+
+        g_snap.jit_eff_khz = (uint32_t)(cyc68k / dt / 1000.0 + 0.5);
+
+        share = (double)(uint32_t)(ic - prev_ic) / (double)dcc;
+        if (share > 1.0)
+          share = 1.0;
+        v = (long)((1.0 - share) * 1000.0 + 0.5);
+        g_snap.jit_hit_x10 = (uint32_t)(v < 0 ? 0 : v);
+
+        share = (double)(uint32_t)(si - prev_si) * 4.0 *
+                (double)cpucycleunit / (double)dcc;
+        if (share > 1.0)
+          share = 1.0;
+        g_snap.jit_idle_x10 = (uint32_t)(share * 1000.0 + 0.5);
+      }
+    }
+
+    prev_cc = cc;
+    prev_ic = ic;
+    prev_si = si;
+    prev_ts = ts;
+  }
+
   /* bump last so a reader that keys on the epoch sees finished values */
   g_snap.epoch = g_snap.epoch + 1;
 }
@@ -393,6 +461,12 @@ uint32_t psctrl_getint(uint32_t index)
       return g_snap.uptime_s;
     case PS_HOST_THROTTLED:
       return g_snap.throttled;
+    case PS_JIT_EFF_KHZ:
+      return g_snap.jit_eff_khz;
+    case PS_JIT_HITRATE_X10:
+      return g_snap.jit_hit_x10;
+    case PS_JIT_IDLE_X10:
+      return g_snap.jit_idle_x10;
 
     /* Pi wall clock, computed on demand (the Pi is NTP-synced; the
      * Atari has no battery RTC, so the guest can set its GEMDOS clock

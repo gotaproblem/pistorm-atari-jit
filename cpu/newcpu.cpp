@@ -7576,6 +7576,7 @@ void execute_normal(void)
 				jit_dbg_check_vec2_dispatch("execute_normal_PRE_COMPILE");
 			}
 #endif
+			psctrl_ctr_interp_cycles += (uae_u32)total_cycles;	/* PSCTRL statistics */
 			compile_block(pc_hist, blocklen, total_cycles);
 			return; /* We will deal with the spcflags in the caller */
 		}
