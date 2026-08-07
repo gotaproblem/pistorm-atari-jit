@@ -1328,6 +1328,7 @@ static void *decode_thread(void *arg)
     AVPacket *pkt = av_packet_alloc();
     AVFrame  *frm = av_frame_alloc();
     int hw_probe_pkts = 0;
+    double hw_probe_t0 = 0;       /* wall time of first packet fed to hw dec */
     long n_last = 0;
     int  diagnosed = 0, announced_pkt = 0;
     double stat_t = now_s(), slow_t = now_s();
@@ -1395,6 +1396,8 @@ static void *decode_thread(void *arg)
         if (pkt->stream_index == g_vs && g_vctx) {
             long v_pkts = atomic_fetch_add(&g_v_pkts, 1) + 1;
             hw_probe_pkts++;
+            if (hw_probe_pkts == 1)
+                hw_probe_t0 = now_s();
             if (!vq_push(pkt))
                 fprintf(stderr, "[VID] video packet queue overflow\n");
             if (!announced_pkt) {
@@ -1404,10 +1407,26 @@ static void *decode_thread(void *arg)
                         (long long)pkt->pts);
             }
 
-            /* Hardware decoder that never produces anything: fall back once. */
-            if (g_hw && g_frames_out == 0 && hw_probe_pkts > 48) {
-                fprintf(stderr, "[VID] hardware decoder produced no frames - "
-                                "falling back to software\n");
+            /* Hardware decoder that never produces anything: fall back once.
+             * Packet count alone is not enough - a starved/wedged VPU can
+             * stall each send/receive for up to a second internally, so 48
+             * packets could take the better part of a minute while the (one)
+             * demux thread starves the AUDIO too and the player looks dead.
+             * The wall-clock arm catches that in 3 seconds. Field causes,
+             * so the message can say something useful: gpu_mem too small
+             * (decoder opens, zero frames ever), or a VPU wedged by an
+             * earlier crashed decode (cleared only by reboot). */
+            if (g_hw && g_frames_out == 0 &&
+                (hw_probe_pkts > 48 ||
+                 (hw_probe_pkts >= 16 && now_s() - hw_probe_t0 > 3.0))) {
+                fprintf(stderr,
+                    "[VID] HARDWARE decoder produced no frames (%d packets, "
+                    "%.1fs) - falling back to SOFTWARE decode.\n"
+                    "[VID] If this recurs: config.txt needs gpu_mem=128 (the "
+                    "VPU allocates frame buffers from it), and a crashed "
+                    "decode wedges the VPU until reboot (dmesg: 'failed to "
+                    "create component ril.video_decode').\n",
+                    hw_probe_pkts, now_s() - hw_probe_t0);
                 avcodec_free_context(&g_vctx);
                 g_hw = 0;
                 if (open_video(0) != 0) {
@@ -1418,6 +1437,7 @@ static void *decode_thread(void *arg)
                 av_seek_frame(g_fmt, -1, (int64_t)(g_start_off * AV_TIME_BASE),
                               AVSEEK_FLAG_BACKWARD);
                 hw_probe_pkts = 0;
+                hw_probe_t0 = 0;
             }
 
             /* Still nothing after a good run of packets: say everything we
@@ -2150,6 +2170,44 @@ int vidplay_play(const char *host_path)
     g_as = av_find_best_stream(g_fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (g_as < 0)
         g_as = -1;              /* it returns AVERROR_STREAM_NOT_FOUND, not -1 */
+
+    /* Blu-ray remuxes carry a lossless TrueHD/MLP or DTS track plus a plain
+     * AC3/EAC3 compatibility track. av_find_best_stream picks the lossless
+     * one, but TrueHD costs roughly an order of magnitude more CPU than AC3
+     * to decode and the output here is a stereo downmix anyway - the
+     * compatibility track is strictly better for this player.
+     * PISTORM_VID_AUDIO=<stream#> overrides either way. */
+    {
+        const char *e = getenv("PISTORM_VID_AUDIO");
+        if (e && *e) {
+            int want = atoi(e);
+            if (want >= 0 && want < (int)g_fmt->nb_streams &&
+                g_fmt->streams[want]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+                g_as = want;
+            else
+                fprintf(stderr, "[VID] PISTORM_VID_AUDIO=%s is not an audio "
+                                "stream here - ignored\n", e);
+        } else if (g_as >= 0) {
+            enum AVCodecID cur = g_fmt->streams[g_as]->codecpar->codec_id;
+            if (cur == AV_CODEC_ID_TRUEHD || cur == AV_CODEC_ID_MLP ||
+                cur == AV_CODEC_ID_DTS) {
+                for (unsigned i = 0; i < g_fmt->nb_streams; i++) {
+                    enum AVCodecID c = g_fmt->streams[i]->codecpar->codec_id;
+                    if (g_fmt->streams[i]->codecpar->codec_type ==
+                            AVMEDIA_TYPE_AUDIO &&
+                        (c == AV_CODEC_ID_AC3 || c == AV_CODEC_ID_EAC3)) {
+                        fprintf(stderr, "[VID] audio: stream %u (%s) preferred "
+                                "over %s - much cheaper to decode, output is "
+                                "a stereo downmix anyway "
+                                "(PISTORM_VID_AUDIO=<n> overrides)\n",
+                                i, avcodec_get_name(c), avcodec_get_name(cur));
+                        g_as = (int)i;
+                        break;
+                    }
+                }
+            }
+        }
+    }
     if (g_vs < 0) {
         fprintf(stderr, "[VID] '%s' has no video stream\n", host_path);
         goto fail;
