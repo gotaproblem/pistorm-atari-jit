@@ -147,6 +147,15 @@ Created next to the repo (won't overwrite anything that already exists):
 
 Nothing you had in those files is discarded.
 
+> **`gpu_mem=128` is a hard requirement on the Pi 4** (already set in the
+> shipped `configs/config.txt`). The VideoCore H.264 decoder (VIDPLAY film
+> playback) and encoder (screen recording) allocate their frame buffers from
+> `gpu_mem`. With less (e.g. 32 MB) the decoder opens but never produces a
+> frame: playback hangs silently, and killing it wedges the VPU decoder
+> (`failed to create component ril.video_decode` in dmesg) until the next
+> reboot. If films suddenly play green or not at all after "tuning" memory
+> settings, check this first.
+
 ---
 
 ## Optional components

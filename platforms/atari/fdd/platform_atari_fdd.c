@@ -39,11 +39,9 @@ void platform_fdd_init(char *image)
     fdd_init();
 
     if (fdd_insert_disk (0, image, wp) != 0)
-       // fprintf(stderr, "[FDD] Drive A: %s%s\n", image, wp ? " (WP)" : " RW");
-    //else
         fprintf(stderr, "[FDD] Drive A: failed to mount %s\n", image);
-
-    //fprintf(stderr, "[FDD] Platform init complete\n");
+    else
+        fprintf(stderr, "[FDD] Drive A: %s%s\n", image, wp ? " (WP)" : " RW");
 }
 
 #ifdef __cplusplus

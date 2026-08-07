@@ -23,7 +23,13 @@ gpu_mem=32
 [pi4]
 #over_voltage=6 # works for 2100
 arm_freq=1500
-gpu_mem=32
+# 128 MB minimum - do NOT reduce. The VPU H.264 decoder (VIDPLAY film
+# playback) and encoder (avrecord screen recording) allocate their frame
+# buffers from gpu_mem. At 32 MB the decoder OPENS but never emits a frame
+# (ffmpeg: "poll unexpected timeout"), the player hangs silently, and
+# killing it wedges the VPU ('failed to create component ril.video_decode'
+# in dmesg) until the next reboot.
+gpu_mem=128
 
 
 [all]
