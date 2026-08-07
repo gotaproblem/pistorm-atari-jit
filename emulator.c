@@ -949,9 +949,9 @@ int main (int argc, char *argv[])
     if (config->rom.rom_size != 0)
     {
       // ATARI STe ROM
-      if (config->rom.rom_size >= (256 * 1024))
+      //if (config->rom.rom_size >= (256 * 1024))
       {
-        ROM_START = 0x00E00000;
+        ROM_START = config->rom.rom_address; //0x00E00000;
         ROM_END = ROM_START + config->rom.rom_size; // 0x00F00000;
         ROM_MASK = config->rom.rom_size - 1;        // 0x000FFFFF;
        

@@ -904,6 +904,27 @@ static inline void acia_trace(const char *op, uaecptr a, uae_u32 v, int size)
 // static void dm_wput(uaecptr a, uae_u32 v){ if(dummy_log_ok()) fprintf(stderr,"[DUMMY] wput @0x%08x = 0x%04x\n",a,v&0xffff); fc_data(); m68k_write_memory_16(a, v); pistorm_buserr(a,v,false,sz_word); }
 // static void dm_bput(uaecptr a, uae_u32 v){ if(dummy_log_ok()) fprintf(stderr,"[DUMMY] bput @0x%08x = 0x%02x\n",a,v&0xff); fc_data(); m68k_write_memory_8 (a, v); pistorm_buserr(a,v,false,sz_byte); }
 
+/* ------------------------------------------------------------------------
+ * Cartridge ROM shadowing (0xFA0000-0xFBFFFF).
+ *
+ * Executing a cartridge in place cannot be trusted: under the JIT the
+ * compiler reads the (empty) natmem pages behind the range instead of the
+ * cartridge. On the first access the magic is probed over the real bus;
+ * if a ROM cartridge answers (application 0xABCDEF42 or diagnostic
+ * 0xFA52235F) the 128KB is copied once and the range remapped as direct
+ * ROM. Requires a properly reset bus for a clean copy.
+ *
+ * PISTORM_CART_SHADOW=0 forces pass-through (live-hardware cartridges
+ * such as NetUSBee must not be shadowed); =1 skips the magic check.
+ * cart_shadow_state: 0 = undecided, 1 = shadowed, 2 = pass-through. */
+static int g_cart_shadow_state = 0;
+static void cart_maybe_shadow(void);   /* defined after map_region() */
+
+static inline bool cart_range(uaecptr a)
+{
+    return (a & 0x00FE0000u) == 0x00FA0000u;
+}
+
 static uae_u32 dm_lget(uaecptr a)
 {
     PROF_DUMMY_R(a);
@@ -917,6 +938,12 @@ static uae_u32 dm_lget(uaecptr a)
     fc_data();
     if (!dm_bus_addr(&a))
         return 0;
+    if (cart_range(a)) {
+        if (g_cart_shadow_state == 0)
+            cart_maybe_shadow();
+        if (g_cart_shadow_state == 1)
+            return do_get_mem_long((uae_u32 *)(natmem_offset + a));
+    }
     uae_u32 v = ps_bus_lget(a);
     pistorm_buserr(a, 0, true, sz_long);
     return v;
@@ -935,6 +962,12 @@ static uae_u32 dm_wget(uaecptr a)
     fc_data();
     if (!dm_bus_addr(&a))
         return 0;
+    if (cart_range(a)) {
+        if (g_cart_shadow_state == 0)
+            cart_maybe_shadow();
+        if (g_cart_shadow_state == 1)
+            return do_get_mem_word((uae_u16 *)(natmem_offset + a));
+    }
     uae_u16 v = ps_read_16(a);
     pistorm_buserr(a, 0, true, sz_word);
     return v;
@@ -953,6 +986,12 @@ static uae_u32 dm_bget(uaecptr a)
     fc_data();
     if (!dm_bus_addr(&a))
         return 0;
+    if (cart_range(a)) {
+        if (g_cart_shadow_state == 0)
+            cart_maybe_shadow();
+        if (g_cart_shadow_state == 1)
+            return natmem_offset[a];
+    }
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
     return v;
@@ -3146,6 +3185,36 @@ static void map_region(uaecptr start, uint32_t len, addrbank *b)
     }
 }
 
+/* First-touch cartridge probe and shadow (see the comment block above the
+ * dummy-bank read handlers). Runs on the CPU thread inside a dummy-bank
+ * access, before any code has been fetched from the range. */
+static void cart_maybe_shadow(void)
+{
+    const char *e = getenv("PISTORM_CART_SHADOW");
+    if (e && e[0] == '0') {
+        g_cart_shadow_state = 2;
+        return;
+    }
+
+    if (!(e && e[0] == '1')) {
+        uae_u32 magic = ((uae_u32)ps_read_16(0x00FA0000u) << 16) |
+                        ps_read_16(0x00FA0002u);
+        if (magic != 0xABCDEF42u && magic != 0xFA52235Fu) {
+            g_cart_shadow_state = 2;
+            return;
+        }
+    }
+
+    fprintf(stderr, "[CART] ROM cartridge detected - shadowing 128KB...\n");
+    for (uae_u32 a = 0x00FA0000u; a < 0x00FC0000u; a += 2)
+        do_put_mem_word((uae_u16 *)(natmem_offset + a), ps_read_16(a));
+
+    map_region(0x00FA0000u, 0x20000, &pistorm_rom_bank);
+    pistorm_smc(0x00FA0000u, 0x20000);
+    g_cart_shadow_state = 1;
+    fprintf(stderr, "[CART] shadow active: 0xFA0000-0xFBFFFF direct ROM\n");
+}
+
 /* ------------------------------------------------------------------ */
 /* No-spill guarded-read slow path (PISTORM_JIT_GUARD=2).              */
 /*                                                                     */
@@ -3295,7 +3364,11 @@ extern "C" void jit_mem_init(void)
     pistorm_dummy_bank.baseaddr = natmem_offset + 0;
     pistorm_stram_bank.baseaddr = natmem_offset + 0;
     //pistorm_fdd_bank.baseaddr = natmem_offset + 0x00FF0000;
-    pistorm_rom_bank.baseaddr = natmem_offset + ROM_BASE;
+    /* ROM placement follows the loaded image (pistorm_rom_start), not the
+     * compile-time ROM_BASE: 192KB TOS 1.x lives at 0xFC0000, 256KB+ TOS
+     * and EmuTOS at 0xE00000. Falls back to ROM_BASE if no start was set. */
+    const uint32_t rom_base = pistorm_rom_start ? pistorm_rom_start : ROM_BASE;
+    pistorm_rom_bank.baseaddr = natmem_offset + rom_base;
     pistorm_ide_bank.baseaddr = natmem_offset + IO_IDE_BASE;
     pistorm_io_bank.baseaddr = natmem_offset + IO_HW_BASE;
     pistorm_hw_bank.baseaddr = natmem_offset + 0x00FF0000;
@@ -3312,7 +3385,7 @@ extern "C" void jit_mem_init(void)
      //   pistorm_rom_size = ROM_MAX_SIZE;
 
     if (pistorm_rom_ptr) // && pistorm_tos_image_len <= pistorm_rom_size)
-        memcpy(natmem_offset + ROM_BASE, pistorm_rom_ptr, pistorm_rom_size);
+        memcpy(natmem_offset + rom_base, pistorm_rom_ptr, pistorm_rom_size);
    // else
     //    printf("[JITINIT] ROM copy failed\n");
     //printf ("rom ptr %p\n", pistorm_rom_ptr);
@@ -3351,7 +3424,7 @@ extern "C" void jit_mem_init(void)
 
     map_region(FVDI_FB_BASE, FVDI_FB_MAX_BYTES, &pistorm_fvdi_bank);
 
-    map_region(ROM_BASE, pistorm_rom_size, &pistorm_rom_bank);
+    map_region(rom_base, pistorm_rom_size, &pistorm_rom_bank);
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases
     map_region(0xFFFF0000u, 0x10000, &pistorm_hw_bank); // 32-bit alias
     map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
@@ -3377,5 +3450,7 @@ extern "C" void jit_mem_init(void)
 extern "C" void pistorm_seed_reset_vector(void)
 {
     if (natmem_offset)
-        memcpy(natmem_offset + 0, natmem_offset + ROM_BASE, 8);
+        memcpy(natmem_offset + 0,
+               natmem_offset + (pistorm_rom_start ? pistorm_rom_start
+                                                  : ROM_BASE), 8);
 }

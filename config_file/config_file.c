@@ -630,6 +630,9 @@ struct emulator_config *load_config_file(char *filename) {
           if (cfg->rom.rom_size >= 256 * 1024)
             cfg->rom.rom_address = 0x00E00000;
 
+          else if (cfg->rom.rom_size >= 192 * 1024)
+            cfg->rom.rom_address = 0x00FC0000;
+
           else
           {
             printf ("[CFG] unexpected ROM size %d - can not load\n", cfg->rom.rom_size);
