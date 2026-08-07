@@ -151,10 +151,25 @@ static void psctrl_sample_once(void)
     g_snap.uptime_s = (uint32_t)v;
 
   {
+    /* Reading this sysfs node CLEARS the firmware's since-boot sticky
+     * bits (the kernel driver passes a full clear mask on every read),
+     * so a 500 ms sampler destroys the very history it is supposed to
+     * report - the guest's throttle tooltip showed '-' for events that
+     * definitely happened, and vcgencmd only showed them while the
+     * emulator (and thus this sampler) was stopped. Keep our own latch:
+     * remember every active bit we ever see, plus any sticky bits the
+     * kernel hands us - the first read captures whatever happened
+     * before the emulator started. */
+    static uint32_t thr_seen = 0;
     unsigned long thr;
 
-    if (read_file_hex("/sys/devices/platform/soc/soc:firmware/get_throttled", &thr))
-      g_snap.throttled = (uint32_t)thr;
+    if (read_file_hex("/sys/devices/platform/soc/soc:firmware/get_throttled", &thr)) {
+      uint32_t t = (uint32_t)thr;
+
+      thr_seen |= (t & 0xFu) << 16;    /* active now -> seen since boot */
+      thr_seen |= t & 0xF0000u;        /* kernel-reported sticky bits   */
+      g_snap.throttled = (t & 0xFFFFu) | thr_seen;
+    }
   }
 
   /* bump last so a reader that keys on the epoch sees finished values */
