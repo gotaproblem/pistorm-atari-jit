@@ -95,18 +95,24 @@ static int read_file_hex(const char *path, unsigned long *out)
  * nothing and the guest saw a permanently clean history while vcgencmd
  * showed 0xe0000). The request value is a clear-mask for the sticky
  * bits: we pass 0, so reading NEVER erases the since-boot history. */
+static int vcio_fd = -2;            /* -2 = not tried, -1 = unavailable */
+
+static int vcio_open(void)
+{
+  if (vcio_fd == -2) {
+    vcio_fd = open("/dev/vcio", O_RDONLY | O_CLOEXEC);
+    if (vcio_fd < 0)
+      fprintf(stderr, "[PSCTRL] /dev/vcio unavailable - throttle state and "
+                      "measured ARM clock fall back to sysfs (if present)\n");
+  }
+  return vcio_fd;
+}
+
 static int read_throttled_mailbox(uint32_t *out)
 {
-  static int fd = -2;               /* -2 = not tried, -1 = unavailable */
   uint32_t msg[8];
 
-  if (fd == -2) {
-    fd = open("/dev/vcio", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-      fprintf(stderr, "[PSCTRL] /dev/vcio unavailable - throttle state "
-                      "falls back to sysfs (if present)\n");
-  }
-  if (fd < 0)
+  if (vcio_open() < 0)
     return 0;
 
   msg[0] = 8 * sizeof(uint32_t);    /* total buffer size */
@@ -118,12 +124,44 @@ static int read_throttled_mailbox(uint32_t *out)
   msg[6] = 0;                       /* end tag */
   msg[7] = 0;
 
-  if (ioctl(fd, _IOWR(100, 0, char *), msg) < 0)
+  if (ioctl(vcio_fd, _IOWR(100, 0, char *), msg) < 0)
     return 0;
   if (msg[1] != 0x80000000u)        /* firmware says: request failed */
     return 0;
 
   *out = msg[5];
+  return 1;
+}
+
+/* The ACTUAL ARM clock, measured by the firmware (what vcgencmd
+ * measure_clock arm shows). The kernel's cpufreq sysfs reports the
+ * REQUESTED clock, which with force_turbo=1 is pinned at 1500 MHz no
+ * matter what the firmware's thermal scaling is really doing - the
+ * guest's tooltip showed a rock-steady 1500 while the real clock sat
+ * at 1238. Only the firmware knows the truth. */
+static int read_arm_clock_mailbox(uint32_t *out_khz)
+{
+  uint32_t msg[9];
+
+  if (vcio_open() < 0)
+    return 0;
+
+  msg[0] = 9 * sizeof(uint32_t);    /* total buffer size */
+  msg[1] = 0;                       /* this is a request */
+  msg[2] = 0x00030047;              /* GET_CLOCK_RATE_MEASURED */
+  msg[3] = 8;                       /* value buffer size */
+  msg[4] = 8;                       /* request: 8 bytes follow */
+  msg[5] = 3;                       /* clock id: ARM */
+  msg[6] = 0;                       /* response: rate lands here (Hz) */
+  msg[7] = 0;                       /* end tag */
+  msg[8] = 0;
+
+  if (ioctl(vcio_fd, _IOWR(100, 0, char *), msg) < 0)
+    return 0;
+  if (msg[1] != 0x80000000u || msg[6] == 0)
+    return 0;
+
+  *out_khz = msg[6] / 1000u;
   return 1;
 }
 
@@ -182,8 +220,18 @@ static void psctrl_sample_once(void)
   if (read_file_number("/sys/class/thermal/thermal_zone0/temp", &v))
     g_snap.soc_temp_mc = (uint32_t)v;
 
-  if (read_file_number("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", &v))
-    g_snap.arm_freq_khz = (uint32_t)v;
+  {
+    /* Prefer the firmware's MEASURED clock (thermal scaling shows up
+     * there); cpufreq sysfs is the fallback, but with force_turbo=1 it
+     * reports a pinned 1500 MHz regardless of reality. */
+    uint32_t khz;
+
+    if (read_arm_clock_mailbox(&khz))
+      g_snap.arm_freq_khz = khz;
+    else if (read_file_number(
+               "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", &v))
+      g_snap.arm_freq_khz = (uint32_t)v;
+  }
 
   if (read_file_number("/proc/loadavg", &v))
     g_snap.loadavg_x100 = (uint32_t)(v * 100.0);
