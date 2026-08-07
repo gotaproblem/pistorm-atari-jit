@@ -481,6 +481,30 @@ static void resolve_rect(void)
         g_dx = g_rect_x + drmpres_dst_x();
         g_dy = g_rect_y + drmpres_dst_y();
         g_dw = g_rect_w; g_dh = g_rect_h;
+        /* The guest computes its own aspect fit for the rect and rounds; a
+         * round-UP makes the picture overhang the GEM window frame by a
+         * pixel or two along the bottom/right (field report). If the rect
+         * is within a few pixels of the source aspect, snap DOWN to the
+         * exact floor fit so the picture always stays inside the frame.
+         * Larger deviations are respected - the guest may genuinely want
+         * that shape. Top-left anchored, so shrinking pulls the overhang
+         * back in. */
+        if (g_vw > 0 && g_vh > 0 && g_fmt && g_vs >= 0) {
+            double sn = 1.0;
+            AVRational ar = av_guess_sample_aspect_ratio(g_fmt,
+                                g_fmt->streams[g_vs], NULL);
+            if (ar.num > 0 && ar.den > 0)
+                sn = (double)ar.num / (double)ar.den;
+            {
+                double dar2 = (double)g_vw * sn / (double)g_vh;
+                int fit_h = (int)(g_dw / dar2);          /* floor */
+                int fit_w = (int)(g_dh * dar2);          /* floor */
+                if (fit_h >= 2 && fit_h < g_dh && g_dh - fit_h <= 4)
+                    g_dh = fit_h;
+                else if (fit_w >= 2 && fit_w < g_dw && g_dw - fit_w <= 4)
+                    g_dw = fit_w;
+            }
+        }
         /* A window has its own background; the bars there belong to the app. */
         g_want_backdrop = 0;
         return;
@@ -1216,20 +1240,23 @@ static int publish_frame(AVFrame *frm)
         }
     }
     if (upload_frame(frm, idx) == 0) {
-        /* Keep a reference for the screen recorder. A refcount, not a copy,
-         * and only on this path - the zero-copy branch above returns before
-         * here because its frames are unreadable by the CPU. */
-        if (avrecord_active()) {
-            pthread_mutex_lock(&g_cap_lock);
-            if (!g_cap_frame)
-                g_cap_frame = av_frame_alloc();
-            if (g_cap_frame) {
+        /* Keep a reference to the newest frame for the screen recorder AND
+         * for one-off screendumps (which is why this is no longer gated on
+         * avrecord_active - a dump can happen at any moment). A refcount,
+         * not a copy; only on this path - the zero-copy branch above returns
+         * before here because its frames are unreadable by the CPU. The ref
+         * is dropped in teardown() BEFORE the codec context is freed, which
+         * matters for v4l2m2m frames (the buffer must go back to the
+         * decoder or the VPU wedges). */
+        pthread_mutex_lock(&g_cap_lock);
+        if (!g_cap_frame)
+            g_cap_frame = av_frame_alloc();
+        if (g_cap_frame) {
+            av_frame_unref(g_cap_frame);
+            if (av_frame_ref(g_cap_frame, frm) < 0)
                 av_frame_unref(g_cap_frame);
-                if (av_frame_ref(g_cap_frame, frm) < 0)
-                    av_frame_unref(g_cap_frame);
-            }
-            pthread_mutex_unlock(&g_cap_lock);
         }
+        pthread_mutex_unlock(&g_cap_lock);
         ring_publish(idx, 0, NULL, pts >= 0 ? pts : master_clock());
     }
     return 1;

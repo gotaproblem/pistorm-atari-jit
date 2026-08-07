@@ -862,6 +862,55 @@ static const void *et4000_record_compose(ET4000State *s, int *full_frame)
     return g_rec_scratch;
 }
 
+/* One-off screendump. If a film is playing on the overlay plane, the raw
+ * framebuffer has a hole where the picture is (the plane composites at
+ * scanout), so blend the film's current frame into a COPY first - the same
+ * mechanism the screen recorder uses. Zero-copy HEVC frames are
+ * CPU-unreadable; those dumps keep the hole, with a note saying why. */
+static void et4000_do_screendump(ET4000State *s)
+{
+    const uint32_t *src;
+    uint32_t *tmp = NULL;
+    int pend;
+
+    if (!s->fb_mem || !s->fb_width || !s->fb_height || !s->fb_stride)
+    {
+        fprintf(stderr, "[DISPLAY] PNG screendump failed (no framebuffer)\n");
+        return;
+    }
+
+    src = (const uint32_t *)s->fb_mem;
+    pend = vidplay_capture_pending();
+
+    if (pend > 0)
+    {
+        size_t need = (size_t)s->fb_stride * s->fb_height;
+        tmp = malloc(need);
+        if (tmp)
+        {
+            memcpy(tmp, s->fb_mem, need);
+            if (vidplay_capture_blend(tmp, (int)s->fb_stride,
+                                      (int)s->fb_width, (int)s->fb_height) == 0)
+                src = tmp;
+        }
+    } else if (pend < 0)
+    {
+        fprintf(stderr, "[DISPLAY] note: this film decodes straight into the "
+                "display hardware (zero-copy HEVC) - the dump will have a "
+                "hole where the picture is\n");
+    }
+
+    if (save_png_rgb("screendump.png", src,
+                     s->fb_width, s->fb_height, s->fb_stride / 4) == 0)
+        printf("[DISPLAY] Screendump %ux%u -> screendump.png\n",
+               s->fb_width, s->fb_height);
+    else
+        fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
+
+    free(tmp);
+}
+
+
 static void et4000_record_frame(ET4000State *s)
 {
     if (!g_screenrecord_active)
@@ -976,13 +1025,7 @@ static void sdl_present (ET4000State *s)
         if (g_screendump_req)
         {
             g_screendump_req = 0;
-            if (s->fb_mem && s->fb_width && s->fb_height && s->fb_stride &&
-                save_png_rgb("screendump.png", (const uint32_t *)s->fb_mem,
-                             s->fb_width, s->fb_height, s->fb_stride / 4) == 0)
-                printf("[DISPLAY] Screendump %ux%u -> screendump.png\n",
-                       s->fb_width, s->fb_height);
-            else
-                fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
+            et4000_do_screendump(s);
         }
         et4000_record_frame(s);
 
@@ -1095,13 +1138,7 @@ static void sdl_present (ET4000State *s)
         if (g_screendump_req)
         {
             g_screendump_req = 0;
-            if (s->fb_mem && s->fb_width && s->fb_height && s->fb_stride &&
-                save_png_rgb("screendump.png", (const uint32_t *)s->fb_mem,
-                             s->fb_width, s->fb_height, s->fb_stride / 4) == 0)
-                printf("[DISPLAY] Screendump %ux%u -> screendump.png\n",
-                       s->fb_width, s->fb_height);
-            else
-                fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
+            et4000_do_screendump(s);
         }
         et4000_record_frame(s);
         fbdev_present(s);
