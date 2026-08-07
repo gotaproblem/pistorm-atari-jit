@@ -23,6 +23,8 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 
 /* --- counters bumped by the CPU/JIT core ------------------------------- */
 
@@ -83,6 +85,45 @@ static int read_file_hex(const char *path, unsigned long *out)
     return 0;
 
   *out = v;
+  return 1;
+}
+
+/* Read the firmware throttle state directly over the VideoCore mailbox
+ * (property tag GET_THROTTLED), exactly as vcgencmd does. This is kernel-
+ * version-proof - the sysfs get_throttled node moves/vanishes between
+ * kernel releases (field finding on 6.18: the sampler silently read
+ * nothing and the guest saw a permanently clean history while vcgencmd
+ * showed 0xe0000). The request value is a clear-mask for the sticky
+ * bits: we pass 0, so reading NEVER erases the since-boot history. */
+static int read_throttled_mailbox(uint32_t *out)
+{
+  static int fd = -2;               /* -2 = not tried, -1 = unavailable */
+  uint32_t msg[8];
+
+  if (fd == -2) {
+    fd = open("/dev/vcio", O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+      fprintf(stderr, "[PSCTRL] /dev/vcio unavailable - throttle state "
+                      "falls back to sysfs (if present)\n");
+  }
+  if (fd < 0)
+    return 0;
+
+  msg[0] = 8 * sizeof(uint32_t);    /* total buffer size */
+  msg[1] = 0;                       /* this is a request */
+  msg[2] = 0x00030046;              /* GET_THROTTLED */
+  msg[3] = 4;                       /* value buffer size */
+  msg[4] = 4;                       /* request: 4 bytes follow */
+  msg[5] = 0;                       /* sticky clear-mask: clear NOTHING */
+  msg[6] = 0;                       /* end tag */
+  msg[7] = 0;
+
+  if (ioctl(fd, _IOWR(100, 0, char *), msg) < 0)
+    return 0;
+  if (msg[1] != 0x80000000u)        /* firmware says: request failed */
+    return 0;
+
+  *out = msg[5];
   return 1;
 }
 
@@ -151,23 +192,26 @@ static void psctrl_sample_once(void)
     g_snap.uptime_s = (uint32_t)v;
 
   {
-    /* Reading this sysfs node CLEARS the firmware's since-boot sticky
-     * bits (the kernel driver passes a full clear mask on every read),
-     * so a 500 ms sampler destroys the very history it is supposed to
-     * report - the guest's throttle tooltip showed '-' for events that
-     * definitely happened, and vcgencmd only showed them while the
-     * emulator (and thus this sampler) was stopped. Keep our own latch:
-     * remember every active bit we ever see, plus any sticky bits the
-     * kernel hands us - the first read captures whatever happened
-     * before the emulator started. */
+    /* Primary source: the VideoCore mailbox with a zero clear-mask -
+     * kernel-proof and history-preserving. Fallback: the sysfs node
+     * (path varies by kernel; on some it does not exist at all).
+     * Either way, keep our own latch of every event ever observed, so
+     * the guest's since-boot history survives anything that clears the
+     * firmware's sticky bits behind our back. */
     static uint32_t thr_seen = 0;
+    uint32_t t;
     unsigned long thr;
+    int got = read_throttled_mailbox(&t);
 
-    if (read_file_hex("/sys/devices/platform/soc/soc:firmware/get_throttled", &thr)) {
-      uint32_t t = (uint32_t)thr;
+    if (!got && read_file_hex(
+            "/sys/devices/platform/soc/soc:firmware/get_throttled", &thr)) {
+      t = (uint32_t)thr;
+      got = 1;
+    }
 
+    if (got) {
       thr_seen |= (t & 0xFu) << 16;    /* active now -> seen since boot */
-      thr_seen |= t & 0xF0000u;        /* kernel-reported sticky bits   */
+      thr_seen |= t & 0xF0000u;        /* firmware-reported sticky bits */
       g_snap.throttled = (t & 0xFFFFu) | thr_seen;
     }
   }
