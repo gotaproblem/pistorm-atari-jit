@@ -217,8 +217,20 @@ static int clip_rect(int *dx, int *dy, int *dw, int *dh,
                      int *sx, int *sy, int *sw, int *sh)
 {
     int x1, y1, x2, y2;
+    int mw = (int)vidplane_mode_w();
+    int mh = (int)vidplane_mode_h();
 
     *sx = 0; *sy = 0; *sw = g_vw; *sh = g_vh;
+
+    /* The display itself is an implicit clip: a window the AES moved
+     * fully off screen (workspace switch on the bespoke XaAES hides by
+     * moving the window away) must take its picture with it. Without
+     * this, the software path hands the DRM a dest beyond the mode and
+     * the previous frame stays stranded on screen. */
+    if (mw > 0 && mh > 0 && *dw > 0 && *dh > 0 &&
+        (*dx >= mw || *dy >= mh || *dx + *dw <= 0 || *dy + *dh <= 0))
+        return 0;
+
     if (g_clip_w <= 0 || g_clip_h <= 0 || *dw <= 0 || *dh <= 0)
         return 1;
 
@@ -1697,6 +1709,16 @@ static int show_hw_frame(uint32_t fb)
 
     if (mw <= 0 || mh <= 0 || dw <= 0 || dh <= 0)
         return -1;
+
+    /* Fully off the display: the window was moved off screen (bespoke
+     * XaAES workspace switch, or just dragged away) and the picture
+     * goes with it. Must be checked BEFORE the on-screen clamp below,
+     * which would otherwise drag the picture back into view on
+     * whatever desk is looking. */
+    if (dx >= mw || dy >= mh || dx + dw <= 0 || dy + dh <= 0) {
+        vidplane_hide();
+        return 0;
+    }
 
     {
         int min_w, min_h;
