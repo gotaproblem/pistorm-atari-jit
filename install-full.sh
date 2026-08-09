@@ -284,6 +284,12 @@ else
   warn "no configs/gem-binaries — GEM programs not installed"
 fi
 
+if [ -f "$HERE/configs/pistormbg.jpg" ]; then
+  say "Installing desktop wallpaper into $ROOT/atari-share/bg"
+  mkdir -p "$ROOT/atari-share/bg"
+  copy_newer "$HERE/configs/pistormbg.jpg" "$ROOT/atari-share/bg/pistormbg.jpg"
+fi
+
 # --------------------------------------------------------------------------
 # 3. Boot configuration — MERGE, don't clobber the user's settings.
 # --------------------------------------------------------------------------
