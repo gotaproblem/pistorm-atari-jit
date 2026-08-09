@@ -1,0 +1,11 @@
+[Unit]
+Description=APJ-OS: apply Wi-Fi settings from /boot/firmware/wifi.txt
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/apj-wifi
+
+[Install]
+WantedBy=multi-user.target

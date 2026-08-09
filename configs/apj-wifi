@@ -1,0 +1,29 @@
+#!/bin/bash
+# APJ-OS: apply Wi-Fi credentials from the FAT boot partition, where a
+# user on ANY OS (Windows/Mac/Linux) can edit them after flashing the
+# SD image. Runs once per boot via apj-wifi.service; does nothing unless
+# /boot/firmware/wifi.txt exists with real values in it.
+
+f=/boot/firmware/wifi.txt
+[ -f "$f" ] || exit 0
+
+ssid=$(sed -n 's/^SSID=//p'     "$f" | head -1 | tr -d '\r')
+pass=$(sed -n 's/^PASSWORD=//p' "$f" | head -1 | tr -d '\r')
+ctry=$(sed -n 's/^COUNTRY=//p'  "$f" | head -1 | tr -d '\r')
+
+# untouched template, or empty: leave it for the user to fill in
+[ -n "$ssid" ] || exit 0
+[ "$ssid" = "YourNetworkName" ] && exit 0
+
+[ -n "$ctry" ] && raspi-config nonint do_wifi_country "$ctry" 2>/dev/null
+
+# replace any previous connection of the same name, then connect
+nmcli connection delete "$ssid" 2>/dev/null
+nmcli connection add type wifi ifname wlan0 con-name "$ssid" ssid "$ssid" \
+    wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$pass" \
+    connection.autoconnect yes
+nmcli connection up "$ssid" 2>/dev/null
+
+# credentials leave the world-readable FAT partition
+mv "$f" "$f.applied"
+exit 0

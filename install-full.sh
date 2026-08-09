@@ -290,6 +290,28 @@ if [ -f "$HERE/configs/pistormbg.jpg" ]; then
   copy_newer "$HERE/configs/pistormbg.jpg" "$ROOT/atari-share/bg/pistormbg.jpg"
 fi
 
+# APJ-OS Wi-Fi onboarding: after flashing the SD image, a user on any OS
+# can edit wifi.txt on the FAT boot partition; this service applies it
+# at boot and then renames the file so credentials leave the FAT.
+if [ -f "$HERE/configs/apj-wifi" ]; then
+  say "Installing APJ Wi-Fi onboarding (wifi.txt on the boot partition)"
+  sudo install -m 755 "$HERE/configs/apj-wifi" /usr/local/sbin/apj-wifi
+  sudo install -m 644 "$HERE/configs/apj-wifi.service" /etc/systemd/system/apj-wifi.service
+  sudo systemctl enable apj-wifi.service
+  if [ -d /boot/firmware ] && [ ! -f /boot/firmware/wifi.txt ] \
+       && [ ! -f /boot/firmware/wifi.txt.applied ]; then
+    sudo tee /boot/firmware/wifi.txt >/dev/null <<'WEOF'
+# APJ-OS Wi-Fi setup
+# Edit the three lines below with your network details, save, and boot.
+# The file is renamed to wifi.txt.applied once the settings are taken.
+SSID=YourNetworkName
+PASSWORD=YourWifiPassword
+COUNTRY=GB
+WEOF
+  fi
+fi
+
+
 # --------------------------------------------------------------------------
 # 3. Boot configuration — MERGE, don't clobber the user's settings.
 # --------------------------------------------------------------------------
