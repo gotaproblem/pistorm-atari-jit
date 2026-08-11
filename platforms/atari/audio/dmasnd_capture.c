@@ -518,14 +518,21 @@ static void frames_advance(void)
     }
 }
 
-/* observer: ipl_task. Cheap when idle; one clock_gettime while playing. */
+/* observer: ipl_task. The frame clock must advance REGARDLESS of
+ * pending-interrupt state: real STE DMA keeps playing and re-triggering
+ * whether or not the CPU has serviced the interrupt. The previous
+ * early-out on pending gated the clock on the guest's IACK latency -
+ * field-measured: 798us frames advancing at 4.21ms (the guest's ISR
+ * cycle), starving the DAC 5x. The stride keeps the hot ipl_task loop
+ * from paying a clock read every iteration (~every 8th is plenty:
+ * >100kHz check rate against 1.25kHz frame rate). */
 int dmasnd_irq_wanted(void)
 {
-    if (atomic_load(&g_irq_ta) || atomic_load(&g_irq_g7))
-        return 1;
-    if (!atomic_load(&g_enabled) || atomic_load(&g_parked))
-        return 0;
-    frames_advance();
+    static unsigned stride;
+
+    if (atomic_load(&g_enabled) && !atomic_load(&g_parked) &&
+        !(++stride & 7u))
+        frames_advance();
     return atomic_load(&g_irq_ta) || atomic_load(&g_irq_g7);
 }
 
@@ -656,7 +663,7 @@ static void *pump_thread(void *arg)
                copies are the same buffer again - exactly what real DMA
                would have fetched on each pass. */
             unsigned behind = gen - last_gen;
-            if (behind > 8u) behind = 8u;      /* cap pathological deficits */
+            if (behind > 64u) behind = 64u;    /* match the advance guard */
             last_gen = gen;
             if (natmem_offset) {
                 uint32_t s = atomic_load(&g_act_s), e = atomic_load(&g_act_e);
