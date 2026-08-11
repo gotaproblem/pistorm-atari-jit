@@ -259,6 +259,7 @@ extern "C" void vidplay_seek_rel(long delta_s);
 extern "C" const char *vidplay_meta(int which);
 extern "C" long vidplay_info(int what);
 extern "C" void vidplay_set_rect(int x, int y, int w, int h);
+extern "C" void et4000_fx_slide(int dir);
 extern "C" void vidplay_set_volume(int percent);
 extern "C" void vidplay_set_clip(int x, int y, int w, int h);
 extern uae_u8 *natmem_offset;
@@ -4875,6 +4876,12 @@ static uae_u32 nf_call_psctrl(uae_u32 subid, uaecptr params)
       return PSCTRL_API_VERSION;
     case PSCTRL_GETINT:
       return psctrl_getint(nf_get_param(params, 0));
+    case PSCTRL_FX:
+      /* Desk-slide transition. Snapshots the frame synchronously (a
+       * plain memcpy - straight-line, no guest exceptions, so the JIT
+       * invariant holds) and arms the render-thread animation. */
+      et4000_fx_slide((int)nf_get_param(params, 0));
+      return 0;
   }
 
   return (uae_u32)-1;

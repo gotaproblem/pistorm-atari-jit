@@ -969,6 +969,8 @@ void invalidate_block(blockinfo* bi)
 {
     int i;
 
+    psctrl_ctr_smc_inv++;               /* PSCTRL statistics */
+
     bi->optlevel = 0;
     bi->count = optcount[0] - 1;
     bi->handler = NULL;

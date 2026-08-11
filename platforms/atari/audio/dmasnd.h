@@ -43,6 +43,15 @@ void dmasnd_mp3_seek_rel(long delta_s);       /* seek +/- seconds from current *
 const char *dmasnd_mp3_meta(int which);       /* 0=title 1=artist 2=album */
 
 /* ---- capture (dmasnd_capture.c) ---- */
+int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF8925?      */
+void     dmasnd_mfp_snoop(uint32_t addr, uint32_t value, int is_word);
+int      dmasnd_irq_wanted(void);                  /* observer: ipl_task             */
+uint8_t  dmasnd_iack_vector(void);                 /* consumer: virtual IACK, CPU thr*/
+uint8_t  dmasnd_gpip_shim(uint8_t real);           /* GPIP7 ^= virtual XSINT level   */
+uint8_t  dmasnd_mfp_read_shim(uint32_t addr, uint8_t real); /* +virtual IPRA/ISRA    */
+uint8_t  dmasnd_reg_read8 (uint32_t addr);         /* register readback (reads must  */
+uint16_t dmasnd_reg_read16(uint32_t addr);         /* be served host-side: the range */
+uint32_t dmasnd_reg_read32(uint32_t addr);         /* bus-errors on a plain ST)      */
 void dmasnd_snoop8 (uint32_t addr, uint8_t  val);  /* call from m68k_write_memory_8  */
 void dmasnd_snoop16(uint32_t addr, uint16_t val);  /* call from m68k_write_memory_16 */
 void dmasnd_snoop32(uint32_t addr, uint32_t val);  /* call from m68k_write_memory_32 */

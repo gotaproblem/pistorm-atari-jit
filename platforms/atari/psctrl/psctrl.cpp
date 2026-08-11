@@ -33,6 +33,7 @@ volatile uint32_t psctrl_ctr_flushes = 0;
 volatile uint32_t psctrl_ctr_interp_calls = 0;
 volatile uint32_t psctrl_ctr_stop_iters = 0;
 volatile uint32_t psctrl_ctr_interp_cycles = 0;
+volatile uint32_t psctrl_ctr_smc_inv = 0;
 
 /* The JIT's cycle clock (cpu/events.cpp) and the current 68k cycle length
  * in clock units. Global data symbols, no C++ mangling to worry about. */
@@ -57,6 +58,10 @@ struct psctrl_snapshot {
   volatile uint32_t jit_eff_khz;
   volatile uint32_t jit_hit_x10;
   volatile uint32_t jit_idle_x10;
+  volatile uint32_t flushes_total;
+  volatile uint32_t smc_inv;
+  volatile uint32_t pi_model;     /* static after init */
+  volatile uint32_t pi_ram_mb;    /* static after init */
 };
 
 static struct psctrl_snapshot g_snap;
@@ -224,6 +229,47 @@ static void psctrl_sample_once(void)
   c = psctrl_ctr_stop_iters;
   g_snap.stop_iters = c - s_prev_stop_iters;
   s_prev_stop_iters = c;
+
+  {
+    static uint32_t s_prev_smc_inv;
+
+    c = psctrl_ctr_smc_inv;
+    g_snap.smc_inv = c - s_prev_smc_inv;
+    s_prev_smc_inv = c;
+  }
+
+  /* since-boot cumulative for the JIT panel's cache-pressure line */
+  g_snap.flushes_total = psctrl_ctr_flushes;
+
+  /* Board identity: parse the new-style revision word once. Type in
+   * bits 4-11, RAM size code in bits 20-22 (256 MB << code); bit 23
+   * distinguishes new-style codes - old boards report 0/0. */
+  if (g_snap.pi_model == 0) {
+    static int tried = 0;
+
+    if (!tried) {
+      FILE *f = fopen("/proc/cpuinfo", "r");
+
+      tried = 1;
+      if (f) {
+        char line[256];
+
+        while (fgets(line, sizeof line, f)) {
+          unsigned long rev;
+
+          if (sscanf(line, "Revision : %lx", &rev) == 1 ||
+              sscanf(line, "Revision\t: %lx", &rev) == 1) {
+            if (rev & 0x800000ul) {         /* new-style code */
+              g_snap.pi_model = (uint32_t)((rev >> 4) & 0xFF);
+              g_snap.pi_ram_mb = 256u << ((rev >> 20) & 0x7);
+            }
+            break;
+          }
+        }
+        fclose(f);
+      }
+    }
+  }
 
   /* host sensors; on failure the previous value is retained */
   if (read_file_number("/sys/class/thermal/thermal_zone0/temp", &v))
@@ -467,6 +513,14 @@ uint32_t psctrl_getint(uint32_t index)
       return g_snap.jit_hit_x10;
     case PS_JIT_IDLE_X10:
       return g_snap.jit_idle_x10;
+    case PS_PI_MODEL:
+      return g_snap.pi_model;
+    case PS_PI_RAM_MB:
+      return g_snap.pi_ram_mb;
+    case PS_STAT_FLUSHES_TOTAL:
+      return g_snap.flushes_total;
+    case PS_STAT_SMC_INV:
+      return g_snap.smc_inv;
 
     /* Pi wall clock, computed on demand (the Pi is NTP-synced; the
      * Atari has no battery RTC, so the guest can set its GEMDOS clock

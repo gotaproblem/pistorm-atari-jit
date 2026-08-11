@@ -144,6 +144,12 @@ extern ET4000State *g_et4000;
 
 int  et4000_init(ET4000State *s, const char *fb_device);
 void et4000_shutdown(ET4000State *s);
+
+/* Bespoke desk-slide transition: snapshot the current frame and animate
+ * it out at the next presents. dir 1 = old exits left (moving to a
+ * higher desk), 2 = old exits right. Safe from the CPU thread (straight-
+ * line memcpy + atomic store); PISTORM_FX_MS=0 disables. */
+void et4000_fx_slide(int dir);
 int  et4000_decode_mode(ET4000State *s);
 void et4000_update_display(ET4000State *s);
 

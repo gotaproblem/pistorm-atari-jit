@@ -43,6 +43,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -87,6 +88,60 @@ void pistorm_fvdi_fetch_dirty_rect(uint32_t *mn, uint32_t *mx,
  * ----------------------------------------------------------------------- */
 
 ET4000State *g_et4000 = NULL; /* non-static: used by Musashi callbacks */
+
+/* ---- Bespoke desk-slide transition -------------------------------------
+ * The desktop asks for a slide (PSCTRL subop 2) just BEFORE it switches
+ * workspaces; the NatFeat handler snapshots the current frame HERE,
+ * synchronously (the repaint of the new desk may start within
+ * milliseconds - a deferred snapshot would capture a mix). The render
+ * thread then animates old-out/new-in at vblank rate. Pure presentation:
+ * the guest, the JIT and XaAES never know it happened.
+ * PISTORM_FX_MS tunes the duration (default 200, 0 disables). */
+
+static uint8_t *g_fx_snap = NULL;
+static uint32_t g_fx_w = 0, g_fx_h = 0, g_fx_stride = 0;
+static atomic_int g_fx_req;			/* 0 none, 1 old exits left, 2 right */
+
+static int fx_duration_ms(void)
+{
+    static int ms = -2;
+
+    if (ms == -2) {
+        const char *e = getenv("PISTORM_FX_MS");
+
+        ms = e ? atoi(e) : 200;
+        if (ms > 1000)
+            ms = 1000;
+    }
+    return ms;
+}
+
+void et4000_fx_slide(int dir)
+{
+    ET4000State *s = g_et4000;
+
+    if (fx_duration_ms() <= 0)
+        return;
+    if (!s || !s->fb_mem || s->fb_width == 0 || s->fb_height == 0 ||
+        s->fb_stride == 0)
+        return;
+    if (atomic_load(&g_fx_req) != 0)	/* one at a time */
+        return;
+
+    if (g_fx_snap == NULL || g_fx_w != s->fb_width ||
+        g_fx_h != s->fb_height || g_fx_stride != s->fb_stride) {
+        free(g_fx_snap);
+        g_fx_snap = malloc((size_t)s->fb_stride * s->fb_height);
+        if (g_fx_snap == NULL)
+            return;
+        g_fx_w = s->fb_width;
+        g_fx_h = s->fb_height;
+        g_fx_stride = s->fb_stride;
+    }
+
+    memcpy(g_fx_snap, s->fb_mem, (size_t)g_fx_stride * g_fx_h);
+    atomic_store(&g_fx_req, (dir == 2) ? 2 : 1);
+}
 uint8_t *fb_ptr;
 uint8_t *vram_ptr;
 volatile int et4000_thread_ready = 0;
@@ -1055,6 +1110,66 @@ static void sdl_present (ET4000State *s)
             if (sw != pend_sw || sh != pend_sh) {       /* buffers realloc'd */
                 memset(pend, 0, sizeof(pend));
                 pend_sw = sw; pend_sh = sh;
+            }
+
+            /* Bespoke desk-slide: play the whole animation here, one
+             * composed frame per vblank (drmpres_flip blocks on the
+             * vblank-latched commit). The guest keeps running; the new
+             * desk repaints live into fb_mem underneath the slide. */
+            {
+                int fxdir = atomic_exchange(&g_fx_req, 0);
+
+                if (fxdir && g_fx_snap && g_fx_w == sw && g_fx_h == sh) {
+                    int frames = (fx_duration_ms() * 60) / 1000;
+                    int f;
+
+                    if (frames < 3)
+                        frames = 3;
+
+                    for (f = 1; f <= frames && back; f++) {
+                        float t = (float)f / (float)frames;
+                        float e = 1.0f - (1.0f - t) * (1.0f - t); /* ease-out */
+                        uint32_t off = ((uint32_t)(e * (float)sw)) & ~15u;
+                        uint32_t wl, y;
+
+                        if (off > sw)
+                            off = sw;
+                        wl = sw - off;                  /* old-frame width */
+
+                        for (y = 0; y < sh; y++) {
+                            uint8_t *dst = back + (size_t)y * bp;
+                            const uint8_t *liv = s->fb_mem + (size_t)y * s->fb_stride;
+                            const uint8_t *old = g_fx_snap + (size_t)y * g_fx_stride;
+
+                            if (fxdir == 1) {
+                                /* to a higher desk: old exits left, new
+                                 * enters from the right edge */
+                                if (wl)
+                                    wc_copy(dst, old + (size_t)off * 4, wl * 4);
+                                if (off)
+                                    wc_copy(dst + (size_t)wl * 4, liv, off * 4);
+                            } else {
+                                /* to a lower desk: mirrored */
+                                if (off)
+                                    wc_copy(dst, liv + (size_t)wl * 4, off * 4);
+                                if (wl)
+                                    wc_copy(dst + (size_t)off * 4, old, wl * 4);
+                            }
+                        }
+
+                        drmpres_flip();
+                        back = drmpres_backbuffer();
+                    }
+
+                    /* every in-flight DRM buffer now holds slide frames -
+                     * force full copies until they cycle through */
+                    for (f = 0; f < 4; f++)
+                        if (pend[f].ptr)
+                            pend[f].full = 1;
+
+                    if (!back)
+                        return;
+                }
             }
 
             /* this frame's dirty rect (divisor > 1 skips presents, which

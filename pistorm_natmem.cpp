@@ -217,6 +217,7 @@ extern "C"
     void     mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word);
 }
 extern bool FDD_enabled;
+extern bool DMA_Sound_enabled;
 
 #define MFP_GPIP            0x00FFFA01u
 
@@ -904,27 +905,6 @@ static inline void acia_trace(const char *op, uaecptr a, uae_u32 v, int size)
 // static void dm_wput(uaecptr a, uae_u32 v){ if(dummy_log_ok()) fprintf(stderr,"[DUMMY] wput @0x%08x = 0x%04x\n",a,v&0xffff); fc_data(); m68k_write_memory_16(a, v); pistorm_buserr(a,v,false,sz_word); }
 // static void dm_bput(uaecptr a, uae_u32 v){ if(dummy_log_ok()) fprintf(stderr,"[DUMMY] bput @0x%08x = 0x%02x\n",a,v&0xff); fc_data(); m68k_write_memory_8 (a, v); pistorm_buserr(a,v,false,sz_byte); }
 
-/* ------------------------------------------------------------------------
- * Cartridge ROM shadowing (0xFA0000-0xFBFFFF).
- *
- * Executing a cartridge in place cannot be trusted: under the JIT the
- * compiler reads the (empty) natmem pages behind the range instead of the
- * cartridge. On the first access the magic is probed over the real bus;
- * if a ROM cartridge answers (application 0xABCDEF42 or diagnostic
- * 0xFA52235F) the 128KB is copied once and the range remapped as direct
- * ROM. Requires a properly reset bus for a clean copy.
- *
- * PISTORM_CART_SHADOW=0 forces pass-through (live-hardware cartridges
- * such as NetUSBee must not be shadowed); =1 skips the magic check.
- * cart_shadow_state: 0 = undecided, 1 = shadowed, 2 = pass-through. */
-static int g_cart_shadow_state = 0;
-static void cart_maybe_shadow(void);   /* defined after map_region() */
-
-static inline bool cart_range(uaecptr a)
-{
-    return (a & 0x00FE0000u) == 0x00FA0000u;
-}
-
 static uae_u32 dm_lget(uaecptr a)
 {
     PROF_DUMMY_R(a);
@@ -938,12 +918,6 @@ static uae_u32 dm_lget(uaecptr a)
     fc_data();
     if (!dm_bus_addr(&a))
         return 0;
-    if (cart_range(a)) {
-        if (g_cart_shadow_state == 0)
-            cart_maybe_shadow();
-        if (g_cart_shadow_state == 1)
-            return do_get_mem_long((uae_u32 *)(natmem_offset + a));
-    }
     uae_u32 v = ps_bus_lget(a);
     pistorm_buserr(a, 0, true, sz_long);
     return v;
@@ -962,12 +936,6 @@ static uae_u32 dm_wget(uaecptr a)
     fc_data();
     if (!dm_bus_addr(&a))
         return 0;
-    if (cart_range(a)) {
-        if (g_cart_shadow_state == 0)
-            cart_maybe_shadow();
-        if (g_cart_shadow_state == 1)
-            return do_get_mem_word((uae_u16 *)(natmem_offset + a));
-    }
     uae_u16 v = ps_read_16(a);
     pistorm_buserr(a, 0, true, sz_word);
     return v;
@@ -986,12 +954,6 @@ static uae_u32 dm_bget(uaecptr a)
     fc_data();
     if (!dm_bus_addr(&a))
         return 0;
-    if (cart_range(a)) {
-        if (g_cart_shadow_state == 0)
-            cart_maybe_shadow();
-        if (g_cart_shadow_state == 1)
-            return natmem_offset[a];
-    }
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
     return v;
@@ -1116,6 +1078,10 @@ static uae_u32 io_lget(uaecptr a)
     }
     if (FDD_enabled && fdd_owns_address(a))
         return fdd_io_read(a, 4);
+    /* host-emulated STE DMA sound: serve reads from the register shadow
+       (the range bus-errors on the real ST bus - hardware is host-side) */
+    if (DMA_Sound_enabled && dmasnd_owns(a))
+        return dmasnd_reg_read32(a);
     uae_u32 v = ps_bus_lget(a);
     pistorm_buserr(a, 0, true, sz_long);
     acia_trace("R", a, v, 4);
@@ -1147,12 +1113,17 @@ static uae_u32 io_wget(uaecptr a)
         if (a == MFP_GPIP)
         {
             uae_u16 v = fdd_gpip(ps_read_8(a));
+            if (DMA_Sound_enabled)
+                v = dmasnd_gpip_shim((uae_u8)v);
             pistorm_buserr(a, 0, true, sz_word);
             return v;
         }
         if (fdd_owns_address(a))
             return (uae_u16)fdd_io_read(a, 2);
     }
+    /* host-emulated STE DMA sound: serve reads from the register shadow */
+    if (DMA_Sound_enabled && dmasnd_owns(a))
+        return dmasnd_reg_read16(a);
     uae_u16 v = ps_read_16(a);
     pistorm_buserr(a, 0, true, sz_word);
     acia_trace("R", a, v, 2);
@@ -1184,12 +1155,17 @@ static uae_u32 io_bget(uaecptr a)
         if (a == MFP_GPIP)
         {
             uae_u8 v = fdd_gpip(ps_read_8(a));
+            if (DMA_Sound_enabled)
+                v = dmasnd_gpip_shim(v);
             pistorm_buserr(a, 0, true, sz_byte);
             return v;
         }
         if (fdd_owns_address(a))
             return (uae_u8)fdd_io_read(a, 1);
     }
+    /* host-emulated STE DMA sound: serve reads from the register shadow */
+    if (DMA_Sound_enabled && dmasnd_owns(a))
+        return dmasnd_reg_read8(a);
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
     acia_trace("R", a, v, 1);
@@ -1227,7 +1203,11 @@ static void io_lput(uaecptr a, uae_u32 v)
         fdd_io_write(a, v, 4);
         return;
     }
-    dmasnd_snoop32(a, (uint32_t)v);
+    if (DMA_Sound_enabled && dmasnd_owns(a))
+    {
+        dmasnd_snoop32(a, (uint32_t)v);  /* host owns the STE sound regs */
+        return;                          /* don't BERR the real ST bus   */
+    }
     ps_bus_lput(a, v);
     pistorm_buserr(a, v, false, sz_long);
     acia_trace("W", a, v, 4);
@@ -1261,7 +1241,13 @@ static void io_wput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, true);
-    dmasnd_snoop16(a, (uint16_t)v);
+    if (DMA_Sound_enabled)
+        dmasnd_mfp_snoop(a, v, 1);
+    if (DMA_Sound_enabled && dmasnd_owns(a))
+    {
+        dmasnd_snoop16(a, (uint16_t)v);  /* host owns the STE sound regs */
+        return;
+    }
     ps_write_16(a, (uint16_t)v);
     pistorm_buserr(a, v, false, sz_word);
     acia_trace("W", a, v, 2);
@@ -1295,7 +1281,13 @@ static void io_bput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, false);
-    dmasnd_snoop8(a, (uint8_t)v);
+    if (DMA_Sound_enabled)
+        dmasnd_mfp_snoop(a, v, 0);
+    if (DMA_Sound_enabled && dmasnd_owns(a))
+    {
+        dmasnd_snoop8(a, (uint8_t)v);    /* host owns the STE sound regs */
+        return;
+    }
     ps_write_8(a, (uint8_t)v);
     pistorm_buserr(a, v, false, sz_byte);
     acia_trace("W", a, v, 1);
@@ -1841,6 +1833,8 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
         v &= (uae_u8)~0x20;      /* GPIP5 low = disk interrupt (active low) */
     if (KBD_USB_enabled)
         v = kbd_usb_gpip_shim(v);  /* GPIP4 low = keyboard irq (active low) */
+    if (DMA_Sound_enabled)
+        v = dmasnd_gpip_shim(v);   /* GPIP7 ^= virtual XSINT frame parity   */
     return v;
 }
 
@@ -1878,7 +1872,13 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
         pistorm_buserr(a, 0, true, sz_word);
         return v;
     }
-    return hw_bus_wget(a);
+    {
+        uae_u16 v = (uae_u16)hw_bus_wget(a);
+        if (DMA_Sound_enabled)   /* MFP reg is the LOW byte of a word read */
+            v = (uae_u16)((v & 0xFF00u) |
+                          dmasnd_mfp_read_shim(a | 1u, (uint8_t)v));
+        return v;
+    }
 }
 
 static inline uae_u32 hw_mfp_bget(uaecptr a)
@@ -1889,7 +1889,12 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
         pistorm_buserr(a, 0, true, sz_byte);
         return v;
     }
-    return hw_bus_bget(a);
+    {
+        uae_u8 v = (uae_u8)hw_bus_bget(a);
+        if (DMA_Sound_enabled)
+            v = dmasnd_mfp_read_shim(a, v);
+        return v;
+    }
 }
 
 static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
@@ -1898,6 +1903,12 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
     {
         fdd_io_write(a, v, 4);
         return;
+    }
+    if (DMA_Sound_enabled)
+    {
+        /* MFP registers live on odd addresses: a long write covers two */
+        dmasnd_mfp_snoop(a + 1, (v >> 16) & 0xFF, 0);
+        dmasnd_mfp_snoop(a + 3, v & 0xFF, 0);
     }
     if (KBD_USB_enabled)
     {
@@ -1916,6 +1927,8 @@ static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, true);
+    if (DMA_Sound_enabled)
+        dmasnd_mfp_snoop(a, v, 1);
     if (KBD_USB_enabled)
         kbd_usb_mfp_snoop(a, v, 1);
     hw_bus_wput(a, v);
@@ -1929,6 +1942,8 @@ static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, false);
+    if (DMA_Sound_enabled)
+        dmasnd_mfp_snoop(a, v, 0);
     if (KBD_USB_enabled)
         kbd_usb_mfp_snoop(a, v, 0);
     hw_bus_bput(a, v);
@@ -2006,6 +2021,12 @@ static uae_u32 hw_lget(uaecptr a)
         case HW_PAGE_BLITTER_LO:
         case HW_PAGE_BLITTER_HI:
             return hw_blitter_lget(a);
+        case HW_PAGE_DMASND:
+            /* host-emulated STE DMA sound: serve reads from the register
+               shadow (the range bus-errors on the real ST bus) */
+            if (DMA_Sound_enabled && dmasnd_owns(a))
+                return dmasnd_reg_read32(a);
+            return hw_bus_lget(a);
         case HW_PAGE_ACIA:
         {
             if (KBD_USB_enabled && a == KBD_ACIA_CTRL)
@@ -2055,6 +2076,11 @@ static uae_u32 hw_wget(uaecptr a)
         case HW_PAGE_BLITTER_LO:
         case HW_PAGE_BLITTER_HI:
             return hw_blitter_wget(a);
+        case HW_PAGE_DMASND:
+            /* host-emulated STE DMA sound: register shadow readback */
+            if (DMA_Sound_enabled && dmasnd_owns(a))
+                return dmasnd_reg_read16(a);
+            return hw_bus_wget(a);
         case HW_PAGE_ACIA:
         {
             if (kbd_acia_shadowed(a))
@@ -2110,6 +2136,11 @@ static uae_u32 hw_bget(uaecptr a)
         case HW_PAGE_BLITTER_LO:
         case HW_PAGE_BLITTER_HI:
             return hw_blitter_bget(a);
+        case HW_PAGE_DMASND:
+            /* host-emulated STE DMA sound: register shadow readback */
+            if (DMA_Sound_enabled && dmasnd_owns(a))
+                return dmasnd_reg_read8(a);
+            return hw_bus_bget(a);
         case HW_PAGE_ACIA:
         {
             if (kbd_acia_shadowed(a))
@@ -2163,7 +2194,11 @@ static void hw_lput(uaecptr a, uae_u32 v)
             hw_fdd_lput(a, v);
             break;
         case HW_PAGE_DMASND:
-            dmasnd_snoop32(a, (uint32_t)v);
+            if (DMA_Sound_enabled && dmasnd_owns(a))
+            {
+                dmasnd_snoop32(a, (uint32_t)v);  /* host owns the regs -  */
+                break;                           /* don't BERR the ST bus */
+            }
             hw_bus_lput(a, v);
             break;
         case HW_PAGE_BLITTER_LO:
@@ -2225,7 +2260,11 @@ static void hw_wput(uaecptr a, uae_u32 v)
             hw_fdd_wput(a, v);
             break;
         case HW_PAGE_DMASND:
-            dmasnd_snoop16(a, (uint16_t)v);
+            if (DMA_Sound_enabled && dmasnd_owns(a))
+            {
+                dmasnd_snoop16(a, (uint16_t)v);  /* host owns the regs */
+                break;
+            }
             hw_bus_wput(a, v);
             break;
         case HW_PAGE_BLITTER_LO:
@@ -2292,7 +2331,11 @@ static void hw_bput(uaecptr a, uae_u32 v)
             hw_fdd_bput(a, v);
             break;
         case HW_PAGE_DMASND:
-            dmasnd_snoop8(a, (uint8_t)v);
+            if (DMA_Sound_enabled && dmasnd_owns(a))
+            {
+                dmasnd_snoop8(a, (uint8_t)v);    /* host owns the regs */
+                break;
+            }
             hw_bus_bput(a, v);
             break;
         case HW_PAGE_BLITTER_LO:
@@ -3185,36 +3228,6 @@ static void map_region(uaecptr start, uint32_t len, addrbank *b)
     }
 }
 
-/* First-touch cartridge probe and shadow (see the comment block above the
- * dummy-bank read handlers). Runs on the CPU thread inside a dummy-bank
- * access, before any code has been fetched from the range. */
-static void cart_maybe_shadow(void)
-{
-    const char *e = getenv("PISTORM_CART_SHADOW");
-    if (e && e[0] == '0') {
-        g_cart_shadow_state = 2;
-        return;
-    }
-
-    if (!(e && e[0] == '1')) {
-        uae_u32 magic = ((uae_u32)ps_read_16(0x00FA0000u) << 16) |
-                        ps_read_16(0x00FA0002u);
-        if (magic != 0xABCDEF42u && magic != 0xFA52235Fu) {
-            g_cart_shadow_state = 2;
-            return;
-        }
-    }
-
-    fprintf(stderr, "[CART] ROM cartridge detected - shadowing 128KB...\n");
-    for (uae_u32 a = 0x00FA0000u; a < 0x00FC0000u; a += 2)
-        do_put_mem_word((uae_u16 *)(natmem_offset + a), ps_read_16(a));
-
-    map_region(0x00FA0000u, 0x20000, &pistorm_rom_bank);
-    pistorm_smc(0x00FA0000u, 0x20000);
-    g_cart_shadow_state = 1;
-    fprintf(stderr, "[CART] shadow active: 0xFA0000-0xFBFFFF direct ROM\n");
-}
-
 /* ------------------------------------------------------------------ */
 /* No-spill guarded-read slow path (PISTORM_JIT_GUARD=2).              */
 /*                                                                     */
@@ -3364,11 +3377,7 @@ extern "C" void jit_mem_init(void)
     pistorm_dummy_bank.baseaddr = natmem_offset + 0;
     pistorm_stram_bank.baseaddr = natmem_offset + 0;
     //pistorm_fdd_bank.baseaddr = natmem_offset + 0x00FF0000;
-    /* ROM placement follows the loaded image (pistorm_rom_start), not the
-     * compile-time ROM_BASE: 192KB TOS 1.x lives at 0xFC0000, 256KB+ TOS
-     * and EmuTOS at 0xE00000. Falls back to ROM_BASE if no start was set. */
-    const uint32_t rom_base = pistorm_rom_start ? pistorm_rom_start : ROM_BASE;
-    pistorm_rom_bank.baseaddr = natmem_offset + rom_base;
+    pistorm_rom_bank.baseaddr = natmem_offset + ROM_BASE;
     pistorm_ide_bank.baseaddr = natmem_offset + IO_IDE_BASE;
     pistorm_io_bank.baseaddr = natmem_offset + IO_HW_BASE;
     pistorm_hw_bank.baseaddr = natmem_offset + 0x00FF0000;
@@ -3385,7 +3394,7 @@ extern "C" void jit_mem_init(void)
      //   pistorm_rom_size = ROM_MAX_SIZE;
 
     if (pistorm_rom_ptr) // && pistorm_tos_image_len <= pistorm_rom_size)
-        memcpy(natmem_offset + rom_base, pistorm_rom_ptr, pistorm_rom_size);
+        memcpy(natmem_offset + ROM_BASE, pistorm_rom_ptr, pistorm_rom_size);
    // else
     //    printf("[JITINIT] ROM copy failed\n");
     //printf ("rom ptr %p\n", pistorm_rom_ptr);
@@ -3424,7 +3433,7 @@ extern "C" void jit_mem_init(void)
 
     map_region(FVDI_FB_BASE, FVDI_FB_MAX_BYTES, &pistorm_fvdi_bank);
 
-    map_region(rom_base, pistorm_rom_size, &pistorm_rom_bank);
+    map_region(ROM_BASE, pistorm_rom_size, &pistorm_rom_bank);
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases
     map_region(0xFFFF0000u, 0x10000, &pistorm_hw_bank); // 32-bit alias
     map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
@@ -3450,7 +3459,5 @@ extern "C" void jit_mem_init(void)
 extern "C" void pistorm_seed_reset_vector(void)
 {
     if (natmem_offset)
-        memcpy(natmem_offset + 0,
-               natmem_offset + (pistorm_rom_start ? pistorm_rom_start
-                                                  : ROM_BASE), 8);
+        memcpy(natmem_offset + 0, natmem_offset + ROM_BASE, 8);
 }

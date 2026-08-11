@@ -523,6 +523,16 @@ static void *ipl_task(void *)
       jit_request_cpu_exit();
     }
 
+    /* Virtual STE DMA sound frame interrupt (Timer A event count / GPIP7):
+     * the real MFP never sees the host-side frame progress, so the level-6
+     * is synthesised here just like the keyboard's; intlev_ack() supplies
+     * the vector from the snooped MFP state. */
+    if (DMA_Sound_enabled && dmasnd_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
+    {
+      g_irq = 6;
+      jit_request_cpu_exit();
+    }
+
 #ifdef ATARI_LAT_DIAG
     /* Stall watchdog (measurement only): while a latched interrupt is
      * waiting on delivery, sample the CPU thread's state from this thread. */
@@ -949,9 +959,9 @@ int main (int argc, char *argv[])
     if (config->rom.rom_size != 0)
     {
       // ATARI STe ROM
-      //if (config->rom.rom_size >= (256 * 1024))
+      if (config->rom.rom_size >= (256 * 1024))
       {
-        ROM_START = config->rom.rom_address; //0x00E00000;
+        ROM_START = 0x00E00000;
         ROM_END = ROM_START + config->rom.rom_size; // 0x00F00000;
         ROM_MASK = config->rom.rom_size - 1;        // 0x000FFFFF;
        
@@ -1568,6 +1578,12 @@ extern "C"
 
     if (blitter_disabled_addr(address))
       return 0xFF;
+
+    /* host-emulated STE DMA sound: serve reads from the register shadow
+       (the range bus-errors on the real ST bus - hardware is host-side) */
+    if (DMA_Sound_enabled && dmasnd_owns(address))
+      return dmasnd_reg_read8(address);
+
     /* FDD */
     if (FDD_enabled) {
       if (address == MFP_GPIP) {
@@ -1665,6 +1681,11 @@ extern "C"
 
     if (blitter_disabled_addr(address))
       return 0xFFFF;
+
+    /* host-emulated STE DMA sound: serve reads from the register shadow */
+    if (DMA_Sound_enabled && dmasnd_owns(address))
+      return dmasnd_reg_read16(address);
+
     /* FDD */
     if (FDD_enabled)
     {
@@ -1765,6 +1786,11 @@ extern "C"
 
     if (blitter_disabled_addr(address))
       return 0xFFFFFFFF;
+
+    /* host-emulated STE DMA sound: serve reads from the register shadow */
+    if (DMA_Sound_enabled && dmasnd_owns(address))
+      return dmasnd_reg_read32(address);
+
      /* FDD */
     if (FDD_enabled)
     {
@@ -1790,8 +1816,11 @@ extern "C"
 
     st_video_snoop8(address, (uint8_t)value);
 
-    if (DMA_Sound_enabled)
-      dmasnd_snoop8 (address, (uint8_t)value); /* snoop STE sound regs */
+    if (DMA_Sound_enabled && dmasnd_owns(address))
+    {
+      dmasnd_snoop8 (address, (uint8_t)value); /* host owns the STE sound regs */
+      return;                                  /* don't BERR the real ST bus */
+    }
 
 #if (NOT_OBSOLETE)
     if (__builtin_expect(RAM_CACHE_enabled && (address < STRAM_MAX_ADDR), 1))
@@ -1859,6 +1888,8 @@ extern "C"
 
     cpu_data_fc();
     mfp_note_eoi_write(address, value, false);
+    if (DMA_Sound_enabled)
+      dmasnd_mfp_snoop (address, value, 0);
     if (KBD_USB_enabled)
     {
       kbd_usb_mfp_snoop (address, value, 0);
@@ -1905,8 +1936,11 @@ extern "C"
 
     st_video_snoop16(address, (uint16_t)value);
 
-    if (DMA_Sound_enabled)
-      dmasnd_snoop16 (address, (uint16_t)value);
+    if (DMA_Sound_enabled && dmasnd_owns(address))
+    {
+      dmasnd_snoop16 (address, (uint16_t)value); /* host owns the STE sound regs */
+      return;
+    }
 
 #if (NOT_OBSOLETE)
     // if ( ET4K_enabled && rtg.vram_base) {
@@ -1985,6 +2019,8 @@ extern "C"
 
     cpu_data_fc();
     mfp_note_eoi_write(address, value, true);
+    if (DMA_Sound_enabled)
+      dmasnd_mfp_snoop (address, value, 1);
     if (KBD_USB_enabled)
     {
       kbd_usb_mfp_snoop (address, value, 1);
@@ -2013,8 +2049,11 @@ extern "C"
 
     st_video_snoop32(address, (uint32_t)value);
 
-    if (DMA_Sound_enabled)
-      dmasnd_snoop32 (address, (uint32_t)value);
+    if (DMA_Sound_enabled && dmasnd_owns(address))
+    {
+      dmasnd_snoop32 (address, (uint32_t)value); /* host owns the STE sound regs */
+      return;
+    }
 
 #if (NOT_OBSOLETE)
     // if (address < et4kaddresses [ET4K_driver].vram_base && address >= et4kaddresses [ET4K_driver].vram_top - 4) {

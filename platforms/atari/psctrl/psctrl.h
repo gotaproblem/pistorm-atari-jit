@@ -24,7 +24,11 @@ extern "C" {
 /* PSCTRL sub-operations (low 20 bits of the NatFeat id) */
 enum psctrl_subop {
   PSCTRL_VERSION = 0,           /* -> API version                     */
-  PSCTRL_GETINT  = 1            /* p0 = index -> value, see below     */
+  PSCTRL_GETINT  = 1,           /* p0 = index -> value, see below     */
+  PSCTRL_FX      = 2            /* p0 = 1|2: desk-slide transition
+                                 * (old frame exits left|right); a
+                                 * presentation-only effect, snapshot
+                                 * taken synchronously in the handler */
 };
 
 /* PS_GETINT index namespace.
@@ -70,8 +74,20 @@ enum psctrl_stat_index {
   PS_JIT_EFF_KHZ        = 71,   /* effective 68k speed, kHz            */
   PS_JIT_HITRATE_X10    = 72,   /* cycle-weighted JIT hit rate,
                                  * tenths of a percent (0-1000)        */
-  PS_JIT_IDLE_X10       = 73    /* true idle (STOP) share of the
+  PS_JIT_IDLE_X10       = 73,   /* true idle (STOP) share of the
                                  * clock, tenths of a percent          */
+
+  /* Taskbar v2: board identity (static, from the revision word in
+   * /proc/cpuinfo - new-style codes only, 0 when undecodable) and two
+   * more JIT health figures for the click-open JIT panel. */
+  PS_PI_MODEL           = 74,   /* board type code, revision bits 4-11:
+                                 * 0x08=3B 0x0d=3B+ 0x0e=3A+ 0x11=4B
+                                 * 0x13=400 0x14=CM4 0x17=5            */
+  PS_PI_RAM_MB          = 75,   /* board RAM, MB (256 << rev bits
+                                 * 20-22)                              */
+  PS_STAT_FLUSHES_TOTAL = 76,   /* hard cache flushes since boot       */
+  PS_STAT_SMC_INV       = 77    /* blocks invalidated (self-modifying
+                                 * code / checksum fail), last window  */
 };
 
 /* Idempotent; spawns the sampler thread on first use (called lazily from
@@ -90,6 +106,7 @@ extern volatile uint32_t psctrl_ctr_flushes;
 extern volatile uint32_t psctrl_ctr_interp_calls;
 extern volatile uint32_t psctrl_ctr_stop_iters;
 extern volatile uint32_t psctrl_ctr_interp_cycles;	/* CYCLE_UNIT-weighted */
+extern volatile uint32_t psctrl_ctr_smc_inv;	/* invalidate_block() calls */
 
 /* Implemented in jit/arm/compemu_support_arm.cpp */
 uint32_t psctrl_jit_cache_used(void);
