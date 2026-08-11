@@ -2213,13 +2213,19 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
      * the shifter prefetches, and the video counter advances by one extra
      * group (planes*2 bytes) per line. Both mirror the real chip's rules -
      * software's registers then do whatever they do on the real shifter. */
-    uint32_t hs;
+    uint32_t hs = 0;
     {
         extern rtg_s rtg;            /* lives in emulator.c */
-        stride += (uint32_t)rtg.linewidth * 2u;
-        hs = rtg.hscroll & 15u;
-        if (hs)
-            stride += planes * 2u;   /* prefetched extra group */
+        extern bool emulator_config_shifter_ste(void);
+        /* $FF820F linewidth and $FF8265 fine scroll are STE-only: an ST
+         * host's real shifter ignores both, so the mirror must too (cfg
+         * "shifter ste" restores them for STE hosts). */
+        if (emulator_config_shifter_ste()) {
+            stride += (uint32_t)rtg.linewidth * 2u;
+            hs = rtg.hscroll & 15u;
+            if (hs)
+                stride += planes * 2u;   /* prefetched extra group */
+        }
     }
 
     /* Decode at the native sample grid; the GPU stretches it to the common
@@ -2465,9 +2471,19 @@ void *render_frame(void *vptr)
     while (cpu_emulation_running)
     {
         const char *render_source = "none";
+        /* $FF820D (STE base low byte) exists only on STE shifters. On an
+         * ST host the real chip ignores it - base is always high:mid:00 -
+         * and the mirror must do the same or it starts reading planes at
+         * an offset the glass never had (field case: colour layers
+         * shifted on HDMI while the RGB monitor was correct; also the
+         * boot-time shift - EmuTOS's STE-shifter probe writes a test
+         * value to $FF820D that the snoop kept). "shifter ste" in the
+         * cfg restores STE semantics for STE host machines. */
+        extern bool emulator_config_shifter_ste(void);
         uint32_t shifter_base = ((uint32_t)rtg.high << 16) |
                                 ((uint32_t)rtg.mid << 8) |
-                                ((uint32_t)rtg.low & 0xFEu);
+                                (emulator_config_shifter_ste()
+                                     ? ((uint32_t)rtg.low & 0xFEu) : 0u);
         if (shifter_base)
             rtg.vram_base = shifter_base;
         else

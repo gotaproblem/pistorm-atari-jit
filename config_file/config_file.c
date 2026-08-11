@@ -33,6 +33,7 @@ typedef enum {
   CONFITEM_YM2149,
   CONFITEM_KBD,
   CONFITEM_BLITTER,
+  CONFITEM_SHIFTER,
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
   CONFITEM_VGA_RENDER,
@@ -88,6 +89,7 @@ static const config_switch_def config_switches[] = {
   { "ym2149", CONFITEM_YM2149 },
   { "kbd", CONFITEM_KBD },
   { "blitter", CONFITEM_BLITTER },
+  { "shifter", CONFITEM_SHIFTER },
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
   { "vga_render", CONFITEM_VGA_RENDER },
@@ -143,6 +145,11 @@ void emulator_config_set_current(const struct emulator_config *cfg)
 const struct emulator_config *emulator_config_current(void)
 {
   return current_config;
+}
+
+bool emulator_config_shifter_ste(void)
+{
+  return current_config ? current_config->shifter_ste : false;
 }
 
 bool emulator_config_blitter_enabled(void)
@@ -729,6 +736,16 @@ struct emulator_config *load_config_file(char *filename) {
                     cfg->kbd_mode == 2 ? " (standalone: real IKBD ignored)" :
                     cfg->kbd_mode == 1 ? " (merge: real IKBD always trusted)" :
                                          " (auto-detect real IKBD)");
+        }
+        break;
+
+      case CONFITEM_SHIFTER:
+        {
+          char *arg = parse_line + str_pos;
+          while (*arg == ' ' || *arg == '\t')
+            arg++;
+          cfg->shifter_ste = (strncasecmp(arg, "ste", 3) == 0);
+          printf ("[CFG] Shifter model: %s\n", cfg->shifter_ste ? "STE" : "ST");
         }
         break;
 

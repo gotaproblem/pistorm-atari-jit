@@ -108,6 +108,7 @@ struct emulator_config {
   int  kbd_mode;       /* 0 = auto-detect real IKBD, 1 = merge, 2 = standalone */
   int  kbd_mouse_div;  /* host mouse count divisor (1 = raw)              */
   bool blitter;
+  bool shifter_ste;   /* shifter ste: mirror honours STE video regs ($FF820D/0F/8265); default ST ignores them like the real chip */
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
   bool stram_cache;
   bool stram_direct;
@@ -144,6 +145,7 @@ void free_config_file(struct emulator_config *cfg);
 
 void emulator_config_set_current(const struct emulator_config *cfg);
 const struct emulator_config *emulator_config_current(void);
+bool emulator_config_shifter_ste(void);
 bool emulator_config_blitter_enabled(void);
 int  emulator_config_blitter_mode(void);  /* 0=off 1=real 2=emulated */
 bool emulator_config_stram_cache_enabled(void);
