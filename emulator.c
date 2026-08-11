@@ -1436,14 +1436,32 @@ static inline uint32_t check_ff_st(uint32_t add)
   return add;
 }
 
+/* In "shifter ste" mode the mirror acts as the STE shifter the ST host
+ * lacks. Stale-value guard: an OS that believes the machine is an ST
+ * (probe failed on the real bus) sets screens by writing ONLY hi/mid
+ * and never clears the STE extras - EmuTOS's boot probe leaves a test
+ * value in $FF820D that then skews the desktop forever. So a plain
+ * hi/mid base write clears the STE extras; software that really uses
+ * them (STE demos) rewrites them every frame and loses nothing. */
+static inline void st_video_ste_extras_clear(void)
+{
+  rtg.low = 0;
+  rtg.linewidth = 0;
+  rtg.hscroll = 0;
+}
+
 static inline void st_video_snoop8(uint32_t address, uint8_t value)
 {
   uint32_t a = address & 0x00FFFFFFu;
 
-  if (a == 0x00FF8201)
+  if (a == 0x00FF8201) {
     rtg.high = value;
-  else if (a == 0x00FF8203)
+    st_video_ste_extras_clear();
+  }
+  else if (a == 0x00FF8203) {
     rtg.mid = value;
+    st_video_ste_extras_clear();
+  }
   else if (a == 0x00FF820D)
     rtg.low = value;
   else if (a == 0x00FF820F)
@@ -1458,10 +1476,14 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
 {
   uint32_t a = address & 0x00FFFFFFu;
 
-  if (a == 0x00FF8200)
+  if (a == 0x00FF8200) {
     rtg.high = (uint8_t)value;
-  else if (a == 0x00FF8202)
+    st_video_ste_extras_clear();
+  }
+  else if (a == 0x00FF8202) {
     rtg.mid = (uint8_t)value;
+    st_video_ste_extras_clear();
+  }
   else if (a == 0x00FF820C)
     rtg.low = (uint8_t)value;
   else if (a == 0x00FF820E)
@@ -1481,6 +1503,7 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
   if (a == 0x00FF8200) {
     rtg.high = (uint8_t)(value >> 16);
     rtg.mid = (uint8_t)value;
+    st_video_ste_extras_clear();
   } else if (a == 0x00FF820C) {
     rtg.low = (uint8_t)(value >> 16);
     rtg.linewidth = (uint8_t)value;
