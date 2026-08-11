@@ -454,16 +454,16 @@ static void frame_end_event(unsigned frameno)
         atomic_fetch_or(&g_vipra, 0x80u);            /* pending: ch 15 */
     }
     if (dmasnd_dbg()) {
-        static int logged = 0;
-        if (logged < 16) {
-            logged++;
-            fprintf(stderr, "[dmasnd] frame#%u end act=%05X..%05X ta=%d g7=%d "
-                    "iera=%02X imra=%02X tacr=%X tacnt=%u\n",
-                    frameno, atomic_load(&g_act_s), atomic_load(&g_act_e),
-                    atomic_load(&g_irq_ta), atomic_load(&g_irq_g7),
-                    atomic_load(&g_mfp_iera), atomic_load(&g_mfp_imra),
-                    atomic_load(&g_mfp_tacr), atomic_load(&g_ta_count));
-        }
+        /* uncapped and self-describing: length, bps and the computed
+         * frame duration make clock errors directly measurable */
+        uint32_t s2 = atomic_load(&g_act_s), e2 = atomic_load(&g_act_e);
+        uint32_t b2 = atomic_load(&g_act_bps);
+        fprintf(stderr, "[dmasnd] frame#%u act=%05X..%05X len=%u bps=%u "
+                "dur=%uus ta=%d g7=%d tacnt=%u\n",
+                frameno, s2, e2, e2 - s2, b2,
+                (unsigned)((uint64_t)(e2 - s2) * 1000000u / (b2 ? b2 : 1)),
+                atomic_load(&g_irq_ta), atomic_load(&g_irq_g7),
+                atomic_load(&g_ta_count));
     }
 }
 
@@ -648,20 +648,31 @@ static void *pump_thread(void *arg)
                full frame later); capturing at stage time reads half-mixed
                audio = glitches (field case: Paula). At the boundary the
                frame is complete, exactly like the real fetch. */
+            /* one copy PER GENERATION, not per wakeup: frames_advance may
+               process several overdue boundaries in one call (bumping the
+               generation each time); copying once per wake silently DROPPED
+               the missed frames (field-measured: 19KB/s pushed against a
+               100KB/s DAC = starvation). For a re-triggered loop the extra
+               copies are the same buffer again - exactly what real DMA
+               would have fetched on each pass. */
+            unsigned behind = gen - last_gen;
+            if (behind > 8u) behind = 8u;      /* cap pathological deficits */
             last_gen = gen;
             if (natmem_offset) {
                 uint32_t s = atomic_load(&g_act_s), e = atomic_load(&g_act_e);
                 uint8_t  m = reg[0x21];
                 if (e > s && (e - s) <= MAX_FRAME && e <= ST_RAM_SIZE) {
+                    unsigned k;
                     if (m != last_mode) {
                         dmasnd_set_mode(ste_rates[m & 3], (m & 0x80) ? 0 : 1);
                         last_mode = m;
                     }
                     dmasnd_note_frame_len(e - s);
-                    dmasnd_write_bytes(&natmem_offset[s], e - s);
+                    for (k = 0; k < behind; k++)
+                        dmasnd_write_bytes(&natmem_offset[s], e - s);
                     if (dmasnd_dbg())
-                        fprintf(stderr, "[dmasnd] accept s=0x%06X e=0x%06X len=%u "
-                                "%s %uHz\n", s, e, e - s,
+                        fprintf(stderr, "[dmasnd] accept s=0x%06X e=0x%06X len=%u x%u "
+                                "%s %uHz\n", s, e, e - s, behind,
                                 (m & 0x80) ? "mono" : "stereo", ste_rates[m & 3]);
                 } else if (dmasnd_dbg()) {
                     fprintf(stderr, "[dmasnd] REJECT s=0x%06X e=0x%06X len=%d mode=0x%02X"
