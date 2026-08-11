@@ -1450,6 +1450,26 @@ static inline void st_video_ste_extras_clear(void)
   rtg.hscroll = 0;
 }
 
+/* PISTORM_VID_DEBUG=1: trace every shifter-register write the guest
+ * makes (base hi/mid, STE low/linewidth/hscroll, shift mode) so screen
+ * programming sequences are measured, not assumed. Low-rate registers:
+ * at most a few hundred lines/second during a demo. */
+static inline int vid_dbg(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("PISTORM_VID_DEBUG");
+    v = (e && *e == '1') ? 1 : 0;
+  }
+  return v;
+}
+
+static inline void vid_dbg_w(uint32_t a, uint32_t value)
+{
+  if (vid_dbg())
+    fprintf(stderr, "[vid] W %06X=%02X\n", a, value & 0xFF);
+}
+
 static inline void st_video_snoop8(uint32_t address, uint8_t value)
 {
   uint32_t a = address & 0x00FFFFFFu;
@@ -1457,19 +1477,29 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
   if (a == 0x00FF8201) {
     rtg.high = value;
     st_video_ste_extras_clear();
+    vid_dbg_w(a, value);
   }
   else if (a == 0x00FF8203) {
     rtg.mid = value;
     st_video_ste_extras_clear();
+    vid_dbg_w(a, value);
   }
-  else if (a == 0x00FF820D)
+  else if (a == 0x00FF820D) {
     rtg.low = value;
-  else if (a == 0x00FF820F)
+    vid_dbg_w(a, value);
+  }
+  else if (a == 0x00FF820F) {
     rtg.linewidth = value;         /* STE: extra words per scanline */
-  else if (a == 0x00FF8265)
+    vid_dbg_w(a, value);
+  }
+  else if (a == 0x00FF8265) {
     rtg.hscroll = value & 0x0F;    /* STE: fine horizontal scroll */
-  else if (a == 0x00FF8260)
+    vid_dbg_w(a, value);
+  }
+  else if (a == 0x00FF8260) {
     rtg.shift_mode = value;
+    vid_dbg_w(a, value);
+  }
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)
@@ -1479,17 +1509,25 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
   if (a == 0x00FF8200) {
     rtg.high = (uint8_t)value;
     st_video_ste_extras_clear();
+    vid_dbg_w(a, value);
   }
   else if (a == 0x00FF8202) {
     rtg.mid = (uint8_t)value;
     st_video_ste_extras_clear();
+    vid_dbg_w(a, value);
   }
-  else if (a == 0x00FF820C)
+  else if (a == 0x00FF820C) {
     rtg.low = (uint8_t)value;
-  else if (a == 0x00FF820E)
+    vid_dbg_w(a, value);
+  }
+  else if (a == 0x00FF820E) {
     rtg.linewidth = (uint8_t)value;
-  else if (a == 0x00FF8264)
+    vid_dbg_w(a, value);
+  }
+  else if (a == 0x00FF8264) {
     rtg.hscroll = (uint8_t)(value & 0x0F);
+    vid_dbg_w(a, value);
+  }
   else if (a == 0x00FF8260)
     rtg.shift_mode = (uint8_t)(value >> 8);
   else if (a >= 0x00FF8240 && a < 0x00FF8260)
@@ -1504,9 +1542,13 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
     rtg.high = (uint8_t)(value >> 16);
     rtg.mid = (uint8_t)value;
     st_video_ste_extras_clear();
+    vid_dbg_w(a, value >> 16);
+    vid_dbg_w(a + 2, value);
   } else if (a == 0x00FF820C) {
     rtg.low = (uint8_t)(value >> 16);
     rtg.linewidth = (uint8_t)value;
+    vid_dbg_w(a, value >> 16);
+    vid_dbg_w(a + 2, value);
   } else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     unsigned i = (a - 0x00FF8240) >> 1;
     st_palette[i] = (uint16_t)(value >> 16);
