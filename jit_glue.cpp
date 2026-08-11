@@ -29,6 +29,7 @@
 #include "uae.h" /* quit_program, UAE_RESET */
 #include "jit/compemu.h"
 #include "platforms/atari/kbd_usb.h"
+#include "platforms/atari/audio/dmasnd.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -391,6 +392,28 @@ void intlev_ack (uint8_t nr)
      * If the real IPL line is itself at 6, a real MFP interrupt raced us:
      * acknowledge that one on the bus first; the injected byte stays
      * pending and re-raises after the guest's RTE. */
+    /* Virtual STE DMA sound frame interrupt (Timer A ch13 / GPIP7 ch15):
+     * checked BEFORE the virtual keyboard (GPIP4 ch12) to match real MFP
+     * channel priority. The real MFP has nothing to acknowledge for
+     * either; a racing real level-6 wins the bus IACK and the
+     * synthesised cause stays pending and re-raises. */
+    {
+        extern bool DMA_Sound_enabled;
+        if (nr == 6 && DMA_Sound_enabled && dmasnd_irq_wanted())
+        {
+            uint8_t live = 0;
+            ps_read_ipl(&live);
+            if (live < 6)
+            {
+                uint8_t vec = dmasnd_iack_vector();
+                pistorm_iack_vector = vec;
+                pistorm_mfp_last_iack_vector = vec;
+                pistorm_mfp_iack_counts[6]++;
+                return;
+            }
+        }
+    }
+
     if (nr == 6 && KBD_USB_enabled && kbd_usb_irq_wanted())
     {
         uint8_t live = 0;

@@ -10,11 +10,36 @@
 #define DEBUG_CD32CDTVIO 0
 #define EXCEPTION3_DEBUGGER 0
 #define CPUTRACE_DEBUG 0
-#define CPU_EXCEPTION_TRACE 0
-#define CPU_BUSERR_TRACE 0
+/* CPU diagnostics are compiled IN but RUNTIME-gated: silent unless the
+ * environment has PISTORM_CPU_DIAG=1. Covers: exception trace (EXC),
+ * bus-error trace (HWX2/BE), and the PC-history ring + register dump at
+ * a RESET instruction (PCRING/RSTDBG). No rebuild needed to
+ * investigate a crash/boot-loop - just set the env var.
+ * (ATARI_MFP_IACK_DIAG stays compile-time: it fires on routine real
+ * IACK glitches and is only wanted for interrupt-plumbing work.) */
+#define CPU_EXCEPTION_TRACE 1
+#define CPU_BUSERR_TRACE 1
 #define CPU_MMU30_TRACE 0
+#include <stdlib.h>
+static inline int pistorm_cpu_diag(void)
+{
+	static int v = -1;
+	if (v < 0) {
+		const char *e = getenv("PISTORM_CPU_DIAG");
+		v = (e && *e == '1') ? 1 : 0;
+	}
+	return v;
+}
 #ifndef ATARI_MFP_IACK_DIAG
 #define ATARI_MFP_IACK_DIAG 0
+
+/* Ring of the last 256 interpreter PCs (stored always - one cheap write
+ * per instruction); dumped at a RESET instruction when diag is on. */
+#define CPU_PC_RING 1
+#if CPU_PC_RING
+static unsigned int pistorm_pc_ring[256];
+static unsigned pistorm_pc_ring_i;
+#endif
 #endif
 #ifndef ATARI_VBS_MON
 #define ATARI_VBS_MON 0
@@ -4389,17 +4414,22 @@ void REGPARAM2 Exception(int nr)
 	extern volatile uint8_t g_buserr;
 	extern volatile uint32_t g_buserr_addr; /* your ps_protocol fault address */
 
-	if (nr < 24)
+	if (pistorm_cpu_diag() && nr < 48)
 	{
-		static unsigned exc_count[24];
-		static uaecptr exc_last_pc[24];
-		static uae_u16 exc_last_op[24];
-		static uae_u32 exc_last_buserr[24];
+		static unsigned exc_count[48];
+		static uaecptr exc_last_pc[48];
+		static uae_u16 exc_last_op[48];
+		static uae_u32 exc_last_buserr[48];
 		uaecptr pc = m68k_getpc();
-		uae_u16 op = get_word(pc);
-		bool changed = pc != exc_last_pc[nr] || op != exc_last_op[nr] || g_buserr_addr != exc_last_buserr[nr];
+		/* NOTE: do NOT get_word(pc) here - fetching the opcode inside the
+		 * exception path can itself fault (pc may point at unreadable
+		 * space) and wedge the machine inside the fault handler. */
+		uae_u16 op = 0;
+		bool changed = pc != exc_last_pc[nr] || g_buserr_addr != exc_last_buserr[nr];
 
-		if (changed || exc_count[nr] < 8)
+		/* async vectors (autovectors/traps, nr >= 24) interrupt at random
+		 * pcs - "changed" would flood; hard-cap those at 8 total */
+		if (nr >= 24 ? (exc_count[nr] < 8) : (changed || exc_count[nr] < 8))
 		{
 			fprintf(stderr, "EXC vec=%d pc=%08X op=%04X g_buserr_addr=%08X stopped=%d\n",
 					nr, (unsigned)pc, (unsigned)op,
@@ -4428,8 +4458,9 @@ void REGPARAM2 ExceptionL(int nr, uaecptr address)
 static void bus_error()
 {
 #if CPU_BUSERR_TRACE
-	fprintf(stderr, "[BE] getpc=%08x instr_pc=%08x fault=%08x\n",
-			m68k_getpc(), regs.instruction_pc, last_fault_for_exception_3);
+	if (pistorm_cpu_diag())
+		fprintf(stderr, "[BE] getpc=%08x instr_pc=%08x fault=%08x\n",
+				m68k_getpc(), regs.instruction_pc, last_fault_for_exception_3);
 #endif
 
 	TRY(prb2)
@@ -8952,6 +8983,9 @@ static void m68k_run_2_000()
 				}
 #endif
 				r->instruction_pc = m68k_getpc();
+#if CPU_PC_RING
+				pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = r->instruction_pc;
+#endif
 
 				r->opcode = x_get_iword(0);
 				count_instr(r->opcode);
@@ -10596,7 +10630,7 @@ void hardware_exception2(uaecptr addr, uae_u32 v, bool read, bool ins, int size)
 		last_pc = pc;
 		repeat_count = 0;
 	}
-	if (repeat_count < 8)
+	if (pistorm_cpu_diag() && repeat_count < 8)
 	{
 		fprintf(stderr, "[HWX2] addr=%08X pc=%08X g_buserr=%u\n",
 				(unsigned)addr, (unsigned)pc, (unsigned)g_buserr);
@@ -10762,6 +10796,39 @@ bool cpureset(void)
 	if (ab->check(pc, 2))
 	{
 		write_log(_T("CPU reset PC=%x (%s)..\n"), pc - 2, ab->name);
+#if CPU_PC_RING
+		if (pistorm_cpu_diag())
+		{
+			/* the last 256 instruction PCs, oldest first - the transition
+			 * out of application RAM into ROM is the jump we're hunting */
+			unsigned k;
+			write_log(_T("[PCRING] last 256 pcs, oldest first:\n"));
+			for (k = 0; k < 256; k++)
+			{
+				uae_u32 v = pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255];
+				write_log(_T("%s%08X"), (k & 7) ? _T(" ") : _T("\n[PCRING] "), v);
+			}
+			write_log(_T("\n"));
+		}
+#endif
+#if CPU_PC_RING
+		if (pistorm_cpu_diag())
+		{
+			/* Debug: who brought us here? Dump registers and the top of
+			 * both stacks so the call chain into the RESET instruction
+			 * can be reconstructed from the log. */
+			int i;
+			write_log(_T("[RSTDBG] SR=%04X USP=%08X ISP=%08X\n"),
+					  regs.sr, (unsigned)regs.usp, (unsigned)regs.isp);
+			for (i = 0; i < 8; i++)
+				write_log(_T("[RSTDBG] D%d=%08X A%d=%08X\n"), i,
+						  (unsigned)m68k_dreg(regs, i), i,
+						  (unsigned)m68k_areg(regs, i));
+			for (i = 0; i < 12; i++)
+				write_log(_T("[RSTDBG] (sp+%02X)=%08X\n"), i * 4,
+						  (unsigned)get_long(m68k_areg(regs, 7) + i * 4));
+		}
+#endif
 		ins = get_word(pc);
 		// custom_reset_cpu(false, false);
 		//  did memory disappear under us?
