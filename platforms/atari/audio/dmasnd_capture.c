@@ -33,17 +33,30 @@
 
 #define DMASND_DEBUG 0
 
-/* Opt-in probe (PISTORM_DMASND_DEBUG=1): traces the capture chain so we can see
- * where DMA sound stalls - whether the guest ever writes the $FF89xx registers,
- * whether commits fire, and whether the pump accepts or rejects each buffer. */
-static int dmasnd_dbg(void)
+/* Opt-in probes:
+ *   PISTORM_DMASND_DEBUG=1  verbose - traces the capture chain per event
+ *                           (register writes, commits, per-frame boundary
+ *                           lines, pump accept/reject). Heavy: the print
+ *                           avalanche itself perturbs timing-sensitive
+ *                           guests (field case: Bad Apple stalls at its
+ *                           loading screen under =1).
+ *   PISTORM_DMASND_DEBUG=2  summary - ONE line per second from the pump
+ *                           thread (frame events/s, active frame, bps,
+ *                           computed duration). Cheap enough to measure
+ *                           playback cadence without disturbing it. */
+static int dmasnd_dbg_level(void)
 {
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("PISTORM_DMASND_DEBUG");
-        v = (e && *e == '1') ? 1 : 0;
+        v = e ? atoi(e) : 0;
+        if (v < 0) v = 0;
     }
     return v;
+}
+static int dmasnd_dbg(void)
+{
+    return dmasnd_dbg_level() == 1;
 }
 
 extern unsigned char *natmem_offset;    /* pistorm_natmem.cpp: flat ST-RAM mmap */
@@ -654,8 +667,36 @@ static void *pump_thread(void *arg)
     (void)arg;
     unsigned last_gen  = atomic_load(&g_gen);
     uint8_t  last_mode = 0xFF;
+    uint64_t sum_t0    = now_ns();     /* =2 summary: 1 Hz reporter state */
+    unsigned sum_gen   = last_gen;
 
     while (atomic_load(&pump_run)) {
+        /* PISTORM_DMASND_DEBUG=2: one summary line per second, printed
+         * from this thread (free to syscall - never ipl_task). The 100ms
+         * poll timeout below guarantees we pass here even when idle. */
+        if (dmasnd_dbg_level() == 2) {
+            uint64_t t = now_ns();
+            if (t - sum_t0 >= 1000000000ull) {
+                unsigned gen = atomic_load(&g_gen);
+                uint32_t s   = atomic_load(&g_act_s);
+                uint32_t e   = atomic_load(&g_act_e);
+                uint32_t bps = atomic_load(&g_act_bps);
+                uint8_t  m   = reg[0x21];
+                fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
+                        "act=%05X..%05X len=%u bps=%u dur=%uus "
+                        "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
+                        (unsigned long long)(t / 1000000000ull),
+                        (unsigned long long)((t / 1000000ull) % 1000ull),
+                        gen - sum_gen, s, e, (e > s) ? e - s : 0, bps,
+                        (e > s && bps) ?
+                            (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
+                        m, (m & 0x80) ? "mono" : "stereo", ste_rates[m & 3],
+                        atomic_load(&g_enabled), atomic_load(&g_parked),
+                        dmasnd_ring_used());
+                sum_gen = gen;
+                sum_t0  = t;
+            }
+        }
         unsigned gen = atomic_load_explicit(&g_gen, memory_order_acquire);
         if (gen != last_gen) {
             /* Frame became ACTIVE: copy it now. Captures are triggered at
