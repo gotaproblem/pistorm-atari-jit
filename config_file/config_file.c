@@ -147,6 +147,11 @@ const struct emulator_config *emulator_config_current(void)
   return current_config;
 }
 
+bool emulator_config_fpu(void)
+{
+  return current_config ? current_config->fpu : false;
+}
+
 bool emulator_config_shifter_ste(void)
 {
   return current_config ? current_config->shifter_ste : false;

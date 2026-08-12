@@ -145,6 +145,7 @@ void free_config_file(struct emulator_config *cfg);
 
 void emulator_config_set_current(const struct emulator_config *cfg);
 const struct emulator_config *emulator_config_current(void);
+bool emulator_config_fpu(void);
 bool emulator_config_shifter_ste(void);
 bool emulator_config_blitter_enabled(void);
 int  emulator_config_blitter_mode(void);  /* 0=off 1=real 2=emulated */

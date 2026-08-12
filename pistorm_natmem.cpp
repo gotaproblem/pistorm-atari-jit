@@ -1632,8 +1632,16 @@ static inline uaecptr hw_page_addr(uaecptr a)
 
 static inline int fpu_in_regs(uaecptr a)
 {
+    /* SFP-004 memory-mapped FPU window. Absorbing it unconditionally
+     * made EmuTOS's 68000 FPU probe (tst.w $FFFA40 under a temporary
+     * bus-error handler) succeed on a machine with NO FPU configured -
+     * the guest then set _FPU=0x00010000 and believed an SFP004 was
+     * fitted. Real ST hardware bus-errors here; so do we now, unless
+     * the cfg enables an FPU. */
+    extern bool emulator_config_fpu(void);
     uint32_t folded = hw_fold_addr(a);
-    return folded >= FPU_REG_BASE && folded < FPU_REG_TOP;
+    return emulator_config_fpu() &&
+           folded >= FPU_REG_BASE && folded < FPU_REG_TOP;
 }
 
 static inline int nova_io_alias_addr(uaecptr a)
