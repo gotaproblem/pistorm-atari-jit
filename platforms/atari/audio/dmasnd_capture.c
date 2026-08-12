@@ -329,6 +329,13 @@ static int playing_now(void)
 static atomic_uint g_ct_rd_ctrl;
 static atomic_uint g_ct_rd_cnt;
 
+/* IPL latch counters (emulator.c ipl_task, single writer): interrupt
+ * requests presented to the CPU per level. i4 is the guest's VBL rate -
+ * the field case that motivated them: phantom level-4s from unsynchron-
+ * ized IPL line sampling paced Bad Apple ~12% fast. */
+extern volatile unsigned pistorm_ipl_lat2, pistorm_ipl_lat4,
+                         pistorm_ipl_lat6;
+
 /* counter walks the ACTIVE (latched) frame - staged chain writes must
  * NOT move it (that divergence corrupted chaining players) */
 static uint32_t cur_counter(void)
@@ -711,6 +718,9 @@ static void *pump_thread(void *arg)
     unsigned sum_ra    = atomic_load(&g_ct_rd_cnt);
     unsigned sum_sg    = atomic_load(&g_ct_stage);
     unsigned sum_rp    = atomic_load(&g_ct_rep);
+    unsigned sum_i2    = pistorm_ipl_lat2;
+    unsigned sum_i4    = pistorm_ipl_lat4;
+    unsigned sum_i6    = pistorm_ipl_lat6;
 
     while (atomic_load(&pump_run)) {
         /* PISTORM_DMASND_DEBUG=2: one summary line per second, printed
@@ -727,18 +737,23 @@ static void *pump_thread(void *arg)
                 unsigned ra  = atomic_load(&g_ct_rd_cnt);
                 unsigned sg  = atomic_load(&g_ct_stage);
                 unsigned rp  = atomic_load(&g_ct_rep);
+                unsigned i2  = pistorm_ipl_lat2;
+                unsigned i4  = pistorm_ipl_lat4;
+                unsigned i6  = pistorm_ipl_lat6;
                 uint32_t s   = atomic_load(&g_act_s);
                 uint32_t e   = atomic_load(&g_act_e);
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
                         "ta=%u g7=%u iack=%u rdc=%u rda=%u stg=%u rep=%u "
+                        "i2=%u i4=%u i6=%u "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
                         (unsigned long long)(t / 1000000000ull),
                         (unsigned long long)((t / 1000000ull) % 1000ull),
                         gen - sum_gen, ta - sum_ta, g7 - sum_g7, ia - sum_ia,
                         rc - sum_rc, ra - sum_ra, sg - sum_sg, rp - sum_rp,
+                        i2 - sum_i2, i4 - sum_i4, i6 - sum_i6,
                         s, e, (e > s) ? e - s : 0, bps,
                         (e > s && bps) ?
                             (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
@@ -753,6 +768,9 @@ static void *pump_thread(void *arg)
                 sum_ra  = ra;
                 sum_sg  = sg;
                 sum_rp  = rp;
+                sum_i2  = i2;
+                sum_i4  = i4;
+                sum_i6  = i6;
                 sum_t0  = t;
             }
         }

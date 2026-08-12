@@ -100,6 +100,15 @@ bool tt_ram_available;
 /* FDD setup */
 extern "C" void *fdd_vbl_thread(void *arg);
 extern "C" void fdd_vbl(void);
+
+/* IPL latch counters per level, read by the dmasnd =2 summary line
+ * (i2/i4/i6): how many interrupt requests ipl_task presented to the CPU
+ * per level. Single writer (ipl_task); the 1 Hz reader tolerates tears. */
+extern "C" {
+volatile unsigned pistorm_ipl_lat2 = 0;
+volatile unsigned pistorm_ipl_lat4 = 0;
+volatile unsigned pistorm_ipl_lat6 = 0;
+}
 bool FDD_enabled;
 
 /* ATARI RAM cache setup */
@@ -425,6 +434,9 @@ static void *ipl_task(void *)
   uint64_t irq_watch_next = 0;
   uint32_t raw_ipl0 = 0, raw_ipl2 = 0, raw_ipl4 = 0, raw_ipl6 = 0, raw_other = 0;
   uint32_t latched_ipl2 = 0, latched_ipl4 = 0, latched_ipl6 = 0;
+  uint8_t ipl_cand = 0;                 /* two-sample synchronizer state */
+  const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
+  const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
   bool seen_ipl6 = false;
   unsigned no_ipl6_seconds = 0;
 #ifdef ATARI_IRQ_RATE_PROFILE
@@ -502,6 +514,24 @@ static void *ipl_task(void *)
     */
     ipl = (status & 0x60) >> 4;
 
+    /* 68000 IPL synchronizer: honour a level only when TWO consecutive
+     * samples agree, exactly like the real CPU (it samples IPL every
+     * clock and requires agreement on consecutive edges). The ST drives
+     * IPL from two chips (GLUE: HBL/VBL, MFP: level 6) and the lines do
+     * not switch atomically - a single sample taken mid-transition reads
+     * a phantom intermediate level. Field-measured: Bad Apple's VBL-paced
+     * player counted ~71.7 level-4/s on a 60.05 Hz screen - ~11.6 phantom
+     * VBLs/s from level-6 edges passing through '4' - overwriting staged
+     * DMA frames and shortening the whole run ~12% (stg=37 vs ev/s=31,
+     * intermittent per boot because it is phase-dependent).
+     * PISTORM_IPL_RAW=1 restores single-sample latching (A/B probe). */
+    if (!ipl_raw && ipl != ipl_cand)
+    {
+      ipl_cand = ipl;                   /* candidate: confirm next pass */
+      continue;
+    }
+    ipl_cand = ipl;
+
     /* Only write g_ipl when it actually changes. This poller spins on cpu3 at
      * millions of iterations/sec; writing g_ipl every pass dirtied the cache
      * line it shares with g_irq/g_irq_mask, which the CPU thread reads in
@@ -519,6 +549,9 @@ static void *ipl_task(void *)
         g_irq_latch_us = get_time_us();
 #endif
       g_irq = ipl;
+      if (ipl == 2)      pistorm_ipl_lat2++;
+      else if (ipl == 4) pistorm_ipl_lat4++;
+      else               pistorm_ipl_lat6++;
       jit_request_cpu_exit();
     }
 
