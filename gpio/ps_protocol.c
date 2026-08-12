@@ -54,14 +54,29 @@ volatile uint32_t g_buserr_addr = 0;
 
 static atomic_flag ps_txn_lock = ATOMIC_FLAG_INIT;
 
+/* Raised for the whole time a thread owns the bus - i.e. the window in
+ * which the Pi may be DRIVING the GPIO bank (address/data phases flip
+ * GPFSEL to output). GPLEV0 then reads back the driven values, so an
+ * IPL sample taken by ipl_task inside this window can contain data
+ * pattern bits in the IPL field - phantom interrupt levels that scale
+ * with bus traffic (field case: IDE streaming). ipl_task brackets its
+ * GPLEV0 sample with this flag and discards samples taken while set.
+ * Single writer at a time (whoever holds ps_txn_lock); readers only
+ * need a coherent 0/1. */
+volatile uint8_t ps_bus_active = 0;
+
 static inline void ps_lock_bus(void)
 {
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
+  ps_bus_active = 1;
+  asm volatile ("dmb sy" ::: "memory");
 }
 
 static inline void ps_unlock_bus(void)
 {
+  asm volatile ("dmb sy" ::: "memory");
+  ps_bus_active = 0;
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
 

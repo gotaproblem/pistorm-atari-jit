@@ -509,8 +509,24 @@ static void *ipl_task(void *)
         machine_cookie_tick();
     }
 
-    /* read IPL lines only when bus transaction has ended */
-    if ((status = *ioread) & 0x01)
+    /* Read IPL lines only when no thread owns the bus: while ps_bus_active
+     * the Pi may be DRIVING the GPIO bank (address/data phases), and
+     * GPLEV0 reads back the driven values - the IPL field then carries
+     * data pattern bits, not the CPLD's IPL lines. Field-measured: ~13
+     * phantom level-4/s + ~90 phantom level-2/s riding on IDE streaming
+     * traffic, pacing Bad Apple's VBL-gated player ~12% fast. The sample
+     * is bracketed (flag checked before AND after the read) so a
+     * transaction starting mid-read also discards it; the persistence
+     * filter below covers the residual race. */
+    if (ps_bus_active)
+    {
+      asm volatile("yield" ::: "memory");
+      continue;
+    }
+    status = *ioread;
+    if (ps_bus_active)
+      continue;                       /* transaction raced the sample */
+    if (status & 0x01)
     {
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
       asm volatile("yield" ::: "memory");
