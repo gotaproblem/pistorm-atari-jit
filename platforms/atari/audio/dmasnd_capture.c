@@ -312,6 +312,12 @@ static int playing_now(void)
     return atomic_load(&g_enabled) && !atomic_load(&g_parked);
 }
 
+/* readback counters: does the guest form its idea of time by READING the
+ * hardware back? rdc = ctrl ($8901), rda = address counter ($8909/0B/0D).
+ * A player that never reads the counter cannot be misled by it. */
+static atomic_uint g_ct_rd_ctrl;
+static atomic_uint g_ct_rd_cnt;
+
 /* counter walks the ACTIVE (latched) frame - staged chain writes must
  * NOT move it (that divergence corrupted chaining players) */
 static uint32_t cur_counter(void)
@@ -350,10 +356,14 @@ uint8_t dmasnd_reg_read8(uint32_t addr)
 
     switch (off) {
     case 0x01:                  /* ctrl: live play bit, repeat as written */
+        atomic_fetch_add(&g_ct_rd_ctrl, 1);
         return (uint8_t)((reg[0x01] & 0x02) | (playing_now() ? 0x01 : 0x00));
-    case 0x09: c = cur_counter(); return (uint8_t)(c >> 16);
-    case 0x0B: c = cur_counter(); return (uint8_t)(c >> 8);
-    case 0x0D: c = cur_counter(); return (uint8_t)c;
+    case 0x09: atomic_fetch_add(&g_ct_rd_cnt, 1);
+               c = cur_counter(); return (uint8_t)(c >> 16);
+    case 0x0B: atomic_fetch_add(&g_ct_rd_cnt, 1);
+               c = cur_counter(); return (uint8_t)(c >> 8);
+    case 0x0D: atomic_fetch_add(&g_ct_rd_cnt, 1);
+               c = cur_counter(); return (uint8_t)c;
     case 0x22: return (uint8_t)(mw_data_now() >> 8);    /* microwire data */
     case 0x23: return (uint8_t)mw_data_now();
     case 0x24: return (uint8_t)(mw_mask_now() >> 8);    /* microwire mask */
@@ -683,6 +693,8 @@ static void *pump_thread(void *arg)
     unsigned sum_ta    = atomic_load(&g_ct_ta);
     unsigned sum_g7    = atomic_load(&g_ct_g7);
     unsigned sum_ia    = atomic_load(&g_ct_iack);
+    unsigned sum_rc    = atomic_load(&g_ct_rd_ctrl);
+    unsigned sum_ra    = atomic_load(&g_ct_rd_cnt);
 
     while (atomic_load(&pump_run)) {
         /* PISTORM_DMASND_DEBUG=2: one summary line per second, printed
@@ -695,17 +707,20 @@ static void *pump_thread(void *arg)
                 unsigned ta  = atomic_load(&g_ct_ta);
                 unsigned g7  = atomic_load(&g_ct_g7);
                 unsigned ia  = atomic_load(&g_ct_iack);
+                unsigned rc  = atomic_load(&g_ct_rd_ctrl);
+                unsigned ra  = atomic_load(&g_ct_rd_cnt);
                 uint32_t s   = atomic_load(&g_act_s);
                 uint32_t e   = atomic_load(&g_act_e);
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
-                        "ta=%u g7=%u iack=%u "
+                        "ta=%u g7=%u iack=%u rdc=%u rda=%u "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
                         (unsigned long long)(t / 1000000000ull),
                         (unsigned long long)((t / 1000000ull) % 1000ull),
                         gen - sum_gen, ta - sum_ta, g7 - sum_g7, ia - sum_ia,
+                        rc - sum_rc, ra - sum_ra,
                         s, e, (e > s) ? e - s : 0, bps,
                         (e > s && bps) ?
                             (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
@@ -716,6 +731,8 @@ static void *pump_thread(void *arg)
                 sum_ta  = ta;
                 sum_g7  = g7;
                 sum_ia  = ia;
+                sum_rc  = rc;
+                sum_ra  = ra;
                 sum_t0  = t;
             }
         }
