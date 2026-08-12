@@ -399,7 +399,7 @@ void intlev_ack (uint8_t nr)
      * synthesised cause stays pending and re-raises. */
     {
         extern bool DMA_Sound_enabled;
-        if (nr == 6 && DMA_Sound_enabled && dmasnd_irq_wanted())
+        if (nr == 6 && DMA_Sound_enabled && dmasnd_irq_pending())
         {
             uint8_t live = 0;
             ps_read_ipl(&live);

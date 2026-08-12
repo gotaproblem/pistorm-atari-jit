@@ -536,6 +536,17 @@ int dmasnd_irq_wanted(void)
     return atomic_load(&g_irq_ta) || atomic_load(&g_irq_g7);
 }
 
+/* PURE pending check for the IACK path (CPU thread). It must NOT call
+ * frames_advance: that runs on ipl_task ONLY. Field lesson - routing
+ * the advancing call through intlev_ack put two writers on the frame
+ * clock's t0+=dur sequence; lost/doubled updates lurched the clock
+ * ahead of real time and stalled it (measured: 171 events/s against a
+ * needed 1252/s, interleaved frame numbers, x64 catch-up spasms). */
+int dmasnd_irq_pending(void)
+{
+    return atomic_load(&g_irq_ta) || atomic_load(&g_irq_g7);
+}
+
 /* GPIP level shim: on a real STE the XSINT line toggles at each frame
  * end and is XORed onto GPIP7, and handlers confirm "this interrupt is
  * mine" by reading the level ($FFFA01 bit 7). Field case: Paula's own
