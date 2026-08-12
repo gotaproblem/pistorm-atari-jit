@@ -80,6 +80,15 @@ static const unsigned ste_rates[4] = { 6258, 12517, 25033, 50066 };
 static uint8_t      reg[0x26];
 static atomic_int   g_enabled = 0;
 static atomic_uint  g_gen     = 0;
+
+/* pacing counters: stg = guest stagings of a new frame (start-low $8907
+ * writes - Bad Apple's ISR writes end regs then start regs, start-low
+ * last, so one $8907 write = one chunk processed by the guest). rep =
+ * boundaries that latched an UNCHANGED frame (guest didn't restage in
+ * time = replay). stg > ev/s means stagings overwritten before the
+ * latch = chunks silently skipped = playback runs fast. */
+static atomic_uint g_ct_stage;
+static atomic_uint g_ct_rep;
 static atomic_int   g_repeat  = 0;   /* current $FF8901 repeat bit */
 
 static pthread_t    pump_tid;
@@ -196,6 +205,8 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
     if (a < SND_BASE || a > SND_TOP) return;
     uint32_t off = a - SND_BASE;
     reg[off] = val;
+    if (off == 0x07)
+        atomic_fetch_add(&g_ct_stage, 1);
 
     if (dmasnd_dbg()) {
         static int wlogged = 0;
@@ -519,12 +530,15 @@ static void frames_advance(void)
     }
     dur = (uint64_t)(e - s) * 1000000000ull / bps;
     while (now >= t0 + dur && guard++ < 64) {
+        uint32_t ps = s, pe = e;
         t0 += dur;
         /* frame boundary: latch the STAGED registers (STE hardware
          * double-buffering - this is where chain writes take effect) */
         s = start_addr();
         e = end_addr();
         bps = frame_bps();
+        if (s == ps && e == pe)              /* guest didn't restage:  */
+            atomic_fetch_add(&g_ct_rep, 1);  /* replay of same frame   */
         atomic_store(&g_act_s, s);
         atomic_store(&g_act_e, e);
         atomic_store(&g_act_bps, bps);
@@ -695,6 +709,8 @@ static void *pump_thread(void *arg)
     unsigned sum_ia    = atomic_load(&g_ct_iack);
     unsigned sum_rc    = atomic_load(&g_ct_rd_ctrl);
     unsigned sum_ra    = atomic_load(&g_ct_rd_cnt);
+    unsigned sum_sg    = atomic_load(&g_ct_stage);
+    unsigned sum_rp    = atomic_load(&g_ct_rep);
 
     while (atomic_load(&pump_run)) {
         /* PISTORM_DMASND_DEBUG=2: one summary line per second, printed
@@ -709,18 +725,20 @@ static void *pump_thread(void *arg)
                 unsigned ia  = atomic_load(&g_ct_iack);
                 unsigned rc  = atomic_load(&g_ct_rd_ctrl);
                 unsigned ra  = atomic_load(&g_ct_rd_cnt);
+                unsigned sg  = atomic_load(&g_ct_stage);
+                unsigned rp  = atomic_load(&g_ct_rep);
                 uint32_t s   = atomic_load(&g_act_s);
                 uint32_t e   = atomic_load(&g_act_e);
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
-                        "ta=%u g7=%u iack=%u rdc=%u rda=%u "
+                        "ta=%u g7=%u iack=%u rdc=%u rda=%u stg=%u rep=%u "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
                         (unsigned long long)(t / 1000000000ull),
                         (unsigned long long)((t / 1000000ull) % 1000ull),
                         gen - sum_gen, ta - sum_ta, g7 - sum_g7, ia - sum_ia,
-                        rc - sum_rc, ra - sum_ra,
+                        rc - sum_rc, ra - sum_ra, sg - sum_sg, rp - sum_rp,
                         s, e, (e > s) ? e - s : 0, bps,
                         (e > s && bps) ?
                             (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
@@ -733,6 +751,8 @@ static void *pump_thread(void *arg)
                 sum_ia  = ia;
                 sum_rc  = rc;
                 sum_ra  = ra;
+                sum_sg  = sg;
+                sum_rp  = rp;
                 sum_t0  = t;
             }
         }
