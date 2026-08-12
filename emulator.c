@@ -439,14 +439,21 @@ static void *ipl_task(void *)
   const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
   const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
   uint64_t ipl_confirm_ticks;           /* persistence window, arch ticks */
+  uint8_t  av_held = 0;                 /* autovector level already latched
+                                           this assertion episode (2/4)   */
+  uint64_t av4_last_tick = 0;           /* last level-4 latch (refractory) */
+  uint64_t av4_refract_ticks;
   {
     const char *e = getenv("PISTORM_IPL_CONFIRM_NS");
-    uint64_t ns = e ? strtoull(e, NULL, 10) : 2000;   /* default 2us */
+    const char *r = getenv("PISTORM_VBL_REFRACT_NS");
+    uint64_t ns  = e ? strtoull(e, NULL, 10) : 2000;      /* default 2us */
+    uint64_t rns = r ? strtoull(r, NULL, 10) : 5000000;   /* default 5ms */
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     if (!f)
       f = 54000000ULL;                  /* Pi 4 arch-timer fallback */
     ipl_confirm_ticks = ns * f / 1000000000ULL;
+    av4_refract_ticks = rns * f / 1000000000ULL;
   }
   bool seen_ipl6 = false;
   unsigned no_ipl6_seconds = 0;
@@ -583,8 +590,39 @@ static void *ipl_task(void *)
      * interrupt check. */
     if (g_ipl != ipl)
       g_ipl = ipl;
-    if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask)
+
+    /* Autovector edge semantics: one latch per ASSERTION EPISODE for the
+     * GLUE-driven levels 2/4. On real hardware the CPU's IACK (a 6800-
+     * style VPA/VMA handshake for autovectors) clears the GLUE's pending
+     * state - one exception per VBL/HBL. Our IACK cycle evidently does
+     * not complete that handshake: the line stays asserted for the whole
+     * blanking interval, and every RTE inside that window met the still-
+     * asserted line and delivered the SAME VBL again. Field-measured:
+     * 75-84 level-4/s on a screen that can only make 50/60/71.4 - and
+     * varying with guest load (extra deliveries per blank = blank time /
+     * handler time), which no physical clock does. Bad Apple's VBL-gated
+     * player hence ran ~12% fast, intermittently, for weeks.
+     * av_held remembers the level latched this episode; it re-arms when
+     * the line visibly leaves that level. The level-4 refractory (5ms,
+     * PISTORM_VBL_REFRACT_NS, well under any frame period) covers the
+     * 4->6->4 interleave where an MFP interrupt mid-blank briefly masks
+     * the line and would otherwise re-arm the same VBL. Level 2 gets no
+     * refractory: HBL's period is 64us. Level 6 (MFP, vector handshake
+     * works) is untouched. */
+    if (ipl != av_held)
+      av_held = 0;                      /* line left the level: re-arm */
+    if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask && ipl != av_held)
     {
+      if (ipl == 4 && av4_refract_ticks)
+      {
+        uint64_t nowt;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
+        if (nowt - av4_last_tick < av4_refract_ticks)
+          continue;                     /* same VBL blanking interval */
+        av4_last_tick = nowt;
+      }
+      if (ipl == 2 || ipl == 4)
+        av_held = ipl;                  /* one latch per assertion */
 #ifdef ATARI_LAT_DIAG
       /* Latency instrumentation: stamp the moment a level becomes pending;
        * intlev() measures the latch->delivery delta. */
