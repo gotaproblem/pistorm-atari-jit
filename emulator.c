@@ -434,9 +434,20 @@ static void *ipl_task(void *)
   uint64_t irq_watch_next = 0;
   uint32_t raw_ipl0 = 0, raw_ipl2 = 0, raw_ipl4 = 0, raw_ipl6 = 0, raw_other = 0;
   uint32_t latched_ipl2 = 0, latched_ipl4 = 0, latched_ipl6 = 0;
-  uint8_t ipl_cand = 0;                 /* two-sample synchronizer state */
+  uint8_t ipl_cand = 0;                 /* synchronizer candidate level  */
+  uint64_t ipl_cand_tick = 0;           /* arch-timer stamp of candidate */
   const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
   const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
+  uint64_t ipl_confirm_ticks;           /* persistence window, arch ticks */
+  {
+    const char *e = getenv("PISTORM_IPL_CONFIRM_NS");
+    uint64_t ns = e ? strtoull(e, NULL, 10) : 2000;   /* default 2us */
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    if (!f)
+      f = 54000000ULL;                  /* Pi 4 arch-timer fallback */
+    ipl_confirm_ticks = ns * f / 1000000000ULL;
+  }
   bool seen_ipl6 = false;
   unsigned no_ipl6_seconds = 0;
 #ifdef ATARI_IRQ_RATE_PROFILE
@@ -514,23 +525,40 @@ static void *ipl_task(void *)
     */
     ipl = (status & 0x60) >> 4;
 
-    /* 68000 IPL synchronizer: honour a level only when TWO consecutive
-     * samples agree, exactly like the real CPU (it samples IPL every
-     * clock and requires agreement on consecutive edges). The ST drives
-     * IPL from two chips (GLUE: HBL/VBL, MFP: level 6) and the lines do
-     * not switch atomically - a single sample taken mid-transition reads
-     * a phantom intermediate level. Field-measured: Bad Apple's VBL-paced
-     * player counted ~71.7 level-4/s on a 60.05 Hz screen - ~11.6 phantom
-     * VBLs/s from level-6 edges passing through '4' - overwriting staged
-     * DMA frames and shortening the whole run ~12% (stg=37 vs ev/s=31,
-     * intermittent per boot because it is phase-dependent).
-     * PISTORM_IPL_RAW=1 restores single-sample latching (A/B probe). */
-    if (!ipl_raw && ipl != ipl_cand)
+    /* IPL synchronizer: honour a CHANGED level only after it has held
+     * stable for a persistence window (default 2us, PISTORM_IPL_CONFIRM_NS).
+     * The ST drives IPL from two chips (GLUE: HBL/VBL levels 2/4, MFP:
+     * level 6) and the lines do not switch atomically - transitions of a
+     * level-6 edge pass through the phantom codes %100 (4) and %010 (2).
+     * Field-measured with the i2/i4/i6 counters: ~75 level-4/s and ~150
+     * level-2/s latched on a 60 Hz screen riding on ~350 level-6/s - and
+     * Bad Apple, whose player is VBL-paced, ran ~12% fast on the phantom
+     * VBLs (stg=37 vs ev/s=31, intermittent per boot).
+     * Two consecutive samples agreeing (the 68000's own rule) did NOT
+     * filter them: *ioread is the CPLD's PRESENTED status, and a phantom
+     * the CPLD latched at its own sample moment is held until its next
+     * refresh - back-to-back host reads agree on the same held phantom.
+     * Stability across TIME is required instead. Real sources lose
+     * nothing: VBL/HBL/MFP are level-sensitive and hold until serviced,
+     * so a 2us confirm only kills transients.
+     * PISTORM_IPL_RAW=1 restores single-sample latching (A/B probe);
+     * PISTORM_IPL_CONFIRM_NS=0 leaves a two-sample minimum. */
+    if (!ipl_raw)
     {
-      ipl_cand = ipl;                   /* candidate: confirm next pass */
-      continue;
+      if (ipl != ipl_cand)
+      {
+        ipl_cand = ipl;                 /* new candidate: stamp and wait */
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ipl_cand_tick));
+        continue;
+      }
+      if (ipl_confirm_ticks && ipl != g_ipl)
+      {
+        uint64_t nowt;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
+        if (nowt - ipl_cand_tick < ipl_confirm_ticks)
+          continue;                     /* not stable long enough yet */
+      }
     }
-    ipl_cand = ipl;
 
     /* Only write g_ipl when it actually changes. This poller spins on cpu3 at
      * millions of iterations/sec; writing g_ipl every pass dirtied the cache
