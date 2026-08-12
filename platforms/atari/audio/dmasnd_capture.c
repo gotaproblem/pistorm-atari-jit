@@ -395,6 +395,14 @@ static atomic_uint g_ta_count = 256;     /* virtual Timer A main counter */
 static atomic_int  g_irq_ta = 0;         /* pending: Timer A (ch 13) */
 static atomic_int  g_irq_g7 = 0;         /* pending: GPIP7   (ch 15) */
 
+/* delivery counters for the =2 summary: boundaries (ev/s) vs interrupts
+ * actually RAISED (ta/g7) vs vectors actually TAKEN by the guest (iack).
+ * A guest ISR running more often than the frame boundary latches is
+ * invisible in ev/s alone - these make it arithmetic. */
+static atomic_uint g_ct_ta;              /* Timer A raised at a boundary  */
+static atomic_uint g_ct_g7;              /* GPIP7   raised at a boundary  */
+static atomic_uint g_ct_iack;            /* vectors handed to the guest   */
+
 void dmasnd_mfp_snoop(uint32_t addr, uint32_t value, int is_word)
 {
     uint32_t a = addr & 0x00FFFFFFu;
@@ -459,12 +467,14 @@ static void frame_end_event(unsigned frameno)
             atomic_store(&g_ta_count, atomic_load(&g_mfp_tadr));
             atomic_store(&g_irq_ta, 1);
             atomic_fetch_or(&g_vipra, 0x20u);        /* pending: ch 13 */
+            atomic_fetch_add(&g_ct_ta, 1);
         } else
             atomic_store(&g_ta_count, c - 1u);
     }
     if ((en & 0x80u) && g7_deliver()) {
         atomic_store(&g_irq_g7, 1);
         atomic_fetch_or(&g_vipra, 0x80u);            /* pending: ch 15 */
+        atomic_fetch_add(&g_ct_g7, 1);
     }
     if (dmasnd_dbg()) {
         /* uncapped and self-describing: length, bps and the computed
@@ -628,6 +638,7 @@ uint8_t dmasnd_iack_vector(void)
             atomic_fetch_or(&g_visra, 0x20u);
         vec = (uint8_t)(base | 13u);
     }
+    atomic_fetch_add(&g_ct_iack, 1);
     if (dmasnd_dbg()) {
         static int logged = 0;
         if (logged < 12) {
@@ -669,6 +680,9 @@ static void *pump_thread(void *arg)
     uint8_t  last_mode = 0xFF;
     uint64_t sum_t0    = now_ns();     /* =2 summary: 1 Hz reporter state */
     unsigned sum_gen   = last_gen;
+    unsigned sum_ta    = atomic_load(&g_ct_ta);
+    unsigned sum_g7    = atomic_load(&g_ct_g7);
+    unsigned sum_ia    = atomic_load(&g_ct_iack);
 
     while (atomic_load(&pump_run)) {
         /* PISTORM_DMASND_DEBUG=2: one summary line per second, printed
@@ -678,22 +692,30 @@ static void *pump_thread(void *arg)
             uint64_t t = now_ns();
             if (t - sum_t0 >= 1000000000ull) {
                 unsigned gen = atomic_load(&g_gen);
+                unsigned ta  = atomic_load(&g_ct_ta);
+                unsigned g7  = atomic_load(&g_ct_g7);
+                unsigned ia  = atomic_load(&g_ct_iack);
                 uint32_t s   = atomic_load(&g_act_s);
                 uint32_t e   = atomic_load(&g_act_e);
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
+                        "ta=%u g7=%u iack=%u "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
                         (unsigned long long)(t / 1000000000ull),
                         (unsigned long long)((t / 1000000ull) % 1000ull),
-                        gen - sum_gen, s, e, (e > s) ? e - s : 0, bps,
+                        gen - sum_gen, ta - sum_ta, g7 - sum_g7, ia - sum_ia,
+                        s, e, (e > s) ? e - s : 0, bps,
                         (e > s && bps) ?
                             (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
                         m, (m & 0x80) ? "mono" : "stereo", ste_rates[m & 3],
                         atomic_load(&g_enabled), atomic_load(&g_parked),
                         dmasnd_ring_used());
                 sum_gen = gen;
+                sum_ta  = ta;
+                sum_g7  = g7;
+                sum_ia  = ia;
                 sum_t0  = t;
             }
         }
