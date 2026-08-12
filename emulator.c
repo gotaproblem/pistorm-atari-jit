@@ -23,6 +23,7 @@
 #include "config_file/config_file.h"
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
+#include "platforms/atari/machine_cookie.h"
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
 #include "sysdeps.h"
@@ -475,6 +476,14 @@ static void *ipl_task(void *)
         fdd_vbl();
         fdd_next = hk_now + fdd_step;
       }
+    }
+
+    /* _MCH cookie watcher: independent of FDD, stride-gated (~every
+     * 32768 passes = roughly every half-second). Bounded memory work. */
+    {
+      static unsigned mch_stride;
+      if (!(++mch_stride & 0x7FFFu))
+        machine_cookie_tick();
     }
 
     /* read IPL lines only when bus transaction has ended */
@@ -1186,6 +1195,14 @@ int main (int argc, char *argv[])
 
   printf("[MAIN] Press CTRL-C to terminate\n");
   printf("\n");
+
+  /* Host-side _MCH cookie forcing (cfg "machine ..."): retires
+   * AUTO\SETMCH.PRG for emulator boots. */
+  {
+    uint32_t mch;
+    if (emulator_config_machine_set(&mch))
+      machine_cookie_set(mch);
+  }
 
   /* Initialise JIT CPU core */
   fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);

@@ -28,6 +28,7 @@ EXENAME = emulator
 CFILES = config_file/config_file.c \
          gpio/ps_protocol.c \
          platforms/atari/IDE.c \
+         platforms/atari/machine_cookie.c \
          platforms/atari/idedriver.c \
          platforms/atari/fdd/atari_fdd.c \
          platforms/atari/fdd/platform_atari_fdd.c \

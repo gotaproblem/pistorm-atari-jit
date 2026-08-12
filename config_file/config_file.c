@@ -34,6 +34,7 @@ typedef enum {
   CONFITEM_KBD,
   CONFITEM_BLITTER,
   CONFITEM_SHIFTER,
+  CONFITEM_MACHINE,
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
   CONFITEM_VGA_RENDER,
@@ -90,6 +91,7 @@ static const config_switch_def config_switches[] = {
   { "kbd", CONFITEM_KBD },
   { "blitter", CONFITEM_BLITTER },
   { "shifter", CONFITEM_SHIFTER },
+  { "machine", CONFITEM_MACHINE },
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
   { "vga_render", CONFITEM_VGA_RENDER },
@@ -145,6 +147,15 @@ void emulator_config_set_current(const struct emulator_config *cfg)
 const struct emulator_config *emulator_config_current(void)
 {
   return current_config;
+}
+
+bool emulator_config_machine_set(uint32_t *mch)
+{
+  if (current_config && current_config->machine_set) {
+    if (mch) *mch = current_config->machine_mch;
+    return true;
+  }
+  return false;
 }
 
 bool emulator_config_fpu(void)
@@ -744,12 +755,36 @@ struct emulator_config *load_config_file(char *filename) {
         }
         break;
 
+      case CONFITEM_MACHINE:
+        {
+          char *arg = parse_line + str_pos;
+          while (*arg == ' ' || *arg == '\t')
+            arg++;
+          cfg->machine_set = true;
+          if (strncasecmp(arg, "megaste", 7) == 0)      cfg->machine_mch = 0x00010010u;
+          else if (strncasecmp(arg, "ste", 3) == 0)     cfg->machine_mch = 0x00010000u;
+          else if (strncasecmp(arg, "tt", 2) == 0)      cfg->machine_mch = 0x00020000u;
+          else if (strncasecmp(arg, "falcon", 6) == 0)  cfg->machine_mch = 0x00030000u;
+          else if (strncasecmp(arg, "st", 2) == 0)      cfg->machine_mch = 0x00000000u;
+          else { cfg->machine_set = false;
+                 printf ("[CFG] machine: unknown '%s' (st/ste/megaste/tt/falcon)\n", arg); break; }
+          /* STE-class machines imply the STE shifter personality for the
+           * native mirror unless the cfg set shifter explicitly */
+          if (!cfg->shifter_set &&
+              (cfg->machine_mch == 0x00010000u || cfg->machine_mch == 0x00010010u))
+            cfg->shifter_ste = true;
+          printf ("[CFG] Machine: _MCH forced to 0x%08X%s\n", cfg->machine_mch,
+                  cfg->shifter_ste ? " (shifter: STE)" : "");
+        }
+        break;
+
       case CONFITEM_SHIFTER:
         {
           char *arg = parse_line + str_pos;
           while (*arg == ' ' || *arg == '\t')
             arg++;
           cfg->shifter_ste = (strncasecmp(arg, "ste", 3) == 0);
+          cfg->shifter_set = true;
           printf ("[CFG] Shifter model: %s\n", cfg->shifter_ste ? "STE" : "ST");
         }
         break;
