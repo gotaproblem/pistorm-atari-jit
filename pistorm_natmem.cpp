@@ -317,32 +317,99 @@ static inline void stram_snoop_lowram(uaecptr a, int sz)
         stram_refresh_physbase();
 }
 
+/* PISTORM_VID_DEBUG=1: trace shifter register writes (LIVE bank-layer
+ * copy - the emulator.c snoops are legacy-path and compiled out). */
+static inline int vid_dbg(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_VID_DEBUG");
+        v = (e && *e == '1') ? 1 : 0;
+    }
+    return v;
+}
+
+static inline void vid_dbg_w(uint32_t a, uint32_t value)
+{
+    if (vid_dbg())
+        fprintf(stderr, "[vid] W %06X=%02X\n", a, value & 0xFFu);
+}
+
+/* Stale-STE-extras guard for 'shifter ste' mode: an OS that believes
+ * the machine is an ST sets screens by writing ONLY hi/mid and never
+ * clears $FF820D (EmuTOS's boot probe leaves residue there -> skewed
+ * desktop). A plain hi/mid write clears the extras; STE software that
+ * uses them programs base then extras (ascending register order) and
+ * so keeps them. */
+static inline void st_video_ste_extras_clear(void)
+{
+    rtg.low = 0;
+    rtg.linewidth = 0;
+    rtg.hscroll = 0;
+}
+
 static inline void st_video_snoop8(uint32_t address, uint8_t value)
 {
     uint32_t a = address & 0x00FFFFFFu;
 
-    if (a == 0x00FF8201u)
+    if (a == 0x00FF8201u) {
         rtg.high = value;
-    else if (a == 0x00FF8203u)
+        st_video_ste_extras_clear();
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF8203u) {
         rtg.mid = value;
-    else if (a == 0x00FF820Du)
+        st_video_ste_extras_clear();
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF820Du) {
         rtg.low = value;
-    else if (a == 0x00FF8260u)
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF820Fu) {
+        rtg.linewidth = value;      /* STE: extra words per scanline */
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF8265u) {
+        rtg.hscroll = value & 0x0Fu; /* STE: fine horizontal scroll */
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF8260u) {
         rtg.shift_mode = value;
+        vid_dbg_w(a, value);
+    }
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)
 {
     uint32_t a = address & 0x00FFFFFFu;
 
-    if (a == 0x00FF8200u)
+    if (a == 0x00FF8200u) {
         rtg.high = (uint8_t)value;
-    else if (a == 0x00FF8202u)
+        st_video_ste_extras_clear();
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF8202u) {
         rtg.mid = (uint8_t)value;
-    else if (a == 0x00FF820Cu)
+        st_video_ste_extras_clear();
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF820Cu) {
         rtg.low = (uint8_t)value;
-    else if (a == 0x00FF8260u)
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF820Eu) {
+        rtg.linewidth = (uint8_t)value;
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF8264u) {
+        rtg.hscroll = (uint8_t)(value & 0x0Fu);
+        vid_dbg_w(a, value);
+    }
+    else if (a == 0x00FF8260u) {
         rtg.shift_mode = (uint8_t)(value >> 8);
+        vid_dbg_w(a, value >> 8);
+    }
     else if (a >= 0x00FF8240u && a < 0x00FF8260u)
         st_palette[(a - 0x00FF8240u) >> 1] = value;
 }
@@ -354,8 +421,14 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
     if (a == 0x00FF8200u) {
         rtg.high = (uint8_t)(value >> 16);
         rtg.mid = (uint8_t)value;
+        st_video_ste_extras_clear();
+        vid_dbg_w(a, value >> 16);
+        vid_dbg_w(a + 2, value);
     } else if (a == 0x00FF820Cu) {
         rtg.low = (uint8_t)(value >> 16);
+        rtg.linewidth = (uint8_t)value;   /* long write spans $0C..$0F */
+        vid_dbg_w(a, value >> 16);
+        vid_dbg_w(a + 2, value);
     } else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
         unsigned i = (a - 0x00FF8240u) >> 1;
         st_palette[i] = (uint16_t)(value >> 16);
