@@ -165,7 +165,17 @@ bool emulator_config_fpu(void)
 
 bool emulator_config_shifter_ste(void)
 {
-  return current_config ? current_config->shifter_ste : false;
+  /* STE video personality exists ONLY on an STE-class machine. The
+   * default machine (no `machine` line) is a plain ST, so a stray
+   * `shifter ste` line alone enables nothing - `shifter` is an override
+   * WITHIN an STE machine (machine ste + shifter st = cookie/sound
+   * without the video personality), not a backdoor. */
+  if (!current_config || !current_config->machine_set)
+    return false;
+  if (current_config->machine_mch != 0x00010000u &&
+      current_config->machine_mch != 0x00010010u)
+    return false;
+  return current_config->shifter_ste;
 }
 
 bool emulator_config_blitter_enabled(void)

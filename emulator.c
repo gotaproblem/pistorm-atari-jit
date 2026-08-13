@@ -1194,12 +1194,34 @@ int main (int argc, char *argv[])
 
   /* --------------------------- */
 
-  /* Audio -> HDMI. dma_sound (STe DMA capture) and ym2149 (emulated PSG
-   * shadowing the real chip's register writes) are independent switches;
-   * either one brings up the shared SDL3 audio device. */
-  if (config->dma_sound || config->ym2149) {
+  /* Audio -> HDMI. ym2149 (emulated PSG shadowing the real chip) is
+   * machine-independent - every ST has a PSG. DMA sound is STE hardware,
+   * and an explicit `machine` line is the AUTHORITATIVE statement of
+   * machine identity: ste/megaste switch it on, st/tt/falcon switch it
+   * off, either way overriding a legacy `dma_sound` entry. Rationale
+   * (field case): `dma_sound` in an otherwise-ST config made the bank
+   * absorb $FF89xx, so EmuTOS's boot probe found DMA sound hardware and
+   * set _SND - an "ST" that had quietly grown STE sound. Without a
+   * machine line the old key still works, with a hint. */
+  /* THE DEFAULT MACHINE IS A PLAIN ST. STE hardware exists only when
+   * the cfg says so: `machine ste` (or megaste) is the one switch for
+   * everything STE - DMA sound, STE shifter personality, _MCH cookie.
+   * A dma_sound line on its own enables NOTHING (loud notice below, so
+   * an old config cannot fail silently). */
+  bool want_dmasnd = false;
+  {
+    uint32_t mch;
+    if (emulator_config_machine_set(&mch))
+      want_dmasnd = (mch == 0x00010000u || mch == 0x00010010u);
+    if (config->dma_sound && !want_dmasnd)
+      printf ("[CFG] dma_sound line IGNORED - STE hardware needs "
+              "`machine ste` (default machine is a plain ST)\n");
+    else if (want_dmasnd)
+      printf ("[CFG] machine STE-class: DMA sound ON\n");
+  }
+  if (want_dmasnd || config->ym2149) {
     if (dmasnd_init (NULL) == 0) {
-      if (config->dma_sound) {
+      if (want_dmasnd) {
         if (dmasnd_capture_start() == 0) {
           DMA_Sound_enabled = true;
           printf ("[INIT] DMA Sound enabled\n");
@@ -1208,7 +1230,7 @@ int main (int argc, char *argv[])
           fprintf(stderr, "[INIT] DMA Sound failed to start\n");
         }
       } else {
-        printf ("[INIT] DMA Sound disabled\n");
+        printf ("[INIT] DMA Sound disabled (machine is not STE-class)\n");
       }
       if (config->ym2149) {
         if (ym2149_init () == 0)
