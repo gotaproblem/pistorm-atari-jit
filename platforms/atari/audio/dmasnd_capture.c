@@ -625,7 +625,25 @@ uint8_t dmasnd_gpip_shim(uint8_t real)
      * The hardware-true model is a steady inversion while playing,
      * coherent with the ctrl-register readback (same playing_now()). */
     if (playing_now())
-        return (uint8_t)(real ^ 0x80u);
+    {
+        uint8_t v = (uint8_t)(real ^ 0x80u);
+        /* EmuTOS's detect_monitor_change() un-XORs this byte with NEG,
+         * not EOR - and negation has fixed points 0x00 and 0x80. If the
+         * byte reads EXACTLY 0x00 (our inversion clears bit7 while the
+         * IDE shim holds GPIP5 low, a pending keyboard byte holds GPIP4
+         * low, and the serial lines idle low on this machine), -0 == 0
+         * defeats the compensation and EmuTOS concludes "mono monitor":
+         * it rewrites the shifter and the GLUE jumps to 71.4Hz hi-res.
+         * Field case: Bad Apple ~19% fast (VBL/2-gated player at
+         * 35.8 chunks/s = 71.6/2), colour monitor loses sync during
+         * playback, intermittent per boot (needs several GPIP bits to
+         * line up). Real STEs never present 0x00 here - the idle RS232
+         * receiver lines pull their GPIP bits high; emulate that
+         * pull-up with RI (bit 6, inert) in the one case it matters. */
+        if (v == 0x00u)
+            v = 0x40u;
+        return v;
+    }
     return real;
 }
 
