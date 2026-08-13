@@ -149,6 +149,13 @@ const struct emulator_config *emulator_config_current(void)
   return current_config;
 }
 
+int emulator_config_machine_kind(void)
+{
+  if (!current_config || !current_config->machine_set)
+    return -1;
+  return current_config->machine_kind;
+}
+
 bool emulator_config_machine_set(uint32_t *mch)
 {
   if (current_config && current_config->machine_set) {
@@ -172,8 +179,7 @@ bool emulator_config_shifter_ste(void)
    * without the video personality), not a backdoor. */
   if (!current_config || !current_config->machine_set)
     return false;
-  if (current_config->machine_mch != 0x00010000u &&
-      current_config->machine_mch != 0x00010010u)
+  if (current_config->machine_kind != 1)   /* STE only */
     return false;
   return current_config->shifter_ste;
 }
@@ -187,14 +193,9 @@ static bool blitter_machine_default(void)
 {
   if (!current_config || !current_config->machine_set)
     return false;                   /* default machine = plain ST */
-  switch (current_config->machine_mch) {
-    case 0x00010000u:               /* STE      */
-    case 0x00010010u:               /* Mega STE */
-    case 0x00030000u:               /* Falcon   */
-      return true;
-    default:                        /* ST, TT   */
-      return false;
-  }
+  /* STE and Mega ST shipped with the blitter; plain ST did not. */
+  return current_config->machine_kind == 1 ||
+         current_config->machine_kind == 2;
 }
 
 bool emulator_config_blitter_enabled(void)
@@ -791,20 +792,30 @@ struct emulator_config *load_config_file(char *filename) {
           char *arg = parse_line + str_pos;
           while (*arg == ' ' || *arg == '\t')
             arg++;
+          /* Only machines that can physically host the PiStorm exist
+           * here: ST, STE, Mega ST. (TT/Falcon are 68030 machines - no
+           * socket for the board; megaste dropped for the same product
+           * reason.) Mega ST reports the SAME _MCH as a plain ST on real
+           * hardware - the kind field is what carries the difference
+           * (blitter fitted, no STE hardware). */
           cfg->machine_set = true;
-          if (strncasecmp(arg, "megaste", 7) == 0)      cfg->machine_mch = 0x00010010u;
-          else if (strncasecmp(arg, "ste", 3) == 0)     cfg->machine_mch = 0x00010000u;
-          else if (strncasecmp(arg, "tt", 2) == 0)      cfg->machine_mch = 0x00020000u;
-          else if (strncasecmp(arg, "falcon", 6) == 0)  cfg->machine_mch = 0x00030000u;
-          else if (strncasecmp(arg, "st", 2) == 0)      cfg->machine_mch = 0x00000000u;
+          if (strncasecmp(arg, "megast", 6) == 0 ||
+              strncasecmp(arg, "mst", 3) == 0)
+            { cfg->machine_mch = 0x00000000u; cfg->machine_kind = 2; }
+          else if (strncasecmp(arg, "ste", 3) == 0)
+            { cfg->machine_mch = 0x00010000u; cfg->machine_kind = 1; }
+          else if (strncasecmp(arg, "st", 2) == 0)
+            { cfg->machine_mch = 0x00000000u; cfg->machine_kind = 0; }
           else { cfg->machine_set = false;
-                 printf ("[CFG] machine: unknown '%s' (st/ste/megaste/tt/falcon)\n", arg); break; }
-          /* STE-class machines imply the STE shifter personality for the
-           * native mirror unless the cfg set shifter explicitly */
-          if (!cfg->shifter_set &&
-              (cfg->machine_mch == 0x00010000u || cfg->machine_mch == 0x00010010u))
+                 printf ("[CFG] machine: unknown '%s' (st / ste / megast)\n", arg); break; }
+          /* STE implies the STE shifter personality for the native
+           * mirror unless the cfg set shifter explicitly */
+          if (!cfg->shifter_set && cfg->machine_kind == 1)
             cfg->shifter_ste = true;
-          printf ("[CFG] Machine: _MCH forced to 0x%08X%s\n", cfg->machine_mch,
+          printf ("[CFG] Machine: %s - _MCH forced to 0x%08X%s\n",
+                  cfg->machine_kind == 2 ? "Mega ST" :
+                  cfg->machine_kind == 1 ? "STE" : "ST",
+                  cfg->machine_mch,
                   cfg->shifter_ste ? " (shifter: STE)" : "");
         }
         break;

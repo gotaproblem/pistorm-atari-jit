@@ -1210,9 +1210,8 @@ int main (int argc, char *argv[])
    * an old config cannot fail silently). */
   bool want_dmasnd = false;
   {
-    uint32_t mch;
-    if (emulator_config_machine_set(&mch))
-      want_dmasnd = (mch == 0x00010000u || mch == 0x00010010u);
+    extern int emulator_config_machine_kind(void);
+    want_dmasnd = (emulator_config_machine_kind() == 1);   /* STE only */
     if (config->dma_sound && !want_dmasnd)
       printf ("[CFG] dma_sound line IGNORED - STE hardware needs "
               "`machine ste` (default machine is a plain ST)\n");

@@ -111,6 +111,7 @@ struct emulator_config {
   bool blitter_set;    /* cfg had an explicit blitter line (override) */
   bool machine_set;    /* cfg 'machine ...' present */
   uint32_t machine_mch;/* forced _MCH value */
+  int machine_kind;    /* 0=st 1=ste 2=megast (PiStorm-capable machines) */
   bool shifter_set;    /* cfg set shifter explicitly */
   bool shifter_ste;   /* shifter ste: mirror honours STE video regs ($FF820D/0F/8265); default ST ignores them like the real chip */
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
@@ -150,6 +151,7 @@ void free_config_file(struct emulator_config *cfg);
 void emulator_config_set_current(const struct emulator_config *cfg);
 const struct emulator_config *emulator_config_current(void);
 bool emulator_config_machine_set(uint32_t *mch);
+int emulator_config_machine_kind(void); /* -1 unset, 0 st, 1 ste, 2 megast */
 bool emulator_config_fpu(void);
 bool emulator_config_shifter_ste(void);
 bool emulator_config_blitter_enabled(void);
