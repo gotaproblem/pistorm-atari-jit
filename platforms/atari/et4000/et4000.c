@@ -116,6 +116,30 @@ static int fx_duration_ms(void)
     return ms;
 }
 
+/* Hold the OLD frame frozen for this long before the slide starts.
+ * Field case: without the hold, the slide samples the live framebuffer
+ * while XaAES is still hiding the old desk's windows - a flash of the
+ * bare XaAES root appears mid-slide before TeraDesk repaints the new
+ * desk's wallpaper (user report: "three desktops - current, gem, and
+ * the xaaes one"). The hold lets that phase pass unseen behind the
+ * frozen old frame; the slide then reveals the mostly-painted desk.
+ * PISTORM_FX_HOLD_MS, default 80, clamp 500, 0 = old behaviour. */
+static int fx_hold_ms(void)
+{
+    static int ms = -2;
+
+    if (ms == -2) {
+        const char *e = getenv("PISTORM_FX_HOLD_MS");
+
+        ms = e ? atoi(e) : 80;
+        if (ms < 0)
+            ms = 0;
+        if (ms > 500)
+            ms = 500;
+    }
+    return ms;
+}
+
 void et4000_fx_slide(int dir)
 {
     ET4000State *s = g_et4000;
@@ -1121,10 +1145,25 @@ static void sdl_present (ET4000State *s)
 
                 if (fxdir && g_fx_snap && g_fx_w == sw && g_fx_h == sh) {
                     int frames = (fx_duration_ms() * 60) / 1000;
+                    int hold = (fx_hold_ms() * 60) / 1000;
                     int f;
 
                     if (frames < 3)
                         frames = 3;
+
+                    /* hold phase: present the old frame unchanged while
+                     * XaAES hides windows and TeraDesk starts painting
+                     * the new desk underneath */
+                    for (f = 0; f < hold && back; f++) {
+                        uint32_t y;
+
+                        for (y = 0; y < sh; y++)
+                            wc_copy(back + (size_t)y * bp,
+                                    g_fx_snap + (size_t)y * g_fx_stride,
+                                    (size_t)sw * 4);
+                        drmpres_flip();
+                        back = drmpres_backbuffer();
+                    }
 
                     for (f = 1; f <= frames && back; f++) {
                         float t = (float)f / (float)frames;
