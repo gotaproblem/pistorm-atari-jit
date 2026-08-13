@@ -336,6 +336,15 @@ static atomic_uint g_ct_rd_cnt;
 extern volatile unsigned pistorm_ipl_lat2, pistorm_ipl_lat4,
                          pistorm_ipl_lat6;
 
+/* Real-bus GPIP sample for the =2 summary (gp=): reads the PHYSICAL MFP
+ * GPIP register once per second - bit 7 is the real MonoDetect wire,
+ * which on an ST also feeds the GLUE's MONOMON timing select. Field
+ * question this answers: the GLUE runs 71.47Hz (mono timing) with
+ * REZ=0 the moment Bad Apple starts - is the physical line actually
+ * being pulled low? ps_read_8 takes the bus lock; one read/s from the
+ * pump thread is harmless and GPIP reads have no side effects. */
+extern uint8_t ps_read_8(uint32_t address);
+
 /* counter walks the ACTIVE (latched) frame - staged chain writes must
  * NOT move it (that divergence corrupted chaining players) */
 static uint32_t cur_counter(void)
@@ -758,13 +767,14 @@ static void *pump_thread(void *arg)
                 unsigned i2  = pistorm_ipl_lat2;
                 unsigned i4  = pistorm_ipl_lat4;
                 unsigned i6  = pistorm_ipl_lat6;
+                uint8_t  gp  = ps_read_8(0x00FFFA01u);  /* real GPIP */
                 uint32_t s   = atomic_load(&g_act_s);
                 uint32_t e   = atomic_load(&g_act_e);
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
                         "ta=%u g7=%u iack=%u rdc=%u rda=%u stg=%u rep=%u "
-                        "i2=%u i4=%u i6=%u "
+                        "i2=%u i4=%u i6=%u gp=%02X%s "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
                         (unsigned long long)(t / 1000000000ull),
@@ -772,6 +782,7 @@ static void *pump_thread(void *arg)
                         gen - sum_gen, ta - sum_ta, g7 - sum_g7, ia - sum_ia,
                         rc - sum_rc, ra - sum_ra, sg - sum_sg, rp - sum_rp,
                         i2 - sum_i2, i4 - sum_i4, i6 - sum_i6,
+                        gp, (gp & 0x80u) ? "" : "<MONO!",
                         s, e, (e > s) ? e - s : 0, bps,
                         (e > s && bps) ?
                             (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
