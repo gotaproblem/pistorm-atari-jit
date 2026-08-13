@@ -108,6 +108,7 @@ struct emulator_config {
   int  kbd_mode;       /* 0 = auto-detect real IKBD, 1 = merge, 2 = standalone */
   int  kbd_mouse_div;  /* host mouse count divisor (1 = raw)              */
   bool blitter;
+  bool blitter_set;    /* cfg had an explicit blitter line (override) */
   bool machine_set;    /* cfg 'machine ...' present */
   uint32_t machine_mch;/* forced _MCH value */
   bool shifter_set;    /* cfg set shifter explicitly */

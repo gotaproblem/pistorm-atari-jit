@@ -178,18 +178,39 @@ bool emulator_config_shifter_ste(void)
   return current_config->shifter_ste;
 }
 
+/* Blitter presence follows the machine unless the cfg says otherwise.
+ * Hardware reality: Mega ST, STE, Mega STE and Falcon have a blitter;
+ * plain ST (the default machine) and TT do not. An explicit `blitter`
+ * line overrides in either direction - `machine st` + `blitter on` is
+ * the historically real "STFM with a blitter fitted in the socket". */
+static bool blitter_machine_default(void)
+{
+  if (!current_config || !current_config->machine_set)
+    return false;                   /* default machine = plain ST */
+  switch (current_config->machine_mch) {
+    case 0x00010000u:               /* STE      */
+    case 0x00010010u:               /* Mega STE */
+    case 0x00030000u:               /* Falcon   */
+      return true;
+    default:                        /* ST, TT   */
+      return false;
+  }
+}
+
 bool emulator_config_blitter_enabled(void)
 {
-  return current_config ? current_config->blitter : true;
+  if (!current_config)
+    return false;
+  if (current_config->blitter_set)
+    return current_config->blitter;
+  return blitter_machine_default();
 }
 
 int emulator_config_blitter_mode(void)
 {
-  if (!current_config)
-    return 2;                       /* default: emulated */
-  if (!current_config->blitter)
+  if (!emulator_config_blitter_enabled())
     return 0;
-  return current_config->blitter_real ? 1 : 2;
+  return (current_config && current_config->blitter_real) ? 1 : 2;
 }
 
 bool emulator_config_stram_cache_enabled(void)
@@ -811,7 +832,8 @@ struct emulator_config *load_config_file(char *filename) {
             cfg->blitter = get_bool_default_true(parse_line + str_pos);
             cfg->blitter_real = false;
           }
-          printf ("[CFG] Blitter %s\n",
+          cfg->blitter_set = true;
+          printf ("[CFG] Blitter %s (explicit - overrides machine default)\n",
                   !cfg->blitter ? "disabled" :
                   cfg->blitter_real ? "real (pass-through)" : "emulated");
         }
