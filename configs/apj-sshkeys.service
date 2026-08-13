@@ -1,5 +1,5 @@
 [Unit]
-Description=APJ-OS: generate ssh host keys on first boot
+Description=APJ-OS: generate ssh host keys if missing (first boot)
 # RPi OS trixie's regenerate_ssh_host_keys.service did not run on APJ-OS
 # (field-verified during the 0.1.1 release: sshd refused to start with no
 # host keys). This oneshot runs only when the ed25519 host key is absent -
