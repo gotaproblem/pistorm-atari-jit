@@ -311,6 +311,17 @@ WEOF
   fi
 fi
 
+# APJ-OS ssh host-key generation: RPi OS trixie's regenerate service did
+# not run in the field (sshd refused to start with no host keys after a
+# sanitized image's first boot). This oneshot runs ssh-keygen -A only
+# when the ed25519 host key is absent - inert on an installed system,
+# decisive on a freshly flashed card.
+if [ -f "$HERE/configs/apj-sshkeys.service" ]; then
+  say "Installing APJ ssh host-key first-boot generation"
+  sudo install -m 644 "$HERE/configs/apj-sshkeys.service" /etc/systemd/system/apj-sshkeys.service
+  sudo systemctl enable apj-sshkeys.service
+fi
+
 
 # --------------------------------------------------------------------------
 # 3. Boot configuration — MERGE, don't clobber the user's settings.

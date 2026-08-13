@@ -1,0 +1,16 @@
+[Unit]
+Description=APJ-OS: generate ssh host keys on first boot
+# RPi OS trixie's regenerate_ssh_host_keys.service did not run on APJ-OS
+# (field-verified during the 0.1.1 release: sshd refused to start with no
+# host keys). This oneshot runs only when the ed25519 host key is absent -
+# i.e. on the first boot of a freshly flashed card, whose image was
+# sanitized by capture-image.sh (host keys removed).
+Before=ssh.service
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=multi-user.target
