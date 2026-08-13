@@ -348,6 +348,8 @@ static inline void st_video_ste_extras_clear(void)
     rtg.hscroll = 0;
 }
 
+static void st_rez_sync_trace(uint32_t a, uint8_t v);
+
 static inline void st_video_snoop8(uint32_t address, uint8_t value)
 {
     uint32_t a = address & 0x00FFFFFFu;
@@ -376,8 +378,31 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     }
     else if (a == 0x00FF8260u) {
         rtg.shift_mode = value;
+        st_rez_sync_trace(a, value);
         vid_dbg_w(a, value);
     }
+    else if (a == 0x00FF820Au) {
+        st_rez_sync_trace(a, value);
+    }
+}
+
+/* GLUE mode changes are rare (a handful per boot) and are exactly what
+ * the 71.4Hz investigations need timestamped - so this trace is ALWAYS
+ * on. REZ $FF8260 = 2 means someone put the GLUE into mono/hi-res
+ * timing (71.4Hz VBL); SYNC $FF820A bit1 selects 50/60Hz. The printed
+ * t= matches the [dmasnd] SUM clock so the two logs line up directly. */
+static void st_rez_sync_trace(uint32_t a, uint8_t v)
+{
+    static uint8_t last_rez = 0xFF, last_sync = 0xFF;
+    struct timespec ts;
+    if (a == 0x00FF8260u) { if (v == last_rez)  return; last_rez  = v; }
+    else                  { if (v == last_sync) return; last_sync = v; }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s\n",
+            (unsigned long long)ts.tv_sec,
+            (unsigned long long)(ts.tv_nsec / 1000000L),
+            (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
+            (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "");
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)
@@ -408,7 +433,11 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     }
     else if (a == 0x00FF8260u) {
         rtg.shift_mode = (uint8_t)(value >> 8);
+        st_rez_sync_trace(a, (uint8_t)(value >> 8));
         vid_dbg_w(a, value >> 8);
+    }
+    else if (a == 0x00FF820Au) {
+        st_rez_sync_trace(a, (uint8_t)(value >> 8));
     }
     else if (a >= 0x00FF8240u && a < 0x00FF8260u)
         st_palette[(a - 0x00FF8240u) >> 1] = value;
