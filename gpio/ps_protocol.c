@@ -309,10 +309,13 @@ static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
   *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI;
   txn_pulse (set, clr);
 
-  while (*lev & PI_TXN_IN_PROGRESS)
-    asm volatile ("yield" ::: "memory");
+  /* the GPLEV sample that shows the transaction complete already
+   * carries the final status bits - the old separate status read was
+   * one uncached GPIO read per transfer, thrown away */
+  do {
+    status = *lev;
+  } while (status & PI_TXN_IN_PROGRESS);
 
-  status = *lev;
   ps_io->berr = CHECK_BERR (status);
   return status;
 }
@@ -408,10 +411,12 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
   *set = REG_DATA;
   *set = PIN_RD;
 
-  while (*lev & PI_TXN_IN_PROGRESS)
-    asm volatile ("yield" ::: "memory");
+  /* same fold as the write core: the completing GPLEV sample IS the
+   * data+status word */
+  do {
+    status = *lev;
+  } while (status & PI_TXN_IN_PROGRESS);
 
-  status = *lev;
   *clr = TXN_END;
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
