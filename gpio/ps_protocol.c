@@ -252,6 +252,18 @@ typedef struct {
   *ioclr = TXN_END; \
 }
 
+/* The hot paths cache the GPIO register pointers in const locals: the
+ * spin loops' "memory"-clobbering yield (and any barrier) otherwise
+ * forces the three GLOBAL pointers to be reloaded around every access.
+ * Same wire sequence as txn_go(), just through the cached pointers. */
+static inline void txn_pulse (volatile uint32_t *const set,
+                              volatile uint32_t *const clr)
+{
+  *set = PIN_WR; *set = PIN_WR;
+  *clr = PIN_WR; *clr = PIN_WR;
+  *clr = TXN_END;
+}
+
 void ps_read (ps_io_t *ps_io);
 void ps_write ( ps_io_t *ps_io );
 
@@ -262,24 +274,24 @@ void ps_write ( ps_io_t *ps_io );
 //volatile uint32_t g_cpu_where = 0;
 //volatile uint32_t g_cpu_where_addr = 0;
 
-inline
-void ps_write ( ps_io_t *ps_io )
+/* The transaction cores run WITHOUT the bus lock so 32-bit accesses can
+ * take it once for both halves. ps_lock_bus() already ends with a full
+ * dmb sy (after raising ps_bus_active), so the cores need no barrier of
+ * their own - the second back-to-back dmb the old bodies carried was
+ * pure overhead. */
+
+static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
 {
-  register uint32_t status;
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const lev = ioread;
+  uint32_t status;
 
- // g_cpu_where_addr = ps_io->addr;
-  //g_cpu_where = 3;
-  ps_lock_bus ();
-  //g_cpu_where = 4;
-  asm volatile ("dmb sy" : : : "memory");
+  *set = (ps_io->data << 8) | REG_DATA;
+  txn_pulse (set, clr);
 
-  //ps_wait_idle ();
-
-  *ioset = (ps_io->data << 8) | REG_DATA;
-  txn_go ();
-
-  *ioset = ((ps_io->addr & 0xffff) << 8) | REG_ADDR_LO;
-  txn_go ();
+  *set = ((ps_io->addr & 0xffff) << 8) | REG_ADDR_LO;
+  txn_pulse (set, clr);
 
   /* 
    * Atari ST uses a 24 bit address - PiSTorm has 32 bits available 
@@ -294,17 +306,23 @@ void ps_write ( ps_io_t *ps_io )
    * READ WORD  = 0x02
    */
   
-  *ioset = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI;
-  txn_go ();
+  *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI;
+  txn_pulse (set, clr);
 
-  //while (( status = *ioread ) & PI_TXN_IN_PROGRESS)
-  //  asm volatile ("yield" ::: "memory");
-  ps_wait_idle ();
+  while (*lev & PI_TXN_IN_PROGRESS)
+    asm volatile ("yield" ::: "memory");
 
-  status = *ioread;
+  status = *lev;
   ps_io->berr = CHECK_BERR (status);
+  return status;
+}
+
+inline
+void ps_write ( ps_io_t *ps_io )
+{
+  ps_lock_bus ();
+  ps_write_txn (ps_io);
   ps_unlock_bus();
-  //g_cpu_where = 0;
 }
 
 
@@ -344,43 +362,68 @@ inline void ps_write_16 (uint32_t addr, uint16_t data)
 
 inline void ps_write_32 (uint32_t addr, uint32_t data) 
 {
-  ps_write_16 (addr, (uint16_t)(data >> 16));
-  ps_write_16 (addr + 2, (uint16_t)data);
+  ps_io_t hi, lo;
+
+  hi.data = (uint16_t)(data >> 16);
+  hi.addr = addr;
+  hi.fc = fc;
+  hi.io_type = WRITE_WORD;
+
+  lo.data = (uint16_t)data;
+  lo.addr = addr + 2;
+  lo.fc = fc;
+  lo.io_type = WRITE_WORD;
+
+  /* one lock + one barrier pair for the whole longword */
+  ps_lock_bus ();
+  ps_write_txn (&hi);
+  ps_write_txn (&lo);
+  ps_unlock_bus ();
+
+  if (hi.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr;
+  }
+  if (lo.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr + 2;
+  }
 }
 
 
 
+static inline uint32_t ps_read_txn (ps_io_t *ps_io)
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const lev = ioread;
+  uint32_t status;
+
+  *set = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
+  txn_pulse (set, clr);
+
+  *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
+  txn_pulse (set, clr);
+
+  *set = REG_DATA;
+  *set = PIN_RD;
+
+  while (*lev & PI_TXN_IN_PROGRESS)
+    asm volatile ("yield" ::: "memory");
+
+  status = *lev;
+  *clr = TXN_END;
+  ps_io->berr = CHECK_BERR (status);
+  ps_io->data = status >> 8;
+  return status;
+}
+
 inline
 void ps_read (ps_io_t *ps_io)
 {
-  register uint32_t status;
-
-  //g_cpu_where_addr = ps_io->addr;
-  //g_cpu_where = 1;
   ps_lock_bus ();
-  //g_cpu_where = 2;
-  asm volatile ("dmb sy" : : : "memory");
-  //ps_wait_idle ();
-
-  *ioset = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
-  txn_go ();
-
-  *ioset = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
-  txn_go ();
-
-  *ioset = REG_DATA;
-  *ioset = PIN_RD;
-
-  //while ((status = *ioread) & PI_TXN_IN_PROGRESS)
-  //  asm volatile ("yield" ::: "memory");
-  ps_wait_idle ();
-
-  status = *ioread;
- 	*ioclr = TXN_END;
-  ps_io->berr = CHECK_BERR (status);
-  ps_io->data = status >> 8;
+  ps_read_txn (ps_io);
   ps_unlock_bus();
-  //g_cpu_where = 0;
 }
 
 inline uint16_t ps_read_16 (uint32_t addr) 
@@ -486,7 +529,34 @@ inline uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 
 inline uint32_t ps_read_32 (uint32_t addr) 
 {
-  return (ps_read_16 (addr) << 16) | ps_read_16 (addr + 2);
+  ps_io_t hi, lo;
+
+  hi.data = 0;
+  hi.addr = addr;
+  hi.fc = fc;
+  hi.io_type = READ_WORD;
+
+  lo.data = 0;
+  lo.addr = addr + 2;
+  lo.fc = fc;
+  lo.io_type = READ_WORD;
+
+  /* one lock + one barrier pair for the whole longword */
+  ps_lock_bus ();
+  ps_read_txn (&hi);
+  ps_read_txn (&lo);
+  ps_unlock_bus ();
+
+  if (hi.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr;
+  }
+  if (lo.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr + 2;
+  }
+
+  return ((uint32_t)hi.data << 16) | lo.data;
 }
 
 
