@@ -259,8 +259,14 @@ typedef struct {
 static inline void txn_pulse (volatile uint32_t *const set,
                               volatile uint32_t *const clr)
 {
-  *set = PIN_WR; *set = PIN_WR;
-  *clr = PIN_WR; *clr = PIN_WR;
+  /* EXPERIMENT: single set/clear per strobe (was doubled, presumably
+   * to stretch the pulse). Each uncached GPSET/GPCLR write holds the
+   * pin for the full AXI-posted write time, which at the CPLD's clock
+   * is many sample periods - if the field proves otherwise (ataritest
+   * errors, boot flakes), revert THIS commit alone and the doubled
+   * writes come back. Saves 6 GPIO writes per write-op, 4 per read. */
+  *set = PIN_WR;
+  *clr = PIN_WR;
   *clr = TXN_END;
 }
 
