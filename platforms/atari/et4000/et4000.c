@@ -223,8 +223,14 @@ static int g_fbdev_mode = 0;
 /* The Atari's current video rate (50 / 60 / 71.4), published by
  * st_rez_sync_trace() in pistorm_natmem.cpp on a REZ or SYNC register
  * write. 0.0 until one of those registers has been seen. Consumed by
- * render_frame() when PISTORM_VID_FOLLOW=1. */
-extern "C" volatile double pistorm_guest_hz;
+ * render_frame() when PISTORM_VID_FOLLOW=1.
+ *
+ * NOTE: this file is built as C, not C++ - see the per-file rule in the
+ * Makefile ("et4000.c is built as C"), which overrides its appearance in
+ * PISTORM_CPP. So no linkage specifier here; the definition side already
+ * sits inside extern "C" { } in pistorm_natmem.cpp, which is what makes
+ * the symbol match. */
+extern volatile double pistorm_guest_hz;
 
 static int g_drm_mode = 0;
 static int g_fbdev_fd = -1;
