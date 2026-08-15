@@ -394,18 +394,39 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
  * on. REZ $FF8260 = 2 means someone put the GLUE into mono/hi-res
  * timing (71.4Hz VBL); SYNC $FF820A bit1 selects 50/60Hz. The printed
  * t= matches the [dmasnd] SUM clock so the two logs line up directly. */
+/* The rate the GLUE is producing right now, published for the render
+ * thread. 0.0 means "not established yet" - nothing has written REZ or
+ * SYNC - and the consumer must treat that as do-nothing so the HDMI mode
+ * is never switched on a guess during boot. Written only here (guest
+ * write path, single writer); read by render_frame. */
+extern "C" { volatile double pistorm_guest_hz = 0.0; }
+
 static void st_rez_sync_trace(uint32_t a, uint8_t v)
 {
     static uint8_t last_rez = 0xFF, last_sync = 0xFF;
     struct timespec ts;
+    double hz;
     if (a == 0x00FF8260u) { if (v == last_rez)  return; last_rez  = v; }
     else                  { if (v == last_sync) return; last_sync = v; }
+
+    /* Mono/hi-res timing is 71.4Hz whatever SYNC says; otherwise SYNC
+     * bit1 picks 50 or 60. Only publish once the deciding register has
+     * actually been seen - 0xFF is the never-written marker. */
+    hz = 0.0;
+    if (last_rez != 0xFF && (last_rez & 3) == 2)
+        hz = 71.4;
+    else if (last_sync != 0xFF)
+        hz = (last_sync & 2) ? 50.0 : 60.0;
+    if (hz > 0.0)
+        pistorm_guest_hz = hz;
+
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s\n",
+    fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s  guest=%.1fHz\n",
             (unsigned long long)ts.tv_sec,
             (unsigned long long)(ts.tv_nsec / 1000000L),
             (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
-            (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "");
+            (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "",
+            hz);
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)

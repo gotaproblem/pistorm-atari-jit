@@ -788,6 +788,15 @@ int drmpres_match_refresh(double fps)
         double err;
         if (m->hdisplay != g_mode.hdisplay || m->vdisplay != g_mode.vdisplay)
             continue;             /* refresh only - never change resolution */
+        /* Never pick an interlaced mode. EDIDs commonly carry an interlaced
+         * twin of the progressive mode at the SAME hdisplay/vdisplay/vrefresh
+         * - e.g. CEA VIC 20 (1920x1080i@50) alongside VIC 31 (1920x1080@50),
+         * and VIC 5 alongside VIC 16 at 60. Both score identical error here,
+         * and the tie-break below only prefers a HIGHER refresh, so with the
+         * interlaced entry first in connector order it would win and we would
+         * hand the display half the lines per field. */
+        if (m->flags & DRM_MODE_FLAG_INTERLACE)
+            continue;
         if ((int)m->vrefresh < min_hz)
             continue;
         err = refresh_error(m->vrefresh, fps);

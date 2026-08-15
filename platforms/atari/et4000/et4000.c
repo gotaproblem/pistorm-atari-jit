@@ -219,6 +219,13 @@ static int g_fbdev_mode = 0;
  * scanout buffer - the dirty-row swizzle writes straight into display
  * memory and presentation costs nothing. See et4000_drm.c. */
 #include "et4000_drm.h"
+
+/* The Atari's current video rate (50 / 60 / 71.4), published by
+ * st_rez_sync_trace() in pistorm_natmem.cpp on a REZ or SYNC register
+ * write. 0.0 until one of those registers has been seen. Consumed by
+ * render_frame() when PISTORM_VID_FOLLOW=1. */
+extern "C" volatile double pistorm_guest_hz;
+
 static int g_drm_mode = 0;
 static int g_fbdev_fd = -1;
 static uint8_t *g_fbdev_mem = NULL;
@@ -2492,6 +2499,12 @@ void *render_frame(void *vptr)
     int irq_backoff = et4000_irq_backoff_enabled();
     int8_t prev_shift_mode = -1;
     static int64_t frames = 1;
+    /* Follow the guest's video rate (PISTORM_VID_FOLLOW=1). pistorm_guest_hz
+     * is published by st_rez_sync_trace() in pistorm_natmem.cpp; declared at
+     * file scope below the includes - a linkage spec cannot go in a body. */
+    double applied_hz = 0.0;
+    const char *follow_env = getenv("PISTORM_VID_FOLLOW");
+    int follow_guest_hz = (follow_env && *follow_env == '1');
 
     et4000_configure_render_thread ();
 
@@ -2533,6 +2546,31 @@ void *render_frame(void *vptr)
         }
         
         sdl_pump();
+
+        /* PISTORM_VID_FOLLOW=1: track the Atari's own video rate instead of
+         * the fixed cfg fps. st_rez_sync_trace() publishes the rate on a REZ
+         * / SYNC write; it is acted on HERE, on the render thread, because
+         * drmpres_match_refresh() renegotiates the HDMI link and must never
+         * run on the guest write path. Both halves move together - the frame
+         * budget always, and the output refresh when the display offers a
+         * mode that fits. Opt-in, because a mode switch costs a visible
+         * resync and can drop HDMI audio on some sinks. */
+        if (follow_guest_hz)
+        {
+            double hz = pistorm_guest_hz;
+            if (hz > 0.0 && hz != applied_hz)
+            {
+                applied_hz = hz;
+                FRAME_RATE = (int) (1000000.0 / hz);
+                printf("[DISPLAY] guest video is %.1f Hz - frame budget %d us\n",
+                       hz, FRAME_RATE);
+                if (drmpres_match_refresh(hz) > 0)
+                    printf("[DISPLAY] HDMI refresh now matches %.1f Hz\n", hz);
+                else
+                    printf("[DISPLAY] no matching HDMI mode for %.1f Hz - "
+                           "output refresh unchanged\n", hz);
+            }
+        }
 
         gettimeofday(&start, NULL);
 
