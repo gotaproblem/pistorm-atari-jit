@@ -17,6 +17,7 @@
 #include <termios.h>
 #include <fcntl.h>
 #include <sys/time.h>
+#include <time.h>       /* nanosleep() for the IPL stats thread */
 
 #include "platforms/atari/et4000/et4000.h"
 // #include "platforms/atari/et4000/native_vga.h"
@@ -108,6 +109,15 @@ extern "C" {
 volatile unsigned pistorm_ipl_lat2 = 0;
 volatile unsigned pistorm_ipl_lat4 = 0;
 volatile unsigned pistorm_ipl_lat6 = 0;
+/* IPL ASSERTION EPISODE counters: how many times the confirmed level
+ * ENTERED 2/4/6, as distinct from how many interrupts we then presented
+ * (the lat counters above). One is what the Atari's line did, the other
+ * is what the guest saw - the difference is the whole redelivery
+ * question. Counted on the level transition, not per poll sample, so
+ * these are event rates and not sample rates. */
+volatile unsigned pistorm_ipl_ep2 = 0;
+volatile unsigned pistorm_ipl_ep4 = 0;
+volatile unsigned pistorm_ipl_ep6 = 0;
 }
 bool FDD_enabled;
 
@@ -424,6 +434,42 @@ static void mfp_diag_dump(const char *why)
 }
 
 //#define ATARI_IRQ_RATE_PROFILE
+/* PISTORM_IPL_STATS=1 helper: report interrupt EPISODE and DELIVERY rates
+ * once per second, from a thread that is free to syscall.
+ *
+ * ep*  = how often the Atari's IPL line ENTERED that level
+ * del* = how many interrupts we then PRESENTED to the guest
+ *
+ * On a 50 Hz RGB screen ep4 should read ~50 (60 Hz: ~60, mono: ~71.4).
+ * Reading the two together says which half is wrong:
+ *   ep4 ~= del4 ~= 50  - interrupts are fine, look elsewhere
+ *   ep4 ~= 50, del4 higher - redelivery inside one blanking interval
+ *   ep4 itself too high - the line is seen at level 4 more often than
+ *                         the video hardware can possibly produce it */
+static void *ipl_stats_task(void *)
+{
+  unsigned p2 = 0, p4 = 0, p6 = 0, q2 = 0, q4 = 0, q6 = 0;
+
+  for (;;)
+  {
+    struct timespec ts = { 1, 0 };
+    unsigned e2, e4, e6, d2, d4, d6;
+
+    nanosleep(&ts, NULL);
+
+    e2 = pistorm_ipl_ep2;  e4 = pistorm_ipl_ep4;  e6 = pistorm_ipl_ep6;
+    d2 = pistorm_ipl_lat2; d4 = pistorm_ipl_lat4; d6 = pistorm_ipl_lat6;
+
+    fprintf(stderr,
+            "[ipl] ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
+            e2 - p2, e4 - p4, e6 - p6, d2 - q2, d4 - q4, d6 - q6);
+
+    p2 = e2; p4 = e4; p6 = e6;
+    q2 = d2; q4 = d4; q6 = d6;
+  }
+  return NULL;
+}
+
 static void *ipl_task(void *)
 {
   cpu_set_t cpuset;
@@ -589,7 +635,15 @@ static void *ipl_task(void *)
      * intlev()/get_ipl() - false sharing that taxed guest execution on every
      * interrupt check. */
     if (g_ipl != ipl)
+    {
+      /* Count the ENTRY into each level - one per assertion episode,
+       * whatever we later decide to deliver. Cheap: this branch is
+       * already the rare one (see the false-sharing note above). */
+      if (ipl == 2)      pistorm_ipl_ep2++;
+      else if (ipl == 4) pistorm_ipl_ep4++;
+      else if (ipl == 6) pistorm_ipl_ep6++;
       g_ipl = ipl;
+    }
 
     /* Autovector edge semantics: one latch per ASSERTION EPISODE for the
      * GLUE-driven levels 2/4. On real hardware the CPU's IACK (a 6800-
@@ -1269,6 +1323,25 @@ int main (int argc, char *argv[])
   {
     pthread_setname_np(ipl_tid, "pistorm: ipl");
     printf("[MAIN] IPL thread created successfully\n");
+  }
+
+  /* PISTORM_IPL_STATS=1: one line per second of interrupt rates. Runs in
+   * its own thread so nothing is printed from ipl_task, which spins on
+   * cpu3 and must not syscall. Off unless the env var is set. */
+  {
+    const char *e = getenv("PISTORM_IPL_STATS");
+    if (e && *e == '1')
+    {
+      pthread_t stats_tid;
+      if (pthread_create(&stats_tid, NULL, &ipl_stats_task, NULL) != 0)
+        printf("[ERROR] Cannot create IPL stats thread\n");
+      else
+      {
+        pthread_setname_np(stats_tid, "pistorm: iplstat");
+        pthread_detach(stats_tid);
+        printf("[MAIN] IPL stats enabled (1 Hz)\n");
+      }
+    }
   }
 #else
   printf("[MAIN] IPL thread disabled; CPU path polls IPL serially\n");
