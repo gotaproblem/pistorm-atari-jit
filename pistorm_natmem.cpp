@@ -244,6 +244,9 @@ extern uint32_t ROM_START;
 extern uint32_t ROM_END;
 
 #define ST_RAM_SIZE (0x00400000u)  // 0x000000..
+/* NOTE: the ROM base is NOT a constant - TOS 1.x lives at 0x00FC0000 and
+ * EmuTOS / TOS 2.06 at 0x00E00000. Use pistorm_rom_start (set in emulator.c
+ * from the image length); this define is only the legacy default. */
 #define ROM_BASE (0x00E00000u)     // 0xFC0000 for TOS 1.x
 #define ROM_TOP (0x00F00000u)      // ROM_END
 #define ROM_MAX_SIZE (0x00100000u) // up to IDE @ 0xF00000 => 1MB max at 0xE00000
@@ -3487,7 +3490,7 @@ extern "C" void jit_mem_init(void)
     pistorm_dummy_bank.baseaddr = natmem_offset + 0;
     pistorm_stram_bank.baseaddr = natmem_offset + 0;
     //pistorm_fdd_bank.baseaddr = natmem_offset + 0x00FF0000;
-    pistorm_rom_bank.baseaddr = natmem_offset + ROM_BASE;
+    pistorm_rom_bank.baseaddr = natmem_offset + pistorm_rom_start;
     pistorm_ide_bank.baseaddr = natmem_offset + IO_IDE_BASE;
     pistorm_io_bank.baseaddr = natmem_offset + IO_HW_BASE;
     pistorm_hw_bank.baseaddr = natmem_offset + 0x00FF0000;
@@ -3504,7 +3507,7 @@ extern "C" void jit_mem_init(void)
      //   pistorm_rom_size = ROM_MAX_SIZE;
 
     if (pistorm_rom_ptr) // && pistorm_tos_image_len <= pistorm_rom_size)
-        memcpy(natmem_offset + ROM_BASE, pistorm_rom_ptr, pistorm_rom_size);
+        memcpy(natmem_offset + pistorm_rom_start, pistorm_rom_ptr, pistorm_rom_size);
    // else
     //    printf("[JITINIT] ROM copy failed\n");
     //printf ("rom ptr %p\n", pistorm_rom_ptr);
@@ -3543,7 +3546,7 @@ extern "C" void jit_mem_init(void)
 
     map_region(FVDI_FB_BASE, FVDI_FB_MAX_BYTES, &pistorm_fvdi_bank);
 
-    map_region(ROM_BASE, pistorm_rom_size, &pistorm_rom_bank);
+    map_region(pistorm_rom_start, pistorm_rom_size, &pistorm_rom_bank);
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases
     map_region(0xFFFF0000u, 0x10000, &pistorm_hw_bank); // 32-bit alias
     map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
@@ -3569,5 +3572,5 @@ extern "C" void jit_mem_init(void)
 extern "C" void pistorm_seed_reset_vector(void)
 {
     if (natmem_offset)
-        memcpy(natmem_offset + 0, natmem_offset + ROM_BASE, 8);
+        memcpy(natmem_offset + 0, natmem_offset + pistorm_rom_start, 8);
 }

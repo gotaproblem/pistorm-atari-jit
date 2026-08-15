@@ -1082,31 +1082,31 @@ int main (int argc, char *argv[])
   //{
     if (config->rom.rom_size != 0)
     {
-      // ATARI STe ROM
-      if (config->rom.rom_size >= (256 * 1024))
-      {
-        ROM_START = 0x00E00000;
-        ROM_END = ROM_START + config->rom.rom_size; // 0x00F00000;
-        ROM_MASK = config->rom.rom_size - 1;        // 0x000FFFFF;
-       
-        pistorm_rom_ptr = config->rom.rom_ptr;
-        pistorm_rom_start = ROM_START;
-        pistorm_rom_end = ROM_END;
-        pistorm_rom_mask = ROM_MASK;
+      /* config_file.c has already derived the base from the image length:
+       * TOS 1.x is 192K at 0x00FC0000, EmuTOS / TOS 2.06 are 256K or more
+       * at 0x00E00000. Use it. This used to test `rom_size >= 256K` and
+       * hardcode 0x00E00000 with no else, so every 192K TOS 1.x image was
+       * read off disk and then never mapped: ROM_START/ROM_END stayed 0,
+       * the `address >= ROM_START && address < ROM_END` tests in the read
+       * paths were all false, pistorm_rom_size came out 0 in jit_mem_init,
+       * and pistorm_seed_reset_vector() copied 8 zero bytes to address 0.
+       * The CPU then reset to SSP=0 PC=0 and executed nothing at all. */
+      ROM_START = config->rom.rom_address;
+      ROM_END = ROM_START + config->rom.rom_size;
+      ROM_MASK = config->rom.rom_size - 1;
 
-        //rom_ptr = (uint8_t*)cfg->rom.rom_ptr;
-        //tos_ptr_big = rom_ptr;
-        //rom_vector_ptr = (uint8_t*)cfg->rom.rom_ptr;
-        //pistorm_rom_ptr = rom_ptr; pistorm_rom_start = ROM_START; pistorm_rom_end = ROM_END; pistorm_rom_mask = ROM_MASK;
-        //printf ("rom ptr %p\n", pistorm_rom_ptr);
-        //break;
-      }
+      pistorm_rom_ptr = config->rom.rom_ptr;
+      pistorm_rom_start = ROM_START;
+      pistorm_rom_end = ROM_END;
+      pistorm_rom_mask = ROM_MASK;
 
       /* setup ROM boot vector interception */
       //for (int n = 0; n < 8; n++ )
       //  rom_vector [n] = *pistorm_rom_ptr++;
 
-      printf ("[INIT] ROM loaded\n");
+      printf ("[INIT] ROM loaded - %dK mapped at 0x%06X-0x%06X\n",
+              config->rom.rom_size / 1024,
+              (unsigned) ROM_START, (unsigned) ROM_END);
     }
   //}
   else {
