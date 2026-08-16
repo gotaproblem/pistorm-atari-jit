@@ -109,6 +109,7 @@ extern uint8_t ps_read_8(uint32_t address);   /* gpio/ps_protocol.h      */
 
 /* 6850 status bits */
 #define ACIA_RDRF  0x01
+#define ACIA_TDRE  0x02
 #define ACIA_FE    0x10
 #define ACIA_OVRN  0x20
 #define ACIA_PE    0x40
@@ -296,6 +297,113 @@ static void ikbd_apply(uint8_t cmd)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Native mouse: fewer IKBD reports, same pointer speed                */
+/*                                                                     */
+/* The level-6 interrupts a moving mouse costs are raised by the REAL  */
+/* MFP, because the real ACIA latched a byte. By the time this file    */
+/* sees that byte the interrupt has already been taken, so dropping or */
+/* rewriting it here saves nothing. The only way to spend fewer        */
+/* interrupts is to make the IKBD send fewer bytes - and IKBD command  */
+/* 0x0B (set relative mouse threshold) does exactly that: it withholds */
+/* a report until accumulated motion exceeds the threshold, so N costs */
+/* roughly 1/N the packets for the same hand movement. At 7812.5 baud, */
+/* 8N1, three bytes a packet, the stream tops out near 260 packets/s = */
+/* ~780 level-6/s, on top of Timer C's 200/s.                          */
+/*                                                                     */
+/* A threshold quantises movement, so the deltas are scaled back up on */
+/* the way past to keep the pointer covering the screen at the same    */
+/* speed. That scaling is COMPENSATION, not the saving: it is applied  */
+/* to bytes that have already cost their interrupt.                    */
+/*                                                                     */
+/*   PISTORM_MOUSE_THRESH=N   1..15. 0 or unset = feature off entirely */
+/*   PISTORM_MOUSE_SCALE=M    delta multiplier, defaults to N          */
+/*                                                                     */
+/* Real IKBD bytes only. Injected USB packets are generated host-side  */
+/* and cost no real interrupt, so they are left exactly as they are.   */
+/* ------------------------------------------------------------------ */
+
+static int      mouse_thresh = -1;      /* -1 = env not read yet        */
+static int      mouse_scale  = 1;
+static uint8_t  thresh_tx[3];
+static int      thresh_tx_left;         /* bytes of 0x0B x y still due  */
+static uint64_t thresh_due_us;
+static int      mouse_pkt_left;         /* dx/dy bytes still expected   */
+
+static void mouse_cfg_init(void)
+{
+    const char *e = getenv("PISTORM_MOUSE_THRESH");
+
+    mouse_thresh = (e && *e) ? atoi(e) : 0;
+    if (mouse_thresh < 0)  mouse_thresh = 0;
+    if (mouse_thresh > 15) mouse_thresh = 15;
+
+    e = getenv("PISTORM_MOUSE_SCALE");
+    mouse_scale = (e && *e) ? atoi(e) : mouse_thresh;
+    if (mouse_scale < 1)  mouse_scale = 1;
+    if (mouse_scale > 16) mouse_scale = 16;
+
+    if (mouse_thresh)
+        printf("[KBD] native mouse: IKBD threshold %d, delta scale %d\n",
+               mouse_thresh, mouse_scale);
+}
+
+/* Queue "0x0B thresh thresh" to the real IKBD, not before now+delay -
+ * after a reset the controller needs time before it will listen. */
+static void mouse_thresh_arm(uint64_t delay_us)
+{
+    if (mouse_thresh <= 0)
+        return;
+    thresh_tx[0] = 0x0B;
+    thresh_tx[1] = (uint8_t) mouse_thresh;
+    thresh_tx[2] = (uint8_t) mouse_thresh;
+    thresh_tx_left = 3;
+    thresh_due_us  = now_us() + delay_us;
+}
+
+/* One byte per call at most. Called from the guest's ACIA read path, so
+ * it is already serialised against the guest's own ACIA writes; the
+ * pending_params check keeps us from interleaving into the middle of a
+ * command the guest is part-way through sending. */
+static void mouse_thresh_pump(void)
+{
+    uint8_t st;
+
+    if (thresh_tx_left <= 0 || now_us() < thresh_due_us)
+        return;
+    if (ikbd.pending_params > 0 || ikbd.memload_left > 0)
+        return;
+    st = ps_read_8(KBD_ACIA_CTRL_ADDR);
+    if (!(st & ACIA_TDRE))
+        return;                         /* transmitter still busy       */
+    ps_write_8(KBD_ACIA_DATA_ADDR, thresh_tx[3 - thresh_tx_left]);
+    thresh_tx_left--;
+}
+
+/* Scale the dx/dy of a relative mouse packet on its way to the guest.
+ * 0xF8..0xFB is the header (buttons in bits 0-1) followed by two signed
+ * bytes. Only engaged in relative mode - in absolute or keycode mode
+ * those byte values mean something else entirely. mouse_mode is written
+ * under ikbd.lock by a single writer; a stale read here costs at worst
+ * one mis-scaled packet across a mode change. */
+static uint8_t mouse_scale_byte(uint8_t v)
+{
+    if (mouse_thresh <= 0 || mouse_scale <= 1)
+        return v;
+
+    if (mouse_pkt_left > 0)
+    {
+        int d = (int)(int8_t) v * mouse_scale;
+        if (d >  127) d =  127;
+        if (d < -128) d = -128;
+        mouse_pkt_left--;
+        return (uint8_t)(int8_t) d;
+    }
+    if (v >= 0xF8 && v <= 0xFB && ikbd.mouse_mode == MOUSE_REL)
+        mouse_pkt_left = 2;
+    return v;
+}
+
 static void ikbd_reset_state(void)
 {
     ikbd.mouse_mode = MOUSE_REL;
@@ -308,6 +416,10 @@ static void ikbd_reset_state(void)
     /* flush anything queued under the old mode */
     atomic_store(&ring_head, atomic_load(&ring_tail));
     atomic_store(&in_packet, 0);
+    /* a reset returns the IKBD to threshold 1,1 - put ours back once the
+     * controller has finished resetting */
+    mouse_pkt_left = 0;
+    mouse_thresh_arm(RESET_ANSWER_US);
 }
 
 void kbd_usb_tx_snoop(uint8_t v)
@@ -358,7 +470,14 @@ void kbd_usb_tx_snoop(uint8_t v)
         if (ikbd.pending_cmd == 0x20 && ikbd.pending_params == 0)
             ikbd.memload_left = v;          /* 3rd param = byte count    */
         if (ikbd.pending_params == 0 && ikbd.pending_cmd != 0x20)
+        {
+            /* The guest just set its own mouse threshold, which replaces
+             * ours. Put ours back, or the saving silently disappears the
+             * first time TOS or an app touches the mouse parameters. */
+            if (ikbd.pending_cmd == 0x0B)
+                mouse_thresh_arm(2000);
             ikbd.pending_cmd = 0;
+        }
     }
     else
     {
@@ -633,6 +752,11 @@ uint8_t kbd_usb_acia_status_shim(uint8_t real)
 
 uint8_t kbd_usb_acia_data_shim(void)
 {
+    if (mouse_thresh < 0)
+        mouse_cfg_init();
+    if (thresh_tx_left > 0)
+        mouse_thresh_pump();
+
     if (kbd_usb_rx_priority())
         return kbd_usb_rx_read();
 
@@ -654,7 +778,7 @@ uint8_t kbd_usb_acia_data_shim(void)
         atomic_fetch_add(&real_rx_passed, 1);
         real_byte_consumed(rs);
         kbd_usb_note_real_rx();
-        return v;
+        return mouse_scale_byte(v);     /* native mouse only */
     }
     if (kbd_usb_rx_ready())
         return kbd_usb_rx_read();
