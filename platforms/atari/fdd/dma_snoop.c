@@ -24,6 +24,15 @@
 #include "atari_fdd.h"          /* FDC_DATA_REG, DMA_MODE_*, DMA_STATUS_* */
 
 extern uint8_t  ps_read_8 (uint32_t addr);
+extern uint16_t ps_read_16(uint32_t addr);
+extern uint32_t ps_read_status_reg(void);
+
+/* CPLD status word, bit 11: sticky "M68K_BR_n has been asserted since
+ * reset". Added to the firmware 2026-08-16 because it is the one thing the
+ * Pi could not otherwise observe - whether the DMA controller is even
+ * ASKING for the bus. Reads 0 on older firmware, which is indistinguishable
+ * from "never requested", so check the firmware revision if it says no. */
+#define STATUS_BR_SEEN  0x0800u
 extern void     ps_write_8(uint32_t addr, uint16_t value);
 extern void     pistorm_dma_to_stram  (uint32_t addr, const uint8_t *src, uint32_t n);
 extern void     pistorm_dma_from_stram(uint32_t addr, uint8_t *dst, uint32_t n);
@@ -208,7 +217,10 @@ void dma_snoop_write(uint32_t addr, uint32_t val, int size)
                      * is firing on a stale zero rather than on a completed
                      * transfer. That distinction decides whether the DMA is
                      * running at all. */
-                    uint32_t st = ps_read_8(0xFF8607u);
+                    /* $FF8606 is a WORD register - the earlier byte read of
+                     * $FF8607 returned 0xFF, which was the probe being wrong
+                     * rather than the hardware saying anything. */
+                    uint32_t st = ps_read_16(DMA_MODE_REG) & 0xFFu;
                     SNOOP_LOG("arm : base=0x%06X count=%u %-5s status=0x%02X%s",
                               win_base, win_count,
                               win_is_write ? "WRITE" : "READ", st,
@@ -250,12 +262,14 @@ void dma_snoop_read(uint32_t addr, uint32_t val, int size)
         {
             uint32_t after  = read_dma_base();
             uint32_t expect = win_base + win_count * 512u;
-            SNOOP_LOG("done: address 0x%06X -> 0x%06X (expected 0x%06X)  %s",
+            uint32_t sr = ps_read_status_reg();
+            SNOOP_LOG("done: address 0x%06X -> 0x%06X (expected 0x%06X)  %s  [BR seen: %s]",
                       win_base, after, expect,
                       (after == win_base)
                         ? "<< DID NOT MOVE - no DMA took place"
                         : (after == expect ? "<< advanced correctly"
-                                           : "<< advanced, but not by the expected amount"));
+                                           : "<< advanced, but not by the expected amount"),
+                      (sr & STATUS_BR_SEEN) ? "YES" : "no");
         }
 
         if (!win_is_write)
