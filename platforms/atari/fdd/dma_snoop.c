@@ -41,7 +41,7 @@ extern void     pistorm_dma_from_stram(uint32_t addr, uint8_t *dst, uint32_t n);
  * larger than this is reported rather than silently half-copied. */
 #define MAX_SYNC_SECTORS    256u
 
-static int      snoop_env = -1;         /* -1 = not yet read */
+static int      snoop_env = -1;         /* -1 = not yet read; 2 = verbose */
 
 static uint32_t dma_base;               /* $FF8609/0B/0D */
 static uint32_t dma_mode;               /* $FF8606        */
@@ -59,9 +59,10 @@ int dma_snoop_active(void)
     if (snoop_env < 0)
     {
         const char *e = getenv("PISTORM_DMA_SNOOP");
-        snoop_env = (e && *e == '1') ? 1 : 0;
+        snoop_env = (e && *e == '2') ? 2 : ((e && *e == '1') ? 1 : 0);
         if (snoop_env)
-            SNOOP_LOG("real bus-master DMA mirror sync enabled");
+            SNOOP_LOG("real bus-master DMA mirror sync enabled%s",
+                      snoop_env == 2 ? " (verbose: probes the DMA registers)" : "");
     }
     return snoop_env;
 }
@@ -69,6 +70,19 @@ int dma_snoop_active(void)
 int dma_snoop_owns(uint32_t addr)
 {
     return addr >= 0xFF8600u && addr <= 0xFF860Fu;
+}
+
+/* The ST's DMA address counter INCREMENTS as the controller transfers. So
+ * reading it back after the fact answers "did any DMA actually happen?"
+ * without depending on how the status register is interpreted. Only used at
+ * verbose level: these are extra reads of live hardware registers, and the
+ * guest is polling them too. */
+static uint32_t read_dma_base(void)
+{
+    uint32_t h = ps_read_8(DMA_BASE_HIGH);
+    uint32_t m = ps_read_8(DMA_BASE_MID);
+    uint32_t l = ps_read_8(DMA_BASE_LOW);
+    return ((h & 0xFFu) << 16) | ((m & 0xFFu) << 8) | (l & 0xFFu);
 }
 
 /* ---- the sync itself ------------------------------------------------- */
@@ -186,6 +200,23 @@ void dma_snoop_write(uint32_t addr, uint32_t val, int size)
                 win_count    = dma_count;
                 win_is_write = (dma_mode & DMA_MODE_RW) != 0;
                 win_armed    = 1;
+
+                if (snoop_env == 2)
+                {
+                    /* If SCZERO is ALREADY set at the moment we arm, the
+                     * count never reached the hardware - and any later pull
+                     * is firing on a stale zero rather than on a completed
+                     * transfer. That distinction decides whether the DMA is
+                     * running at all. */
+                    uint32_t st = ps_read_8(0xFF8607u);
+                    SNOOP_LOG("arm : base=0x%06X count=%u %-5s status=0x%02X%s",
+                              win_base, win_count,
+                              win_is_write ? "WRITE" : "READ", st,
+                              (st & DMA_STATUS_SCZERO)
+                                ? "   << SCZERO ALREADY SET - the count did not take"
+                                : "");
+                }
+
                 if (win_is_write)
                     sync_push(win_base, win_count);
             }
@@ -214,6 +245,19 @@ void dma_snoop_read(uint32_t addr, uint32_t val, int size)
     if (addr == DMA_MODE_REG && (val & DMA_STATUS_SCZERO))
     {
         win_armed = 0;
+
+        if (snoop_env == 2)
+        {
+            uint32_t after  = read_dma_base();
+            uint32_t expect = win_base + win_count * 512u;
+            SNOOP_LOG("done: address 0x%06X -> 0x%06X (expected 0x%06X)  %s",
+                      win_base, after, expect,
+                      (after == win_base)
+                        ? "<< DID NOT MOVE - no DMA took place"
+                        : (after == expect ? "<< advanced correctly"
+                                           : "<< advanced, but not by the expected amount"));
+        }
+
         if (!win_is_write)
             sync_pull(win_base, win_count);
         dma_count = 0;
