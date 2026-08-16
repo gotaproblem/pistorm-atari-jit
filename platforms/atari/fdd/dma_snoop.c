@@ -206,6 +206,20 @@ void dma_snoop_write(uint32_t addr, uint32_t val, int size)
     if (!dma_snoop_active() || !dma_snoop_owns(addr))
         return;
 
+    /* A LONGWORD access at $FF8604 spans TWO registers: the high word goes
+     * to $FF8604 and the low word to $FF8606. That is the standard AHDI
+     * idiom - write an ACSI command byte and the next DMA mode in one bus
+     * cycle - and it is what the guest actually does. Treating it as a
+     * single 32-bit write to the data register threw the mode half away and
+     * left every derived mode/count value wrong from that point on. Split
+     * it and handle each half as the hardware does. */
+    if (size == 4)
+    {
+        dma_snoop_write(addr,     (val >> 16) & 0xFFFFu, 2);
+        dma_snoop_write(addr + 2,  val        & 0xFFFFu, 2);
+        return;
+    }
+
     /* $FF8604 and $FF8606 are WORD registers - a byte access lands on the
      * odd half ($FF8605 / $FF8607). Normalise so the switch below sees the
      * register rather than the half. The base registers are already odd
@@ -287,6 +301,20 @@ void dma_snoop_read(uint32_t addr, uint32_t val, int size)
         return;
     if (!win_armed && snoop_env != 3)
         return;
+
+    /* A LONGWORD access at $FF8604 spans TWO registers: the high word goes
+     * to $FF8604 and the low word to $FF8606. That is the standard AHDI
+     * idiom - write an ACSI command byte and the next DMA mode in one bus
+     * cycle - and it is what the guest actually does. Treating it as a
+     * single 32-bit write to the data register threw the mode half away and
+     * left every derived mode/count value wrong from that point on. Split
+     * it and handle each half as the hardware does. */
+    if (size == 4)
+    {
+        dma_snoop_read(addr,     (val >> 16) & 0xFFFFu, 2);
+        dma_snoop_read(addr + 2,  val        & 0xFFFFu, 2);
+        return;
+    }
 
     /* same word-register normalisation as the write path */
     if (addr == 0xFF8605u || addr == 0xFF8607u)
