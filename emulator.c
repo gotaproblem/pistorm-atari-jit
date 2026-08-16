@@ -115,6 +115,7 @@ volatile unsigned pistorm_ipl_lat6 = 0;
  * is what the guest saw - the difference is the whole redelivery
  * question. Counted on the level transition, not per poll sample, so
  * these are event rates and not sample rates. */
+volatile unsigned pistorm_ipl_ep0 = 0;
 volatile unsigned pistorm_ipl_ep2 = 0;
 volatile unsigned pistorm_ipl_ep4 = 0;
 volatile unsigned pistorm_ipl_ep6 = 0;
@@ -448,24 +449,24 @@ static void mfp_diag_dump(const char *why)
  *                         the video hardware can possibly produce it */
 static void *ipl_stats_task(void *)
 {
-  unsigned p2 = 0, p4 = 0, p6 = 0, q2 = 0, q4 = 0, q6 = 0;
+  unsigned p0 = 0, p2 = 0, p4 = 0, p6 = 0, q0 = 0, q2 = 0, q4 = 0, q6 = 0;
 
   for (;;)
   {
     struct timespec ts = { 1, 0 };
-    unsigned e2, e4, e6, d2, d4, d6;
+    unsigned e0, e2, e4, e6, d0, d2, d4, d6;
 
     nanosleep(&ts, NULL);
 
-    e2 = pistorm_ipl_ep2;  e4 = pistorm_ipl_ep4;  e6 = pistorm_ipl_ep6;
+    e0 = pistorm_ipl_ep0;  e2 = pistorm_ipl_ep2;  e4 = pistorm_ipl_ep4;  e6 = pistorm_ipl_ep6;
     d2 = pistorm_ipl_lat2; d4 = pistorm_ipl_lat4; d6 = pistorm_ipl_lat6;
 
     fprintf(stderr,
-            "[ipl] ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
-            e2 - p2, e4 - p4, e6 - p6, d2 - q2, d4 - q4, d6 - q6);
+            "[ipl] ep0=%u ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
+            e0 - p0, e2 - p2, e4 - p4, e6 - p6, d2 - q2, d4 - q4, d6 - q6);
 
-    p2 = e2; p4 = e4; p6 = e6;
-    q2 = d2; q4 = d4; q6 = d6;
+    p0 = e0, p2 = e2; p4 = e4; p6 = e6;
+    q0 = d0, q2 = d2; q4 = d4; q6 = d6;
   }
   return NULL;
 }
@@ -576,9 +577,10 @@ static void *ipl_task(void *)
       asm volatile("yield" ::: "memory");
       continue;
     }
+
     status = *ioread;
-    if (ps_bus_active)
-      continue;                       /* transaction raced the sample */
+    //if (ps_bus_active)
+    //  continue;                       /* transaction raced the sample */
     if (status & 0x01)
     {
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
@@ -612,6 +614,7 @@ static void *ipl_task(void *)
      * so a 2us confirm only kills transients.
      * PISTORM_IPL_RAW=1 restores single-sample latching (A/B probe);
      * PISTORM_IPL_CONFIRM_NS=0 leaves a two-sample minimum. */
+#if (0)    
     if (!ipl_raw)
     {
       if (ipl != ipl_cand)
@@ -628,7 +631,7 @@ static void *ipl_task(void *)
           continue;                     /* not stable long enough yet */
       }
     }
-
+#endif
     /* Only write g_ipl when it actually changes. This poller spins on cpu3 at
      * millions of iterations/sec; writing g_ipl every pass dirtied the cache
      * line it shares with g_irq/g_irq_mask, which the CPU thread reads in
@@ -642,6 +645,7 @@ static void *ipl_task(void *)
       if (ipl == 2)      pistorm_ipl_ep2++;
       else if (ipl == 4) pistorm_ipl_ep4++;
       else if (ipl == 6) pistorm_ipl_ep6++;
+      else if (ipl == 0) pistorm_ipl_ep0++;
       g_ipl = ipl;
     }
 
@@ -667,6 +671,7 @@ static void *ipl_task(void *)
       av_held = 0;                      /* line left the level: re-arm */
     if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask && ipl != av_held)
     {
+#if (0)
       if (ipl == 4 && av4_refract_ticks)
       {
         uint64_t nowt;
@@ -675,6 +680,7 @@ static void *ipl_task(void *)
           continue;                     /* same VBL blanking interval */
         av4_last_tick = nowt;
       }
+#endif
       if (ipl == 2 || ipl == 4)
         av_held = ipl;                  /* one latch per assertion */
 #ifdef ATARI_LAT_DIAG
@@ -685,9 +691,9 @@ static void *ipl_task(void *)
         g_irq_latch_us = get_time_us();
 #endif
       g_irq = ipl;
-      if (ipl == 2)      pistorm_ipl_lat2++;
-      else if (ipl == 4) pistorm_ipl_lat4++;
-      else               pistorm_ipl_lat6++;
+     // if (ipl == 2)      pistorm_ipl_lat2++;
+     // else if (ipl == 4) pistorm_ipl_lat4++;
+     // else               pistorm_ipl_lat6++;
       jit_request_cpu_exit();
     }
 

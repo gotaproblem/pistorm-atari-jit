@@ -420,13 +420,13 @@ static void st_rez_sync_trace(uint32_t a, uint8_t v)
     if (hz > 0.0)
         pistorm_guest_hz = hz;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s  guest=%.1fHz\n",
-            (unsigned long long)ts.tv_sec,
-            (unsigned long long)(ts.tv_nsec / 1000000L),
-            (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
-            (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "",
-            hz);
+  //  clock_gettime(CLOCK_MONOTONIC, &ts);
+   // fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s  guest=%.1fHz\n",
+   //         (unsigned long long)ts.tv_sec,
+   //         (unsigned long long)(ts.tv_nsec / 1000000L),
+   //         (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
+   //         (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "",
+   //         hz);
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)

@@ -378,10 +378,12 @@ inline void ps_write_32 (uint32_t addr, uint32_t data)
   lo.io_type = WRITE_WORD;
 
   /* one lock + one barrier pair for the whole longword */
-  ps_lock_bus ();
-  ps_write_txn (&hi);
-  ps_write_txn (&lo);
-  ps_unlock_bus ();
+  //ps_lock_bus ();
+  //ps_write_txn (&hi);
+  //ps_write_txn (&lo);
+  ps_write (&hi);
+  ps_write (&lo);
+  //ps_unlock_bus ();
 
   if (hi.berr) {
     g_buserr = 1;
@@ -547,10 +549,12 @@ inline uint32_t ps_read_32 (uint32_t addr)
   lo.io_type = READ_WORD;
 
   /* one lock + one barrier pair for the whole longword */
-  ps_lock_bus ();
-  ps_read_txn (&hi);
-  ps_read_txn (&lo);
-  ps_unlock_bus ();
+  //ps_lock_bus ();
+  //ps_read_txn (&hi);
+  //ps_read_txn (&lo);
+  ps_read (&hi);
+  ps_read (&lo);
+  //ps_unlock_bus ();
 
   if (hi.berr) {
     g_buserr = 1;
