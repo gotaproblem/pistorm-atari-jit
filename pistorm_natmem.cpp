@@ -1990,12 +1990,25 @@ static inline uae_u8 kbd_acia_status_merge(uae_u8 real)
 
 static inline uae_u8 kbd_acia_data_read(void)
 {
-    return kbd_usb_acia_data_shim();
+    if (KBD_USB_enabled)
+        return kbd_usb_acia_data_shim();
+    /* Native mouse threshold with USB injection off: read the byte once -
+     * reading $FFFC02 clears RDRF - and hand it to the filter. */
+    return kbd_native_rx_filter(ps_read_8(KBD_ACIA_DATA));
 }
 
+/* The JIT/natmem banks are the path that actually runs; the equivalent
+ * dispatch in emulator.c serves the other one. Both need the hook or the
+ * threshold silently never gets sent. With USB off only the DATA register
+ * is intercepted - the status register is read straight from the ACIA,
+ * because nothing here needs to shadow it. */
 static inline int kbd_acia_shadowed(uaecptr a)
 {
-    return KBD_USB_enabled && (a == KBD_ACIA_CTRL || a == KBD_ACIA_DATA);
+    if (a != KBD_ACIA_CTRL && a != KBD_ACIA_DATA)
+        return 0;
+    if (KBD_USB_enabled)
+        return 1;
+    return a == KBD_ACIA_DATA && kbd_native_mouse_enabled();
 }
 
 static inline uae_u32 hw_mfp_wget(uaecptr a)
@@ -2163,11 +2176,16 @@ static uae_u32 hw_lget(uaecptr a)
             return hw_bus_lget(a);
         case HW_PAGE_ACIA:
         {
-            if (KBD_USB_enabled && a == KBD_ACIA_CTRL)
+            if (a == KBD_ACIA_CTRL &&
+                (KBD_USB_enabled || kbd_native_mouse_enabled()))
             {
                 /* long read spans status ($FFFC00) and data ($FFFC02):
-                 * evaluate in bus order - status first, then data pop   */
-                uae_u8 s = kbd_acia_status_merge(ps_read_8(KBD_ACIA_CTRL));
+                 * evaluate in bus order - status first, then data pop.
+                 * Only the USB path merges the status; the native mouse
+                 * path takes it raw. */
+                uae_u8 s = KBD_USB_enabled
+                    ? kbd_acia_status_merge(ps_read_8(KBD_ACIA_CTRL))
+                    : ps_read_8(KBD_ACIA_CTRL);
                 uae_u8 d = kbd_acia_data_read();
                 uae_u32 v = ((uae_u32)s << 24) | 0x00FF0000u |
                             ((uae_u32)d << 8) | 0xFFu;
@@ -2353,6 +2371,8 @@ static void hw_lput(uaecptr a, uae_u32 v)
                     ((uae_u32)kbd_usb_ctrl_filter((uae_u8)(v >> 24)) << 24);
                 kbd_usb_tx_snoop((uae_u8)(v >> 8));      /* $FFFC02      */
             }
+            else if (a == KBD_ACIA_CTRL && kbd_native_mouse_enabled())
+                kbd_native_tx_snoop((uae_u8)(v >> 8));   /* $FFFC02      */
             hw_bus_lput(a, v);
             acia_trace("W", a, v, 4);
             break;
@@ -2424,6 +2444,8 @@ static void hw_wput(uaecptr a, uae_u32 v)
                 else if (a == KBD_ACIA_DATA)
                     kbd_usb_tx_snoop((uae_u8)(v >> 8));
             }
+            else if (a == KBD_ACIA_DATA && kbd_native_mouse_enabled())
+                kbd_native_tx_snoop((uae_u8)(v >> 8));
             hw_bus_wput(a, v);
             acia_trace("W", a, v, 2);
             break;
@@ -2493,6 +2515,8 @@ static void hw_bput(uaecptr a, uae_u32 v)
                 else if (a == KBD_ACIA_DATA)
                     kbd_usb_tx_snoop((uae_u8)v);
             }
+            else if (a == KBD_ACIA_DATA && kbd_native_mouse_enabled())
+                kbd_native_tx_snoop((uae_u8)v);
             hw_bus_bput(a, v);
             acia_trace("W", a, v, 1);
             break;

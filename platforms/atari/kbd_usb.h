@@ -107,18 +107,22 @@ extern volatile uint32_t kbd_usb_stat_injected_bytes;
 extern volatile uint32_t kbd_usb_stat_virtual_iacks;
 extern volatile uint32_t kbd_usb_stat_dropped_bytes;
 
+/* ------------------------------------------------------------------ */
+/* Native mouse threshold (PISTORM_MOUSE_THRESH), usable WITHOUT USB   */
+/* injection - see the long comment in kbd_usb.c. When "kbd usb" is    */
+/* enabled the equivalent hooks live inside the USB shims instead, so  */
+/* callers should reach for these only on the non-USB branch.          */
+/* These MUST stay inside the extern "C" block: kbd_usb.c is built as  */
+/* C, while emulator.c and pistorm_natmem.cpp - which call them - are  */
+/* built as C++, so without it the callers emit mangled symbols and    */
+/* the link fails.                                                     */
+/* ------------------------------------------------------------------ */
+int     kbd_native_mouse_enabled(void);   /* threshold configured?     */
+void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
+uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* KBD_USB_H */
-
-/* ------------------------------------------------------------------ */
-/* Native mouse threshold (PISTORM_MOUSE_THRESH), usable WITHOUT USB   */
-/* injection - see the long comment in kbd_usb.c. When "kbd usb" is    */
-/* enabled the equivalent hooks live inside the USB shims instead, so  */
-/* emulator.c should call these only on the non-USB branch.            */
-/* ------------------------------------------------------------------ */
-int     kbd_native_mouse_enabled(void);   /* threshold configured?     */
-void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
-uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */
