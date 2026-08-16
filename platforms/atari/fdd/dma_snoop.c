@@ -62,15 +62,52 @@ static int      win_is_write;           /* RAM -> device */
 static int      win_armed;
 
 static unsigned pulls;
+static unsigned traced;
+
+/* Level 3 - the raw sequence, no interpretation. Everything above this file
+ * derives state from these writes; if the derivation is wrong the derived
+ * logs are worthless, so this prints what actually went past. Bounded so it
+ * cannot flood: the interesting part is the first few command sequences. */
+#define TRACE_MAX 240u
+
+static const char *regname(uint32_t a)
+{
+    switch (a)
+    {
+        case FDC_DATA_REG:   return "DATA/COUNT $FF8604";
+        case DMA_MODE_REG:   return "MODE       $FF8606";
+        case DMA_BASE_HIGH:  return "BASE_HI    $FF8609";
+        case DMA_BASE_MID:   return "BASE_MID   $FF860B";
+        case DMA_BASE_LOW:   return "BASE_LO    $FF860D";
+        default:             return "?";
+    }
+}
+
+static void trace_access(const char *dir, uint32_t a, uint32_t v, int size)
+{
+    if (traced >= TRACE_MAX)
+        return;
+    traced++;
+    SNOOP_LOG("%s %s %s=0x%04X sz=%d  [mode=0x%04X screg=%d hdc=%d %s count=%u]",
+              (traced == TRACE_MAX) ? "trc*" : "trc ",
+              dir, regname(a), v, size,
+              dma_mode,
+              (dma_mode & DMA_MODE_SCREG)   ? 1 : 0,
+              (dma_mode & DMA_MODE_FDC_HDC) ? 1 : 0,
+              (dma_mode & DMA_MODE_RW) ? "WRITE" : "read ",
+              dma_count);
+}
 
 int dma_snoop_active(void)
 {
     if (snoop_env < 0)
     {
         const char *e = getenv("PISTORM_DMA_SNOOP");
-        snoop_env = (e && *e == '2') ? 2 : ((e && *e == '1') ? 1 : 0);
+        snoop_env = (e && *e == '3') ? 3 :
+                    ((e && *e == '2') ? 2 : ((e && *e == '1') ? 1 : 0));
         if (snoop_env)
             SNOOP_LOG("real bus-master DMA mirror sync enabled%s",
+                      snoop_env == 3 ? " (level 3: full register trace)" :
                       snoop_env == 2 ? " (verbose: probes the DMA registers)" : "");
     }
     return snoop_env;
@@ -178,6 +215,9 @@ void dma_snoop_write(uint32_t addr, uint32_t val, int size)
     if (size == 2)
         val &= 0xFFFFu;
 
+    if (snoop_env == 3)
+        trace_access("W", addr, val, size);
+
     switch (addr)
     {
         case DMA_BASE_HIGH:
@@ -243,18 +283,23 @@ void dma_snoop_read(uint32_t addr, uint32_t val, int size)
 {
     (void) size;
 
-    if (!dma_snoop_active() || !win_armed)
+    if (!dma_snoop_active())
+        return;
+    if (!win_armed && snoop_env != 3)
         return;
 
     /* same word-register normalisation as the write path */
     if (addr == 0xFF8605u || addr == 0xFF8607u)
         addr &= ~1u;
 
+    if (snoop_env == 3)
+        trace_access("R", addr, val, size);
+
     /* Completion: the DMA status register reports sector count zero. This is
      * how the hardware itself signals done, so it works for both the WD1772
      * and an ACSI device, and it fires once rather than on every status poll
      * during the transfer. */
-    if (addr == DMA_MODE_REG && (val & DMA_STATUS_SCZERO))
+    if (win_armed && addr == DMA_MODE_REG && (val & DMA_STATUS_SCZERO))
     {
         win_armed = 0;
 
