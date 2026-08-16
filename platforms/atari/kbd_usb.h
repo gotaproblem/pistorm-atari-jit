@@ -112,3 +112,13 @@ extern volatile uint32_t kbd_usb_stat_dropped_bytes;
 #endif
 
 #endif /* KBD_USB_H */
+
+/* ------------------------------------------------------------------ */
+/* Native mouse threshold (PISTORM_MOUSE_THRESH), usable WITHOUT USB   */
+/* injection - see the long comment in kbd_usb.c. When "kbd usb" is    */
+/* enabled the equivalent hooks live inside the USB shims instead, so  */
+/* emulator.c should call these only on the non-USB branch.            */
+/* ------------------------------------------------------------------ */
+int     kbd_native_mouse_enabled(void);   /* threshold configured?     */
+void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
+uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */

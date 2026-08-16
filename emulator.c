@@ -1901,6 +1901,13 @@ extern "C"
         return kbd_usb_acia_data_shim ();
       }
     }
+    /* Native mouse threshold without USB injection. Only the ACIA data
+     * register is touched, and exactly once - reading it clears RDRF, so
+     * the filter is handed the byte rather than reading it again. */
+    else if (kbd_native_mouse_enabled () && address == 0x00FFFC02) {
+      cpu_data_fc();
+      return kbd_native_rx_filter (ps_read_8 (address));
+    }
 
 	    cpu_data_fc();
 	    return ps_read_8(address);
@@ -2192,6 +2199,8 @@ extern "C"
       else if (address == 0x00FFFC02)
         kbd_usb_tx_snoop ((uint8_t)value);
     }
+    else if (address == 0x00FFFC02 && kbd_native_mouse_enabled ())
+      kbd_native_tx_snoop ((uint8_t)value);
     ps_write_8 (address, (uint8_t)value);
   }
 

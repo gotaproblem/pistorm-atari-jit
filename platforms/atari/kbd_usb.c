@@ -311,16 +311,33 @@ static void ikbd_apply(uint8_t cmd)
 /* 8N1, three bytes a packet, the stream tops out near 260 packets/s = */
 /* ~780 level-6/s, on top of Timer C's 200/s.                          */
 /*                                                                     */
-/* A threshold quantises movement, so the deltas are scaled back up on */
-/* the way past to keep the pointer covering the screen at the same    */
-/* speed. That scaling is COMPENSATION, not the saving: it is applied  */
-/* to bytes that have already cost their interrupt.                    */
+/* The threshold BATCHES motion, it does not shrink it: the report      */
+/* carries the full accumulated delta, so total distance is unchanged   */
+/* and only the granularity gets coarser. Scaling therefore defaults to */
+/* 1 - an earlier version defaulted it to N "to compensate", which made */
+/* the pointer travel N times too far in N*N-count steps and was very   */
+/* hard to position. SCALE is a speed preference, not a correction.     */
 /*                                                                     */
 /*   PISTORM_MOUSE_THRESH=N   1..15. 0 or unset = feature off entirely */
-/*   PISTORM_MOUSE_SCALE=M    delta multiplier, defaults to N          */
+/*   PISTORM_MOUSE_SCALE=M    delta multiplier, default 1 (unscaled)   */
 /*                                                                     */
 /* Real IKBD bytes only. Injected USB packets are generated host-side  */
 /* and cost no real interrupt, so they are left exactly as they are.   */
+/*                                                                     */
+/* This works with or without "kbd usb". Wanting a quieter native      */
+/* mouse is not a reason to take on the USB injection layer and its    */
+/* presence detection - that machinery can quarantine the real ACIA    */
+/* and drop you to USB-only input, which is the opposite of what       */
+/* someone asking for a better NATIVE mouse wants. So there are two    */
+/* thin drivers over the same threshold/scale state:                   */
+/*                                                                     */
+/*   kbd usb ON  - hooks inside kbd_usb_acia_data_shim/tx_snoop, and   */
+/*                 the extra presence guards apply because that state  */
+/*                 exists and is meaningful;                           */
+/*   kbd usb OFF - kbd_native_* below, called directly from the ACIA   */
+/*                 paths in emulator.c. No presence detection, no      */
+/*                 quarantine, no RIE handling - nothing to upset,     */
+/*                 because none of it is running.                      */
 /* ------------------------------------------------------------------ */
 
 static int      mouse_thresh = -1;      /* -1 = env not read yet        */
@@ -329,6 +346,11 @@ static uint8_t  thresh_tx[3];
 static int      thresh_tx_left;         /* bytes of 0x0B x y still due  */
 static uint64_t thresh_due_us;
 static int      mouse_pkt_left;         /* dx/dy bytes still expected   */
+/* native-path command tracker (see kbd_native_* below) */
+static int      nat_cmd;
+static int      nat_params;
+static int      nat_memload;
+static int      nat_mouse_rel = 1;      /* IKBD powers up relative      */
 
 static void mouse_cfg_init(void)
 {
@@ -339,7 +361,7 @@ static void mouse_cfg_init(void)
     if (mouse_thresh > 15) mouse_thresh = 15;
 
     e = getenv("PISTORM_MOUSE_SCALE");
-    mouse_scale = (e && *e) ? atoi(e) : mouse_thresh;
+    mouse_scale = (e && *e) ? atoi(e) : 1;
     if (mouse_scale < 1)  mouse_scale = 1;
     if (mouse_scale > 16) mouse_scale = 16;
 
@@ -362,22 +384,66 @@ static void mouse_thresh_arm(uint64_t delay_us)
 }
 
 /* One byte per call at most. Called from the guest's ACIA read path, so
- * it is already serialised against the guest's own ACIA writes; the
- * pending_params check keeps us from interleaving into the middle of a
- * command the guest is part-way through sending. */
-static void mouse_thresh_pump(void)
+ * it is already serialised against the guest's own ACIA writes.
+ *
+ * The guards matter more than the write does. Injecting a byte at the
+ * wrong moment makes the IKBD answer oddly, or not at all, and the
+ * presence detector reads that as a missing or noisy keyboard - it
+ * quarantines the real ACIA and drops to USB input only. So:
+ *
+ *   - only ever talk to a keyboard already confirmed PRESENT. UNKNOWN
+ *     means detection has not finished; ABSENT means it is quarantined
+ *     and a write would be pointless anyway;
+ *   - never while the reset probe is armed. That window exists to hear
+ *     the IKBD's 0xF1 answer, and a command arriving inside it is the
+ *     most direct way to make a healthy keyboard look dead;
+ *   - never part-way through a command the guest is sending, checked
+ *     under ikbd.lock rather than racing the snoop that maintains it.
+ */
+/* Shared tail: emit one queued byte if the transmitter will take it. */
+static void mouse_thresh_tx_one(void)
 {
-    uint8_t st;
+    uint8_t st = ps_read_8(KBD_ACIA_CTRL_ADDR);
 
-    if (thresh_tx_left <= 0 || now_us() < thresh_due_us)
-        return;
-    if (ikbd.pending_params > 0 || ikbd.memload_left > 0)
-        return;
-    st = ps_read_8(KBD_ACIA_CTRL_ADDR);
     if (!(st & ACIA_TDRE))
         return;                         /* transmitter still busy       */
     ps_write_8(KBD_ACIA_DATA_ADDR, thresh_tx[3 - thresh_tx_left]);
-    thresh_tx_left--;
+    if (--thresh_tx_left == 0)
+        printf("[KBD] native mouse: IKBD threshold %d applied\n", mouse_thresh);
+}
+
+/* USB path. */
+static void mouse_thresh_pump(void)
+{
+    int busy;
+
+    if (thresh_tx_left <= 0 || now_us() < thresh_due_us)
+        return;
+    if (atomic_load_explicit(&real_state, memory_order_relaxed) != IKBD_PRESENT)
+        return;
+    if (atomic_load_explicit(&reset_probe_armed, memory_order_relaxed))
+        return;
+
+    pthread_mutex_lock(&ikbd.lock);
+    busy = (ikbd.pending_params > 0 || ikbd.memload_left > 0);
+    pthread_mutex_unlock(&ikbd.lock);
+    if (busy)
+        return;
+
+    mouse_thresh_tx_one();
+}
+
+/* Native path. None of the presence state above exists or is maintained
+ * when USB injection is off, so the guards are just the post-reset delay
+ * and not interleaving into a command the guest is sending. Nothing here
+ * can quarantine anything, because there is no quarantine. */
+static void mouse_native_pump(void)
+{
+    if (thresh_tx_left <= 0 || now_us() < thresh_due_us)
+        return;
+    if (nat_params > 0 || nat_memload > 0)
+        return;
+    mouse_thresh_tx_one();
 }
 
 /* Scale the dx/dy of a relative mouse packet on its way to the guest.
@@ -386,7 +452,7 @@ static void mouse_thresh_pump(void)
  * those byte values mean something else entirely. mouse_mode is written
  * under ikbd.lock by a single writer; a stale read here costs at worst
  * one mis-scaled packet across a mode change. */
-static uint8_t mouse_scale_byte(uint8_t v)
+static uint8_t mouse_scale_byte_mode(uint8_t v, int relative)
 {
     if (mouse_thresh <= 0 || mouse_scale <= 1)
         return v;
@@ -399,9 +465,87 @@ static uint8_t mouse_scale_byte(uint8_t v)
         mouse_pkt_left--;
         return (uint8_t)(int8_t) d;
     }
-    if (v >= 0xF8 && v <= 0xFB && ikbd.mouse_mode == MOUSE_REL)
+    if (v >= 0xF8 && v <= 0xFB && relative)
         mouse_pkt_left = 2;
     return v;
+}
+
+static uint8_t mouse_scale_byte(uint8_t v)
+{
+    return mouse_scale_byte_mode(v, ikbd.mouse_mode == MOUSE_REL);
+}
+
+/* ---- native path: used when "kbd usb" is OFF ---------------------- */
+/* Its own tiny command tracker, because kbd_usb_tx_snoop() returns
+ * immediately when USB is disabled and so ikbd.pending_params is not
+ * maintained. Everything else - the threshold queue, the scaling - is
+ * shared with the USB path above. */
+
+int kbd_native_mouse_enabled(void)
+{
+    if (mouse_thresh < 0)
+        mouse_cfg_init();
+    return mouse_thresh > 0;
+}
+
+/* Guest -> IKBD. Track command boundaries so our own byte is never
+ * interleaved into one, and re-arm whenever the guest resets the
+ * controller or sets a threshold of its own. */
+void kbd_native_tx_snoop(uint8_t v)
+{
+    if (mouse_thresh <= 0)
+        return;
+
+    if (nat_memload > 0)
+    {
+        nat_memload--;
+        return;
+    }
+    if (nat_params > 0)
+    {
+        nat_params--;
+        if (nat_cmd == 0x80 && v == 0x01)
+        {
+            /* full IKBD reset: back to threshold 1,1 and relative mode.
+             * Leave it well alone until the controller has settled. */
+            nat_mouse_rel = 1;
+            mouse_pkt_left = 0;
+            mouse_thresh_arm(RESET_ANSWER_US + 200000);
+        }
+        if (nat_cmd == 0x20 && nat_params == 0)
+            nat_memload = v;
+        if (nat_params == 0 && nat_cmd != 0x20)
+        {
+            if (nat_cmd == 0x0B)        /* guest replaced ours */
+                mouse_thresh_arm(2000);
+            nat_cmd = 0;
+        }
+        return;
+    }
+
+    nat_params = ikbd_param_len(v);
+    if (nat_params > 0)
+    {
+        nat_cmd = v;
+        return;
+    }
+    switch (v)
+    {
+        case 0x08: nat_mouse_rel = 1; break;   /* relative reporting  */
+        case 0x09: case 0x0A: case 0x12:
+                   nat_mouse_rel = 0; break;   /* absolute/keycode/off */
+        default: break;
+    }
+}
+
+/* IKBD -> guest. One byte, already read from the ACIA by the caller. */
+uint8_t kbd_native_rx_filter(uint8_t v)
+{
+    if (mouse_thresh <= 0)
+        return v;
+    if (thresh_tx_left > 0)
+        mouse_native_pump();
+    return mouse_scale_byte_mode(v, nat_mouse_rel);
 }
 
 static void ikbd_reset_state(void)
