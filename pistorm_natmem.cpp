@@ -213,6 +213,11 @@ extern "C"
     uint32_t fdd_io_read      (uint32_t addr, int size);
     void     fdd_io_write     (uint32_t addr, uint32_t val, int size);
     bool     fdd_owns_address (uint32_t addr);
+    /* real bus-master DMA mirror coherence - see dma_snoop.h */
+    int      dma_snoop_active (void);
+    int      dma_snoop_owns   (uint32_t addr);
+    void     dma_snoop_write  (uint32_t addr, uint32_t val, int size);
+    void     dma_snoop_read   (uint32_t addr, uint32_t val, int size);
     uint8_t  fdd_gpip         (uint8_t other_gpip);
     void     mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word);
 }
@@ -2100,21 +2105,30 @@ static inline uae_u32 hw_fdd_lget(uaecptr a)
 {
     if (FDD_enabled && fdd_owns_address(a))
         return fdd_io_read(a, 4);
-    return hw_bus_lget(a);
+    uae_u32 v = hw_bus_lget(a);
+    if (dma_snoop_active() && dma_snoop_owns(a))
+        dma_snoop_read(a, v, 4);
+    return v;
 }
 
 static inline uae_u32 hw_fdd_wget(uaecptr a)
 {
     if (FDD_enabled && fdd_owns_address(a))
         return (uae_u16)fdd_io_read(a, 2);
-    return hw_bus_wget(a);
+    uae_u32 v = hw_bus_wget(a);
+    if (dma_snoop_active() && dma_snoop_owns(a))
+        dma_snoop_read(a, v, 2);
+    return v;
 }
 
 static inline uae_u32 hw_fdd_bget(uaecptr a)
 {
     if (FDD_enabled && fdd_owns_address(a))
         return (uae_u8)fdd_io_read(a, 1);
-    return hw_bus_bget(a);
+    uae_u32 v = hw_bus_bget(a);
+    if (dma_snoop_active() && dma_snoop_owns(a))
+        dma_snoop_read(a, v, 1);
+    return v;
 }
 
 static inline void hw_fdd_lput(uaecptr a, uae_u32 v)
@@ -2125,6 +2139,8 @@ static inline void hw_fdd_lput(uaecptr a, uae_u32 v)
         return;
     }
     hw_bus_lput(a, v);
+    if (dma_snoop_active() && dma_snoop_owns(a))
+        dma_snoop_write(a, v, 4);
 }
 
 static inline void hw_fdd_wput(uaecptr a, uae_u32 v)
@@ -2135,6 +2151,8 @@ static inline void hw_fdd_wput(uaecptr a, uae_u32 v)
         return;
     }
     hw_bus_wput(a, v);
+    if (dma_snoop_active() && dma_snoop_owns(a))
+        dma_snoop_write(a, v, 2);
 }
 
 static inline void hw_fdd_bput(uaecptr a, uae_u32 v)
@@ -2145,6 +2163,8 @@ static inline void hw_fdd_bput(uaecptr a, uae_u32 v)
         return;
     }
     hw_bus_bput(a, v);
+    if (dma_snoop_active() && dma_snoop_owns(a))
+        dma_snoop_write(a, v, 1);
 }
 
 static uae_u32 hw_lget(uaecptr a)

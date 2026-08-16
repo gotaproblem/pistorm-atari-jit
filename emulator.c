@@ -1791,6 +1791,10 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
 //extern "C" uint32_t  fdd_io_read  (uint32_t addr, int size);
 extern  void      fdd_io_write (uint32_t addr, uint32_t val, int size);
 extern  bool      fdd_owns_address (uint32_t addr);
+extern "C" int  dma_snoop_active (void);
+extern "C" int  dma_snoop_owns   (uint32_t addr);
+extern "C" void dma_snoop_write  (uint32_t addr, uint32_t val, int size);
+extern "C" void dma_snoop_read   (uint32_t addr, uint32_t val, int size);
 //}
 //extern volatile uint8_t psg_latch;
 //extern void psg_intercept_write(uint32_t, uint8_t);
@@ -1885,6 +1889,17 @@ extern "C"
       if (fdd_owns_address (address))
         return fdd_io_read (address, 1);
 	    }
+    /* Real bus-master DMA (no "fdd" line): snoop the registers on their way
+     * past so the transfer window is known, and sync the mirror when it
+     * completes. See dma_snoop.h - without this the guest cannot see what a
+     * real DMA controller wrote, because ST-RAM reads come from the mirror. */
+    else if (dma_snoop_active () && dma_snoop_owns (address))
+    {
+      cpu_data_fc();
+      uint8_t v = ps_read_8 (address);
+      dma_snoop_read (address, v, 1);
+      return v;
+    }
 
     /* USB/Bluetooth keyboard injection shadows */
     if (KBD_USB_enabled) {
@@ -2182,6 +2197,13 @@ extern "C"
           fdd_io_write (address, value, 1);
           return;
       }
+    }
+    else if (dma_snoop_active () && dma_snoop_owns (address))
+    {
+      cpu_data_fc();
+      ps_write_8 (address, (uint8_t)value);
+      dma_snoop_write (address, value, 1);
+      return;
     }
 
     cpu_data_fc();
