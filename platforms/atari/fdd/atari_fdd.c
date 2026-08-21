@@ -30,7 +30,7 @@
  * Logging
  * ========================================================================= */
 #define FDD_LOG(fmt, ...)  fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
-#define FDD_DBG(fmt, ...)  //fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
+#define FDD_DBG(fmt, ...)  fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
 
 /* =========================================================================
  * Global state

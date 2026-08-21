@@ -36,6 +36,25 @@ extern "C" {
  * handling the FDD registers - that condition belongs to the call site. */
 int  dma_snoop_active(void);
 
+/* 1 while a real DMA transfer is armed (command byte seen, completion not
+ * yet). The natmem GPIP path uses this to space out poll cycles - see
+ * dma_snoop_poll_yield(). */
+int  dma_snoop_xfer_active(void);
+
+/* Sleep briefly if a transfer is in flight. Call from hot poll paths (MFP
+ * GPIP, FDC status) BEFORE the bus access. PISTORM_DMA_YIELD_US sets the
+ * gap; 0 disables. */
+void dma_snoop_poll_yield(void);
+
+/* Feed a RAW MFP GPIP byte (pre-shim) from the natmem getters. If a
+ * transfer is armed and GPIP5 goes high-then-low, the mirror is synced
+ * inside this call - before the guest can act on the completion. */
+void dma_snoop_gpip_poll(uint32_t raw);
+
+/* Feed writes to MFP ISRB ($FFFA11). A value with bit 7 clear while a
+ * transfer is armed = the disk ISR's end-of-interrupt = completion. */
+void dma_snoop_mfp_eoi(uint32_t val);
+
 /* Does this address belong to the DMA/FDC register block? */
 int  dma_snoop_owns(uint32_t addr);
 

@@ -29,6 +29,7 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <time.h>
 #include "platforms/atari/audio/dmasnd.h"
@@ -218,6 +219,9 @@ extern "C"
     int      dma_snoop_owns   (uint32_t addr);
     void     dma_snoop_write  (uint32_t addr, uint32_t val, int size);
     void     dma_snoop_read   (uint32_t addr, uint32_t val, int size);
+    int      dma_snoop_xfer_active(void);
+    void     dma_snoop_poll_yield (void);
+    void     dma_snoop_gpip_poll  (uint32_t raw);
     uint8_t  fdd_gpip         (uint8_t other_gpip);
     void     mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word);
 }
@@ -520,6 +524,38 @@ static inline int stram_range_overlaps(uaecptr a, int sz, uae_u32 start, uae_u32
     uae_u32 end = (uae_u32)a + (uae_u32)sz;
     uae_u32 win_end = start + len;
     return a < win_end && end > start;
+}
+
+/* PACE THE WRITE-THROUGH WHILE REAL DMA IS RUNNING.
+ *
+ * Found with a clean read path (RD_SETTLE fixed) and the bus census: the
+ * one sector that landed as zeros was exactly the one with 3852 guest RAM
+ * writes during its data phase - the loader relocating the PREVIOUS sector
+ * while the next one transferred. Neighbours with ~150 writes arrived
+ * intact. On a real 68000 those writes are 500ns each and the MMU slots
+ * DMA around them; PiStorm writes are 2-4us back-to-back, the FIFO never
+ * gets a slot, the WD1772 drops every byte, and the window stays zero.
+ *
+ * So: while a transfer is armed, insert a gap after each write-through so
+ * the MMU always has DMA slots. The WD1772 needs one byte drained per
+ * 32us; a gap of that order guarantees it regardless of how fast the guest
+ * spews writes. Costs milliseconds per sector during loads, nothing any
+ * other time. PISTORM_DMA_WRITE_GAP_US tunes it, 0 disables. */
+static inline void stram_write_dma_pace(void)
+{
+    /* dma_snoop_xfer_active is declared in the extern "C" block at the top
+     * of this file (a block-scope linkage specifier is ill-formed C++). */
+    static int gap_us = -1;
+
+    if (__builtin_expect(gap_us < 0, 0)) {
+        const char *e = getenv("PISTORM_DMA_WRITE_GAP_US");
+        gap_us = e ? atoi(e) : 32;
+        if (gap_us < 0)   gap_us = 0;
+        if (gap_us > 500) gap_us = 500;
+    }
+
+    if (gap_us && dma_snoop_xfer_active())
+        usleep((useconds_t)gap_us);
 }
 
 static inline int stram_needs_bus_write(uaecptr a, int sz)
@@ -2020,12 +2056,32 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
 {
     if (a == MFP_GPIP)
     {
-        uae_u16 v = mfp_gpip_shim(ps_read_8(a));
+        /* While a real DMA transfer is in flight, space the completion polls
+         * out. Each poll is a full PiStorm bus transaction (1-2us of bus
+         * occupancy), the guest spins on this register for the whole
+         * transfer, and the WD1772's LOST DATA bit says the DMA FIFO is
+         * being starved of exactly the MMU slots those polls consume. The
+         * sleep happens BEFORE the bus access so the gap is real bus idle. */
+        dma_snoop_poll_yield();
+        /* raw byte BEFORE the shim: the IDE shim forces bit 5 low for its
+         * own pending interrupt, which would fake a floppy completion */
+        uae_u8 raw = ps_read_8(a);
+        dma_snoop_gpip_poll(raw);
+        uae_u16 v = mfp_gpip_shim(raw);
         pistorm_buserr(a, 0, true, sz_word);
         return v;
     }
     {
+        /* A WORD read at $FFFA00 carries GPIP in its LOW byte, and a loader
+         * doing move.w $FFFA00 arrives here with a==$FFFA00 - NOT $FFFA01 -
+         * so the hook above never sees it. The Gotek menu panicked twice
+         * with every byte-granular trigger in place; this is the remaining
+         * way to poll GPIP that was invisible. */
+        if (a == MFP_GPIP - 1)
+            dma_snoop_poll_yield();
         uae_u16 v = (uae_u16)hw_bus_wget(a);
+        if (a == MFP_GPIP - 1)
+            dma_snoop_gpip_poll(v & 0xFFu);
         if (DMA_Sound_enabled)   /* MFP reg is the LOW byte of a word read */
             v = (uae_u16)((v & 0xFF00u) |
                           dmasnd_mfp_read_shim(a | 1u, (uint8_t)v));
@@ -2037,7 +2093,10 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
 {
     if (a == MFP_GPIP)
     {
-        uae_u8 v = mfp_gpip_shim(ps_read_8(a));
+        dma_snoop_poll_yield();         /* see hw_mfp_wget */
+        uae_u8 raw = ps_read_8(a);
+        dma_snoop_gpip_poll(raw);       /* sync mirror BEFORE guest sees it */
+        uae_u8 v = mfp_gpip_shim(raw);
         pistorm_buserr(a, 0, true, sz_byte);
         return v;
     }
@@ -2105,6 +2164,8 @@ static inline uae_u32 hw_fdd_lget(uaecptr a)
 {
     if (FDD_enabled && fdd_owns_address(a))
         return fdd_io_read(a, 4);
+    if (dma_snoop_xfer_active() && dma_snoop_owns(a))
+        dma_snoop_poll_yield();         /* space status polls during DMA */
     uae_u32 v = hw_bus_lget(a);
     if (dma_snoop_active() && dma_snoop_owns(a))
         dma_snoop_read(a, v, 4);
@@ -2115,6 +2176,8 @@ static inline uae_u32 hw_fdd_wget(uaecptr a)
 {
     if (FDD_enabled && fdd_owns_address(a))
         return (uae_u16)fdd_io_read(a, 2);
+    if (dma_snoop_xfer_active() && dma_snoop_owns(a))
+        dma_snoop_poll_yield();         /* space status polls during DMA */
     uae_u32 v = hw_bus_wget(a);
     if (dma_snoop_active() && dma_snoop_owns(a))
         dma_snoop_read(a, v, 2);
@@ -2125,6 +2188,8 @@ static inline uae_u32 hw_fdd_bget(uaecptr a)
 {
     if (FDD_enabled && fdd_owns_address(a))
         return (uae_u8)fdd_io_read(a, 1);
+    if (dma_snoop_xfer_active() && dma_snoop_owns(a))
+        dma_snoop_poll_yield();         /* space status polls during DMA */
     uae_u32 v = hw_bus_bget(a);
     if (dma_snoop_active() && dma_snoop_owns(a))
         dma_snoop_read(a, v, 1);
@@ -2150,6 +2215,12 @@ static inline void hw_fdd_wput(uaecptr a, uae_u32 v)
         fdd_io_write(a, v, 2);
         return;
     }
+    /* FF-Manager investigation parked (2026-08-18). Root area: the DMA
+     * chip's direction latch vs its reset-on-direction-change behaviour
+     * under back-to-back mode writes faster than a real 68000 can issue
+     * them. Every injection variant (double, pace, re-issue, slow
+     * toggle before/after count) either did nothing or made it worse;
+     * Xenon-class loaders are unaffected. See session notes. */
     hw_bus_wput(a, v);
     if (dma_snoop_active() && dma_snoop_owns(a))
         dma_snoop_write(a, v, 2);
@@ -2673,6 +2744,7 @@ static void sr_lput(uaecptr a, uae_u32 v)
     stram_snoop_lowram(a, 4);
     if (stram_needs_bus_write(a, 4)) {
         uae_u32 bus_a = a & 0x00FFFFFF;
+        stram_write_dma_pace();
         fc_data();
         ps_write_32(bus_a, v); // write-through to bus
     }
@@ -2686,6 +2758,7 @@ static void sr_wput(uaecptr a, uae_u32 v)
     stram_snoop_lowram(a, 2);
     if (stram_needs_bus_write(a, 2)) {
         uae_u32 bus_a = a & 0x00FFFFFF;
+        stram_write_dma_pace();
         fc_data();
         ps_write_16(bus_a, (uint16_t)v);
     }
@@ -2699,6 +2772,7 @@ static void sr_bput(uaecptr a, uae_u32 v)
     stram_snoop_lowram(a, 1);
     if (stram_needs_bus_write(a, 1)) {
         uae_u32 bus_a = a & 0x00FFFFFF;
+        stram_write_dma_pace();
         fc_data();
         ps_write_8(bus_a, (uint8_t)v);
     }
@@ -2728,6 +2802,8 @@ extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
     if (stram_needs_bus_write(a, 2))
     {
         uint8_t old_fc = fc;
+        stram_write_dma_pace();       /* emulated-blitter bursts starve the
+                                         DMA FIFO exactly like guest writes */
         fc = 5;
         g_buserr = 0;
         ps_write_16(a, v);

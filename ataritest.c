@@ -65,6 +65,9 @@ void devTest ( int rw );
 void atariReset ( void );
 void atariHalt ( void );
 void arbTest ( void );
+void acsiTest ( void );
+void fdcTest ( void );
+void p2diag ( void );
 
 #define ARB_SOURCE_NONE    0
 #define ARB_SOURCE_BLITTER 1
@@ -97,6 +100,45 @@ int cmdRESET = 0;
 int cmdHALT = 0;
 int cmdArbTest = 0;
 int arbSeconds = 5;
+
+/* --acsitest : standalone real-ACSI DMA loop, no TOS in the picture.
+ * Every ACSI result to date came from a single transfer inside one TOS boot,
+ * where the timing differs every run and nothing can be repeated. This runs
+ * the same register sequence the boot trace shows, N times, and counts
+ * outcomes. */
+int cmdAcsiTest  = 0;
+int acsiLoops    = 100;
+int acsiDev      = 0;          /* ACSI target 0-7                        */
+uint32_t acsiLba = 0;          /* logical block to read                  */
+uint32_t acsiBase = 0x001000u; /* ST-RAM destination (even, < memory)    */
+int acsiSectors  = 1;          /* sectors per transfer                   */
+int acsiSettleUs = 0;          /* optional delay before the status read  */
+int acsiQuiet    = 0;          /* 1 = summary only, no per-loop lines    */
+int acsiPollUs   = 100;        /* gap between GPIP polls - see acsiTest  */
+int acsiUseIrq   = 1;          /* 0 = skip the IRQ wait, just delay      */
+int acsiWaitMs   = 50;         /* fixed wait when irq=no                 */
+int acsiGapUs    = 0;          /* delay after each register write        */
+int acsiScan     = 0;
+int acsiBare = 0;          /* bare=yes: preamble EXACTLY as the working scan */          /* 1 = probe targets 0-7 and stop         */
+int acsiFc       = 5;          /* 68000 function code on FC0-2           */
+
+/* --fdctest : does the WD1772 completion interrupt reach MFP GPIP5?
+ * EmuTOS's floppy driver issues a command then waits on that bit. In the
+ * boot trace it issues FORCE INTERRUPT, then RESTORE, reads status once,
+ * sees BUSY - which is correct that soon after a command - and never looks
+ * at the floppy again. So either the interrupt never arrives, or it is
+ * already asserted and the wait falls straight through. This measures
+ * which, with no TOS in the way. */
+int cmdFdcTest   = 0;
+int cmdP2diag    = 0;
+int fdcLoops     = 5;
+int fdcDrive     = 0;          /* 0 = A, 1 = B                            */
+int acsiCmd      = 0;          /* 0=READ(6) 1=TEST UNIT READY 2=INQUIRY  */
+int acsiResetFail= 1;          /* reset after a wedged command: ON       */
+int acsiCleanup  = 0;          /* extra bus accesses to tidy up: OFF      */
+int acsiLun      = 0;          /* CDB byte 1, bits 7-5                    */
+int acsiResetMs  = 100;        /* settle after an ACSI bus reset          */
+int acsiResetEvery = 0;        /* reset before EVERY iteration            */
 int arbHammer = 0;
 int arbSource = ARB_SOURCE_NONE;
 int arbBlitOp = ARB_BLIT_FILL;
@@ -231,8 +273,7 @@ int main ( int argc, char *argv[] )
     {        
         ps_setup_protocol ();
        
-        if ( VERBOSE )
-            ps_get_firmware_revision ();
+        ps_get_firmware_revision ();     /* always - bring-up needs it */
 
         if ( !memSize )
         {
@@ -443,6 +484,24 @@ test_loop:
         {
             arbTest ();
         }
+
+        if ( cmdAcsiTest )
+        {
+            setMemory ( memSize );
+            acsiTest ();
+        }
+
+        if ( cmdFdcTest )
+        {
+            setMemory ( memSize );
+            fdcTest ();
+        }
+
+        if ( cmdP2diag )
+        {
+            setMemory ( memSize );
+            p2diag ();
+        }
     }
 
     else
@@ -471,6 +530,16 @@ test_loop:
                  "     <size> 512 to 4096. If not supplied, 512 is used\n"
                  "--arbtest <seconds=n> <hammer=yes> <address=xxxxxx> <source=blitter> <op=fill|copy> <blitms=n> <quietms=n>\n"
                  "     polls CPLD arbitration status bit and optionally hammers RAM or starts real blits\n"
+                 "--fdctest <loops=n> <drive=a|b>\n"
+                 "     drives the real WD1772 directly: selects the drive via PSG port A,\n"
+                 "     issues FORCE INTERRUPT then RESTORE, and times how long MFP GPIP5\n"
+                 "     takes to signal completion. Says whether the FDC interrupt reaches\n"
+                 "     the host at all - which is what EmuTOS waits on.\n"
+                 "--acsitest <loops=n> <dev=0-7> <lba=n> <sectors=n> <base=xxxxxx> <settle=us> <quiet=yes>\n"
+                 "     standalone real-ACSI DMA loop, no TOS. Issues READ(6) N times and reports\n"
+                 "     the DMA address-counter delta per transfer, BR (re-armed each time),\n"
+                 "     the ACSI and DMA status bytes, and how many destination bytes changed.\n"
+                 "     Gives a rate rather than a single boot-time anecdote.\n"
         );
 
         exit (0);
@@ -2130,6 +2199,205 @@ int parser ( int argc, char **argv )
                 cmdArbTest = 1;
         }
 
+        if ( strcmp ( cmdptr, "p2diag" ) == 0 )
+        {
+            valid = 1;
+            cmdP2diag = 1;
+        }
+
+        if ( strcmp ( cmdptr, "fdctest" ) == 0 )
+        {
+            valid = 1;
+            substring = strtok_r ( NULL, " ", &strSave );
+
+            for ( ; substring != NULL; substring = strtok_r ( NULL, " ", &strSave ) )
+            {
+                aptr = strtok ( substring, "=" );
+
+                if ( strcmp ( aptr, "loops" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    fdcLoops = atoi ( tptr );
+                    if ( fdcLoops < 1 )
+                        fdcLoops = 1;
+                }
+
+                else if ( strcmp ( aptr, "drive" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    fdcDrive = ( *tptr == 'b' || *tptr == 'B' || *tptr == '1' );
+                }
+
+                else
+                    valid = 0;
+            }
+
+            if ( valid )
+                cmdFdcTest = 1;
+        }
+
+        if ( strcmp ( cmdptr, "acsitest" ) == 0 )
+        {
+            valid = 1;
+            substring = strtok_r ( NULL, " ", &strSave );
+
+            for ( ; substring != NULL; substring = strtok_r ( NULL, " ", &strSave ) )
+            {
+                aptr = strtok ( substring, "=" );
+
+                if ( strcmp ( aptr, "loops" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiLoops = atoi ( tptr );
+                    if ( acsiLoops < 1 )
+                        acsiLoops = 1;
+                }
+
+                else if ( strcmp ( aptr, "dev" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiDev = atoi ( tptr ) & 7;
+                }
+
+                else if ( strcmp ( aptr, "lba" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiLba = (uint32_t)strtoul ( tptr, NULL, 0 ) & 0x001FFFFFu;
+                }
+
+                else if ( strcmp ( aptr, "base" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    sscanf ( tptr, "%x", &acsiBase );
+                    acsiBase &= ~1u;
+                }
+
+                else if ( strcmp ( aptr, "sectors" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiSectors = atoi ( tptr );
+                    if ( acsiSectors < 1 )   acsiSectors = 1;
+                    if ( acsiSectors > 255 ) acsiSectors = 255;
+                }
+
+                else if ( strcmp ( aptr, "settle" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiSettleUs = atoi ( tptr );
+                    if ( acsiSettleUs < 0 )
+                        acsiSettleUs = 0;
+                }
+
+                else if ( strcmp ( aptr, "quiet" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        acsiQuiet = 1;
+                }
+
+                else if ( strcmp ( aptr, "pollus" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiPollUs = atoi ( tptr );
+                    if ( acsiPollUs < 0 )
+                        acsiPollUs = 0;
+                }
+
+                else if ( strcmp ( aptr, "irq" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "no" ) == 0 )
+                        acsiUseIrq = 0;
+                }
+
+                else if ( strcmp ( aptr, "gapus" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiGapUs = atoi ( tptr );
+                    if ( acsiGapUs < 0 )
+                        acsiGapUs = 0;
+                }
+
+                else if ( strcmp ( aptr, "cmd" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "read" ) == 0 )         acsiCmd = 0;
+                    else if ( strcmp ( tptr, "tur" ) == 0 )     acsiCmd = 1;
+                    else if ( strcmp ( tptr, "inquiry" ) == 0 ) acsiCmd = 2;
+                    else valid = 0;
+                }
+
+                else if ( strcmp ( aptr, "resetms" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiResetMs = atoi ( tptr );
+                    if ( acsiResetMs < 1 )
+                        acsiResetMs = 1;
+                }
+
+                else if ( strcmp ( aptr, "resetevery" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        acsiResetEvery = 1;
+                }
+
+                else if ( strcmp ( aptr, "lun" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiLun = atoi ( tptr ) & 7;
+                }
+
+                else if ( strcmp ( aptr, "cleanup" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        acsiCleanup = 1;
+                }
+
+                else if ( strcmp ( aptr, "resetonfail" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        acsiResetFail = 1;
+                }
+
+                else if ( strcmp ( aptr, "fc" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiFc = atoi ( tptr ) & 7;
+                }
+
+                else if ( strcmp ( aptr, "bare" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        acsiBare = 1;
+                }
+
+                else if ( strcmp ( aptr, "scan" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    if ( strcmp ( tptr, "yes" ) == 0 )
+                        acsiScan = 1;
+                }
+
+                else if ( strcmp ( aptr, "waitms" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    acsiWaitMs = atoi ( tptr );
+                    if ( acsiWaitMs < 1 )
+                        acsiWaitMs = 1;
+                }
+
+                else
+                    valid = 0;
+            }
+
+            if ( valid )
+                cmdAcsiTest = 1;
+        }
+
         if ( strcmp ( cmdptr, "dev" ) == 0 )
         {
             valid = 1; 
@@ -2775,4 +3043,963 @@ void devTest ( int rw )
     }
 #endif
     
+}
+
+
+/* =========================================================================
+ * --acsitest : standalone real-ACSI DMA loop
+ *
+ * WHY THIS EXISTS
+ * Every ACSI measurement so far came from a single transfer inside one TOS
+ * boot. Boot-to-boot the enumeration path, the timing and the number of
+ * transfers all differ, so each run is N=1 and nothing can be attributed to
+ * anything. One boot pulled six sectors; the next, same binary and same
+ * config, pulled none. That is not a bug report, it is noise.
+ *
+ * This runs the exact register sequence the boot trace shows - the
+ * $0190/$0090 R/W toggle, base, sector count, then a six-byte READ(6) CDB -
+ * N times with no TOS in the loop, and counts outcomes. The Pi owns all the
+ * timing, so the probes are not competing with EmuTOS for the bus.
+ *
+ * WHAT IT MEASURES, per iteration:
+ *   - the DMA address counter delta, read back off the real chip. 0 means
+ *     the controller performed no bus cycles; count*512 means it completed;
+ *     anything between means it started and was cut off.
+ *   - BR, re-armed before each transfer via status[2], so it means "during
+ *     THIS transfer" rather than "at some point since reset".
+ *   - the ACSI status byte and the DMA status register.
+ *   - how many bytes of the destination window actually changed. The window
+ *     is poisoned with a per-iteration pattern first, so "DMA wrote zeros"
+ *     and "DMA wrote nothing" are distinguishable - they were not before.
+ *
+ * The output is a rate, not an anecdote. Vary one thing (firmware revision,
+ * settle delay, sector count) and the rate moves or it does not.
+ * ========================================================================= */
+
+#define ACSI_STATUS_BR_SEEN  (1u << 19)  /* PI_D[11] -> GPIO19. Same bit as
+                                            ARB_STATUS_BUSY_RAW above, which
+                                            is labelled BGACK - that comment
+                                            predates fw 0.70a, where the bit
+                                            became the sticky BR flag. */
+#define ACSI_MFP_GPIP        0x00FFFA01u
+#define ACSI_GPIP_IRQ        0x20u        /* FDC/HDC interrupt, active low */
+
+#define ACSI_DMA_DATA        0x00FF8604u
+#define ACSI_DMA_MODE        0x00FF8606u
+#define ACSI_DMA_BASE_HI     0x00FF8609u
+#define ACSI_DMA_BASE_MID    0x00FF860Bu
+#define ACSI_DMA_BASE_LO     0x00FF860Du
+
+#define ACSI_IRQ_TIMEOUT_MS  1000u    /* whole command incl. data phase */
+#define ACSI_ACK_TIMEOUT_MS  20u      /* per command byte               */
+
+static uint32_t acsi_read_base ( void )
+{
+    uint32_t h = read8 ( ACSI_DMA_BASE_HI );
+    uint32_t m = read8 ( ACSI_DMA_BASE_MID );
+    uint32_t l = read8 ( ACSI_DMA_BASE_LO );
+
+    return ( ( h & 0xFFu ) << 16 ) | ( ( m & 0xFFu ) << 8 ) | ( l & 0xFFu );
+}
+
+/* MFP GPIP bit 5, active low. Returns 1 if it went low before the deadline. */
+static int acsi_wait_irq ( uint32_t ms, int poll_us )
+{
+    uint64_t deadline = monotonic_ms () + ms;
+
+    while ( read8 ( ACSI_MFP_GPIP ) & ACSI_GPIP_IRQ )
+    {
+        if ( monotonic_ms () > deadline )
+            return 0;
+
+        if ( poll_us )
+            usleep ( (useconds_t)poll_us );
+    }
+
+    return 1;
+}
+
+/* One CDB byte. Mode $88 selects the HDC with A1 low - that is the FIRST
+ * byte, the one that also asserts the device select. $8A is A1 high, every
+ * byte after it. Straight from the boot trace.
+ *
+ * ACSI IS HANDSHAKED PER BYTE. The device pulls IRQ low to acknowledge each
+ * command byte and the host must not send the next one until it does. The
+ * first version of this function wrote all six bytes back-to-back at Pi
+ * speed, which no real target can follow: the command was never assembled,
+ * so there was no completion, no IRQ, and $FF8604 read back floating bus -
+ * $FF, $60, $1E, $00 with nothing driving it. Every iteration timed out and
+ * it looked like a DMA fault when it was a protocol fault in the test.
+ *
+ * Returns 0 if the device did not acknowledge.
+ */
+extern void ps_flush_posted ( void );
+
+/* Real-ST pacing for every ACSI interaction.  A 68000 running TOS puts
+ * whole instructions (and landed bus cycles) between each step; posted
+ * writes at Pi pace do not.  Every step below LANDS before the next
+ * begins, with ~real-world spacing.  "Wait for the handshake" applied
+ * to the whole path, not one spot. */
+#define ACSI_STEP_US 15
+
+static int acsi_cmd_byte ( uint16_t mode, uint8_t byte, uint32_t ms )
+{
+    /* ROLLBACK NOTE (measured): the canonical-TOS two-mode-write shape
+     * plus step pacing took a 50%-flaky CDB phase to 100% dead at byte
+     * 0.  This body is the exact configuration that achieved partial
+     * acks; changes go back in ONE AT A TIME against that baseline. */
+    if ( mode )
+        write16 ( ACSI_DMA_MODE, mode );
+
+    /* `gapus` exists because the Pi issues these two writes microseconds
+     * apart, where a 68000 running TOS puts whole instructions between them.
+     * If selection only works with a gap, the target cannot follow the Pi's
+     * bus rate and that is the finding - not a DMA fault. */
+    if ( acsiGapUs )
+        usleep ( (useconds_t)acsiGapUs );
+
+    write16 ( ACSI_DMA_DATA, (uint16_t)byte );
+
+    if ( acsiGapUs )
+        usleep ( (useconds_t)acsiGapUs );
+
+    return acsi_wait_irq ( ms, 0 );   /* ack arrives in microseconds */
+}
+
+/* Put the DMA chip back to a deselected, floppy-owned state. Without this a
+ * command that dies part way leaves the target waiting for the rest of its
+ * CDB, and the NEXT iteration's first byte is swallowed as a continuation -
+ * one failure poisons every attempt after it. */
+static void acsi_deselect ( void )
+{
+    write16 ( ACSI_DMA_MODE, 0x0080 );
+}
+
+/* Probe each target with just the select byte. */
+static void acsi_scan ( void )
+{
+    printf ( "scanning ACSI targets 0-7 (select byte only)\n" );
+
+    for ( int d = 0; d < 8; d++ )
+    {
+        int ack;
+
+        acsi_deselect ();
+        write16 ( ACSI_DMA_MODE, 0x0190 );
+        write16 ( ACSI_DMA_MODE, 0x0090 );
+        write16 ( ACSI_DMA_DATA, 1 );
+
+        ack = acsi_cmd_byte ( 0x0088, (uint8_t)( ( d << 5 ) | 0x00 ),
+                              ACSI_ACK_TIMEOUT_MS );   /* TEST UNIT READY */
+
+        printf ( "  target %d: %s  (gpip=$%02X)\n", d,
+                 ack ? "ACK - device present" : "no response",
+                 read8 ( ACSI_MFP_GPIP ) );
+
+        acsi_deselect ();
+        usleep ( 2000 );
+    }
+
+    printf ( "\n" );
+}
+
+
+/* ACSI BUS RESET - the only thing known to return the target to a defined
+ * state.
+ *
+ * This matters more than anything else in the file. A command that is
+ * abandoned part way leaves the device still selected and still counting
+ * bytes, so the NEXT command's select byte is swallowed as a continuation
+ * byte. Evidence: the HDC decoded one command as
+ *
+ *     TEST_UNIT_READY t1:2 (0x00:40:60:80:a0:c0)
+ *
+ * where $20/$40/$60/$80/$a0/$c0 are the select bytes for six DIFFERENT
+ * targets, concatenated into a single CDB by a scan whose acknowledgements
+ * never arrived. Whether any given command works then depends on what byte
+ * offset the device happens to be sitting at - which is exactly the
+ * "random, intermittent" behaviour, and it is not randomness at all.
+ *
+ * Deselecting with mode $0080 does NOT clear that state; only a bus reset
+ * does, and the device reports RESET when it sees one.
+ *
+ * The reset also clears the MMU configuration, so setMemory() has to run
+ * again or every subsequent DMA target address is meaningless.
+ */
+static void acsi_bus_reset ( const char *why )
+{
+    uint64_t deadline;
+
+    if ( VERBOSE && why )
+        printf ( "      [ACSI bus reset: %s]\n", why );
+
+    atariReset ();
+    usleep ( (useconds_t)acsiResetMs * 1000u );
+
+    setMemory ( memSize );          /* reset wiped the MMU config */
+
+    /* Both controllers can be left asserting after a reset - the WD1772
+     * finishes a restore and raises IRQ, and the HDC answers the reset.
+     * Read each status register once so GPIP5 is released before the next
+     * command, otherwise the pre-command check sees a stuck IRQ and skips
+     * every iteration. An earlier build pulsed reset and then did NOT do
+     * this, and came back with gpip=$CF on all four remaining loops. */
+    write16 ( ACSI_DMA_MODE, 0x0080 );      /* FDC status  */
+    (void)read16 ( ACSI_DMA_DATA );
+    write16 ( ACSI_DMA_MODE, 0x008A );      /* HDC status  */
+    (void)read16 ( ACSI_DMA_DATA );
+    write16 ( ACSI_DMA_MODE, 0x0080 );
+
+    deadline = monotonic_ms () + 500;
+
+    while ( !( read8 ( ACSI_MFP_GPIP ) & ACSI_GPIP_IRQ ) )
+    {
+        if ( monotonic_ms () > deadline )
+        {
+            printf ( "      [ACSI bus reset: GPIP5 still asserted after "
+                     "500ms - gpip=$%02X]\n", read8 ( ACSI_MFP_GPIP ) );
+            break;
+        }
+
+        usleep ( 1000 );
+    }
+}
+
+void acsiTest ( void )
+{
+    uint8_t  saved_fc = fc;
+    uint32_t len      = (uint32_t)acsiSectors * 512u;   /* poison window */
+
+    /* Bytes the DMA controller should actually move. INQUIRY returns 36,
+     * TEST UNIT READY none - classifying either against sectors*512 meant
+     * a perfectly good 36-byte transfer would still have printed PARTIAL. */
+    uint32_t xfer_len = ( acsiCmd == 1 ) ? 0u
+                      : ( acsiCmd == 2 ) ? 36u
+                                         : len;
+
+    uint32_t n_nomove = 0, n_partial = 0, n_complete = 0;
+    uint32_t n_br     = 0, n_timeout = 0, n_buserr   = 0;
+    uint32_t n_status_ok = 0, n_data_changed = 0, n_cmd_fail = 0;
+    uint32_t n_cdb_retry = 0;
+    uint32_t n_stuck_irq = 0;
+    uint64_t total_delta = 0;
+
+    /* 5 = supervisor data, which is what TOS uses for $FF8xxx register
+     * access and what arbTest uses. NOTE main() leaves the global at 6
+     * (supervisor program) and devTest keeps it there, so results from
+     * --dev are not directly comparable. Overridable with fc=n so the
+     * function code can be swept against a scope rather than argued about. */
+    fc = (uint8_t)acsiFc;
+
+    printf ( "\nATARITEST standalone ACSI DMA loop\n" );
+    printf ( "loops=%d dev=%d lba=%u sectors=%d base=$%06X settle=%dus "
+             "fc=%d gap=%dus\n",
+             acsiLoops, acsiDev, acsiLba, acsiSectors, acsiBase, acsiSettleUs,
+             acsiFc, acsiGapUs );
+    printf ( "bus accesses: command + status only%s\n",
+             acsiCleanup ? ", plus cleanup toggles" : "" );
+    printf ( "bus reset: at start%s%s (settle %dms)\n",
+             acsiResetFail  ? ", after any failure" : "",
+             acsiResetEvery ? ", before every iteration" : "",
+             acsiResetMs );
+    printf ( "command: %s%s\n",
+             acsiCmd == 1 ? "TEST UNIT READY (no data phase)" :
+             acsiCmd == 2 ? "INQUIRY (36 bytes)" : "READ(6)",
+             acsiResetFail ? ", ST reset pulse after a wedge" : "" );
+    printf ( "completion: %s\n", acsiUseIrq
+             ? "MFP GPIP bit 5 (poll gap below)" : "fixed delay, IRQ ignored" );
+    if ( acsiUseIrq )
+        printf ( "poll gap=%dus timeout=%ums\n", acsiPollUs,
+                 ACSI_IRQ_TIMEOUT_MS );
+    else
+        printf ( "wait=%dms\n", acsiWaitMs );
+    printf ( "CDB = %02X %02X %02X %02X %02X 00   (target %d, LUN %d)\n",
+             (unsigned)( ( acsiDev << 5 ) | ( acsiCmd == 1 ? 0x00 :
+                                              acsiCmd == 2 ? 0x12 : 0x08 ) ),
+             (unsigned)( acsiCmd == 0
+                         ? ( ( acsiLun << 5 ) | ( ( acsiLba >> 16 ) & 0x1F ) )
+                         : ( acsiLun << 5 ) ),
+             (unsigned)( acsiCmd == 0 ? ( acsiLba >> 8 ) & 0xFF : 0 ),
+             (unsigned)( acsiCmd == 0 ? acsiLba & 0xFF : 0 ),
+             (unsigned)( acsiCmd == 1 ? 0 : acsiCmd == 2 ? 36 : acsiSectors ),
+             acsiDev, acsiLun );
+    printf ( "delta is the DMA address counter read back off the real chip; "
+             "expecting %u byte%s\n\n", xfer_len, xfer_len == 1 ? "" : "s" );
+
+    if ( acsiScan )
+    {
+        acsi_scan ();
+        fc = saved_fc;
+        return;
+    }
+
+    /* Start from a defined state, always. Every run before this one began
+     * with whatever the previous run left the target holding. */
+    /* THE SCAN/LOOP BISECTION LANDED HERE: the scan path (which ACKS)
+     * returns above this line and never fires the bus reset; the loop
+     * (byte 0 never acked) always did.  Our reset pulse is a 100ms
+     * assertion - nothing like a real ST's 16us RESET instruction - and
+     * whatever the target does to re-initialise afterwards, it is not
+     * listening when the CDBs start.  bare=yes now also skips it. */
+    if ( !acsiBare )
+        acsi_bus_reset ( "start of run" );
+
+    /* sigint_handler exit()s directly, so there is no abort flag to poll. */
+    for ( int loop = 0; loop < acsiLoops; loop++ )
+    {
+        uint8_t  poison = (uint8_t)( 0xA5u ^ (unsigned)loop );
+        uint32_t after, delta, changed = 0;
+        uint16_t acsi_status, dma_status;
+        uint32_t sr;
+        int      timed_out = 0;
+        uint64_t deadline  = 0;
+        uint8_t  gpip      = 0;
+        int      cmd_fail_byte = -1;
+
+        g_buserr = 0;
+
+        if ( acsiResetEvery && loop )
+            acsi_bus_reset ( NULL );
+
+        /* IRQ MUST be deasserted before a command starts. If it is already
+         * low - left over from a command that failed part way - then every
+         * per-byte wait below returns instantly without the device having
+         * done anything, and the whole iteration is a false pass. Exactly
+         * one iteration in the first 20-loop run "succeeded" this way. */
+        if ( !( read8 ( ACSI_MFP_GPIP ) & ACSI_GPIP_IRQ ) )
+        {
+            /* OBSERVE, DO NOT TIDY - default.
+             *
+             * This used to try to clear the interrupt with mode toggles and
+             * a status read. Those are extra accesses to a target whose
+             * state machine is not mine to guess at, and adding them turned
+             * a tool that reliably produced one clean INQUIRY into one that
+             * was unreliable on every command. Skipping the iteration costs
+             * a data point; poking the device costs the whole run.
+             *
+             * cleanup=yes puts the old behaviour back if it turns out to
+             * help, but it has to earn its place on evidence. */
+            if ( acsiCleanup )
+            {
+                write16 ( ACSI_DMA_MODE, 0x0000 );
+                ps_flush_posted ();         /* transfer mode LANDED
+                                               before we start waiting  */
+                write16 ( ACSI_DMA_MODE, 0x008A );
+                (void)read16 ( ACSI_DMA_DATA );
+                acsi_deselect ();
+            }
+
+            usleep ( 1000 );
+
+            if ( !( read8 ( ACSI_MFP_GPIP ) & ACSI_GPIP_IRQ ) )
+            {
+                n_stuck_irq++;
+
+                if ( !acsiQuiet )
+                    printf ( "%4d: IRQ still asserted before command - "
+                             "skipped (gpip=$%02X)\n",
+                             loop, read8 ( ACSI_MFP_GPIP ) );
+                continue;
+            }
+        }
+
+        /* Poison the destination. Without this a transfer that moves 512
+         * zero bytes is indistinguishable from one that moves nothing, and
+         * both were being reported as "sig 0000". */
+        if ( !acsiBare )
+            for ( uint32_t i = 0; i < len; i++ )
+                write8 ( acsiBase + i, poison );
+
+        /* Re-arm the sticky BR flag: 0x0004 to clear, 0x0000 to release.
+         * status[1:0] stay 00 so HALT/RESET/INIT are untouched. */
+        if ( !acsiBare )
+        {
+            write_reg ( 0x0004 );
+            write_reg ( 0x0000 );
+        }
+
+        /* DESELECT FIRST - this is the one ordering difference between
+         * this loop (byte 0 never acked) and the scan path (acks every
+         * time, today, on this stack): the loop used to program the
+         * BASE registers while the mode register still held $8A from
+         * the previous status read - HDC selected, A1 high.  The scan
+         * deselects to $80 before touching anything, and the EmuTOS
+         * trace likewise programs base with an FDC-family mode live.
+         * A base access with the HDC addressed can hand the target a
+         * phantom byte - after which the real select is "byte 1" of a
+         * command that never existed. */
+        write16 ( ACSI_DMA_MODE, 0x0080 );
+
+        /* Base next - the trace programs it before the mode toggle.
+         * bare=yes skips it: the scan (which ACKS on this bench, today)
+         * never touches base. */
+        if ( !acsiBare )
+        {
+            write8 ( ACSI_DMA_BASE_LO,  (uint8_t)( acsiBase & 0xFFu ) );
+            write8 ( ACSI_DMA_BASE_MID, (uint8_t)( ( acsiBase >> 8 ) & 0xFFu ) );
+            write8 ( ACSI_DMA_BASE_HI,  (uint8_t)( ( acsiBase >> 16 ) & 0xFFu ) );
+        }
+
+        /* Toggling the R/W bit with SCREG set resets the DMA chip's internal
+         * state. $0190 then $0090 leaves direction = read (device -> RAM). */
+        write16 ( ACSI_DMA_MODE, 0x0190 );
+        write16 ( ACSI_DMA_MODE, 0x0090 );
+
+        /* Sector count, SCREG still set. */
+        write16 ( ACSI_DMA_DATA, (uint16_t)acsiSectors );
+
+        /* Six-byte READ(6), each byte acknowledged before the next.
+         * The LAST byte is not waited on here - that ack is the end of the
+         * whole command including the data phase, and it gets the long
+         * timeout below. */
+        {
+            uint8_t cdb[6];
+            int cdb_attempt;
+
+            /* opcode 0x08 READ(6), 0x00 TEST UNIT READY, 0x12 INQUIRY.
+             *
+             * TEST UNIT READY has NO DATA PHASE, and that is the point of
+             * offering it: --scan (which only ever sends TUR) runs happily
+             * while the READ loop wedges the target hard enough to need a
+             * power cycle. A device that accepts a READ and is then left
+             * holding 512 bytes nobody collects has nowhere to go - which
+             * is what a DRQ that never gets serviced looks like from the
+             * far end. Being able to loop TUR proves the command transport
+             * is sound independently of the data phase. */
+            /* Byte 0 : device in bits 7-5, opcode in bits 4-0.
+             * Byte 1 : LUN in bits 7-5, and for READ(6) the top five bits
+             *          of the LBA in bits 4-0.
+             *
+             * The LUN was previously never written explicitly - it came out
+             * as 0 only because lba=0 made (lba >> 16) & 0x1F zero. Correct
+             * by accident. Now it is placed deliberately, and a non-zero
+             * lba can no longer silently overwrite it. */
+            cdb[0] = (uint8_t)( ( acsiDev << 5 ) |
+                                ( acsiCmd == 1 ? 0x00 :
+                                  acsiCmd == 2 ? 0x12 : 0x08 ) );
+
+            if ( acsiCmd == 0 )         /* READ(6) */
+            {
+                cdb[1] = (uint8_t)( ( acsiLun << 5 ) |
+                                    ( ( acsiLba >> 16 ) & 0x1F ) );
+                cdb[2] = (uint8_t)( ( acsiLba >> 8 ) & 0xFF );
+                cdb[3] = (uint8_t)( acsiLba & 0xFF );
+                cdb[4] = (uint8_t)acsiSectors;
+            }
+
+            else                        /* TEST UNIT READY / INQUIRY */
+            {
+                cdb[1] = (uint8_t)( acsiLun << 5 );   /* EVPD / reserved 0 */
+                cdb[2] = 0x00;                        /* page code         */
+                cdb[3] = 0x00;
+                cdb[4] = (uint8_t)( acsiCmd == 2 ? 36 : 0 );
+            }
+
+            cdb[5] = 0x00;              /* control */
+
+            /* CDB RETRY - what every real-world initiator does.  The
+             * target's command arming is a sub-microsecond polled
+             * window (its own CMD prints skip whole loops), and TOS
+             * masks exactly this by silently retrying commands.  Three
+             * attempts at ~real-world spacing; retries are COUNTED so
+             * the marginality stays visible instead of hidden. */
+            for ( cdb_attempt = 0; cdb_attempt < 3; cdb_attempt++ )
+            {
+                cmd_fail_byte = -1;
+
+                for ( int b = 0; b < 5; b++ )
+                {
+                    if ( !acsi_cmd_byte ( b ? 0x008A : 0x0088, cdb[b],
+                                          ACSI_ACK_TIMEOUT_MS ) )
+                    {
+                        cmd_fail_byte = b;
+                        break;
+                    }
+                }
+
+                if ( cmd_fail_byte < 0 )
+                    break;                       /* CDB accepted        */
+
+                n_cdb_retry++;
+                acsi_deselect ();
+                usleep ( 2000 );                 /* let the target re-arm */
+            }
+
+            if ( cmd_fail_byte < 0 )
+            {
+                /* final byte: write it, then wait for the transfer */
+                write16 ( ACSI_DMA_MODE, 0x008A );
+                write16 ( ACSI_DMA_DATA, (uint16_t)cdb[5] );
+
+                /* DATA-PHASE MODE - the EmuTOS trace decoded WITH its
+                 * time axis: the "$0000 ... $008A" pair has the ENTIRE
+                 * DMA TRANSFER between the two writes.  $0000 (bit7=0)
+                 * is the transfer mode - it is what routes the HDC's
+                 * DRQ into the DMA engine.  $008A comes only AFTERWARDS,
+                 * to address the status byte.  Replaying the pair
+                 * back-to-back (as this code did) left the DMA deaf to
+                 * the HDC for the whole data phase: DRQs ignored, BR
+                 * never asserted, address counter frozen, target wedged
+                 * in its no-timeout ACK spin.  Every data-phase symptom
+                 * ever logged by --acsitest, from one collapsed trace. */
+                write16 ( ACSI_DMA_MODE, 0x0000 );
+            }
+        }
+
+        if ( cmd_fail_byte >= 0 )
+        {
+            n_cmd_fail++;
+
+            if ( !acsiQuiet )
+                printf ( "%4d: device did not acknowledge CDB byte %d "
+                         "(gpip=$%02X) - target %d not responding?\n",
+                         loop, cmd_fail_byte, read8 ( ACSI_MFP_GPIP ),
+                         acsiDev );
+
+            if ( acsiCleanup )
+                acsi_deselect ();
+
+            if ( acsiResetFail )
+                acsi_bus_reset ( "CDB not acknowledged" );
+            else
+                usleep ( 1000 );
+
+            continue;
+        }
+
+        /* Wait for the device IRQ on MFP GPIP bit 5, active low.
+         *
+         * THE GAP IS NOT OPTIONAL. A tight read8() loop here is a solid
+         * second of back-to-back Pi bus cycles at exactly the moment the
+         * DMA controller needs idle slots to move data in - the poll would
+         * be preventing the event it is waiting for, then reporting a
+         * timeout. `pollus` puts the bus back down between samples; 100us
+         * is ~1000 polls/sec, plenty to catch a completion, and leaves the
+         * bus quiet the rest of the time.
+         *
+         * If it still never fires, `irq=no` skips the wait entirely and
+         * just delays `waitms` before reading back - which tells you
+         * whether the transfer works and only the IRQ path is broken. */
+        if ( acsiUseIrq )
+        {
+            timed_out = !acsi_wait_irq ( ACSI_IRQ_TIMEOUT_MS, acsiPollUs );
+            gpip      = read8 ( ACSI_MFP_GPIP );
+            (void)deadline;
+        }
+
+        else
+        {
+            usleep ( (useconds_t)acsiWaitMs * 1000u );
+            gpip = read8 ( ACSI_MFP_GPIP );
+        }
+
+        if ( acsiSettleUs )
+            usleep ( (useconds_t)acsiSettleUs );
+
+        /* Transfer over (or timed out): NOW address the status byte. */
+        write16 ( ACSI_DMA_MODE, 0x008A );
+
+        /* Read everything BEFORE anything else touches the bus. */
+        acsi_status = read16 ( ACSI_DMA_DATA ) & 0xFFu;
+        after       = acsi_read_base ();
+        dma_status  = read16 ( ACSI_DMA_MODE ) & 0x07u;
+        sr          = read_reg ();
+
+        delta = ( after >= acsiBase ) ? after - acsiBase : 0;
+        total_delta += delta;
+
+        for ( uint32_t i = 0; i < len; i++ )
+            if ( read8 ( acsiBase + i ) != poison )
+                changed++;
+
+        if ( delta == 0 )             n_nomove++;
+        else if ( delta >= xfer_len ) n_complete++;
+        else                          n_partial++;
+
+        if ( sr & ACSI_STATUS_BR_SEEN ) n_br++;
+        if ( timed_out )
+        {
+            n_timeout++;
+
+            /* A target left mid-data-phase stays there. Deselect, and pulse
+             * reset if asked, or every iteration after the first is testing
+             * a wedged device rather than the DMA. */
+            /* Count it and stop. Same reasoning as the pre-check above:
+             * no unsolicited bus accesses on the failure path. */
+            if ( acsiCleanup )
+            {
+                write16 ( ACSI_DMA_MODE, 0x0000 );
+                write16 ( ACSI_DMA_MODE, 0x008A );
+                (void)read16 ( ACSI_DMA_DATA );
+                acsi_deselect ();
+            }
+
+            /* A target left mid-data-phase stays there, and deselecting
+             * does not move it. Reset is the only thing that does. */
+            if ( acsiResetFail )
+                acsi_bus_reset ( "transfer timed out" );
+            else
+                usleep ( 2000 );
+        }
+        if ( g_buserr )                 n_buserr++;
+        if ( acsi_status == 0 )         n_status_ok++;
+        if ( changed )                  n_data_changed++;
+
+        if ( !acsiQuiet )
+        {
+            printf ( "%4d: delta=%-6u %-8s  acsi=$%02X dma=$%02X gpip=$%02X "
+                     "BR=%-3s changed=%u/%u%s%s\n",
+                     loop, delta,
+                     delta == 0 ? "NOMOVE" : ( delta >= xfer_len ? "complete"
+                                                                 : "PARTIAL" ),
+                     acsi_status, dma_status, gpip,
+                     ( sr & ACSI_STATUS_BR_SEEN ) ? "yes" : "no",
+                     changed, len,
+                     timed_out ? "  TIMEOUT" : "",
+                     g_buserr  ? "  BUSERR"  : "" );
+            fflush ( stdout );
+        }
+    }
+
+    printf ( "\n--- %d iterations ---\n", acsiLoops );
+    printf ( "complete      %6u  (%.1f%%)\n", n_complete,
+             100.0 * n_complete / (double)acsiLoops );
+    printf ( "partial       %6u  (%.1f%%)\n", n_partial,
+             100.0 * n_partial / (double)acsiLoops );
+    printf ( "no movement   %6u  (%.1f%%)\n", n_nomove,
+             100.0 * n_nomove / (double)acsiLoops );
+    printf ( "mean delta    %6.1f bytes of %u\n",
+             (double)total_delta / (double)acsiLoops, xfer_len );
+    printf ( "BR asserted   %6u\n", n_br );
+    printf ( "acsi status 0 %6u\n", n_status_ok );
+    printf ( "data changed  %6u\n", n_data_changed );
+    printf ( "irq timeout   %6u\n", n_timeout );
+    printf ( "bus error     %6u\n",   n_buserr );
+    printf ( "cmd not ack'd %6u  << device never acknowledged a CDB byte\n",
+             n_cmd_fail );
+    printf ( "cdb retries     %4u  (arming marginality, masked by retry - a real ST's TOS does the same)\n",
+             n_cdb_retry );
+    printf ( "irq stuck low %6u  << skipped, would have been a false pass\n\n",
+             n_stuck_irq );
+
+    if ( n_complete == 0 && n_partial == 0 )
+        printf ( "The DMA controller performed no bus cycles in any "
+                 "iteration.\n\n" );
+    else if ( n_complete == 0 )
+        printf ( "Every transfer started and none finished - a hold problem, "
+                 "not a grant problem.\n\n" );
+
+    fc = saved_fc;
+}
+
+
+/* =========================================================================
+ * --fdctest : does the WD1772 completion interrupt reach MFP GPIP5?
+ *
+ * EmuTOS's floppy driver issues a command and then waits for GPIP5 to go
+ * low. The boot trace shows it issue FORCE INTERRUPT, then RESTORE, read
+ * the status once - getting BUSY, which is correct microseconds after a
+ * command - and then never touch the floppy again. Two possibilities, and
+ * they need separating:
+ *
+ *   a) the interrupt never arrives, so the wait times out;
+ *   b) GPIP5 is ALREADY low when the wait starts, so it falls straight
+ *      through and the status is read while the command is still running.
+ *
+ * This drives the same registers with no TOS involved and reports the state
+ * of GPIP5 before the command, and how long it takes to assert after it.
+ *
+ * The WD1772 status register is Type I here (RESTORE is a Type I command):
+ *   b7 MOTOR ON   b6 WRITE PROTECT   b5 SPIN-UP   b4 SEEK ERROR
+ *   b3 CRC ERROR  b2 TRACK 00        b1 INDEX     b0 BUSY
+ * ========================================================================= */
+
+#define FDC_MODE_REG        0x00FF8606u
+#define FDC_DATA            0x00FF8604u
+#define FDC_MODE_CMD        0x0080u     /* A1=0 A0=0 -> command/status     */
+#define FDC_MODE_TRACK      0x0082u
+#define FDC_MODE_DATA       0x0086u
+
+#define PSG_SELECT          0x00FF8800u
+#define PSG_WRITE           0x00FF8802u
+
+#define FDC_CMD_FORCE_INT   0xD0u
+#define FDC_CMD_RESTORE     0x0Bu
+
+static void fdc_select ( int drive_b )
+{
+    uint8_t pa;
+
+    write8 ( PSG_SELECT, 14 );          /* port A */
+    pa = read8 ( PSG_SELECT );
+
+    pa |= 0x07u;                        /* deselect both, side 0          */
+    pa &= (uint8_t)~( drive_b ? 0x04u : 0x02u );   /* select one, active low */
+
+    write8 ( PSG_SELECT, 14 );
+    write8 ( PSG_WRITE, pa );
+}
+
+static uint8_t fdc_status ( void )
+{
+    write16 ( FDC_MODE_REG, FDC_MODE_CMD );
+    return (uint8_t)( read16 ( FDC_DATA ) & 0xFFu );
+}
+
+static void fdc_command ( uint8_t cmd )
+{
+    write16 ( FDC_MODE_REG, FDC_MODE_CMD );
+    write16 ( FDC_DATA, (uint16_t)cmd );
+}
+
+static void fdc_decode ( uint8_t st )
+{
+    printf ( "        status $%02X ="
+             " %s%s%s%s%s%s%s%s\n", st,
+             ( st & 0x80 ) ? "MOTOR "     : "",
+             ( st & 0x40 ) ? "PROTECT "   : "",
+             ( st & 0x20 ) ? "SPINUP "    : "",
+             ( st & 0x10 ) ? "SEEKERR "   : "",
+             ( st & 0x08 ) ? "CRCERR "    : "",
+             ( st & 0x04 ) ? "TRACK00 "   : "",
+             ( st & 0x02 ) ? "INDEX "     : "",
+             ( st & 0x01 ) ? "BUSY"       : "idle" );
+}
+
+void fdcTest ( void )
+{
+    uint8_t saved_fc = fc;
+    uint32_t n_already = 0, n_timeout = 0, n_ok = 0;
+
+    fc = 5;
+
+    printf ( "\nATARITEST WD1772 interrupt test\n" );
+    printf ( "drive %c, %d loops. GPIP5 (MFP $FFFA01 bit 5) is what EmuTOS\n"
+             "waits on for floppy command completion - active low.\n\n",
+             fdcDrive ? 'B' : 'A', fdcLoops );
+
+    for ( int loop = 0; loop < fdcLoops; loop++ )
+    {
+        uint8_t  before, st;
+        uint64_t t0, took = 0;
+        int      asserted = 0;
+
+        fdc_select ( fdcDrive );
+
+        /* Clear anything outstanding: force interrupt, then read status -
+         * reading the status register is what releases the WD1772's INTRQ. */
+        fdc_command ( FDC_CMD_FORCE_INT );
+        usleep ( 20000 );
+        (void)fdc_status ();
+        usleep ( 10000 );
+
+        before = read8 ( ACSI_MFP_GPIP );
+
+        if ( !( before & ACSI_GPIP_IRQ ) )
+        {
+            n_already++;
+            printf ( "%3d: GPIP5 ALREADY LOW before the command (gpip=$%02X)"
+                     "   << EmuTOS's wait would fall straight through\n",
+                     loop, before );
+            fdc_decode ( fdc_status () );
+            continue;
+        }
+
+        /* RESTORE: seek to track 0. Completes in a few ms at track 0, or up
+         * to ~250 steps x 30ms if the head is elsewhere. */
+        fdc_command ( FDC_CMD_RESTORE );
+
+        t0 = monotonic_ms ();
+
+        while ( monotonic_ms () - t0 < 3000 )
+        {
+            if ( !( read8 ( ACSI_MFP_GPIP ) & ACSI_GPIP_IRQ ) )
+            {
+                asserted = 1;
+                took = monotonic_ms () - t0;
+                break;
+            }
+
+            usleep ( 500 );
+        }
+
+        st = fdc_status ();
+
+        if ( asserted )
+        {
+            n_ok++;
+            printf ( "%3d: GPIP5 asserted after %llu ms\n",
+                     loop, (unsigned long long)took );
+        }
+
+        else
+        {
+            n_timeout++;
+            printf ( "%3d: GPIP5 NEVER asserted in 3s (gpip=$%02X)"
+                     "   << the FDC interrupt is not reaching the host\n",
+                     loop, read8 ( ACSI_MFP_GPIP ) );
+        }
+
+        fdc_decode ( st );
+        usleep ( 100000 );
+    }
+
+    printf ( "\n--- %d loops ---\n", fdcLoops );
+    printf ( "completed      %u\n", n_ok );
+    printf ( "never asserted %u\n", n_timeout );
+    printf ( "already low    %u\n", n_already );
+
+    if ( n_ok == fdcLoops )
+        printf ( "\nThe FDC and its interrupt path are fine. The fault is\n"
+                 "between GPIP5 and the guest, not in the hardware.\n\n" );
+    else if ( n_timeout )
+        printf ( "\nThe WD1772 is not signalling completion to the MFP.\n"
+                 "Nothing above this can work until that does.\n\n" );
+    else
+        printf ( "\nGPIP5 is being held low by something else - EmuTOS's\n"
+                 "wait returns immediately and it reads BUSY. That matches\n"
+                 "the boot trace exactly.\n\n" );
+
+    fc = saved_fc;
+}
+
+
+/* =========================================================================
+ * --p2diag : isolate the PSP2 write-misfire variable by variable.
+ *
+ * Bench evidence so far: ~0.25% of BYTE writes misfire during ataritest's
+ * priming (read tests then re-discover the same damaged addresses pass
+ * after pass), and some aligned WORD writes never land (memory still holds
+ * the previous pattern).  Whether the trigger is data value, address
+ * change, back-to-back pacing, or byte-vs-word is EXACTLY what this
+ * separates.  Each experiment changes ONE thing.  50k ops each, immediate
+ * read-back verify, first 5 mismatches printed with full context.
+ * ========================================================================= */
+#define P2D_OPS 50000
+
+#include <sched.h>
+#include <sys/mman.h>
+#include <time.h>
+
+extern uint32_t p2_go_misses;      /* PSP2 driver retry counter */
+extern uint32_t p2_dbg_counters(void); /* FW 0x27: {fight,wr[6:0],rd[7:0]} */
+
+static uint64_t p2d_us(void)
+{
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + ts.tv_nsec / 1000;
+}
+
+static uint32_t p2d_run(const char *name, int exp_no)
+{
+    uint32_t errs = 0, shown = 0;
+    uint32_t a1 = 0x001000, a2 = 0x042000;
+    uint32_t d0 = p2_dbg_counters();
+
+    for (uint32_t i = 0; i < P2D_OPS; i++)
+    {
+        uint32_t addr, got, exp;
+
+        switch (exp_no)
+        {
+            case 0:                      /* same addr, same data      */
+                addr = a1; exp = 0xA55A;
+                write16(addr, (uint16_t)exp);  got = read16(addr); break;
+            case 1:                      /* same addr, walking data   */
+                addr = a1; exp = i & 0xFFFF;
+                write16(addr, (uint16_t)exp);  got = read16(addr); break;
+            case 2:                      /* alternating addr, walking data
+                                            (was data=addr, which made a
+                                            stale-address write INVISIBLE -
+                                            the old value equalled the
+                                            expected one; blind experiment) */
+                addr = (i & 1) ? a2 : a1; exp = (addr ^ i) & 0xFFFF;
+                write16(addr, (uint16_t)exp);  got = read16(addr); break;
+            case 3:                      /* sequential sweep, like WRITE16 */
+                addr = 0x001000 + ((i * 2) & 0xFFFF); exp = addr & 0xFFFF;
+                write16(addr, (uint16_t)exp);  got = read16(addr); break;
+            case 4:                      /* byte even                 */
+                addr = 0x001000 + ((i * 2) & 0xFFFF); exp = i & 0xFF;
+                write8(addr, (uint16_t)exp);   got = read8(addr);  break;
+            default:                     /* byte odd                  */
+                addr = 0x001001 + ((i * 2) & 0xFFFF); exp = i & 0xFF;
+                write8(addr, (uint16_t)exp);   got = read8(addr);  break;
+        }
+
+        if (got != exp)
+        {
+            static uint64_t last_err_us;
+            uint64_t now = p2d_us();
+            errs++;
+            if (shown < 5)
+            {
+                uint32_t r2 = (exp_no >= 4) ? read8(addr) : read16(addr);
+                uint32_t r3 = (exp_no >= 4) ? read8(addr) : read16(addr);
+                shown++;
+                printf("  %-22s op %6u  $%06X  wrote %04X  read %04X"
+                       "  re-read %04X/%04X  +%llums\n",
+                       name, i, addr, exp, got, r2, r3,
+                       (unsigned long long)((now - last_err_us) / 1000));
+            }
+            last_err_us = now;
+        }
+    }
+
+    {
+        /* reconcile EXECUTED cycles (firmware counters) with ISSUED ops.
+         * cnt_wr is 7 bits, cnt_rd 8; the CSR reads themselves are not
+         * counted (separate engine path).  Reads issued = ops + 2 per
+         * printed error (the re-read pair). */
+        uint32_t d1 = p2_dbg_counters();
+        unsigned wr_got = ((d1 >> 8) - (d0 >> 8)) & 0x7F;
+        unsigned wr_exp = P2D_OPS & 0x7F;
+        unsigned rd_got = (d1 - d0) & 0xFF;
+        unsigned rd_exp = (P2D_OPS + 2 * shown) & 0xFF;
+        printf("%-26s %6u / %u errors  (%.3f%%)  timeouts: %u\n"
+               "    fw executed: wr %%128 = %u (expect %u)%s   "
+               "rd %%256 = %u (expect %u)%s   fight=%s\n",
+               name, errs, (unsigned)P2D_OPS, 100.0 * errs / P2D_OPS,
+               p2_go_misses,
+               wr_got, wr_exp, wr_got == wr_exp ? "" : "  <<< SHORT",
+               rd_got, rd_exp, rd_got == rd_exp ? "" : "  <<< OFF",
+               (d1 & 0x8000) ? "YES <<< BUS FIGHT" : "no");
+    }
+    return errs;
+}
+
+void p2diag(void)
+{
+    uint8_t saved_fc = fc;
+    fc = 5;
+
+    printf("\nPSP2 write-path diagnostic - one variable per experiment\n\n");
+
+    /* THE PREEMPTION TEST.  Bench evidence: writes vanish in ADJACENT-OP
+     * PAIRS every few milliseconds - the cadence of the 250Hz scheduler
+     * tick, not of any electrical process.  Lock memory and go SCHED_FIFO:
+     * if the error table goes clean under RT priority, the fault is a
+     * preemption window in the transaction, located in software in one
+     * run.  If errors persist identically, preemption is eliminated. */
+    {
+        struct sched_param sp = { .sched_priority = 90 };
+        mlockall(MCL_CURRENT | MCL_FUTURE);
+        if (sched_setscheduler(0, SCHED_FIFO, &sp) == 0)
+            printf("running at SCHED_FIFO 90 (preemption suppressed)\n\n");
+        else
+            printf("SCHED_FIFO unavailable (%s) - running normally\n\n",
+                   "need root");
+    }
+    p2d_run("A same-addr same-data",    0);
+    p2d_run("B same-addr walking-data", 1);
+    p2d_run("C alternating-addr",       2);
+    p2d_run("D sequential sweep",       3);
+    p2d_run("E byte even",              4);
+    p2d_run("F byte odd",               5);
+    printf("\nReading the table: errors only in D = address-phase pacing;"
+           "\nonly in B = data-dependent; A clean + others dirty = change-"
+           "\ntriggered; E/F only = byte-path; everything dirty = per-"
+           "\ntransaction (strobe/GO).  A clean table = writes are fine and"
+           "\nthe fault is in sustained-rate patterns only.\n\n");
+
+    fc = saved_fc;
 }

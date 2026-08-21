@@ -307,9 +307,23 @@ extern "C" void mfp_note_write(uint32_t addr, uint32_t value, bool word)
 
 }
 
+extern "C" void dma_snoop_mfp_eoi(uint32_t value);
+
 extern "C" void mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word)
 {
   mfp_note_write(addr, value, word);
+
+  /* ISRB ($FFFA11) with bit 7 clear = software end-of-interrupt for MFP
+   * channel 7 = GPIP5 = FDC/HDC. For an interrupt-driven disk loader this
+   * is the only externally visible completion signal for its LAST sector -
+   * dma_snoop uses it to sync the final DMA window into the mirror. Byte
+   * writes land on $FFFA11; a word write at $FFFA10 carries ISRB in its
+   * low byte. */
+  {
+    uint32_t folded = addr & 0x00FFFFFFu;
+    if (folded == 0x00FFFA11u || (word && folded == 0x00FFFA10u))
+      dma_snoop_mfp_eoi(value & 0xFFu);
+  }
 }
 
 #if MYWTC
@@ -579,13 +593,12 @@ static void *ipl_task(void *)
     status = *ioread;
     if (ps_bus_active)
       continue;                       /* transaction raced the sample */
-    if (status & 0x01)
-    {
-      // A very short sleep here is fine as it's just waiting for a hardware cycle finish
-      asm volatile("yield" ::: "memory");
-      wait_ns (250);
-      continue;
-    }
+    /* PSP2 (fw >= 0x23): GPIO0 is a completion TOGGLE, not a busy level -
+     * it parks high after ~half of all transactions.  The old level test
+     * here then spun forever without ever sampling IPL again: no VBL, no
+     * Timer C, EmuTOS frozen at the version line.  Under PSP2 the IPL
+     * pins (GPIO5/6) are dedicated and valid at ALL times - sampling
+     * needs no busy gate at all. */
 
     /*
      * gpio 5 & 6 = ipl 1 & 2
