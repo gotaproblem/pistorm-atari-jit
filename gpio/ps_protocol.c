@@ -411,11 +411,40 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
   *set = REG_DATA;
   *set = PIN_RD;
 
-  /* same fold as the write core: the completing GPLEV sample IS the
-   * data+status word */
   do {
     status = *lev;
   } while (status & PI_TXN_IN_PROGRESS);
+
+  /* RE-SAMPLE AFTER THE HANDSHAKE - the zero-margin contract was a fault.
+   *
+   * Commit bd98cce ("the completing GPLEV sample IS the status - drop the
+   * re-read") made the data come from the SAME sample that first observes
+   * TXN_IN_PROGRESS low. That demands data be valid at the Pi's pads on
+   * the very instant TXN falls - but TXN (GPIO0, CPLD) and data (GPIO8-23,
+   * '374s) arrive via different drivers, flight paths and pads. It is a
+   * nanosecond race, decided by temperature and Vdd, differently per boot.
+   *
+   * Measured (2026-08-17, dma_snoop vrfy instrument): 28-69 of 512 bytes
+   * differing between two reads of UNCHANGING RAM on bad boots, zero on
+   * good ones; whole sectors returning byte-swapped echoes of the Pi's
+   * own address phases. A real 68000 never sees this because it samples
+   * on a clock edge with datasheet setup; this loop sampled on a race.
+   *
+   * Each extra GPLEV read adds ~50-100ns of settle after the TXN edge.
+   * Sweep result: 1 was not enough, 4 is clean. PISTORM_RD_SETTLE tunes. */
+  {
+    static int rd_settle = -1;
+
+    if (__builtin_expect(rd_settle < 0, 0)) {
+      const char *e = getenv("PISTORM_RD_SETTLE");
+      rd_settle = e ? atoi(e) : 4;
+      if (rd_settle < 0) rd_settle = 0;
+      if (rd_settle > 8) rd_settle = 8;
+    }
+
+    for (int i = 0; i < rd_settle; i++)
+      status = *lev;
+  }
 
   *clr = TXN_END;
   ps_io->berr = CHECK_BERR (status);
