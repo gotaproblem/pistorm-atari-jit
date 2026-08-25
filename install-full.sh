@@ -268,10 +268,10 @@ copy_once "$HERE/configs/capmux.sh"         "$HERE/capmux.sh"
 chmod +x "$HERE/capmux.sh" 2>/dev/null || true
 
 # ---- GEM programs ---------------------------------------------------------
-# The host-side NatFeats (MP3PLAY, VIDPLAY) are useless without something on
-# the Atari to drive them, and atari-share is the one directory the guest can
-# actually reach: it is what a HOSTFS drive points at. Anywhere else and you
-# are back to writing them onto a floppy image to get them across.
+# The host-side NatFeats (MP3PLAY, VIDPLAY, STBOX) are useless without
+# something on the Atari to drive them, and atari-share is the one directory
+# the guest can actually reach: it is what a HOSTFS drive points at. Anywhere
+# else and you are back to writing them onto a floppy image to get them across.
 if [ -d "$HERE/configs/gem-binaries" ]; then
   say "Installing GEM programs into $ROOT/atari-share"
   for prg in "$HERE"/configs/gem-binaries/*.PRG "$HERE"/configs/gem-binaries/*.TTP; do
@@ -283,6 +283,16 @@ if [ -d "$HERE/configs/gem-binaries" ]; then
 else
   warn "no configs/gem-binaries — GEM programs not installed"
 fi
+
+# ---- STBOX (sandboxed ST in a GEM window) ---------------------------------
+# STBOX.PRG went to atari-share with the other GEM programs above. It also
+# needs: a TOS ROM for the sandbox machine (PISTORM_STBOX_TOS, set in the
+# systemd unit below - we can't ship real TOS, so the user drops one in), and
+# somewhere for game disk images that HOSTFS can reach, because the in-box
+# file selector browses the HOSTFS drives - an image outside atari-share is
+# invisible to it.
+say "Creating STBOX game-image directory $ROOT/atari-share/games"
+mkdir -p "$ROOT/atari-share/games"
 
 if [ -f "$HERE/configs/pistormbg.jpg" ]; then
   say "Installing desktop wallpaper into $ROOT/atari-share/bg"
@@ -388,6 +398,10 @@ Conflicts=getty@tty1.service
 Type=simple
 User=root
 WorkingDirectory=$HERE
+# STBOX: the TOS ROM the sandboxed ST boots (drop a TOS 1.04/2.06 or a
+# 192/256K EmuTOS image at this path - the Aranym EmuTOS in roms/ is for
+# the MAIN machine and will not work in the box)
+Environment=PISTORM_STBOX_TOS=$ROOT/roms/stbox-tos.rom
 ExecStart=$HERE/emulator --config ../configs/$CFG
 Restart=on-failure
 RestartSec=2
@@ -446,6 +460,14 @@ fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
 echo "  GEM programs : $ROOT/atari-share/   (point a HOSTFS drive here)"
+echo
+echo "  STBOX (ST games in a GEM window):"
+echo "      TOS for the box -> $ROOT/roms/stbox-tos.rom"
+echo "        (TOS 1.04/2.06 or 192/256K EmuTOS; the bundled Aranym EmuTOS"
+echo "         is for the main machine and will NOT boot the box)"
+echo "      game images (.st/.msa) -> $ROOT/atari-share/games/"
+echo "      then run STBOX.PRG from the HOSTFS drive and pick a game."
+echo "      Running without the service? export PISTORM_STBOX_TOS yourself."
 echo
 echo "  Media on another PC or NAS? cifs-utils is installed. Mount the share"
 echo "  as a subdirectory of atari-share and it appears on the HOSTFS drive:"
