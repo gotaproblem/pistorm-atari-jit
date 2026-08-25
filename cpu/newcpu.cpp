@@ -90,6 +90,7 @@ static unsigned pistorm_pc_ring_i;
 #endif
 #include "devices.h"
 #include "platforms/atari/psctrl/psctrl.h"
+extern "C" void stbox_errand_pump(void);   /* real-FDC bus errands (STBOX) */
 
 extern void warpmode(int mode);
 
@@ -7856,6 +7857,12 @@ static void m68k_run_jit(void)
 					if (regs.stopped)
 					{
 						psctrl_ctr_stop_iters++;	/* PSCTRL statistics */
+						/* The STOPPED loop never reaches the post-dispatch
+						 * spcflags site below, and an idle guest lives HERE.
+						 * Field failure: box TOS waits on the FDC, pump never
+						 * runs, input stays captured - everything "locks up".
+						 * The pump is a single load when idle. */
+						stbox_errand_pump();
 						do_cycles_stop(4);
 						const uae_u8 pending_irq = g_irq;
 						if (pending_irq > regs.intmask)
@@ -7946,6 +7953,10 @@ static void m68k_run_jit(void)
 #if defined(JIT_HAS_BUS_ERROR_RECOVERY)
 						jit_in_compiled_code = false;
 #endif
+						/* Outside compiled code: the one safe place for
+						 * host-driven bus traffic. No-op unless the STBOX
+						 * real-FDC bridge has an errand posted. */
+						stbox_errand_pump();
 						if (do_specialties(0))
 						{
 							STOPTRY;

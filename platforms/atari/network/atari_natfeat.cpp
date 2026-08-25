@@ -98,7 +98,36 @@ enum nf_feature_index {
   NF_FEATURE_VIDEO,
   NF_FEATURE_PSCTRL,
   NF_FEATURE_PSIMG,
+  NF_FEATURE_STBOX,
   NF_FEATURE_COUNT
+};
+
+/* STBOX subids: the sandboxed Musashi ST (platforms/atari/stbox/).
+ * All handlers below are NatFeat-invariant safe: plain function calls into
+ * stbox_host.c setters / lock-free input pushes, no 68k control flow. The
+ * heavyweight ones (START does file I/O + DRM setup, STOP joins a thread)
+ * stall the guest for their duration, same trade VIDPLAY.PLAY accepted. */
+enum nf_stbox_ops {
+  NF_STBOX_START = 0,  /* p0 = ptr TOS path (GEMDOS or /host), p1 = ram_kb,
+                          p2 = flags (bit0 = STE) -> 0 ok                  */
+  NF_STBOX_STOP,       /* park the box, release the plane                  */
+  NF_STBOX_RESET,      /* guest cold reset                                 */
+  NF_STBOX_STATUS,     /* -> 1 running, 0 stopped                          */
+  NF_STBOX_RECT,       /* p0..p3 = x y w h, display pixels                 */
+  NF_STBOX_CLIP,       /* p0..p3 = x y w h visible part (w<0 = no clip)    */
+  NF_STBOX_FOCUS,      /* p0 = 1 window topped / 0 lost focus              */
+  NF_STBOX_STATS,      /* p0 = ptr to 4 longwords: cps, frames, overruns,
+                          running                                          */
+  NF_STBOX_KEY,        /* p0 = ST scancode, p1 = 1 down / 0 up             */
+  NF_STBOX_MOUSE,      /* p0 = dx (s32), p1 = dy (s32), p2 = buttons       */
+  NF_STBOX_JOY,        /* p0 = joy 0/1, p1 = ST joystick state byte        */
+  NF_STBOX_DISKA,      /* p0 = ptr to .ST/.MSA path (GEMDOS or /host);
+                          insert as drive A. Follow with RESET to boot it. */
+  NF_STBOX_DMABUF,     /* p0 = guest ST-RAM phys addr (Mxalloc'd by the
+                          front-end), p1 = length. Donated DMA buffer for
+                          the real-FDC bridge; 0,0 withdraws it.          */
+  NF_STBOX_REALFDC     /* p0 = 1: drive A is the REAL WD1772/Gotek,
+                          0: back to image mode. Needs a DMABUF first.   */
 };
 
 /* MP3PLAY subids (NF_SUBID of the id) */
@@ -226,7 +255,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "MP3PLAY",
   "VIDPLAY",
   "PSCTRL",
-  "PSIMG"
+  "PSIMG",
+  "STBOX"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -4798,6 +4828,132 @@ static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
   return (uae_u32)-1;
 }
 
+#include "../stbox/stbox.h"
+
+/* fsel under MiNT often returns paths on the U: unified drive
+ * ("U:\S\GAMES\FOO.ST"); the HOSTFS mapper only knows lettered
+ * drives. Rewrite U:\x\rest to x:\rest before mapping, and say so
+ * on the console when mapping still fails - a silent -1 here cost an
+ * afternoon behind an invisible alert. */
+static bool stbox_map_path(const char *gem_in, char *host, size_t hostsz)
+{
+  char gem[512];
+  snprintf(gem, sizeof gem, "%s", gem_in);
+  if ((gem[0] == 'u' || gem[0] == 'U') && gem[1] == ':' &&
+      (gem[2] == '\\' || gem[2] == '/')) {
+    char d = gem[3];
+    if (((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z')) &&
+        (gem[4] == '\\' || gem[4] == '/')) {
+      char tmp[512];
+      snprintf(tmp, sizeof tmp, "%c:%s", d, gem + 4);
+      snprintf(gem, sizeof gem, "%s", tmp);
+    }
+  }
+  if (mp3_gemdos_to_host(gem, host, hostsz))
+    return true;
+  if (gem[0] == '/') {
+    snprintf(host, hostsz, "%s", gem);
+    return true;
+  }
+  fprintf(stderr, "[NF] STBOX: cannot map guest path '%s' to a host path "
+          "(need a HOSTFS drive letter or /host/path)\n", gem_in);
+  return false;
+}
+
+static uae_u32 nf_call_stbox(uae_u32 subid, uaecptr params)
+{
+  switch (subid) {
+    case NF_STBOX_START: {
+      uaecptr pathp = nf_get_param(params, 0);
+      char gem[512], host[HOSTFS_HOST_PATH_MAX + 16];
+      stbox_cfg_t cfg;
+      memset(&cfg, 0, sizeof cfg);
+      cfg.ram_kb = nf_get_param(params, 1);
+      cfg.machine_ste = nf_get_param(params, 2) & 1;
+      if (pathp) {
+        nf_read_string(pathp, gem, sizeof(gem));
+        if (gem[0] && stbox_map_path(gem, host, sizeof(host)))
+          snprintf(cfg.tos_path, sizeof cfg.tos_path, "%s", host);
+        /* else: empty - stbox_start falls back to PISTORM_STBOX_TOS */
+      }
+      int rc = stbox_start(&cfg);
+      fprintf(stderr, "[NF] STBOX.START '%s' ram=%uK -> %d\n",
+              cfg.tos_path[0] ? cfg.tos_path : "(env)", cfg.ram_kb, rc);
+      return rc == 0 ? 0u : (uae_u32)-1;
+    }
+    case NF_STBOX_STOP:   stbox_stop();  return 0;
+    case NF_STBOX_RESET:  stbox_reset(); return 0;
+    case NF_STBOX_STATUS: return (uae_u32)stbox_running();
+    case NF_STBOX_RECT:
+      stbox_set_rect((int)(int32_t)nf_get_param(params, 0),
+                     (int)(int32_t)nf_get_param(params, 1),
+                     (int)(int32_t)nf_get_param(params, 2),
+                     (int)(int32_t)nf_get_param(params, 3));
+      return 0;
+    case NF_STBOX_CLIP:
+      stbox_set_clip((int)(int32_t)nf_get_param(params, 0),
+                     (int)(int32_t)nf_get_param(params, 1),
+                     (int)(int32_t)nf_get_param(params, 2),
+                     (int)(int32_t)nf_get_param(params, 3));
+      return 0;
+    case NF_STBOX_FOCUS:
+      stbox_set_focus((int)nf_get_param(params, 0));
+      return 0;
+    case NF_STBOX_STATS: {
+      uaecptr buf = nf_get_param(params, 0);
+      if (!buf) return (uae_u32)-1;
+      uint32_t st[4];
+      stbox_get_stats(st);
+      uae_u8 be[16];
+      for (int i = 0; i < 4; i++) {
+        be[i * 4 + 0] = (uae_u8)(st[i] >> 24);
+        be[i * 4 + 1] = (uae_u8)(st[i] >> 16);
+        be[i * 4 + 2] = (uae_u8)(st[i] >> 8);
+        be[i * 4 + 3] = (uae_u8)(st[i]);
+      }
+      nf_write_buffer(buf, be, 16);
+      return 0;
+    }
+    case NF_STBOX_KEY:
+      stbox_key_event((uint8_t)nf_get_param(params, 0),
+                      (int)nf_get_param(params, 1));
+      return 0;
+    case NF_STBOX_MOUSE:
+      stbox_mouse_rel((int)(int32_t)nf_get_param(params, 0),
+                      (int)(int32_t)nf_get_param(params, 1),
+                      (int)nf_get_param(params, 2));
+      return 0;
+    case NF_STBOX_JOY:
+      stbox_joy_event((int)nf_get_param(params, 0),
+                      (uint8_t)nf_get_param(params, 1));
+      return 0;
+    case NF_STBOX_DMABUF:
+      stbox_rfdc_set_buffer(nf_get_param(params, 0), nf_get_param(params, 1));
+      return 0;
+    case NF_STBOX_REALFDC:
+      stbox_rfdc_enable((int)nf_get_param(params, 0));
+      fprintf(stderr, "[NF] STBOX.REALFDC %u (dmabuf ok: %s)\n",
+              nf_get_param(params, 0), stbox_rfdc.enabled ? "yes" : "NO");
+      return stbox_rfdc.enabled == (int)(nf_get_param(params, 0) != 0)
+             ? 0u : (uae_u32)-1;
+    case NF_STBOX_DISKA: {
+      uaecptr pathp = nf_get_param(params, 0);
+      char gem[512], host[HOSTFS_HOST_PATH_MAX + 16];
+      if (!pathp) {
+        fprintf(stderr, "[NF] STBOX.DISKA: null path pointer\n");
+        return (uae_u32)-1;
+      }
+      nf_read_string(pathp, gem, sizeof(gem));
+      fprintf(stderr, "[NF] STBOX.DISKA '%s'\n", gem);
+      if (!stbox_map_path(gem, host, sizeof(host)))
+        return (uae_u32)-1;
+      fprintf(stderr, "[NF] STBOX.DISKA -> host '%s'\n", host);
+      return stbox_disk_insert_path(host) == 0 ? 0u : (uae_u32)-1;
+    }
+  }
+  return (uae_u32)-1;
+}
+
 static uae_u32 nf_call_video(uae_u32 subid, uaecptr params)
 {
   switch (subid) {
@@ -4993,6 +5149,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_psctrl(subid, params);
     case NF_FEATURE_PSIMG:
       return nf_call_psimg(subid, params);
+    case NF_FEATURE_STBOX:
+      return nf_call_stbox(subid, params);
   }
 
   return 0;

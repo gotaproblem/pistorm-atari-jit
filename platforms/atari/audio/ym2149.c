@@ -132,6 +132,12 @@ void ym2149_snoop32(uint32_t addr, uint32_t val)
     ym2149_snoop8(addr + 2, (uint8_t)(val >> 8));
 }
 
+/* The guest's current PSG select latch, tracked by the snoop above. The
+ * real-FDC errand pump (stbox_realfdc.c) restores it after temporarily
+ * selecting reg 14 for drive/side control - both run on the CPU thread,
+ * so this value is exact at any block boundary. */
+uint8_t ym2149_selected_reg(void) { return g_latch; }
+
 /* ---- render (SDL audio thread) ----------------------------------------- */
 
 static void SDLCALL ym_feed_cb(void *ud, SDL_AudioStream *stream,

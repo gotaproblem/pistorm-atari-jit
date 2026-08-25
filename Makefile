@@ -47,6 +47,25 @@ CFILES = config_file/config_file.c \
          platforms/atari/kbd_usb.c
 
 # -----------------------------------------------------------------
+# Musashi 68000 core for the STBOX game sandbox (third_party/musashi).
+# Three TUs + its own softfloat; m68kfpu.c is #included by m68kcpu.c,
+# NOT a separate TU. Its softfloat is C so it cannot collide with the
+# C++-mangled UAE softfloat. m68kops.c/h are pre-generated - see
+# third_party/musashi/VENDOR-NOTES.
+# -----------------------------------------------------------------
+MUSASHI_C = third_party/musashi/m68kcpu.c \
+            third_party/musashi/m68kops.c \
+            third_party/musashi/m68kdasm.c \
+            third_party/musashi/softfloat/softfloat.c
+CFILES += $(MUSASHI_C)
+
+# STBOX - the sandboxed ST that Musashi drives (game sandbox in a GEM window)
+CFILES += platforms/atari/stbox/stbox.c \
+          platforms/atari/stbox/stbox_host.c \
+          platforms/atari/stbox/stbox_psg.c \
+          platforms/atari/stbox/stbox_realfdc.c
+
+# -----------------------------------------------------------------
 # C++ source.
 #  - emulator.c is compiled as C++ (the JIT/UAE headers require it)
 #  - jit/compemu_support.cpp #includes codegen_arm64.cpp,
@@ -364,6 +383,10 @@ platforms/atari/audio/ym2149.o: platforms/atari/audio/ym2149.c
 # Host video player: SDL3 (audio stream on the shared device) + FFmpeg libs.
 platforms/atari/video/vidplay.o: platforms/atari/video/vidplay.c
 	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) $(AV_CFLAGS) -MMD -MP -c -o $@ $<
+
+# The sandbox PSG binds a stream to the same SDL3 device as ym2149.c.
+platforms/atari/stbox/stbox_psg.o: platforms/atari/stbox/stbox_psg.c
+	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
 
 # The video overlay plane only needs libdrm (already on the include path).
 platforms/atari/video/vidplane.o: platforms/atari/video/vidplane.c
