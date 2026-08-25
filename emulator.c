@@ -25,6 +25,7 @@
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
 #include "platforms/atari/machine_cookie.h"
+#include "platforms/atari/stbox/stbox.h"
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
 #include "sysdeps.h"
@@ -560,6 +561,20 @@ static void *ipl_task(void *)
       static unsigned mch_stride;
       if (!(++mch_stride & 0x7FFFu))
         machine_cookie_tick();
+    }
+
+    /* STBOX sandbox micro-slice: the second, Musashi-emulated ST. Admission
+     * rule compliant by construction - stbox_slice() is memory-only (the
+     * whole sandbox machine lives in process memory; file I/O, DRM and
+     * input feeding happen in stbox_host.c on the normal cores) and runs
+     * at most one 64-guest-cycle burst per call (~200-400 ns host), only
+     * when the 8 MHz pace owes one. stbox_core_armed() is a plain load,
+     * false whenever no box is running. */
+    if (stbox_core_armed())
+    {
+      uint64_t sb_now;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(sb_now));
+      stbox_slice(sb_now);
     }
 
     /* Read IPL lines only when no thread owns the bus: while ps_bus_active

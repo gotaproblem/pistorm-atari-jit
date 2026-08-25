@@ -855,6 +855,21 @@ static void real_byte_consumed(uint8_t rs)
 
 /* Swallow a pending real byte. Reading RDR also clears the ACIA's IRQ
  * output, which is what stops the real MFP GPIP4 interrupt storm. */
+/* --- STBOX input routing -------------------------------------------------
+ * While the sandbox's GEM window is focused, USB input goes to the sandbox
+ * IKBD instead of the main machine - that is what gives games real key-up
+ * events and a mouse (GEM's fallback path in STBOX.PRG has neither). F11
+ * toggles the routing while focused, because with the mouse captured by the
+ * box there is no other way to click outside its window. F12 keeps its
+ * existing main-machine grab meaning. */
+#include "stbox/stbox.h"
+static int stbox_route_enabled = 1;
+
+static int stbox_wants_input(void)
+{
+    return stbox_route_enabled && stbox_running() && stbox_get_focus();
+}
+
 static void real_drain(uint8_t rs)
 {
     if (!(rs & (ACIA_RDRF | ACIA_ERRS)))
@@ -871,6 +886,21 @@ uint8_t kbd_usb_acia_status_shim(uint8_t real)
 {
     atomic_store_explicit(&real_last_status, real, memory_order_relaxed);
     real_observe_status(real);
+
+    /* Sandbox focused: the real IKBD's output belongs to the box. Capture
+     * the byte here (every real byte raises GPIP4, so the guest polls this
+     * status at least once per byte - the capture keeps the 1-byte ACIA
+     * from overrunning) and hide the real receiver from the main guest.
+     * Raw bytes: the box's TOS does its own mouse handling, so the main
+     * screen's threshold/scale tuning must not touch them. */
+    if (stbox_wants_input() && (real & ACIA_RDRF))
+    {
+        uint8_t v = ps_read_8(KBD_ACIA_DATA_ADDR);
+        real_byte_consumed(real);
+        kbd_usb_note_real_rx();
+        stbox_ikbd_byte(v);
+        real &= (uint8_t)~(ACIA_RDRF | ACIA_ERRS | ACIA_IRQ);
+    }
 
     if (quarantined())
     {
@@ -922,6 +952,13 @@ uint8_t kbd_usb_acia_data_shim(void)
         atomic_fetch_add(&real_rx_passed, 1);
         real_byte_consumed(rs);
         kbd_usb_note_real_rx();
+        if (stbox_wants_input())
+        {
+            stbox_ikbd_byte(v);          /* raw, for the sandbox */
+            if (kbd_usb_rx_ready())
+                return kbd_usb_rx_read();
+            return 0xFF;                 /* idle line for the main guest */
+        }
         return mouse_scale_byte(v);     /* native mouse only */
     }
     if (kbd_usb_rx_ready())
@@ -1186,6 +1223,26 @@ static void grab_set(int on)
 
 static void send_key(uint8_t scan, int pressed)
 {
+    /* ESC toggles the capture. F11 was the first choice but ST keyboards
+     * have no F11 - the USB scancode table maps it to nothing, so the
+     * event died before reaching this function. ESC (ST scancode $01)
+     * always arrives. The cost: while captured, ESC itself never reaches
+     * the game - release and re-top the window if a game needs it. */
+    if (scan == 0x01 /* ESC */ && stbox_running() && stbox_get_focus())
+    {
+        if (pressed)
+        {
+            stbox_route_enabled = !stbox_route_enabled;
+            fprintf(stderr, "[STBOX] input routing %s\n",
+                    stbox_route_enabled ? "ON (ESC releases)" : "OFF");
+        }
+        return;
+    }
+    if (stbox_wants_input())
+    {
+        stbox_key_event(scan, pressed);
+        return;
+    }
     pthread_mutex_lock(&ikbd.lock);
     int ok = !ikbd.paused;
     pthread_mutex_unlock(&ikbd.lock);
@@ -1197,6 +1254,23 @@ static void send_key(uint8_t scan, int pressed)
 
 static void mouse_flush(void)
 {
+    if (stbox_wants_input())
+    {
+        /* forward accumulated motion and button changes, then clear the
+         * accumulators so nothing leaks to the main machine when focus
+         * returns. Idle flushes send nothing - each ring entry becomes an
+         * IKBD F8 packet and the box's 7812.5 baud serial pace is easy to
+         * flood. */
+        static uint8_t stbox_last_buttons;
+        if (in_state.dx || in_state.dy ||
+            in_state.buttons != stbox_last_buttons)
+        {
+            stbox_mouse_rel(in_state.dx, in_state.dy, in_state.buttons);
+            stbox_last_buttons = (uint8_t)in_state.buttons;
+            in_state.dx = in_state.dy = 0;
+        }
+        return;
+    }
     pthread_mutex_lock(&ikbd.lock);
     int mode   = ikbd.mouse_mode;
     int y0top  = ikbd.y0_top;

@@ -1,0 +1,7 @@
+kstenerud/Musashi 4.10 @ 313ebf1bd9f4d0d93341eb5ce21fd8a119e9dbdd
+m68kops.c/h pre-generated (gcc m68kmake.c -o m68kmake && ./m68kmake . m68k_in.c).
+Regenerate only if m68k_in.c changes. Config lives in the stbox platform code,
+not here - m68kconf.h is upstream-default and edited in place (INT_ACK, ADDRESS_ERROR, PREFETCH -> ON for ST accuracy).
+m68kops.c: local fix - m68k_op_move16_32 guarded with CPU_TYPE_IS_040_PLUS
+(upstream installs it for all CPU types unguarded; breaks TOS line-F on 68000).
+m68kconf.h: 010-040 generations compiled out - the STBOX is a plain 68000.

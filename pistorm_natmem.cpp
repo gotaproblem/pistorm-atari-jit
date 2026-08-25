@@ -764,6 +764,15 @@ static inline void pistorm_bank_profile_init(void) {}
  * And in jit_mem_init(), once:  pistorm_bank_profile_init();
  * ---------------------------------------------------------------------- */
 
+/* Guest-COHERENT word access for host modules (STBOX real-FDC pump).
+ * ST-RAM reads are served Pi-side with write-through, so a raw ps_write
+ * changes the real chips but not what the guest reads - a mutual-
+ * exclusion variable written that way is invisible to the guest. These
+ * go through the banked accessors: Pi-side copy AND write-through. CPU
+ * thread only. */
+extern "C" uint16_t pistorm_guest_get_word(uint32_t a) { return get_word(a); }
+extern "C" void pistorm_guest_put_word(uint32_t a, uint16_t v) { put_word(a, v); }
+
 /* FC: drive the bus function-code from supervisor bit + access space */
 static inline void fc_data(void) { fc = regs.s ? 0x5 : 0x1; } // 5 = supervisor data, 1 = user data
 static inline void fc_prog(void) { fc = regs.s ? 0x6 : 0x2; } // 6 = supervisor program, 2 = user program
