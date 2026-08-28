@@ -459,11 +459,18 @@ static inline void stram_memcfg_snoop(uaecptr a, uae_u32 v, int size)
     else if (size == 2 && a == 0x00FF8000u) { mc = (uae_u8)v;         hit = 1; }
     else if (size == 4 && a == 0x00FF8000u) { mc = (uae_u8)(v >> 16); hit = 1; }
     if (hit) {
-        /* EVERY write, not just changes - a guest re-writing the current
-         * value is invisible to recfg's early-out, and during sizing
-         * triage "TOS wrote $0A again" vs "TOS wrote nothing" is exactly
-         * the distinction that matters. Boot-time rate: a handful. */
-        fprintf(stderr, "[STRAM] guest memcfg write $%02X\n", mc);
+        /* PISTORM_STRAM_DEBUG=1: trace EVERY guest memcfg write, not
+         * just changes - during sizing triage "TOS wrote $0A again" vs
+         * "TOS wrote nothing" is exactly the distinction that matters
+         * (it is how the missing-snoop bug was found). Quiet by
+         * default; recfg below still logs actual changes. */
+        static int dbg = -1;
+        if (__builtin_expect(dbg < 0, 0)) {
+            const char *e = getenv("PISTORM_STRAM_DEBUG");
+            dbg = (e && *e == '1') ? 1 : 0;
+        }
+        if (dbg)
+            fprintf(stderr, "[STRAM] guest memcfg write $%02X\n", mc);
         stram_alias_recfg(mc);
     }
 }
