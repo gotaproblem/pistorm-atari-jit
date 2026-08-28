@@ -3736,9 +3736,41 @@ static void stram_alias_apply_banks(void)
     if (!g_stram_alias)
         return;
     map_region(0, ST_RAM_SIZE, &pistorm_stram_bank);
-    if (emulator_config_stram_direct_enabled())
-        map_region(STRAM_DIRECT_START, STRAM_DIRECT_END - STRAM_DIRECT_START,
-                   &pistorm_lowram_bank);
+
+    uint32_t decoded = g_stram_act[1]
+        ? g_stram_cfgb[0] + g_stram_cfgb[1]    /* both banks present   */
+        : g_stram_cfgb[0];                     /* bank 1 absent        */
+
+    if (emulator_config_stram_direct_enabled()) {
+        /* THE DIRECT (UNHOOKED) WINDOW MUST END A TOP-RESERVE SHORT OF
+         * THE CONFIGURED RAM, NOT OF THE FLAT 4MB.
+         *
+         * The direct bank is raw natmem - no write-through hook, so
+         * nothing in it ever reaches the REAL bus. That is fine for
+         * program RAM, but the frame buffer must reach real DRAM or
+         * the real Shifter scans stale memory. On the flat model the
+         * screen always sits in the top 512K (0x380000+), which the
+         * old fixed STRAM_DIRECT_END left hooked. On a 1MB machine
+         * TOS puts the screen at 0xF8000 - INSIDE the fixed direct
+         * window - so desktop writes were swallowed by the cache and
+         * the monitor showed whatever fragments had landed in real
+         * DRAM (field symptom: multiple part-drawn Fuji logos).
+         *
+         * So: keep the 512K below the top of the CONFIGURED memory
+         * hooked, wherever that top is. Recomputed on every guest
+         * memcfg write, like the rest of the routing. On a 512K
+         * machine this leaves no direct window at all - everything
+         * hooked, slower but correct. */
+        uint32_t direct_end = STRAM_DIRECT_END;
+        if (decoded < ST_RAM_SIZE)
+            direct_end = (decoded > STRAM_DIRECT_START + STRAM_DIRECT_TOP_RESERVE)
+                       ? decoded - STRAM_DIRECT_TOP_RESERVE
+                       : STRAM_DIRECT_START;
+        if (direct_end > STRAM_DIRECT_START)
+            map_region(STRAM_DIRECT_START, direct_end - STRAM_DIRECT_START,
+                       &pistorm_lowram_bank);
+    }
+
     /* Above the configured banks the GLUE asserts no RAS at all: real
      * hardware BUS-ERRORS there, it does not wrap. (Field crash: SysInfo
      * sizes RAM by probing past phystop under a BERR handler; a Pi-side
@@ -3747,9 +3779,6 @@ static void stram_alias_apply_banks(void)
      * memcfg the guest programmed, so it answers authentically: BERR
      * beyond the banks, open bus in an absent bank's slot, regardless
      * of what chips the board actually carries. */
-    uint32_t decoded = g_stram_act[1]
-        ? g_stram_cfgb[0] + g_stram_cfgb[1]    /* both banks present   */
-        : g_stram_cfgb[0];                     /* bank 1 absent        */
     if (decoded < ST_RAM_SIZE)
         map_region(decoded, ST_RAM_SIZE - decoded, &pistorm_dummy_bank);
 }
