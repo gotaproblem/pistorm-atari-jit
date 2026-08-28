@@ -306,6 +306,9 @@ extern volatile uint16_t st_palette[16];
  * Off (flat, exactly the old behaviour) unless cfg stram_size < 4MB.
  * ================================================================== */
 extern volatile uint8_t g_buserr;      /* ps_protocol's sticky BERR latch */
+extern "C" int emulator_machine_is_ste(void);   /* emulator.c (built as
+                                        * C++, but exported with C
+                                        * linkage like its neighbours) */
 
 static int      g_stram_alias = 0;
 static int      g_stram_fd = -1;
@@ -315,6 +318,87 @@ static uint8_t  g_stram_memcfg = 0x0A; /* boot default: 2M|2M probe    */
 
 static const uint32_t stram_bank_tab[4] = {128u<<10, 512u<<10, 2048u<<10, 2048u<<10};
 #define STRAM_ALIAS_CHUNK (128u << 10) /* gcd of all bank sizes        */
+
+/* ==================================================================
+ * PLAIN-ST MMU FOLDING (field case: Mega ST 1MB + TOS 2.06 sized 4MB)
+ *
+ * The memfd page aliasing above folds a too-small bank MODULO its
+ * size - which is what the STE MMU does (its muxing drops the top
+ * LINEAR address bits, folds at +0x40000/+0x80000). The plain ST MMU
+ * muxes differently: 2M mode is col=A10..A1, row=A20..A11, so a 512K
+ * chip drops the col MSB A10 and row MSB A20 and folds at +0x400 /
+ * +0x100000 - a BIT COMPRESSION, sub-page-granular, inexpressible in
+ * page tables. TOS 2.06 on a machine it knows is a plain ST checks
+ * the ST offsets (+0x208/+0x408), our modulo model showed no fold
+ * there, and TOS sized 2M banks on 512K chips: v_bas_ad=0x3F8000,
+ * real MMU in 2M muxing, shifter scanning A10-folded DRAM = the
+ * multiple-Fuji screen. (EmuTOS checks the STE offsets FIRST, which
+ * modulo satisfies - why STBOX's model never caught this.)
+ *
+ * So when the machine flavour is plain ST and the configured banks
+ * exceed the actual chips (i.e. only during TOS's cold sizing), the
+ * sr_* accessors compute the true ST fold against a FLAT view of the
+ * backing file. Once TOS programs memcfg to match the chips, the
+ * layout is flat and the normal paths resume. Known hole, accepted:
+ * a JIT config with machine=ST would still size through the modulo
+ * page tables (readmem_real inlines natmem) - JIT configs here are
+ * machine=STE, whose fold IS modulo. */
+static uae_u8 *g_stram_backing = NULL;  /* flat map of the memfd      */
+static int g_stram_st_mmu = 0;          /* machine flavour: plain ST  */
+static int g_stram_fold_hook = 0;       /* ST fold active (cfg > act) */
+
+static inline unsigned stram_colbits(uint32_t size)
+{
+    return size >= (2048u << 10) ? 10 : size >= (512u << 10) ? 9 : 8;
+}
+
+/* offset within one bank -> offset within its chip, plain-ST muxing:
+ * keep the LOW col/row bits the smaller chip actually decodes */
+static inline uint32_t stram_st_fold(uint32_t o, uint32_t cfg, uint32_t act)
+{
+    if (act >= cfg)
+        return o;
+    unsigned cb_cfg = stram_colbits(cfg);
+    unsigned cb_act = stram_colbits(act);
+    uint32_t word = o >> 1, low = o & 1u;
+    uint32_t col = word & ((1u << cb_cfg) - 1u);
+    uint32_t row = word >> cb_cfg;
+    col &= (1u << cb_act) - 1u;
+    row &= (1u << cb_act) - 1u;    /* row width == col width per size  */
+    return ((((row << cb_act) | col) << 1) | low);
+}
+
+/* guest ST-RAM address -> offset in the flat backing file */
+static inline uint32_t stram_st_map(uae_u32 a)
+{
+    uint32_t cfg0 = g_stram_cfgb[0], cfg1 = g_stram_cfgb[1];
+    uint32_t total = cfg0 + cfg1;
+    if (total && a >= total)
+        a %= total;                          /* MMU ignores high bits  */
+    if (a < cfg0)
+        return stram_st_fold(a, cfg0, g_stram_act[0]);
+    a -= cfg0;
+    if (g_stram_act[1])
+        return g_stram_act[0] + stram_st_fold(a, cfg1, g_stram_act[1]);
+    return stram_st_fold(a, cfg1, g_stram_act[0]);   /* absent bank 1:
+        routed to the real bus by the banks; backed here only so the
+        pointer math stays valid */
+}
+
+static inline void stram_fold_hook_update(void)
+{
+    g_stram_fold_hook = g_stram_alias && g_stram_st_mmu && g_stram_backing &&
+        !(g_stram_cfgb[0] == g_stram_act[0] &&
+          (g_stram_cfgb[1] == g_stram_act[1] || g_stram_act[1] == 0));
+}
+
+/* the ST-RAM mirror pointer the sr_* accessors must use */
+static inline uae_u8 *sr_ptr(uaecptr a)
+{
+    if (__builtin_expect(g_stram_fold_hook, 0))
+        return g_stram_backing + stram_st_map(a);
+    return natmem_offset + a;
+}
 
 static void stram_alias_layout(void)
 {
@@ -356,6 +440,7 @@ static void stram_alias_recfg(uint8_t memcfg)
     g_stram_memcfg = memcfg;
     g_stram_cfgb[0] = stram_bank_tab[(memcfg >> 2) & 3];
     g_stram_cfgb[1] = stram_bank_tab[memcfg & 3];
+    stram_fold_hook_update();
     stram_alias_layout();
     stram_alias_apply_banks();
     fprintf(stderr, "[STRAM] memcfg $%02X: banks configured %uK+%uK "
@@ -497,7 +582,23 @@ static void stram_alias_init(void)
     }
     g_stram_cfgb[0] = stram_bank_tab[(g_stram_memcfg >> 2) & 3];
     g_stram_cfgb[1] = stram_bank_tab[g_stram_memcfg & 3];
+
+    /* flat second view of the backing for the plain-ST fold accessors -
+     * natmem itself is remapped modulo by stram_alias_layout and cannot
+     * serve as a flat window */
+    g_stram_backing = (uae_u8 *)mmap(NULL, g_stram_act[0] + g_stram_act[1],
+                                     PROT_READ | PROT_WRITE, MAP_SHARED,
+                                     g_stram_fd, 0);
+    if (g_stram_backing == MAP_FAILED) {
+        perror("[STRAM] backing mmap");
+        abort();
+    }
+    g_stram_st_mmu = !emulator_machine_is_ste();
     g_stram_alias = 1;
+    stram_fold_hook_update();
+    if (g_stram_st_mmu)
+        fprintf(stderr, "[STRAM] plain-ST MMU flavour: A10/A20 bit-fold "
+                "modelled in the accessors while configured > actual\n");
     stram_alias_layout();
     /* mem_banks[] routing for an absent bank is applied by jit_mem_init
      * once the banks exist (stram_alias_apply_banks) */
@@ -2973,9 +3074,18 @@ static addrbank pistorm_lowram_bank = {
 /* ST-RAM bank — read direct from mirror, optional write-through + SMC  */
 /* ================================================================== */
 
-static uae_u32 sr_lget(uaecptr a) { return do_get_mem_long((uae_u32 *)(natmem_offset + a)); }
-static uae_u32 sr_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)(natmem_offset + a)); }
-static uae_u32 sr_bget(uaecptr a) { return natmem_offset[a]; }
+/* Longs go word-by-word when the ST fold is live: the folded mapping is
+ * discontinuous at every 0x400 boundary, so one flat 4-byte access could
+ * span two chip cells that are not adjacent in the backing. */
+static uae_u32 sr_lget(uaecptr a)
+{
+    if (__builtin_expect(g_stram_fold_hook, 0))
+        return ((uae_u32)do_get_mem_word((uae_u16 *)sr_ptr(a)) << 16) |
+                do_get_mem_word((uae_u16 *)sr_ptr(a + 2));
+    return do_get_mem_long((uae_u32 *)(natmem_offset + a));
+}
+static uae_u32 sr_wget(uaecptr a) { return do_get_mem_word((uae_u16 *)sr_ptr(a)); }
+static uae_u32 sr_bget(uaecptr a) { return *sr_ptr(a); }
 
 /*
 static uae_u32 sr_lget(uaecptr a){ fc_data(); a &= 0x00FFFFFF; uae_u32 v=ps_read_32(a); pistorm_buserr(a,0,true,sz_long); return v; }
@@ -2986,7 +3096,11 @@ static void sr_lput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
     g_buserr = 0;
-    do_put_mem_long((uae_u32 *)(natmem_offset + a), v); // update mirror (BE)
+    if (__builtin_expect(g_stram_fold_hook, 0)) {
+        do_put_mem_word((uae_u16 *)sr_ptr(a),     (uae_u16)(v >> 16));
+        do_put_mem_word((uae_u16 *)sr_ptr(a + 2), (uae_u16)v);
+    } else
+        do_put_mem_long((uae_u32 *)(natmem_offset + a), v); // update mirror (BE)
     stram_snoop_lowram(a, 4);
     if (stram_needs_bus_write(a, 4)) {
         uae_u32 bus_a = a & 0x00FFFFFF;
@@ -2999,7 +3113,7 @@ static void sr_wput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
     g_buserr = 0;
-    do_put_mem_word((uae_u16 *)(natmem_offset + a), (uae_u16)v);
+    do_put_mem_word((uae_u16 *)sr_ptr(a), (uae_u16)v);
     stram_snoop_lowram(a, 2);
     if (stram_needs_bus_write(a, 2)) {
         uae_u32 bus_a = a & 0x00FFFFFF;
@@ -3012,7 +3126,7 @@ static void sr_bput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
     g_buserr = 0;
-    natmem_offset[a] = (uae_u8)v;
+    *sr_ptr(a) = (uae_u8)v;
     stram_snoop_lowram(a, 1);
     if (stram_needs_bus_write(a, 1)) {
         uae_u32 bus_a = a & 0x00FFFFFF;
@@ -3741,8 +3855,12 @@ static void stram_alias_apply_banks(void)
         ? g_stram_cfgb[0] + g_stram_cfgb[1]    /* both banks present   */
         : g_stram_cfgb[0];                     /* bank 1 absent        */
 
-    if (emulator_config_stram_direct_enabled()) {
-        /* THE DIRECT (UNHOOKED) WINDOW MUST END A TOP-RESERVE SHORT OF
+    if (emulator_config_stram_direct_enabled() && !g_stram_fold_hook) {
+        /* (fold_hook: the plain-ST bit-fold lives in the sr_* accessors,
+         * so NOTHING may touch natmem raw while it is active - no direct
+         * window until TOS programs banks matching the chips)
+         *
+         * THE DIRECT (UNHOOKED) WINDOW MUST END A TOP-RESERVE SHORT OF
          * THE CONFIGURED RAM, NOT OF THE FLAT 4MB.
          *
          * The direct bank is raw natmem - no write-through hook, so

@@ -864,6 +864,21 @@ extern void pistorm_crash_dump_guest(void);
  * killed the HOST at pc=0. Permissive by design: the full 4MB ST-RAM
  * window is allowed even if less is fitted - the goal is keeping the
  * host alive, not perfect decode. */
+/* Machine MMU flavour for the ST-RAM alias model (pistorm_natmem.cpp):
+ * plain ST folds small-chip-in-big-config by dropping col/row MSBs
+ * (A10/A20 in 2M mode); STE and later fold modulo. Driven by the cfg
+ * "machine" key; no key = plain ST, matching the _MCH default. */
+#ifdef __cplusplus
+extern "C"
+#endif
+int emulator_machine_is_ste(void)
+{
+  uint32_t mch;
+  if (!emulator_config_machine_set(&mch))
+    return 0;                      /* no machine key: plain ST default */
+  return mch >= 0x00010000u;       /* STE, MegaSTE, TT, Falcon         */
+}
+
 #ifdef __cplusplus
 extern "C"
 #endif
