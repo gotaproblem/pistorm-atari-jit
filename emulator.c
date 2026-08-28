@@ -201,6 +201,10 @@ uint32_t tt_ram_size = 0;
 
 volatile uint8_t g_irq_mask;
 extern volatile uint8_t g_buserr;
+#ifdef __cplusplus
+extern "C"
+#endif
+void pistorm_stram_memcfg_snoop(unsigned int a, unsigned int v, int size);
 
 static inline void cpu_data_fc(void)
 {
@@ -2361,6 +2365,11 @@ extern "C"
     }
 
     cpu_data_fc();
+    /* keep the ST-RAM alias model in sync with guest memcfg writes -
+     * this legacy path is the one that runs for IO when the JIT is off,
+     * and it forwarded $FF8001 to the real chip while the natmem model
+     * kept its boot value (1MB Mega ST field case) */
+    pistorm_stram_memcfg_snoop(address, value, 1);
     mfp_note_eoi_write(address, value, false);
     if (DMA_Sound_enabled)
       dmasnd_mfp_snoop (address, value, 0);
@@ -2494,6 +2503,7 @@ extern "C"
     }
 
     cpu_data_fc();
+    pistorm_stram_memcfg_snoop(address, value, 2);
     mfp_note_eoi_write(address, value, true);
     if (DMA_Sound_enabled)
       dmasnd_mfp_snoop (address, value, 1);
@@ -2524,6 +2534,7 @@ extern "C"
     }
 
     st_video_snoop32(address, (uint32_t)value);
+    pistorm_stram_memcfg_snoop(address & 0x00FFFFFFu, value, 4);
 
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {

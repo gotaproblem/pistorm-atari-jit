@@ -468,6 +468,21 @@ static inline void stram_memcfg_snoop(uaecptr a, uae_u32 v, int size)
     }
 }
 
+/* The legacy (non-natmem) write path in emulator.c is the one that runs
+ * for IO when the JIT is off - it carries the video and keyboard snoops
+ * but had no memcfg snoop, so a TOS memcfg write reached the REAL chip
+ * while this model kept its boot value: model and machine diverged and
+ * everything downstream (fold, memtop scan, phystop) went with it.
+ * Field case: 1MB Mega ST, TOS 2.06, interpreter config - TOS sized
+ * 512K+512K correctly off the real chips, wrote $05, and the model
+ * never heard it. */
+extern "C" void pistorm_stram_memcfg_snoop(unsigned int a, unsigned int v,
+                                           int size)
+{
+    /* callers vary in whether they have masked to 24 bits yet */
+    stram_memcfg_snoop((uaecptr)(a & 0x00FFFFFFu), (uae_u32)v, size);
+}
+
 /* Probe one PHYSICAL DRAM bank over the real bus - EmuTOS memory.S,
  * which is TOS 1.6's algorithm, kept because it is the one PROVEN on
  * real MMUs of both flavours.
