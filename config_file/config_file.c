@@ -53,6 +53,8 @@ typedef enum {
   CONFITEM_NETWORK_NETMASK,
   CONFITEM_NETWORK_DEBUG,
   CONFITEM_HOSTFS,
+  CONFITEM_STBOX_TOS,
+  CONFITEM_STBOX_PLANE,
 } config_item;
 
 typedef struct {
@@ -110,6 +112,8 @@ static const config_switch_def config_switches[] = {
   { "network_netmask", CONFITEM_NETWORK_NETMASK },
   { "network_debug", CONFITEM_NETWORK_DEBUG },
   { "hostfs", CONFITEM_HOSTFS },
+  { "stbox_tos", CONFITEM_STBOX_TOS },
+  { "stbox_plane", CONFITEM_STBOX_PLANE },
 };
 
 const char *graphics_card_types[GRAPHICS_CARD_TYPES] = {
@@ -212,6 +216,16 @@ int emulator_config_blitter_mode(void)
   if (!emulator_config_blitter_enabled())
     return 0;
   return (current_config && current_config->blitter_real) ? 1 : 2;
+}
+
+const char *emulator_config_stbox_tos(void)
+{
+  return current_config ? current_config->stbox_tos : "";
+}
+
+int emulator_config_stbox_plane(void)
+{
+  return current_config ? current_config->stbox_plane : 0;
 }
 
 bool emulator_config_stram_cache_enabled(void)
@@ -990,6 +1004,24 @@ struct emulator_config *load_config_file(char *filename) {
                   cfg->hostfs[idx].path,
                   cfg->hostfs[idx].readonly ? " readonly" : "");
         }
+        break;
+
+      case CONFITEM_STBOX_TOS:
+        /* the whole remainder of the line: TOS images live in directories
+         * with spaces in their names often enough (TOSEC...) that a
+         * space-delimited token would silently truncate the path */
+        while (parse_line[str_pos] == ' ' || parse_line[str_pos] == '\t')
+          str_pos++;
+        strncpy(cfg->stbox_tos, parse_line + str_pos,
+                sizeof(cfg->stbox_tos) - 1);
+        cfg->stbox_tos[sizeof(cfg->stbox_tos) - 1] = '\0';
+        trim_whitespace(cfg->stbox_tos);
+        printf ("[CFG] STBOX TOS %s\n", cfg->stbox_tos);
+        break;
+
+      case CONFITEM_STBOX_PLANE:
+        cfg->stbox_plane = get_int(parse_line + str_pos);
+        printf ("[CFG] STBOX forced overlay plane %d\n", cfg->stbox_plane);
         break;
 
       case CONFITEM_NONE:

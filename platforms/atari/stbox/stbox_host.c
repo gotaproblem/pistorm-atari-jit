@@ -17,7 +17,9 @@
  * lesson as avrecord.c/vidplay.c.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +38,12 @@
 #include "stbox.h"
 #include "../et4000/et4000_drm.h"
 #include "../../../third_party/musashi/m68k.h"   /* m68k_disassemble */
+
+/* config_file.h can't be included here: its M68K_CPU_TYPE_* enum (the
+ * JIT-side copy) collides with the identical names in Musashi's m68k.h
+ * above. Declare the two accessors we need instead. */
+extern const char *emulator_config_stbox_tos(void);   /* "" if unset */
+extern int emulator_config_stbox_plane(void);         /* 0 if unset  */
 
 /* ------------------------------------------------------------------ */
 /* state                                                              */
@@ -180,8 +188,10 @@ static int pick_plane(void)
     int crtc_index = drmpres_crtc_index();
     uint32_t guest_plane = drmpres_plane_id();
 
+    /* forced plane: env overrides cfg overrides auto-pick */
     const char *force = getenv("PISTORM_STBOX_PLANE");
-    uint32_t want = force && *force ? (uint32_t)strtoul(force, NULL, 0) : 0;
+    uint32_t want = force && *force ? (uint32_t)strtoul(force, NULL, 0)
+                                    : (uint32_t)emulator_config_stbox_plane();
 
     drmModePlaneRes *pr = drmModeGetPlaneResources(g_fd);
     if (!pr) return -1;
@@ -669,12 +679,15 @@ int stbox_start(const stbox_cfg_t *cfg)
     if (!g_cfg.ram_kb) g_cfg.ram_kb = 4096;
     uint32_t ram_size = g_cfg.ram_kb * 1024u;
 
-    /* ROM */
+    /* ROM: NatFeat path (per-launch, from STBOX.PRG), then the env
+     * override, then the .cfg's stbox_tos line */
     const char *path = g_cfg.tos_path[0] ? g_cfg.tos_path
                                          : getenv("PISTORM_STBOX_TOS");
+    if (!path || !*path)
+        path = emulator_config_stbox_tos();
     if (!path || !*path) {
-        fprintf(stderr, "[STBOX] no TOS image (config tos_path or "
-                        "PISTORM_STBOX_TOS)\n");
+        fprintf(stderr, "[STBOX] no TOS image (STBOX.PRG path, "
+                        "PISTORM_STBOX_TOS, or cfg 'stbox_tos')\n");
         return -1;
     }
     FILE *f = fopen(path, "rb");

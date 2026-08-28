@@ -65,7 +65,8 @@ double-buffered dumb buffers → spare overlay plane on the guest CRTC
 and STBOX coexist), non-blocking atomic commits per vidplane.c's rules.
 The GEM front-end reports rect/clip/focus in guest desktop pixels; the
 render thread maps them through `drmpres_dst_x/y/w/h`,`drmpres_src_w/h`
-every frame. `PISTORM_STBOX_PLANE=<id>` forces a plane.
+every frame. cfg `stbox_plane <id>` (or env `PISTORM_STBOX_PLANE`, which
+wins) forces a plane.
 
 ## NatFeat protocol ("STBOX")
 
@@ -73,7 +74,7 @@ START(path,ram_kb,flags) STOP RESET STATUS RECT(x,y,w,h) CLIP(x,y,w,h)
 FOCUS(0/1) STATS(ptr to 4 longs: cps, frames, overruns, running)
 KEY(scan,down) MOUSE(dx,dy,buttons) JOY(n,state) — see `enum nf_stbox_ops`.
 TOS path accepts a HOSTFS drive form (`X:\...`) or a literal host path;
-empty falls back to `PISTORM_STBOX_TOS`.
+empty falls back to env `PISTORM_STBOX_TOS`, then cfg `stbox_tos`.
 
 ## Testing without the Pi
 

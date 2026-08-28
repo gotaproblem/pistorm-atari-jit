@@ -136,6 +136,8 @@ struct emulator_config {
   char network_netmask[32];
   bool network_debug;
   HOSTFS_s hostfs[HOSTFS_MAX_DRIVES];
+  char stbox_tos[256];   /* TOS ROM for the sandboxed ST (STBOX)        */
+  int  stbox_plane;      /* force a DRM overlay plane id (0 = auto)     */
 };
 
 
@@ -164,6 +166,8 @@ bool emulator_config_et4k_enabled(void);
 bool emulator_config_fvdi_enabled(void);
 int emulator_config_graphics_driver(void);
 int emulator_config_fps(void);
+const char *emulator_config_stbox_tos(void);   /* "" if unset */
+int emulator_config_stbox_plane(void);         /* 0 if unset  */
 
 #ifdef __cplusplus
 }

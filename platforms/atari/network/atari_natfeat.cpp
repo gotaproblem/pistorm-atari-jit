@@ -4738,12 +4738,29 @@ extern "C" void atari_natfeat_raise_network_irq(void)
   atari_request_irq_level(nfeth_interrupt_level());
 }
 
-/* Translate a GEMDOS path ("U:\dir\file.mp3") to a host path via the mounted
- * HOSTFS drive whose letter matches. Requires an explicit drive letter. */
-static bool mp3_gemdos_to_host(const char *gem, char *out, size_t outsz)
+/* Translate a GEMDOS path ("S:\dir\file.mp3") to a host path via the mounted
+ * HOSTFS drive whose letter matches. Requires an explicit drive letter.
+ * fsel under MiNT often hands back UNIFIED-drive paths ("U:\S\dir\file") -
+ * no HOSTFS mount is lettered U, so peel that prefix to the real drive
+ * first. This rewrite used to live only in stbox_map_path, which is why
+ * MP3.PLAY worked from an S:\ path but not from the selector's U:\S\ one. */
+static bool mp3_gemdos_to_host(const char *gem_in, char *out, size_t outsz)
 {
-  if (!gem || !gem[0])
+  if (!gem_in || !gem_in[0])
     return false;
+
+  char gem[512];
+  snprintf(gem, sizeof gem, "%s", gem_in);
+  if ((gem[0] == 'u' || gem[0] == 'U') && gem[1] == ':' &&
+      (gem[2] == '\\' || gem[2] == '/')) {
+    char d = gem[3];
+    if (((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z')) &&
+        (gem[4] == '\\' || gem[4] == '/')) {
+      char tmp[512];
+      snprintf(tmp, sizeof tmp, "%c:%s", d, gem + 4);
+      snprintf(gem, sizeof gem, "%s", tmp);
+    }
+  }
 
   char letter = 0;
   const char *rest = NULL;
@@ -4830,29 +4847,18 @@ static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
 
 #include "../stbox/stbox.h"
 
-/* fsel under MiNT often returns paths on the U: unified drive
- * ("U:\S\GAMES\FOO.ST"); the HOSTFS mapper only knows lettered
- * drives. Rewrite U:\x\rest to x:\rest before mapping, and say so
- * on the console when mapping still fails - a silent -1 here cost an
- * afternoon behind an invisible alert. */
+/* STBOX's mapper: the shared GEMDOS->host translation (which handles the
+ * U:\ unified-drive rewrite), plus a literal-host-path passthrough, and a
+ * LOUD failure - a silent -1 here cost an afternoon behind an invisible
+ * alert. */
 static bool stbox_map_path(const char *gem_in, char *host, size_t hostsz)
 {
-  char gem[512];
-  snprintf(gem, sizeof gem, "%s", gem_in);
-  if ((gem[0] == 'u' || gem[0] == 'U') && gem[1] == ':' &&
-      (gem[2] == '\\' || gem[2] == '/')) {
-    char d = gem[3];
-    if (((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z')) &&
-        (gem[4] == '\\' || gem[4] == '/')) {
-      char tmp[512];
-      snprintf(tmp, sizeof tmp, "%c:%s", d, gem + 4);
-      snprintf(gem, sizeof gem, "%s", tmp);
-    }
-  }
-  if (mp3_gemdos_to_host(gem, host, hostsz))
+  if (mp3_gemdos_to_host(gem_in, host, hostsz))
     return true;
-  if (gem[0] == '/') {
-    snprintf(host, hostsz, "%s", gem);
+  if (gem_in[0] == '/' && !(gem_in[1] && gem_in[2] == '/')) {
+    /* literal host path (not the /x/dir MiNT drive form, which the
+     * mapper above already rejected because no such drive is mounted) */
+    snprintf(host, hostsz, "%s", gem_in);
     return true;
   }
   fprintf(stderr, "[NF] STBOX: cannot map guest path '%s' to a host path "
