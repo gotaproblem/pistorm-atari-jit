@@ -101,6 +101,12 @@ extern void warpmode(int mode);
 #include "jit/compemu.h"
 #include <signal.h>
 volatile int jit_exception_pending = 0;
+/* True while exec_nostats()/execute_normal() interpret instructions under
+ * the JIT run loop. In that state guest registers are CURRENT in `regs`,
+ * so a bus error may be delivered synchronously (longjmp) - which boot-time
+ * hardware probes with tight catch windows require. In compiled code the
+ * registers live in host registers and only DEFERRED delivery is safe. */
+volatile int jit_in_interpreter = 0;
 #if defined(JIT_HAS_BUS_ERROR_RECOVERY)
 #include <setjmp.h>
 jmp_buf jit_bus_error_jmpbuf;
@@ -7514,6 +7520,7 @@ void exec_nostats(void)
 
 	struct regstruct *r = &regs;
 
+	jit_in_interpreter = 1;
 	for (;;)
 	{
 		r->instruction_pc = m68k_getpc();
@@ -7534,7 +7541,10 @@ void exec_nostats(void)
 		}
 
 		if (end_block(r->opcode) || r->spcflags || uae_int_requested)
+		{
+			jit_in_interpreter = 0;
 			return; /* We will deal with the spcflags in the caller */
+		}
 	}
 }
 
@@ -7560,6 +7570,7 @@ void execute_normal(void)
 
 	psctrl_ctr_interp_calls++;			/* PSCTRL statistics */
 
+	jit_in_interpreter = 1;
 	total_cycles = 0;
 	blocklen = 0;
 	start_pc_p = r->pc_oldp;
@@ -7609,6 +7620,7 @@ void execute_normal(void)
 			}
 #endif
 			psctrl_ctr_interp_cycles += (uae_u32)total_cycles;	/* PSCTRL statistics */
+			jit_in_interpreter = 0;
 			compile_block(pc_hist, blocklen, total_cycles);
 			return; /* We will deal with the spcflags in the caller */
 		}
@@ -7644,6 +7656,7 @@ static int cpu_thread_run_jit(void *v)
 				if (bus_error_exc != 0)
 				{
 					jit_in_compiled_code = false;
+					jit_in_interpreter = 0;
 					Exception(bus_error_exc);
 					continue;
 				}
@@ -7651,8 +7664,10 @@ static int cpu_thread_run_jit(void *v)
 			jit_in_compiled_code = true;
 #endif
 			((compiled_handler *)(pushall_call_handler))();
-			/* Check for pending exception from SIGSEGV handler (x86-64) */
-#if defined(CPU_x86_64) || defined(_M_AMD64)
+			/* Pending exception: from the x86-64 SIGSEGV handler, or from
+			 * hardware_exception2() deferring a bus error raised inside
+			 * compiled code (all architectures) */
+#if defined(CPU_x86_64) || defined(_M_AMD64) || defined(JIT_HAS_BUS_ERROR_RECOVERY)
 			if (jit_exception_pending)
 			{
 				int exc = jit_exception_pending;
@@ -7819,6 +7834,7 @@ static void m68k_run_jit(void)
 				if (bus_error_exc != 0)
 				{
 					jit_in_compiled_code = false;
+					jit_in_interpreter = 0;
 					// Exception(bus_error_exc);
 					//TRY(prb2)
 					//{
@@ -7903,8 +7919,10 @@ static void m68k_run_jit(void)
 
 					((compiled_handler *)(pushall_call_handler))();
 
-					/* Check for pending exception from SIGSEGV handler (x86-64) */
-#if defined(CPU_x86_64) || defined(_M_AMD64)
+					/* Pending exception: x86-64 SIGSEGV handler, or a bus
+					 * error deferred by hardware_exception2() from inside
+					 * compiled code (all architectures) */
+#if defined(CPU_x86_64) || defined(_M_AMD64) || defined(JIT_HAS_BUS_ERROR_RECOVERY)
 					if (jit_exception_pending)
 					{
 						int exc = jit_exception_pending;
@@ -10680,11 +10698,39 @@ void hardware_exception2(uaecptr addr, uae_u32 v, bool read, bool ins, int size)
 		exception2_setup(regs.opcode, addr, read, size, fc);
 
 #if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+		/* C++ exceptions cannot unwind through JIT-compiled code, and a
+		 * longjmp out of a compiled block is NO BETTER: the no-spill
+		 * guarded-access trampolines keep guest registers live in host
+		 * callee-saved registers, which the longjmp destroys - Exception()
+		 * then builds the bus-error frame from STALE regs and the guest
+		 * resumes into garbage (field failure: SysInfo's compiled Alt-RAM
+		 * scan probed past TT-RAM, one BERR here, exception storm, host
+		 * SIGSEGV at a wild PC; boot-time probes survived only because
+		 * they run interpreted with regs current). Defer instead: let the
+		 * faulting access complete harmlessly, force the block to exit,
+		 * and deliver the exception at the dispatch loop with regs
+		 * flushed and consistent. exception2_setup() above has already
+		 * recorded the fault details for the frame. */
 		/* C++ exceptions cannot unwind through JIT-compiled code. When
 		 * executing inside JIT code, return to the JIT loop where
-		 * Exception() can be called with the M68K state saved above. */
+		 * Exception() can be called with the M68K state saved above.
+		 *
+		 * KNOWN LIMITATION (do not "fix" without reading this): from a
+		 * COMPILED block the longjmp rolls guest registers back to the
+		 * last flush point - the bus-error frame is built from stale
+		 * state. Boot-time probes survive this (their catchers longjmp
+		 * guest-side and never resume via the frame; months of field
+		 * evidence). Handlers that DO resume via the frame can storm
+		 * (field case: SysInfo's Alt-RAM scan). Deferring delivery to
+		 * the block boundary is NOT the fix: one-instruction catch
+		 * windows (EmuTOS $FF8282 machine detection, compiled into its
+		 * generic probe helper) then miss the fault and the boot
+		 * panics - tried, failed, reverted. The real fix is specmem-
+		 * style compilation: faulting-capable accesses compiled with
+		 * full register sync, so synchronous delivery has true state. */
 		if (jit_in_compiled_code)
 		{
+			jit_in_interpreter = 0;
 			longjmp(jit_bus_error_jmpbuf, 2);
 			/* not reached */
 		}

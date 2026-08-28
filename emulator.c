@@ -848,6 +848,12 @@ static void crash_dump_mapping(const char *label, uintptr_t addr)
 #endif
 }
 
+#ifdef __cplusplus
+extern "C" void pistorm_crash_dump_guest(void);
+#else
+extern void pistorm_crash_dump_guest(void);
+#endif
+
 static void crash_handler(int sig, siginfo_t *si, void *uctx)
 {
   extern void *pushall_call_handler;
@@ -937,6 +943,9 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
     fprintf(stderr, "[SEGV] si_addr=%p backtrace=%d\n", si->si_addr, n);
     backtrace_symbols_fd(bt, n, STDERR_FILENO);
   }
+
+  /* guest-side post-mortem: m68k regs, vectors, sysvars, stack */
+  pistorm_crash_dump_guest();
 
   _exit(42);
 }

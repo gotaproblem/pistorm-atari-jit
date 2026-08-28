@@ -285,12 +285,274 @@ extern volatile uint16_t st_palette[16];
 #define STRAM_DIRECT_TOP_RESERVE 0x00080000u
 #define STRAM_DIRECT_END (ST_RAM_SIZE - STRAM_DIRECT_TOP_RESERVE)
 
+/* ==================================================================
+ * ST-RAM physical-size aliasing (cfg `stram_size`)
+ *
+ * The Pi-side ST-RAM model is a flat 4MB. On a board with less real
+ * DRAM that is a lie with one victim: the NATIVE display. TOS sizes
+ * the flat 4MB, puts the frame buffer at the top, and programs memcfg
+ * for banks the board does not have - the real Shifter then scans
+ * physically absent, wrongly-multiplexed DRAM (field symptom: each
+ * scanline's halves swapped with a one-line skew, image ghosted).
+ *
+ * Fix: make the Pi-side 4MB alias EXACTLY like the real banks, so the
+ * guest's own sizing probe discovers the true size (same bank model as
+ * stbox.c ram_map, which is field-verified against TOS/EmuTOS memory
+ * detection). The JIT reads ST-RAM through x27 with no C accessor to
+ * hook, so the aliasing is done in the PAGE TABLES: the first 4MB of
+ * natmem is backed by a memfd and the same file pages are mapped at
+ * every guest address that aliases to them. Layout is recomputed when
+ * the guest writes memcfg ($FF8001) - rare, boot-time, CPU thread.
+ * Off (flat, exactly the old behaviour) unless cfg stram_size < 4MB.
+ * ================================================================== */
+extern volatile uint8_t g_buserr;      /* ps_protocol's sticky BERR latch */
+
+static int      g_stram_alias = 0;
+static int      g_stram_fd = -1;
+static uint32_t g_stram_act[2];        /* installed bank sizes         */
+static uint32_t g_stram_cfgb[2];       /* memcfg-programmed bank sizes */
+static uint8_t  g_stram_memcfg = 0x0A; /* boot default: 2M|2M probe    */
+
+static const uint32_t stram_bank_tab[4] = {128u<<10, 512u<<10, 2048u<<10, 2048u<<10};
+#define STRAM_ALIAS_CHUNK (128u << 10) /* gcd of all bank sizes        */
+
+static void stram_alias_layout(void)
+{
+    uint32_t cfg0 = g_stram_cfgb[0], cfg1 = g_stram_cfgb[1];
+    uint32_t total = cfg0 + cfg1;
+    for (uint32_t g = 0; g < ST_RAM_SIZE; g += STRAM_ALIAS_CHUNK) {
+        /* beyond the configured banks the MMU ignores the high bits */
+        uint32_t a = (g < total) ? g : (g % total);
+        uint32_t off;
+        if (a < cfg0)
+            off = a & (g_stram_act[0] - 1);
+        else if (g_stram_act[1])
+            off = g_stram_act[0] + ((a - cfg0) & (g_stram_act[1] - 1));
+        else
+            /* absent bank 1: these pages are never reached - the whole
+             * range above bank 0 is routed to the REAL bus (see
+             * stram_alias_apply_banks), where the actual machine's
+             * open bus answers the probe exactly as real hardware
+             * does. Map bank 0 here only so the address space stays
+             * backed. */
+            off = (a - cfg0) & (g_stram_act[0] - 1);
+        if (mmap(natmem_offset + g, STRAM_ALIAS_CHUNK,
+                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                 g_stram_fd, off) == MAP_FAILED) {
+            perror("[STRAM] alias mmap");
+            abort();
+        }
+    }
+}
+
+/* re-route mem_banks[] for the current bank layout (defined after the
+ * addrbank definitions below; needed by the runtime memcfg snoop) */
+static void stram_alias_apply_banks(void);
+
+static void stram_alias_recfg(uint8_t memcfg)
+{
+    if (memcfg == g_stram_memcfg)
+        return;
+    g_stram_memcfg = memcfg;
+    g_stram_cfgb[0] = stram_bank_tab[(memcfg >> 2) & 3];
+    g_stram_cfgb[1] = stram_bank_tab[memcfg & 3];
+    stram_alias_layout();
+    stram_alias_apply_banks();
+    fprintf(stderr, "[STRAM] memcfg $%02X: banks configured %uK+%uK "
+            "(installed %uK+%uK)\n", memcfg,
+            g_stram_cfgb[0] >> 10, g_stram_cfgb[1] >> 10,
+            g_stram_act[0] >> 10, g_stram_act[1] >> 10);
+}
+
+/* observe guest writes that land on memcfg ($FF8001); a is 24-bit */
+static inline void stram_memcfg_snoop(uaecptr a, uae_u32 v, int size)
+{
+    if (!g_stram_alias)
+        return;
+    if (size == 1 && a == 0x00FF8001u) stram_alias_recfg((uae_u8)v);
+    else if (size == 2 && a == 0x00FF8000u) stram_alias_recfg((uae_u8)v);
+    else if (size == 4 && a == 0x00FF8000u) stram_alias_recfg((uae_u8)(v >> 16));
+}
+
+/* Probe one PHYSICAL DRAM bank over the real bus, TOS's own way: with
+ * memcfg programmed 2M|2M, a smaller chip wraps (row/column bits), an
+ * absent bank (its own RAS line, no chips) retains nothing. The scrub
+ * write guards against the floating bus echoing the marker back. */
+static uint32_t stram_probe_bank(uint32_t base)
+{
+    ps_write_16(base + 0x08, 0x5A3C);
+    ps_write_16(base + 0x10, 0xC3A5);          /* scrub floating bus  */
+    if (ps_read_16(base + 0x08) != 0x5A3C)
+        return 0;                              /* absent              */
+    ps_write_16(base + 0x08, 0x1111);
+    ps_write_16(base + 0x80008, 0x2222);       /* wraps if chip <2M   */
+    if (ps_read_16(base + 0x08) == 0x1111)
+        return 2048u << 10;
+    ps_write_16(base + 0x08, 0x3333);
+    ps_write_16(base + 0x20008, 0x4444);       /* wraps if chip <512K */
+    if (ps_read_16(base + 0x08) == 0x3333)
+        return 512u << 10;
+    if (ps_read_16(base + 0x08) == 0x4444)
+        return 128u << 10;
+    return 0;                                  /* incoherent: absent  */
+}
+
+static void stram_alias_init(void)
+{
+    uint32_t want = emulator_config_stram_size();
+    if (!want)
+        return;              /* key absent: legacy flat 4MB, no probe */
+    if (want > ST_RAM_SIZE)
+        want = ST_RAM_SIZE;
+
+    /* what does the board actually have? Drive a VALID function code
+     * for the probe accesses: fc is still 0 (reserved) this early, and
+     * the GLUE does not decode RAM cycles for FC 0 - the probe then
+     * sees nothing at all (field-reported: bank0 0K on a live board). */
+    uint8_t old_fc = fc;
+    fc = 0x5;                                  /* supervisor data     */
+    ps_write_8(0xFF8001u, 0x0A);               /* 2M|2M while probing */
+    uint32_t phys0 = stram_probe_bank(0x000000u);
+    uint32_t phys1 = stram_probe_bank(0x200000u);
+    fc = old_fc;
+    g_buserr = 0;                              /* no latched surprise */
+    fprintf(stderr, "[STRAM] physical DRAM probed: bank0 %uK, bank1 %uK "
+            "(cfg requests %uK)\n", phys0 >> 10, phys1 >> 10, want >> 10);
+    if (!phys0) {
+        fprintf(stderr, "[STRAM] bank 0 not detected - probe unreliable, "
+                "keeping the flat 4MB model\n");
+        return;
+    }
+
+    /* largest real ST configuration fitting BOTH the request and the
+     * board. A guest bank rides a physical chip at least its size (a
+     * window into a bigger chip is fine); an absent physical bank can
+     * serve nothing. Banks come in 128K/512K/2M only - no 1M bank, so
+     * e.g. 3MB never existed and a request rounds down. */
+    static const struct { uint32_t b0, b1; } combo[] = {
+        { 2048u << 10, 2048u << 10 },          /* 4M   */
+        { 2048u << 10,  512u << 10 },          /* 2.5M */
+        { 2048u << 10,           0 },          /* 2M   */
+        {  512u << 10,  512u << 10 },          /* 1M   */
+        {  512u << 10,           0 },          /* 512K */
+        {  128u << 10,           0 },          /* 128K */
+    };
+    uint32_t eff0 = 0, eff1 = 0;
+    for (unsigned i = 0; i < sizeof combo / sizeof combo[0]; i++) {
+        if (combo[i].b0 + combo[i].b1 <= want &&
+            combo[i].b0 <= phys0 &&
+            (combo[i].b1 == 0 || combo[i].b1 <= phys1)) {
+            eff0 = combo[i].b0; eff1 = combo[i].b1;
+            break;
+        }
+    }
+    if (!eff0) {
+        fprintf(stderr, "[STRAM] no realizable configuration <= %uK on "
+                "this board - keeping the flat 4MB model\n", want >> 10);
+        return;
+    }
+    if (eff0 + eff1 != want)
+        fprintf(stderr, "[STRAM] configuring %uK (largest real ST config "
+                "fitting request and board)\n", (eff0 + eff1) >> 10);
+    if (eff0 + eff1 >= ST_RAM_SIZE) {
+        fprintf(stderr, "[STRAM] full 4MB realizable - flat model\n");
+        return;
+    }
+    g_stram_act[0] = eff0;
+    g_stram_act[1] = eff1;
+    g_stram_fd = memfd_create("stram", 0);
+    if (g_stram_fd < 0 ||
+        ftruncate(g_stram_fd, g_stram_act[0] + g_stram_act[1]) < 0) {
+        perror("[STRAM] memfd");
+        abort();
+    }
+    g_stram_cfgb[0] = stram_bank_tab[(g_stram_memcfg >> 2) & 3];
+    g_stram_cfgb[1] = stram_bank_tab[g_stram_memcfg & 3];
+    g_stram_alias = 1;
+    stram_alias_layout();
+    /* mem_banks[] routing for an absent bank is applied by jit_mem_init
+     * once the banks exist (stram_alias_apply_banks) */
+    fprintf(stderr, "[STRAM] guest ST-RAM %uKB (banks %uK+%uK) - bank "
+            "aliasing engaged; TOS will size it cold, as on real "
+            "hardware\n", (eff0 + eff1) >> 10, eff0 >> 10, eff1 >> 10);
+}
+
 static inline uae_u32 stram_be32(uaecptr a)
 {
     return ((uae_u32)natmem_offset[a] << 24) |
            ((uae_u32)natmem_offset[a + 1] << 16) |
            ((uae_u32)natmem_offset[a + 2] << 8) |
            (uae_u32)natmem_offset[a + 3];
+}
+
+/* Called from the SIGSEGV crash handler: the host-side report says where
+ * the HOST died; this says what the GUEST was doing - registers, the
+ * exception vectors, the sysvars, the stack, and a scan for the wild
+ * value so the corrupted slot names itself. Async-signal safety is
+ * knowingly ignored: we are printing on the way to _exit(). */
+extern "C" void pistorm_crash_dump_guest(void)
+{
+    if (!natmem_offset)
+        return;
+    fprintf(stderr,
+            "[GUEST] pc=%08X instr_pc=%08X pc_p-natmem=%08lX opcode=%04X "
+            "sr=%04X %s vbr=%08X\n",
+            regs.pc, regs.instruction_pc,
+            (unsigned long)(regs.pc_p - natmem_offset),
+            regs.opcode, regs.sr, regs.s ? "SUP" : "usr", regs.vbr);
+    for (int i = 0; i < 16; i += 8) {
+        fprintf(stderr, "[GUEST] %c: ", i ? 'A' : 'D');
+        for (int j = 0; j < 8; j++)
+            fprintf(stderr, "%08X ", regs.regs[i + j]);
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "[GUEST] usp=%08X isp=%08X exception=%d intmask=%d "
+            "stopped=%d\n", regs.usp, regs.isp, regs.exception,
+            regs.intmask, (int)regs.stopped);
+    {
+        extern volatile uae_u32 pistorm_dm_berr_addr, pistorm_dm_berr_count;
+        fprintf(stderr, "[GUEST] dummy-bank BERRs: %u, last at %08X\n",
+                pistorm_dm_berr_count, pistorm_dm_berr_addr);
+    }
+
+    fprintf(stderr, "[GUEST] vectors ($00-$BF):\n");
+    for (uae_u32 a = 0; a < 0xC0; a += 32) {
+        fprintf(stderr, "[GUEST]   %03X:", a);
+        for (uae_u32 j = 0; j < 32; j += 4)
+            fprintf(stderr, " %08X", stram_be32(a + j));
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "[GUEST] memvalid=%08X memcntlr=%02X phystop=%08X "
+            "flock=%04X v_bas_ad=%08X hz200=%08X\n",
+            stram_be32(0x420), natmem_offset[0x424], stram_be32(0x42E),
+            (unsigned)((natmem_offset[0x43E] << 8) | natmem_offset[0x43F]),
+            stram_be32(0x44E), stram_be32(0x4BA));
+    fprintf(stderr, "[STRAM] alias=%d memcfg=$%02X act=%uK+%uK cfg=%uK+%uK\n",
+            g_stram_alias, g_stram_memcfg,
+            g_stram_act[0] >> 10, g_stram_act[1] >> 10,
+            g_stram_cfgb[0] >> 10, g_stram_cfgb[1] >> 10);
+
+    /* the stack the CPU was on, if it is in ST-RAM */
+    uae_u32 a7 = regs.regs[15];
+    if (a7 < ST_RAM_SIZE - 64) {
+        fprintf(stderr, "[GUEST] stack @%08X:", a7);
+        for (uae_u32 j = 0; j < 64; j += 4)
+            fprintf(stderr, " %08X", stram_be32(a7 + j));
+        fprintf(stderr, "\n");
+    }
+
+    /* name the poisoned slots: scan low RAM for the wild high-byte
+     * pattern the crash keeps landing on */
+    int hits = 0;
+    for (uae_u32 a = 0; a < 0x10000 && hits < 16; a += 2) {
+        uae_u32 v = stram_be32(a);
+        if ((v & 0xFF000000u) == 0x26000000u) {
+            fprintf(stderr, "[GUEST] $26xxxxxx-value at %05X: %08X\n", a, v);
+            hits++;
+        }
+    }
+    if (!hits)
+        fprintf(stderr, "[GUEST] no $26xxxxxx values in low 64K\n");
 }
 
 static inline uae_u16 stram_be16(uaecptr a)
@@ -804,11 +1066,25 @@ static inline void pistorm_buserr(uaecptr a, uae_u32 v, bool read, int size)
 #define DUMMY_LOG_LIMIT 256
 static int dummy_log_n = 0;
 static inline int dummy_log_ok(void) { return dummy_log_n < DUMMY_LOG_LIMIT ? (++dummy_log_n, 1) : 0; }
+/* diagnostics: undecoded-space touches the dummy bank swallowed */
+volatile uae_u32 pistorm_dm_berr_addr, pistorm_dm_berr_count;
+
+/* Undecoded high space (>=16MB, not an 0xFFxxxxxx alias) reads 0 and
+ * sinks writes - SILENTLY, no bus error. This is a deliberate platform
+ * contract, not an oversight: this EmuTOS sizes FastRAM by probing past
+ * TT-RAM top with NO berr catcher installed (it never needed one here),
+ * so raising "hardware-correct" TT-style bus errors panics the boot
+ * (field report: Panic addr=090FFFFF pc=00E12558). Software that sizes
+ * by write/readback still terminates correctly on the constant 0. */
 static inline bool dm_bus_addr(uaecptr *a)
 {
     if ((*a & 0xFF000000) == 0xFF000000)
         *a &= 0x00FFFFFF;
-    return (*a & 0xFF000000) == 0;
+    if ((*a & 0xFF000000) == 0)
+        return true;
+    pistorm_dm_berr_addr = *a;
+    pistorm_dm_berr_count++;
+    return false;
 }
 
 static inline uae_u32 ps_bus_lget(uaecptr a)
@@ -1057,7 +1333,7 @@ static uae_u32 dm_lget(uaecptr a)
     g_buserr = 0;
     fc_data();
     if (!dm_bus_addr(&a))
-        return 0;
+        return 0;                  /* silent: see dm_bus_addr comment */
     uae_u32 v = ps_bus_lget(a);
     pistorm_buserr(a, 0, true, sz_long);
     return v;
@@ -1075,7 +1351,7 @@ static uae_u32 dm_wget(uaecptr a)
     g_buserr = 0;
     fc_data();
     if (!dm_bus_addr(&a))
-        return 0;
+        return 0;                  /* silent: see dm_bus_addr comment */
     uae_u16 v = ps_read_16(a);
     pistorm_buserr(a, 0, true, sz_word);
     return v;
@@ -1093,7 +1369,7 @@ static uae_u32 dm_bget(uaecptr a)
     g_buserr = 0;
     fc_data();
     if (!dm_bus_addr(&a))
-        return 0;
+        return 0;                  /* silent: see dm_bus_addr comment */
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
     return v;
@@ -1117,7 +1393,7 @@ static void dm_lput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     if (!dm_bus_addr(&a))
-        return;
+        return;                    /* silent: see dm_bus_addr comment */
     ps_bus_lput(a, v);
     pistorm_buserr(a, v, false, sz_long);
 #endif
@@ -1133,7 +1409,7 @@ static void dm_wput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     if (!dm_bus_addr(&a))
-        return;
+        return;                    /* silent: see dm_bus_addr comment */
     ps_write_16(a, (uint16_t)v);
     pistorm_buserr(a, v, false, sz_word);
 #endif
@@ -1149,7 +1425,7 @@ static void dm_bput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     if (!dm_bus_addr(&a))
-        return;
+        return;                    /* silent: see dm_bus_addr comment */
     ps_write_8(a, (uint8_t)v);
     pistorm_buserr(a, v, false, sz_byte);
 #endif
@@ -1330,6 +1606,7 @@ static void io_lput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     a &= 0x00FFFFFF;
+    stram_memcfg_snoop(a, v, 4);
     st_video_snoop32(a, (uint32_t)v);
     if (blitter_hide_addr(a))
     {
@@ -1367,6 +1644,7 @@ static void io_wput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     a &= 0x00FFFFFF;
+    stram_memcfg_snoop(a, v, 2);
     st_video_snoop16(a, (uint16_t)v);
     if (blitter_hide_addr(a))
     {
@@ -1407,6 +1685,7 @@ static void io_bput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     a &= 0x00FFFFFF;
+    stram_memcfg_snoop(a, v, 1);
     st_video_snoop8(a, (uint8_t)v);
     if (blitter_hide_addr(a))
     {
@@ -3415,6 +3694,37 @@ static void map_region(uaecptr start, uint32_t len, addrbank *b)
     }
 }
 
+/* ST-RAM bank routing for stram_size: the region above a single
+ * populated bank is sent to the REAL bus, so TOS's cold-boot memory
+ * probe reads the actual machine's open bus there - an absent bank has
+ * its own RAS line and no chips, so it answers exactly as real
+ * hardware, and the probe concludes "no RAM" just as it would on a
+ * stock 512K/2M board. Dual-bank layouts need no routing: the memfd
+ * page aliasing already models their wrap. Re-applied on every guest
+ * memcfg write (the slot boundaries move with the configured sizes). */
+static void stram_alias_apply_banks(void)
+{
+    if (!g_stram_alias)
+        return;
+    map_region(0, ST_RAM_SIZE, &pistorm_stram_bank);
+    if (emulator_config_stram_direct_enabled())
+        map_region(STRAM_DIRECT_START, STRAM_DIRECT_END - STRAM_DIRECT_START,
+                   &pistorm_lowram_bank);
+    /* Above the configured banks the GLUE asserts no RAS at all: real
+     * hardware BUS-ERRORS there, it does not wrap. (Field crash: SysInfo
+     * sizes RAM by probing past phystop under a BERR handler; a Pi-side
+     * wrap sent its probe write into the vector table instead.) Route
+     * the whole range to the REAL bus - the real GLUE runs the same
+     * memcfg the guest programmed, so it answers authentically: BERR
+     * beyond the banks, open bus in an absent bank's slot, regardless
+     * of what chips the board actually carries. */
+    uint32_t decoded = g_stram_act[1]
+        ? g_stram_cfgb[0] + g_stram_cfgb[1]    /* both banks present   */
+        : g_stram_cfgb[0];                     /* bank 1 absent        */
+    if (decoded < ST_RAM_SIZE)
+        map_region(decoded, ST_RAM_SIZE - decoded, &pistorm_dummy_bank);
+}
+
 /* ------------------------------------------------------------------ */
 /* No-spill guarded-read slow path (PISTORM_JIT_GUARD=2).              */
 /*                                                                     */
@@ -3529,6 +3839,10 @@ extern "C" void jit_mem_init(void)
         abort();
     }
 
+    /* sub-4MB boards: rebuild the first 4MB as aliased bank mappings
+     * so TOS memory sizing finds the PHYSICAL amount (native display) */
+    stram_alias_init();
+
     pistorm_fvdi_fb = (uint8_t *)mmap(NULL, FVDI_FB_MAX_BYTES,
                                       PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
@@ -3611,7 +3925,9 @@ extern "C" void jit_mem_init(void)
        map_region(STRAM_DIRECT_START, STRAM_DIRECT_END - STRAM_DIRECT_START, &pistorm_lowram_bank);
         //map_region(0, 0x00400000, &pistorm_lowram_bank);
     }
-    
+    /* stram_size single-bank boards: absent-bank range -> real bus */
+    stram_alias_apply_banks();
+
     if (emulator_config_et4k_enabled()) {
         map_region(GUARD_BASE, GUARD_SIZE, &pistorm_guard_bank);
         map_region(et4k_addr_ptr->vram_base, VRAM_SIZE, &pistorm_vga_vram);

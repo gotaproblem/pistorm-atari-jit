@@ -55,6 +55,7 @@ typedef enum {
   CONFITEM_HOSTFS,
   CONFITEM_STBOX_TOS,
   CONFITEM_STBOX_PLANE,
+  CONFITEM_STRAM_SIZE,
 } config_item;
 
 typedef struct {
@@ -114,6 +115,7 @@ static const config_switch_def config_switches[] = {
   { "hostfs", CONFITEM_HOSTFS },
   { "stbox_tos", CONFITEM_STBOX_TOS },
   { "stbox_plane", CONFITEM_STBOX_PLANE },
+  { "stram_size", CONFITEM_STRAM_SIZE },
 };
 
 const char *graphics_card_types[GRAPHICS_CARD_TYPES] = {
@@ -226,6 +228,11 @@ const char *emulator_config_stbox_tos(void)
 int emulator_config_stbox_plane(void)
 {
   return current_config ? current_config->stbox_plane : 0;
+}
+
+uint32_t emulator_config_stram_size(void)
+{
+  return current_config ? current_config->stram_size : 0;
 }
 
 bool emulator_config_stram_cache_enabled(void)
@@ -1017,6 +1024,16 @@ struct emulator_config *load_config_file(char *filename) {
         cfg->stbox_tos[sizeof(cfg->stbox_tos) - 1] = '\0';
         trim_whitespace(cfg->stbox_tos);
         printf ("[CFG] STBOX TOS %s\n", cfg->stbox_tos);
+        break;
+
+      case CONFITEM_STRAM_SIZE:
+        /* PHYSICAL ST-RAM on the board ("1M", "2560" = KB for 2.5M).
+         * Below 4MB the Pi-side ST-RAM aliases like the real banks so
+         * TOS sizes the true amount - a 4MB model on a smaller board
+         * puts the frame buffer outside physical DRAM and scrambles
+         * the native display. */
+        cfg->stram_size = (uint32_t)get_size_kb(parse_line + str_pos) * 1024u;
+        printf ("[CFG] Physical ST-RAM %uKB\n", cfg->stram_size >> 10);
         break;
 
       case CONFITEM_STBOX_PLANE:

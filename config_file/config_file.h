@@ -117,6 +117,7 @@ struct emulator_config {
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
   bool stram_cache;
   bool stram_direct;
+  uint32_t stram_size;   /* PHYSICAL ST-RAM bytes (0 = flat 4MB model) */
   bool vga_render;
   bool native_hdmi;
   bool cpu_clock_multiplier_set;
@@ -168,6 +169,7 @@ int emulator_config_graphics_driver(void);
 int emulator_config_fps(void);
 const char *emulator_config_stbox_tos(void);   /* "" if unset */
 int emulator_config_stbox_plane(void);         /* 0 if unset  */
+uint32_t emulator_config_stram_size(void);     /* bytes; 0 = flat 4MB */
 
 #ifdef __cplusplus
 }
