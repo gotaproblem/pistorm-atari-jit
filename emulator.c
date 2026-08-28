@@ -864,6 +864,9 @@ extern void pistorm_crash_dump_guest(void);
  * killed the HOST at pc=0. Permissive by design: the full 4MB ST-RAM
  * window is allowed even if less is fitted - the goal is keeping the
  * host alive, not perfect decode. */
+#ifdef __cplusplus
+extern "C"
+#endif
 int pistorm_pc_executable(unsigned int pc)
 {
   if (pc < 0x400000u)                                   /* ST-RAM window */
