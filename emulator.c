@@ -1010,13 +1010,25 @@ void *foldchk_thread(void *arg)
   fprintf(stderr, "[FOLDCHK] v_bas_ad=%08X\n", vb);
 
   uint16_t real0[8], real4[8], model0[8];
+  int berr_seen = 0;
   fc = 5;                                   /* supervisor data */
   for (int i = 0; i < 8; i++) {
     real0[i]  = ps_read_16(vb + 2*i);
+    if (g_buserr) { berr_seen = 1; g_buserr = 0; }
     real4[i]  = ps_read_16(vb + 0x400 + 2*i);
+    if (g_buserr) { berr_seen = 1; g_buserr = 0; }
     model0[i] = (uint16_t)((natmem_offset[vb + 2*i] << 8) |
                             natmem_offset[vb + 2*i + 1]);
   }
+  /* CRITICAL: our probe reads must not leave a sticky BERR latched for
+   * the CPU thread to blame on an unrelated guest instruction - the
+   * first version of this diagnostic double-faulted the guest that way
+   * (halt reason 2 at PC=0x70, mid-VBL). */
+  g_buserr = 0;
+  if (berr_seen)
+    fprintf(stderr, "[FOLDCHK] NOTE: bus error during real reads - the "
+            "screen base lies BEYOND the real MMU's configured banks "
+            "(guest sized more RAM than the machine has)\n");
   fprintf(stderr, "[FOLDCHK] real %06X :", vb);
   for (int i = 0; i < 8; i++) fprintf(stderr, " %04X", real0[i]);
   fprintf(stderr, "\n[FOLDCHK] real %06X :", vb + 0x400);
