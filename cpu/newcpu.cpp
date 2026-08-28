@@ -7778,6 +7778,12 @@ static void jit_recover_from_fault(int vec)
 }
 #endif
 
+#ifdef PISTORM_ATARI
+/* WILD-PC GUARD: which guest addresses may instructions be fetched
+ * from. Defined in emulator.c, next to the RAM-layout globals. */
+extern "C" int pistorm_pc_executable(unsigned int pc);
+#endif
+
 static void m68k_run_jit(void)
 {
 	/* Guard against a silent JIT init failure: calling a NULL
@@ -7928,7 +7934,6 @@ static void m68k_run_jit(void)
 					 * Do exactly that. Cost: two predicted-not-taken
 					 * compares per block dispatch, not per instruction. */
 					{
-						extern "C" int pistorm_pc_executable(unsigned int pc);
 						uae_u32 fpc = m68k_getpc();
 						if (__builtin_expect((fpc & 1) || !pistorm_pc_executable(fpc), 0))
 						{
