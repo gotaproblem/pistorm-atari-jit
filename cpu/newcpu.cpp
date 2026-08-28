@@ -7917,6 +7917,39 @@ static void m68k_run_jit(void)
 					}
 #endif
 
+	#ifdef PISTORM_ATARI
+					/* WILD-PC GUARD (Xenon 2 under FreeMiNT, 2026-08-28).
+					 * MiNT's address-error handler RTS'd back to the odd
+					 * address $CCC9D3 - in the unmapped 4-16MB hole. natmem
+					 * is flat, so the wild PC resolved to a readable host
+					 * pointer, the block-cache walk hit a NULL handler, and
+					 * the HOST died at pc=0. Real silicon refuses first:
+					 * odd PC = address error, unmapped fetch = bus error.
+					 * Do exactly that. Cost: two predicted-not-taken
+					 * compares per block dispatch, not per instruction. */
+					{
+						extern "C" int pistorm_pc_executable(unsigned int pc);
+						uae_u32 fpc = m68k_getpc();
+						if (__builtin_expect((fpc & 1) || !pistorm_pc_executable(fpc), 0))
+						{
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+							jit_in_compiled_code = false;
+#endif
+							if (fpc & 1)
+								exception3_read_prefetch(regs.ir, fpc);
+							else
+								exception2_fetch(regs.ir, 0, 0);
+#if defined(JIT_HAS_BUS_ERROR_RECOVERY)
+							jit_in_compiled_code = true;
+#endif
+							/* PC now points at the guest's handler; if THAT
+							 * is wild too, this guard trips again and the
+							 * exception machinery escalates to a guest
+							 * double-fault halt - host stays up. */
+							continue;
+						}
+					}
+#endif
 					((compiled_handler *)(pushall_call_handler))();
 
 					/* Pending exception: x86-64 SIGSEGV handler, or a bus

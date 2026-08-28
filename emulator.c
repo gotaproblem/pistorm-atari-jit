@@ -854,6 +854,30 @@ extern "C" void pistorm_crash_dump_guest(void);
 extern void pistorm_crash_dump_guest(void);
 #endif
 
+/* WILD-PC GUARD support (see m68k_run_jit in cpu/newcpu.cpp).
+ *
+ * Which guest addresses may INSTRUCTIONS be fetched from? Data accesses
+ * to bad addresses already bus-error through the banks, but natmem is
+ * one flat mapping, so a wild PC resolves to a readable host pointer
+ * and the JIT happily dispatches it - Xenon 2 under FreeMiNT rode an
+ * RTS to odd $CCC9D3 (the 4-16MB hole) into a NULL block handler and
+ * killed the HOST at pc=0. Permissive by design: the full 4MB ST-RAM
+ * window is allowed even if less is fitted - the goal is keeping the
+ * host alive, not perfect decode. */
+int pistorm_pc_executable(unsigned int pc)
+{
+  if (pc < 0x400000u)                                   /* ST-RAM window */
+    return 1;
+  if (tt_ram_available &&
+      pc >= 0x01000000u && pc - 0x01000000u < tt_ram_size)
+    return 1;                                           /* TT/alt-RAM    */
+  if (pc >= 0xE00000u && pc < 0xF00000u)                /* TOS 2.x ROM   */
+    return 1;
+  if (pc >= 0xFA0000u && pc < 0xFF0000u)                /* cart + TOS 1.x */
+    return 1;
+  return 0;
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *uctx)
 {
   extern void *pushall_call_handler;
