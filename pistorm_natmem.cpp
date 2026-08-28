@@ -2785,6 +2785,10 @@ static void hw_lput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     a = hw_fold_addr(a);
+    /* memcfg ($FF8001) has no HW_PAGE case of its own and fell through
+     * to hw_bus_* unsnooped - the model missed every guest memcfg write
+     * on this, the dispatcher that actually runs (1MB Mega ST case) */
+    stram_memcfg_snoop(a, v, 4);
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return;
@@ -2854,6 +2858,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     a = hw_fold_addr(a);
+    stram_memcfg_snoop(a, v, 2);   /* see hw_lput */
 
     if (fpu_in_regs(a))
         return;
@@ -2927,6 +2932,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
     g_buserr = 0;
     fc_data();
     a = hw_fold_addr(a);
+    stram_memcfg_snoop(a, v, 1);   /* see hw_lput */
 
     if (fpu_in_regs(a))
         return;
