@@ -989,6 +989,60 @@ static void install_crash_handler(void)
   sigaction(SIGSEGV, &sa, NULL);
 }
 
+/* PISTORM_FOLDCHK: see the creation site in main(). Reads the screen
+ * base from the model's sysvar, then compares REAL DRAM rows (over the
+ * bus, cache bypassed) against each other and against the model. */
+void *foldchk_thread(void *arg)
+{
+  (void)arg;
+  sleep(15);
+
+  if (!natmem_offset) return NULL;
+  uint32_t vb = ((uint32_t)natmem_offset[0x44E] << 24) |
+                ((uint32_t)natmem_offset[0x44F] << 16) |
+                ((uint32_t)natmem_offset[0x450] << 8)  |
+                 (uint32_t)natmem_offset[0x451];
+  vb &= 0x00FFFFFEu;
+  if (!vb || vb >= 0x400000u) {
+    fprintf(stderr, "[FOLDCHK] v_bas_ad=%08X implausible - abort\n", vb);
+    return NULL;
+  }
+  fprintf(stderr, "[FOLDCHK] v_bas_ad=%08X\n", vb);
+
+  uint16_t real0[8], real4[8], model0[8];
+  fc = 5;                                   /* supervisor data */
+  for (int i = 0; i < 8; i++) {
+    real0[i]  = ps_read_16(vb + 2*i);
+    real4[i]  = ps_read_16(vb + 0x400 + 2*i);
+    model0[i] = (uint16_t)((natmem_offset[vb + 2*i] << 8) |
+                            natmem_offset[vb + 2*i + 1]);
+  }
+  fprintf(stderr, "[FOLDCHK] real %06X :", vb);
+  for (int i = 0; i < 8; i++) fprintf(stderr, " %04X", real0[i]);
+  fprintf(stderr, "\n[FOLDCHK] real %06X :", vb + 0x400);
+  for (int i = 0; i < 8; i++) fprintf(stderr, " %04X", real4[i]);
+  fprintf(stderr, "\n[FOLDCHK] model %06X:", vb);
+  for (int i = 0; i < 8; i++) fprintf(stderr, " %04X", model0[i]);
+  fprintf(stderr, "\n");
+
+  int eq_model = 1, eq_fold = 1;
+  for (int i = 0; i < 8; i++) {
+    if (real0[i] != model0[i]) eq_model = 0;
+    if (real0[i] != real4[i])  eq_fold = 0;
+  }
+  if (eq_model)
+    fprintf(stderr, "[FOLDCHK] VERDICT: real DRAM matches the model - real "
+            "MMU is sane; suspect the shifter base registers\n");
+  else if (eq_fold)
+    fprintf(stderr, "[FOLDCHK] VERDICT: real DRAM FOLDS at +0x400 (plain-ST "
+            "A10 fold) - the REAL MMU is still in 2M muxing; the guest's "
+            "memcfg write never reached the chip\n");
+  else
+    fprintf(stderr, "[FOLDCHK] VERDICT: neither clean match nor clean fold - "
+            "send me these three rows\n");
+  return NULL;
+}
+
 void sigint_handler(int sig_num)
 {
   cpu_emulation_running = 0;
@@ -1443,6 +1497,25 @@ int main (int argc, char *argv[])
 #endif
   }
 //FDD_enabled = false;
+
+  /* PISTORM_FOLDCHK=1: one-shot real-vs-model screen RAM comparison,
+   * ~15s after boot (desktop idle, screen static). Decides the
+   * multiple-Fuji question with data instead of theory:
+   *   - real DRAM at v_bas_ad == the natmem model  -> real MMU is sane,
+   *     suspect the shifter base registers instead;
+   *   - real row at base == real row at base+0x400 (the plain-ST A10
+   *     fold) while both differ from the model -> the REAL MMU is still
+   *     in 2M muxing over smaller chips: the guest's memcfg write never
+   *     reached the chip. */
+  {
+    extern void *foldchk_thread(void *);
+    if (getenv("PISTORM_FOLDCHK")) {
+      pthread_t fold_tid;
+      if (pthread_create(&fold_tid, NULL, foldchk_thread, NULL) == 0)
+        pthread_setname_np(fold_tid, "pistorm: foldchk");
+    }
+  }
+
   time(&t); /* get date and time */
 
   printf("[MAIN] Emulation Running [%s] %s\n",
