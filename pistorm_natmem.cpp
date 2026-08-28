@@ -374,27 +374,56 @@ static inline void stram_memcfg_snoop(uaecptr a, uae_u32 v, int size)
     else if (size == 4 && a == 0x00FF8000u) stram_alias_recfg((uae_u8)(v >> 16));
 }
 
-/* Probe one PHYSICAL DRAM bank over the real bus, TOS's own way: with
- * memcfg programmed 2M|2M, a smaller chip wraps (row/column bits), an
- * absent bank (its own RAS line, no chips) retains nothing. The scrub
- * write guards against the floating bus echoing the marker back. */
+/* Probe one PHYSICAL DRAM bank over the real bus - EmuTOS memory.S,
+ * which is TOS 1.6's algorithm, kept because it is the one PROVEN on
+ * real MMUs of both flavours.
+ *
+ * Two things the first version of this probe got wrong (field case: a
+ * Mega ST with 512K+512K probed as 2048K+2048K):
+ *
+ * 1. THE FOLD OFFSETS DIFFER BETWEEN THE ST AND STE MMU. With the
+ *    controller programmed 2M|2M, a 512K chip aliases at +0x80000
+ *    (A19) on an STE - but at +0x400 (A10) on a plain ST, whose 2M
+ *    muxing gives the chip A19 as a row bit it still decodes. Testing
+ *    only the STE offset leaves the base pattern intact on an ST and
+ *    the bank reads as 2M. TOS therefore checks BOTH offsets per size,
+ *    and so do we: 128K = +0x40008 (STE) or +0x208 (ST); 512K =
+ *    +0x80008 (STE) or +0x408 (ST).
+ *
+ * 2. ONE WORD IS NOT PROOF. A floating bus can echo a single marker
+ *    back (TOS 1.6 comment, via EmuTOS: "without SIMM the memory bus
+ *    [lines] are floating and may present the good pattern value").
+ *    An arithmetic pattern of ~250 words (+0xFA54 per step) is written
+ *    at base+8..base+0x1FF and every check verifies the WHOLE pattern
+ *    at the alias offset. */
+static int stram_pattern_present(uint32_t addr)
+{
+    uint16_t v = 0;
+    for (uint32_t a = addr; a < addr + 0x1F8; a += 2) {
+        if (ps_read_16(a) != v)
+            return 0;
+        v = (uint16_t)(v + 0xFA54);
+    }
+    return 1;
+}
+
 static uint32_t stram_probe_bank(uint32_t base)
 {
-    ps_write_16(base + 0x08, 0x5A3C);
-    ps_write_16(base + 0x10, 0xC3A5);          /* scrub floating bus  */
-    if (ps_read_16(base + 0x08) != 0x5A3C)
-        return 0;                              /* absent              */
-    ps_write_16(base + 0x08, 0x1111);
-    ps_write_16(base + 0x80008, 0x2222);       /* wraps if chip <2M   */
-    if (ps_read_16(base + 0x08) == 0x1111)
-        return 2048u << 10;
-    ps_write_16(base + 0x08, 0x3333);
-    ps_write_16(base + 0x20008, 0x4444);       /* wraps if chip <512K */
-    if (ps_read_16(base + 0x08) == 0x3333)
-        return 512u << 10;
-    if (ps_read_16(base + 0x08) == 0x4444)
+    uint16_t v = 0;
+    for (uint32_t a = base + 0x008; a < base + 0x200; a += 2) {
+        ps_write_16(a, v);
+        v = (uint16_t)(v + 0xFA54);
+    }
+    /* order matters: a 128K chip also folds at the 512K offsets */
+    if (stram_pattern_present(base + 0x40008) ||   /* STE fold */
+        stram_pattern_present(base + 0x00208))     /* ST fold  */
         return 128u << 10;
-    return 0;                                  /* incoherent: absent  */
+    if (stram_pattern_present(base + 0x80008) ||   /* STE fold */
+        stram_pattern_present(base + 0x00408))     /* ST fold  */
+        return 512u << 10;
+    if (stram_pattern_present(base + 0x008))       /* intact = real 2M */
+        return 2048u << 10;
+    return 0;                                      /* absent           */
 }
 
 static void stram_alias_init(void)
