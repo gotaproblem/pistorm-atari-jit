@@ -1019,7 +1019,10 @@ void *foldchk_thread(void *arg)
                  (uint32_t)natmem_offset[0x451];
   vb &= 0x00FFFFFEu;
   if (!vb || vb >= 0x400000u) {
-    fprintf(stderr, "[FOLDCHK] v_bas_ad=%08X implausible - abort\n", vb);
+    fprintf(stderr, "[FOLDCHK] v_bas_ad=%08X implausible - the guest has "
+            "not reached screen setup; dumping guest state to show where "
+            "it is stuck:\n", vb);
+    pistorm_crash_dump_guest();
     return NULL;
   }
   fprintf(stderr, "[FOLDCHK] v_bas_ad=%08X\n", vb);

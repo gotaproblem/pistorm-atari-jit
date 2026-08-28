@@ -454,9 +454,18 @@ static inline void stram_memcfg_snoop(uaecptr a, uae_u32 v, int size)
 {
     if (!g_stram_alias)
         return;
-    if (size == 1 && a == 0x00FF8001u) stram_alias_recfg((uae_u8)v);
-    else if (size == 2 && a == 0x00FF8000u) stram_alias_recfg((uae_u8)v);
-    else if (size == 4 && a == 0x00FF8000u) stram_alias_recfg((uae_u8)(v >> 16));
+    uae_u8 mc = 0; int hit = 0;
+    if      (size == 1 && a == 0x00FF8001u) { mc = (uae_u8)v;         hit = 1; }
+    else if (size == 2 && a == 0x00FF8000u) { mc = (uae_u8)v;         hit = 1; }
+    else if (size == 4 && a == 0x00FF8000u) { mc = (uae_u8)(v >> 16); hit = 1; }
+    if (hit) {
+        /* EVERY write, not just changes - a guest re-writing the current
+         * value is invisible to recfg's early-out, and during sizing
+         * triage "TOS wrote $0A again" vs "TOS wrote nothing" is exactly
+         * the distinction that matters. Boot-time rate: a handful. */
+        fprintf(stderr, "[STRAM] guest memcfg write $%02X\n", mc);
+        stram_alias_recfg(mc);
+    }
 }
 
 /* Probe one PHYSICAL DRAM bank over the real bus - EmuTOS memory.S,
