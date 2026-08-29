@@ -215,6 +215,60 @@ int main(void)
         CHECK(ram[0x60006] == 2 && ram[0x60007] == 0, "block size 512");
     }
 
+    /* ---- LOADER-PATTERN STRESS: long chained sequential reads ---------
+     * Spectre/AHDI load big files as a CHAIN of multi-sector READ(6)
+     * commands with varying counts and a moving DMA base. The original
+     * harness only did 2-sector transfers; an addressing/ordering bug
+     * that only shows at scale would corrupt a loaded program image and
+     * present as "guest jumps into garbage" (field suspicion:
+     * macimage.fil). Checksum every byte against the backing file. */
+    {
+        static const int chain[] = { 1, 2, 7, 16, 32, 255, 64, 3, 128, 9 };
+        uint32_t lba = 100;
+        uint32_t base = 0x08000;
+        int ok = 1;
+        for (unsigned ci = 0; ci < sizeof chain / sizeof chain[0]; ci++) {
+            uint32_t cnt = (uint32_t)chain[ci];
+            uint8_t c_rd[6] = { 0x08,
+                (uint8_t)((lba >> 16) & 0x1F), (uint8_t)(lba >> 8),
+                (uint8_t)lba, (uint8_t)(cnt == 256 ? 0 : cnt), 0 };
+            dma_set_base(base);
+            dma_set_count((uint16_t)cnt);
+            if (!send_cdb(c_rd, 6)) { ok = 0; printf("chain[%u]: handshake fail\n", ci); break; }
+            if (read_status() != 0) { ok = 0; printf("chain[%u]: bad status\n", ci); break; }
+            if (dma_ptr() != base + cnt * 512) {
+                ok = 0;
+                printf("chain[%u]: DMA ptr %06X expected %06X\n",
+                       ci, dma_ptr(), base + cnt * 512);
+                break;
+            }
+            /* verify against the raw image file */
+            {
+                FILE *f = fopen("/tmp/acsi_t.img", "rb");
+                static uint8_t fbuf[256 * 512];
+                fseek(f, (long)lba * 512, SEEK_SET);
+                fread(fbuf, 1, cnt * 512, f);
+                fclose(f);
+                if (memcmp(ram + base, fbuf, cnt * 512) != 0) {
+                    ok = 0;
+                    for (uint32_t i = 0; i < cnt * 512; i++)
+                        if (ram[base + i] != fbuf[i]) {
+                            printf("chain[%u]: first mismatch at byte %u "
+                                   "(lba %u) got %02X want %02X\n",
+                                   ci, i, lba + i / 512, ram[base + i], fbuf[i]);
+                            break;
+                        }
+                    break;
+                }
+            }
+            lba += cnt;
+            base += cnt * 512;
+        }
+        CHECK(ok, "loader-pattern chained reads: every byte matches the image");
+        CHECK(lba == 100 + 1+2+7+16+32+255+64+3+128+9,
+              "loader-pattern chain completed all links");
+    }
+
     /* ---- non-emulated ID passes to the real bus ----------------------- */
     {
         long before = bus_hdc_writes;
