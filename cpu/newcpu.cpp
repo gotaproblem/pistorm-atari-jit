@@ -10741,8 +10741,18 @@ void hardware_exception2(uaecptr addr, uae_u32 v, bool read, bool ins, int size)
 	}
 	if (pistorm_cpu_diag() && repeat_count < 8)
 	{
-		fprintf(stderr, "[HWX2] addr=%08X pc=%08X g_buserr=%u\n",
-				(unsigned)addr, (unsigned)pc, (unsigned)g_buserr);
+		/* include instruction_pc and the code bytes AROUND the faulting
+		 * instruction (read host-side from the mirror - cannot fault),
+		 * so a BERR-trap virtualizer's faulting instruction can be
+		 * decoded straight from the log */
+		uae_u8 *nm = natmem_offset;
+		uaecptr ip = regs.instruction_pc & 0x00FFFFFF;
+		fprintf(stderr, "[HWX2] addr=%08X pc=%08X ipc=%08X g_buserr=%u code@ipc:"
+				" %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X\n",
+				(unsigned)addr, (unsigned)pc, (unsigned)ip,
+				(unsigned)g_buserr,
+				nm[ip], nm[ip+1], nm[ip+2], nm[ip+3], nm[ip+4],
+				nm[ip+5], nm[ip+6], nm[ip+7], nm[ip+8], nm[ip+9]);
 		repeat_count++;
 	}
 #endif
