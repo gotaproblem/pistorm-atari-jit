@@ -4435,8 +4435,13 @@ void REGPARAM2 Exception(int nr)
 		bool changed = pc != exc_last_pc[nr] || g_buserr_addr != exc_last_buserr[nr];
 
 		/* async vectors (autovectors/traps, nr >= 24) interrupt at random
-		 * pcs - "changed" would flood; hard-cap those at 8 total */
-		if (nr >= 24 ? (exc_count[nr] < 8) : (changed || exc_count[nr] < 8))
+		 * pcs - "changed" would flood; hard-cap those at 8 total.
+		 * Sync vectors are ALSO capped now: a fault cascade changes pc
+		 * every round and flooded the scrollback right past patient
+		 * zero (Spectre Mac-launch case). The first 16 of each vector
+		 * always include the one that started it. */
+		if (nr >= 24 ? (exc_count[nr] < 8)
+		             : ((changed || exc_count[nr] < 8) && exc_count[nr] < 16))
 		{
 			fprintf(stderr, "EXC vec=%d pc=%08X op=%04X g_buserr_addr=%08X stopped=%d\n",
 					nr, (unsigned)pc, (unsigned)op,
