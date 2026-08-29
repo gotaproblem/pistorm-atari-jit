@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #include "acsi.h"
 
@@ -130,7 +131,7 @@ int acsi_attach_at(int id, const char *path)
 
     int fd = open(path, O_RDWR);
     if (fd < 0) {
-        ACSI_LOG("attach %s: cannot open", path);
+        ACSI_LOG("attach %s: cannot open (%s)", path, strerror(errno));
         return -1;
     }
     struct stat st;
@@ -162,9 +163,16 @@ int acsi_attach_at(int id, const char *path)
 
 int acsi_attach(const char *path)
 {
-    /* optional "N:" prefix pins the ID; otherwise lowest free */
-    if (path[0] >= '0' && path[0] <= '7' && path[1] == ':')
-        return acsi_attach_at(path[0] - '0', path + 2);
+    /* optional ID prefix pins the target: "3:disk.img" or "3 disk.img";
+     * otherwise the lowest free ID is used */
+    if (path[0] >= '0' && path[0] <= '7' &&
+        (path[1] == ':' || path[1] == ' ' || path[1] == '\t')) {
+        int id = path[0] - '0';
+        path += 2;
+        while (*path == ' ' || *path == '\t')
+            path++;
+        return acsi_attach_at(id, path);
+    }
     return acsi_attach_at(-1, path);
 }
 
