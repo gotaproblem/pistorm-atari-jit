@@ -59,6 +59,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/IDE.h"
 #include "platforms/atari/idedriver.h"
 #include "platforms/atari/fdd/atari_fdd.h"
+#include "platforms/atari/fdd/acsi.h"
 #include "platforms/atari/fdd/platform_atari_fdd.h"
 #include "platforms/atari/network/platform_atari_network.h"
 #include "platforms/atari/kbd_usb.h"
@@ -1959,15 +1960,7 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
 //extern "C" uint32_t  fdd_io_read  (uint32_t addr, int size);
 extern  void      fdd_io_write (uint32_t addr, uint32_t val, int size);
 extern  bool      fdd_owns_address (uint32_t addr);
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern  bool      fdd_route_address (uint32_t addr);
-extern  bool      acsi_enabled (void);
-extern  int       acsi_attach (const char *path);
-#ifdef __cplusplus
-}
-#endif
+/* fdd_route_address / acsi_* come from atari_fdd.h / acsi.h up top */
 extern "C" int  dma_snoop_active (void);
 extern "C" int  dma_snoop_owns   (uint32_t addr);
 extern "C" void dma_snoop_write  (uint32_t addr, uint32_t val, int size);
