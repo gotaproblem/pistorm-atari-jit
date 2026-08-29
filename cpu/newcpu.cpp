@@ -4448,12 +4448,36 @@ void REGPARAM2 Exception(int nr)
 
 	if (pistorm_cpu_diag() && nr >= 0 && nr < 256)
 	{
-		pistorm_exc_ring_e *e = &pistorm_exc_ring[pistorm_exc_ring_i++ & 63];
-		e->vec = (uae_u16)nr;
-		e->sr = regs.sr;
-		e->pc = m68k_getpc();
-		e->sp = m68k_areg(regs, 7);
-		e->fault = g_buserr_addr;
+		/* FREEZE the ring once a fault cascade is under way: a cascade
+		 * runs thousands of laps and flushes the interesting part (the
+		 * transition from healthy execution) straight out of a rolling
+		 * ring. 48 consecutive fault-class exceptions with the same
+		 * fault address = cascade; stop recording, keeping ~16 healthy
+		 * entries plus the first cascade rounds. */
+		static unsigned same_fault_run;
+		static uae_u32 last_fault;
+		static bool frozen;
+		if (!frozen)
+		{
+			pistorm_exc_ring_e *e = &pistorm_exc_ring[pistorm_exc_ring_i++ & 63];
+			e->vec = (uae_u16)nr;
+			e->sr = regs.sr;
+			e->pc = m68k_getpc();
+			e->sp = m68k_areg(regs, 7);
+			e->fault = g_buserr_addr;
+
+			bool faultclass = (nr == 2 || nr == 3 || nr == 4 || nr == 11);
+			if (faultclass && g_buserr_addr == last_fault)
+			{
+				if (++same_fault_run >= 48)
+					frozen = true;
+			}
+			else
+			{
+				same_fault_run = 0;
+				last_fault = g_buserr_addr;
+			}
+		}
 	}
 
 	if (pistorm_cpu_diag() && nr < 48)
