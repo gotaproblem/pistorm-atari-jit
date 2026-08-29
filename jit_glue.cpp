@@ -200,8 +200,26 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     currprefs.cpu_memory_cycle_exact = changed_prefs.cpu_memory_cycle_exact = false;
 
     /* cpu_compatible=false -> do_interrupt() takes one Exception and returns
-     * (no get_ipl/intlev re-poll loop), which is what we want with real pins. */
-    currprefs.cpu_compatible = changed_prefs.cpu_compatible = false; // default false, true slows things down a lot
+     * (no get_ipl/intlev re-poll loop), which is what we want with real pins.
+     *
+     * PISTORM_CPU_COMPAT=1 (interpreter only): select the prefetch-accurate
+     * 68000/68010 core instead. Its group-0 (bus/address error) exception
+     * frames carry the EXACT PC, instruction register and access address -
+     * which software that VIRTUALIZES hardware through bus-error traps
+     * requires to decode and resume the faulted instruction. Field case:
+     * Spectre (Mac emulator) traps the Mac ROM's VIA/IWM/SCC accesses via
+     * BERR; with approximate frames its handler mis-decodes, RTEs into
+     * garbage and the guest dies in a fault cascade at Mac launch.
+     * Slower, and the interrupt path differs (re-poll loop) - treat as
+     * experimental alongside real-pin IPL until proven. */
+    {
+        const char *e = getenv("PISTORM_CPU_COMPAT");
+        bool compat = (e && *e == '1') && disable_jit;
+        currprefs.cpu_compatible = changed_prefs.cpu_compatible = compat;
+        if (compat)
+            write_log("[JITGLUE] cpu_compatible=1: prefetch-accurate core, "
+                      "exact group-0 frames (PISTORM_CPU_COMPAT)\n");
+    }
 
     /* Keep the Atari bus map 24-bit unless TT-RAM or addr32 is explicitly
      * enabled. This lets us test 32-bit address decode without exposing TT-RAM. */
