@@ -6776,6 +6776,27 @@ static void m68k_run_1()
 		{
 			while (!exit)
 			{
+#ifdef PISTORM_ATARI
+				/* Same treatment as m68k_run_2_000: this fork delivers
+				 * interrupts by calling intlev() from the run loop (the
+				 * do_specialties SPCFLAG route is compiled out for
+				 * Atari). Without this the compat core executed
+				 * flawlessly but NO interrupt was ever taken - hz_200
+				 * stayed at zero and TOS 2.06 hung at the logo inside a
+				 * disk-poll whose timeout needs Timer C to tick. */
+				if (regs.stopped)
+				{
+					do_cycles_stop(4);
+					intlev();
+					if (r->spcflags)
+					{
+						if (do_specialties(0))
+							exit = true;
+					}
+					regs.ipl[0] = regs.ipl_pin;
+					continue;
+				}
+#endif
 				r->opcode = r->ir;
 
 				count_instr(r->opcode);
@@ -6808,6 +6829,9 @@ static void m68k_run_1()
 				do_cycles(cpu_cycles);
 				regs.instruction_cnt++;
 				atari_serial_irq_poll();
+#ifdef PISTORM_ATARI
+				intlev();          /* the fork's interrupt delivery */
+#endif
 				if (r->spcflags || regs.ipl[0] > 0)
 				{
 					if (do_specialties(cpu_cycles))
