@@ -4420,7 +4420,7 @@ void REGPARAM2 Exception_cpu(int nr)
  * cpu_halt, cannot. */
 struct pistorm_exc_ring_e {
 	uae_u16 vec, sr;
-	uae_u32 pc, sp, fault;
+	uae_u32 pc, sp, fault, target;
 };
 static pistorm_exc_ring_e pistorm_exc_ring[64];
 static unsigned pistorm_exc_ring_i;
@@ -4435,8 +4435,8 @@ void pistorm_exc_ring_dump(void)
 	for (unsigned k = 0; k < n; k++) {
 		pistorm_exc_ring_e *e =
 			&pistorm_exc_ring[(pistorm_exc_ring_i - n + k) & 63];
-		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X\n",
-				e->vec, e->pc, e->sp, e->sr, e->fault);
+		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X vect->%08X\n",
+				e->vec, e->pc, e->sp, e->sr, e->fault, e->target);
 	}
 }
 
@@ -4465,6 +4465,14 @@ void REGPARAM2 Exception(int nr)
 			e->pc = m68k_getpc();
 			e->sp = m68k_areg(regs, 7);
 			e->fault = g_buserr_addr;
+			{
+				/* the address this exception will dispatch to, read
+				 * host-side from the mirror (cannot fault) */
+				uae_u32 va = (regs.vbr + 4u * (uae_u32)nr) & 0x00FFFFFCu;
+				uae_u8 *nm = natmem_offset;
+				e->target = ((uae_u32)nm[va] << 24) | ((uae_u32)nm[va+1] << 16) |
+				            ((uae_u32)nm[va+2] << 8) | nm[va+3];
+			}
 
 			bool faultclass = (nr == 2 || nr == 3 || nr == 4 || nr == 11);
 			if (faultclass && g_buserr_addr == last_fault)
