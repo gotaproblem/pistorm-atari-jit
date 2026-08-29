@@ -47,6 +47,7 @@ typedef struct {
     uint8_t  root[512];          /* synthesized AHDI root (hfs only)      */
     uint8_t  sense;              /* pending sense code (0 = none)         */
     uint32_t sense_lba;
+    bool     probed;             /* first guest contact logged            */
 } acsi_target_t;
 
 static acsi_target_t tgt[ACSI_MAX_TARGETS];
@@ -356,6 +357,15 @@ static void exec_command(void)
     acsi_target_t *t = &tgt[cur_id];
     const uint8_t *c = icd ? cdb + 1 : cdb;
     uint8_t op = icd ? c[0] : (uint8_t)(c[0] & 0x1F);
+
+    if (!t->probed) {
+        /* one line per ID at first guest contact: proves the driver's
+         * probe reached the emulated target (an EmuTOS/AHDI boot scan
+         * shows up here even when nothing mountable is on the disk) */
+        t->probed = true;
+        ACSI_LOG("ID %d first contact: op $%02X%s", cur_id, op,
+                 icd ? " (ICD)" : "");
+    }
 
     /* 6-byte CDB fields (group 0) */
     uint32_t lba6 = (((uint32_t)c[1] & 0x1F) << 16) |
