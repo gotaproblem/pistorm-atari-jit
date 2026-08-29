@@ -214,6 +214,7 @@ extern "C"
     void     fdd_io_write     (uint32_t addr, uint32_t val, int size);
     bool     fdd_owns_address (uint32_t addr);
     bool     fdd_route_address(uint32_t addr);   /* FDD/ACSI dispatch gate */
+    bool     acsi_enabled     (void);           /* emulated ACSI targets? */
     /* real bus-master DMA mirror coherence - see dma_snoop.h */
     int      dma_snoop_active (void);
     int      dma_snoop_owns   (uint32_t addr);
@@ -2417,7 +2418,12 @@ extern "C" uint8_t IDE_intrq_pending(void);
 
 static inline uae_u8 mfp_gpip_shim(uae_u8 v)
 {
-    if (FDD_enabled)
+    /* fdd_gpip carries BOTH the emulated-floppy INTRQ and the emulated
+     * ACSI target IRQ (shared GPIP5). Gating it on FDD_enabled alone
+     * silently discarded ACSI completion IRQs in ACSI-only configs -
+     * EmuTOS's probe then timed out after the first CDB byte and no
+     * emulated disk was ever seen ("needed to enable fdd" field case). */
+    if (FDD_enabled || acsi_enabled())
         v = fdd_gpip(v);
     if (IDE_intrq_pending())
         v &= (uae_u8)~0x20;      /* GPIP5 low = disk interrupt (active low) */
