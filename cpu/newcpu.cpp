@@ -4415,11 +4415,46 @@ void REGPARAM2 Exception_cpu(int nr)
 	Exception_cpu_oldpc(nr, 0xffffffff);
 }
 
+/* Ring of the LAST 64 exceptions (diag mode): caps and scrollback can
+ * hide the first bad exception of a cascade; the ring, dumped at
+ * cpu_halt, cannot. */
+struct pistorm_exc_ring_e {
+	uae_u16 vec, sr;
+	uae_u32 pc, sp, fault;
+};
+static pistorm_exc_ring_e pistorm_exc_ring[64];
+static unsigned pistorm_exc_ring_i;
+
+void pistorm_exc_ring_dump(void)
+{
+	if (!pistorm_exc_ring_i)
+		return;
+	fprintf(stderr, "[EXCRING] last %u exceptions, oldest first:\n",
+			pistorm_exc_ring_i < 64 ? pistorm_exc_ring_i : 64);
+	unsigned n = pistorm_exc_ring_i < 64 ? pistorm_exc_ring_i : 64;
+	for (unsigned k = 0; k < n; k++) {
+		pistorm_exc_ring_e *e =
+			&pistorm_exc_ring[(pistorm_exc_ring_i - n + k) & 63];
+		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X\n",
+				e->vec, e->pc, e->sp, e->sr, e->fault);
+	}
+}
+
 void REGPARAM2 Exception(int nr)
 {
 #if CPU_EXCEPTION_TRACE
 	extern volatile uint8_t g_buserr;
 	extern volatile uint32_t g_buserr_addr; /* your ps_protocol fault address */
+
+	if (pistorm_cpu_diag() && nr >= 0 && nr < 256)
+	{
+		pistorm_exc_ring_e *e = &pistorm_exc_ring[pistorm_exc_ring_i++ & 63];
+		e->vec = (uae_u16)nr;
+		e->sr = regs.sr;
+		e->pc = m68k_getpc();
+		e->sp = m68k_areg(regs, 7);
+		e->fault = g_buserr_addr;
+	}
 
 	if (pistorm_cpu_diag() && nr < 48)
 	{
@@ -8207,6 +8242,7 @@ void cpu_halt(int id)
 			 * instruction that started the cascade - a guest that has
 			 * rebuilt its vector table (Spectre in Mac mode, games)
 			 * leaves no other trace. */
+			pistorm_exc_ring_dump();
 			pistorm_crash_dump_guest();
 		}
 #endif
