@@ -1,0 +1,230 @@
+/*
+ * acsi_test.c - host-side test of the emulated ACSI target THROUGH the
+ * real dispatch: links the actual acsi.c AND the actual atari_fdd.c
+ * routing, with the bus and ST-RAM stubbed. Drives the register-level
+ * sequences a period driver (AHDI/ICD/Spectre) performs, so the CDB
+ * handshake, IRQ pacing, DMA pointer arithmetic and status/sense
+ * behaviour are all exercised on the same code the guest will hit.
+ *
+ * NOTE ataritest cannot test this subsystem: it talks to the REAL bus
+ * from its own process; the emulated targets exist only inside the
+ * emulator's dispatch. This standalone test is the harness instead.
+ *
+ * Build & run (any host):
+ *   cc -DACSI_HOST_TEST -I. -o /tmp/acsi_test \
+ *      platforms/atari/fdd/acsi_test.c platforms/atari/fdd/acsi.c \
+ *      platforms/atari/fdd/atari_fdd.c && /tmp/acsi_test
+ */
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#include "atari_fdd.h"
+#include "acsi.h"
+
+/* ---- stubs: bus + ST-RAM ---------------------------------------------- */
+
+static uint8_t ram[0x400000];
+static long bus_hdc_writes;          /* HDC bytes that went to the "real bus" */
+
+bool FDD_enabled = false;            /* ACSI-only configuration under test */
+
+void ps_write_8(uint32_t a, uint16_t v)  { if (a < sizeof ram) ram[a] = (uint8_t)v;
+                                           if (a == 0xFF8604u) bus_hdc_writes++; }
+void ps_write_16(uint32_t a, uint16_t v) { if (a + 1 < sizeof ram) { ram[a] = v >> 8; ram[a+1] = (uint8_t)v; }
+                                           if (a == 0xFF8604u) bus_hdc_writes++; }
+void ps_write_32(uint32_t a, uint32_t v) { ps_write_16(a, v >> 16); ps_write_16(a + 2, (uint16_t)v); }
+uint16_t ps_read_16(uint32_t a) { return a + 1 < sizeof ram ? (uint16_t)((ram[a] << 8) | ram[a+1]) : 0xFFFF; }
+uint8_t  ps_read_8(uint32_t a)  { return a < sizeof ram ? ram[a] : 0xFF; }
+
+void pistorm_dma_to_stram(uint32_t a, const uint8_t *b, uint32_t n)
+{ if (a + n <= sizeof ram) memcpy(ram + a, b, n); }
+void pistorm_dma_from_stram(uint32_t a, uint8_t *b, uint32_t n)
+{ if (a + n <= sizeof ram) memcpy(b, ram + a, n); }
+void stram_dma_write(uint32_t a, const uint8_t *b, unsigned n)
+{ if (a + n <= sizeof ram) memcpy(ram + a, b, n); }
+
+/* ---- checks ------------------------------------------------------------ */
+
+static int checks, fails;
+#define CHECK(c, msg) do { checks++; \
+    if (!(c)) { fails++; printf("FAIL  %s\n", msg); } } while (0)
+
+/* ---- driver-side helpers (the sequences AHDI performs) ------------------ */
+
+static void dma_set_base(uint32_t a)
+{
+    fdd_io_write(DMA_BASE_LOW,  a & 0xFF, 1);
+    fdd_io_write(DMA_BASE_MID,  (a >> 8) & 0xFF, 1);
+    fdd_io_write(DMA_BASE_HIGH, (a >> 16) & 0xFF, 1);
+}
+
+static void dma_set_count(uint16_t n)
+{
+    fdd_io_write(DMA_MODE_REG, 0x098, 2);      /* HDC + SCREG          */
+    fdd_io_write(FDC_DATA_REG, n, 2);
+}
+
+static int gpip_irq(void)                       /* 1 = GPIP5 asserted   */
+{
+    return (fdd_gpip(0xFF) & (1u << 5)) == 0;
+}
+
+/* send a full CDB; returns 0 on handshake failure */
+static int send_cdb(const uint8_t *c, int n)
+{
+    fdd_io_write(DMA_MODE_REG, 0x088, 2);      /* HDC, A-bits low: 1st */
+    fdd_io_write(FDC_DATA_REG, c[0], 2);
+    for (int i = 1; i < n; i++) {
+        if (!gpip_irq()) return 0;             /* target must request  */
+        fdd_io_write(DMA_MODE_REG, 0x08A, 2);  /* HDC + A0: rest       */
+        fdd_io_write(FDC_DATA_REG, c[i], 2);
+    }
+    return 1;
+}
+
+static uint8_t read_status(void)
+{
+    fdd_io_write(DMA_MODE_REG, 0x08A, 2);
+    return (uint8_t)fdd_io_read(FDC_DATA_REG, 2);
+}
+
+static uint16_t read_count(void)
+{
+    fdd_io_write(DMA_MODE_REG, 0x098, 2);
+    return (uint16_t)fdd_io_read(FDC_DATA_REG, 2);
+}
+
+static uint32_t dma_ptr(void)
+{
+    return ((fdd_io_read(DMA_BASE_HIGH, 1) & 0xFF) << 16) |
+           ((fdd_io_read(DMA_BASE_MID, 1) & 0xFF) << 8) |
+            (fdd_io_read(DMA_BASE_LOW, 1) & 0xFF);
+}
+
+/* ---- image scaffolding -------------------------------------------------- */
+
+static const char *make_image(const char *path, uint32_t sectors, uint8_t seed)
+{
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    uint8_t sec[512];
+    for (uint32_t s = 0; s < sectors; s++) {
+        memset(sec, (uint8_t)(seed + s), sizeof sec);
+        write(fd, sec, sizeof sec);
+    }
+    close(fd);
+    return path;
+}
+
+int main(void)
+{
+    const char *img = make_image("/tmp/acsi_t.img", 2048, 0x10); /* 1MB  */
+    const char *hfs = make_image("/tmp/acsi_t.hfs", 4096, 0x80); /* 2MB  */
+
+    CHECK(acsi_attach(img) == 0, "attach .img at ID 0");
+    CHECK(acsi_attach(hfs) == 1, "attach .hfs at ID 1");
+    CHECK(acsi_enabled(), "subsystem enabled");
+    fdd_init();
+
+    /* ---- INQUIRY, ID 0 ------------------------------------------------ */
+    {
+        uint8_t c[6] = { 0x12, 0, 0, 0, 32, 0 };   /* ID 0 | INQUIRY     */
+        dma_set_base(0x10000);
+        dma_set_count(1);
+        CHECK(send_cdb(c, 6), "INQUIRY: per-byte IRQ handshake");
+        CHECK(gpip_irq(), "INQUIRY: completion IRQ");
+        CHECK(read_status() == 0x00, "INQUIRY: good status");
+        CHECK(!gpip_irq(), "status read clears IRQ");
+        CHECK(memcmp(ram + 0x10008, "PiStorm ", 8) == 0,
+              "INQUIRY data (vendor) landed at DMA base");
+        CHECK(dma_ptr() == 0x10000 + 32, "DMA pointer advanced by 32");
+        CHECK(read_count() == 0, "residual count 0");
+    }
+
+    /* ---- WRITE(6) / READ(6) round trip, ID 0 -------------------------- */
+    {
+        uint8_t c_wr[6] = { 0x0A, 0, 0, 5, 2, 0 }; /* write 2 blks @ 5   */
+        uint8_t c_rd[6] = { 0x08, 0, 0, 5, 2, 0 };
+        for (int i = 0; i < 1024; i++) ram[0x20000 + i] = (uint8_t)(i * 7);
+        dma_set_base(0x20000);
+        dma_set_count(2);
+        CHECK(send_cdb(c_wr, 6), "WRITE6 handshake");
+        CHECK(read_status() == 0x00, "WRITE6 good");
+        memset(ram + 0x30000, 0, 1024);
+        dma_set_base(0x30000);
+        dma_set_count(2);
+        CHECK(send_cdb(c_rd, 6), "READ6 handshake");
+        CHECK(read_status() == 0x00, "READ6 good");
+        CHECK(memcmp(ram + 0x20000, ram + 0x30000, 1024) == 0,
+              "READ6 returns what WRITE6 stored");
+        CHECK(dma_ptr() == 0x30000 + 1024, "DMA pointer advanced 2 sectors");
+    }
+
+    /* ---- .hfs wrapper, ID 1 ------------------------------------------- */
+    {
+        uint8_t c0[6] = { 0x28, 0, 0, 0, 1, 0 };   /* ID 1 | READ6 LBA 0 */
+        c0[0] = (1 << 5) | 0x08;
+        dma_set_base(0x40000);
+        dma_set_count(1);
+        CHECK(send_cdb(c0, 6), "hfs: READ LBA0 handshake");
+        CHECK(read_status() == 0x00, "hfs: LBA0 good");
+        uint8_t *r = ram + 0x40000;
+        uint32_t hd_siz = (r[0x1C2] << 24) | (r[0x1C3] << 16) |
+                          (r[0x1C4] << 8) | r[0x1C5];
+        CHECK(hd_siz == 4097, "hfs root: hd_siz = file sectors + 1");
+        CHECK(r[0x1C6] == 0x01 && r[0x1C7] == 'M' && r[0x1C8] == 'A' &&
+              r[0x1C9] == 'C', "hfs root: MAC partition flagged");
+        CHECK(r[0x1CD] == 1, "hfs root: partition starts at sector 1");
+
+        uint8_t c1[6] = { (1 << 5) | 0x08, 0, 0, 1, 1, 0 };  /* LBA 1   */
+        dma_set_base(0x41000);
+        dma_set_count(1);
+        CHECK(send_cdb(c1, 6), "hfs: READ LBA1 handshake");
+        CHECK(read_status() == 0x00, "hfs: LBA1 good");
+        CHECK(ram[0x41000] == 0x80, "hfs: LBA1 = file offset 0 (seed)");
+    }
+
+    /* ---- error path: bad LBA then REQUEST SENSE ----------------------- */
+    {
+        uint8_t bad[6] = { 0x08, 0x1F, 0xFF, 0xFF, 1, 0 };  /* LBA 2M   */
+        dma_set_base(0x50000);
+        dma_set_count(1);
+        CHECK(send_cdb(bad, 6), "bad READ handshake");
+        CHECK(read_status() == 0x02, "bad READ: check condition");
+        uint8_t rs[6] = { 0x03, 0, 0, 0, 4, 0 };
+        dma_set_base(0x50000);
+        CHECK(send_cdb(rs, 6), "REQUEST SENSE handshake");
+        CHECK(read_status() == 0x00, "REQUEST SENSE good");
+        CHECK(ram[0x50000] == 0x21, "sense code: invalid block address");
+    }
+
+    /* ---- ICD wrapper: READ CAPACITY(10) ------------------------------- */
+    {
+        uint8_t c[11] = { 0x1F, 0x25, 0,0,0,0,0,0,0,0,0 };
+        dma_set_base(0x60000);
+        CHECK(send_cdb(c, 11), "ICD READ CAPACITY handshake");
+        CHECK(read_status() == 0x00, "ICD READ CAPACITY good");
+        uint32_t last = (ram[0x60000] << 24) | (ram[0x60001] << 16) |
+                        (ram[0x60002] << 8) | ram[0x60003];
+        CHECK(last == 2047, "capacity: last LBA of the 1MB image");
+        CHECK(ram[0x60006] == 2 && ram[0x60007] == 0, "block size 512");
+    }
+
+    /* ---- non-emulated ID passes to the real bus ----------------------- */
+    {
+        long before = bus_hdc_writes;
+        fdd_io_write(DMA_MODE_REG, 0x088, 2);
+        fdd_io_write(FDC_DATA_REG, (5 << 5) | 0x00, 2);   /* ID 5: TUR  */
+        CHECK(bus_hdc_writes > before,
+              "ID 5 command byte forwarded to the real bus");
+        CHECK(!acsi_owns_dma(), "emulated side released ownership");
+    }
+
+    printf("\n%d checks, %d failures\n", checks, fails);
+    return fails ? 1 : 0;
+}

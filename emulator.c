@@ -1368,6 +1368,16 @@ int main (int argc, char *argv[])
     platform_fdd_init (config->fdd.img_path);
     //printf ("[INIT] FDD Image Attached %s\n", cfg->fdd.img_path);
   }
+  else if (acsi_enabled())
+  {
+    /* Emulated ACSI targets without floppy emulation: the DMA-port
+     * window still routes through fdd_io_* (which passes FDC traffic to
+     * the real bus), so its state must be initialised. Images were
+     * attached at cfg parse time ("acsi" lines). fdd_init is declared
+     * with C linkage in atari_fdd.h (included above). */
+    fdd_init ();
+    printf ("[INIT] Emulated ACSI target(s) active, floppy passthrough\n");
+  }
 
   if (config->kbd_usb)
   {
@@ -1949,6 +1959,15 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
 //extern "C" uint32_t  fdd_io_read  (uint32_t addr, int size);
 extern  void      fdd_io_write (uint32_t addr, uint32_t val, int size);
 extern  bool      fdd_owns_address (uint32_t addr);
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern  bool      fdd_route_address (uint32_t addr);
+extern  bool      acsi_enabled (void);
+extern  int       acsi_attach (const char *path);
+#ifdef __cplusplus
+}
+#endif
 extern "C" int  dma_snoop_active (void);
 extern "C" int  dma_snoop_owns   (uint32_t addr);
 extern "C" void dma_snoop_write  (uint32_t addr, uint32_t val, int size);
@@ -2037,14 +2056,14 @@ extern "C"
     if (DMA_Sound_enabled && dmasnd_owns(address))
       return dmasnd_reg_read8(address);
 
-    /* FDD */
-    if (FDD_enabled) {
+    /* FDD / emulated ACSI */
+    if (FDD_enabled || acsi_enabled()) {
       if (address == MFP_GPIP) {
         cpu_data_fc();
         return kbd_usb_gpip_shim (fdd_gpip (ps_read_8 (address)));
       }
 
-      if (fdd_owns_address (address))
+      if (fdd_route_address (address))
         return fdd_io_read (address, 1);
 	    }
     /* Real bus-master DMA (no "fdd" line): snoop the registers on their way
@@ -2157,8 +2176,8 @@ extern "C"
     if (DMA_Sound_enabled && dmasnd_owns(address))
       return dmasnd_reg_read16(address);
 
-    /* FDD */
-    if (FDD_enabled)
+    /* FDD / emulated ACSI */
+    if (FDD_enabled || acsi_enabled())
     {
       if (address == MFP_GPIP) {
         cpu_data_fc();
@@ -2166,7 +2185,7 @@ extern "C"
         return kbd_usb_gpip_shim (fdd_gpip (gpip));
       }
 
-      if (fdd_owns_address (address))
+      if (fdd_route_address (address))
           return fdd_io_read (address, 2);
     }
 
@@ -2262,10 +2281,10 @@ extern "C"
     if (DMA_Sound_enabled && dmasnd_owns(address))
       return dmasnd_reg_read32(address);
 
-     /* FDD */
-    if (FDD_enabled)
+     /* FDD / emulated ACSI */
+    if (FDD_enabled || acsi_enabled())
     {
-      if (fdd_owns_address (address))
+      if (fdd_route_address (address))
           return fdd_io_read (address, 4);
     }
 
@@ -2349,9 +2368,9 @@ extern "C"
       return;
 
     /* FDD */
-    if (FDD_enabled)
+    if (FDD_enabled || acsi_enabled())
     {
-      if (fdd_owns_address (address)) {
+      if (fdd_route_address (address)) {
           fdd_io_write (address, value, 1);
           return;
       }
@@ -2489,9 +2508,9 @@ extern "C"
       return;
 
     /* FDD */
-    if (FDD_enabled)
+    if (FDD_enabled || acsi_enabled())
     {
-      if (fdd_owns_address (address)) {
+      if (fdd_route_address (address)) {
           fdd_io_write (address, value, 2);
           return;
       }
@@ -2610,9 +2629,9 @@ extern "C"
     if (blitter_disabled_addr(address))
       return;
 
-    if ( FDD_enabled )
+    if ( FDD_enabled || acsi_enabled() )
     {
-      if (fdd_owns_address (address)) {
+      if (fdd_route_address (address)) {
           fdd_io_write (address, value, 4);
           return;
       }

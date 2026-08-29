@@ -96,8 +96,14 @@ LBA, sense 0x21/0x25 etc. — period drivers do look at these).
 
 ## Testing ladder
 
-1. New `ataritest --acsi` subtest: raw CDB exercise of INQUIRY/READ/
-   WRITE against an image, no TOS involved.
+1. Host-side harness `platforms/atari/fdd/acsi_test.c`: links the REAL
+   acsi.c and the REAL atari_fdd.c routing with the bus and ST-RAM
+   stubbed, and drives the exact register sequences a driver performs -
+   CDB handshake with per-byte IRQ, DMA pointer arithmetic, .hfs
+   wrapper layout, sense codes, ICD wrapper, per-ID passthrough.
+   (`ataritest` CANNOT test this: it talks to the real bus from its own
+   process, and the emulated targets exist only inside the emulator's
+   dispatch.) Build/run: see the header comment; 35 checks.
 2. TOS 2.06 + AHDI 6 on the MST: partition, format, desktop copy tests.
 3. ICD/PP driver boot from the image (most common real-world driver).
 4. Spectre 128 with a `.hfs` image: format check (it should NOT need to

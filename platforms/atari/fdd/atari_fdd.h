@@ -248,6 +248,10 @@ void     fdd_io_write(uint32_t addr, uint32_t val, int size);
 
 bool fdd_owns_address(uint32_t addr);
 
+/* Dispatcher gate: true when this address should be routed into
+ * fdd_io_* given the current FDD/ACSI enablement (see atari_fdd.c). */
+bool fdd_route_address(uint32_t addr);
+
 #ifdef __cplusplus
 }
 #endif

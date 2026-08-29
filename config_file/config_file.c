@@ -29,6 +29,7 @@ typedef enum {
   CONFITEM_IDE,
   CONFITEM_HDD,
   CONFITEM_FDD,
+  CONFITEM_ACSI,
   CONFITEM_DMA_SOUND,
   CONFITEM_YM2149,
   CONFITEM_KBD,
@@ -89,6 +90,7 @@ static const config_switch_def config_switches[] = {
   { "ide", CONFITEM_IDE },
   { "hdd", CONFITEM_HDD },
   { "fdd", CONFITEM_FDD },
+  { "acsi", CONFITEM_ACSI },
   { "dma_sound", CONFITEM_DMA_SOUND },
   { "ym2149", CONFITEM_YM2149 },
   { "kbd", CONFITEM_KBD },
@@ -748,6 +750,15 @@ struct emulator_config *load_config_file(char *filename) {
         {
           cfg->fdd.enabled = true;
           strcpy (cfg->fdd.img_path, parse_line + str_pos);
+        }
+        break;
+
+      case CONFITEM_ACSI:
+        {
+          /* emulated ACSI target; IDs assigned in cfg order (0..7).
+           * .hfs images are bare Mac HFS volumes (see ACSI-DESIGN.md). */
+          extern int acsi_attach (const char *path);
+          acsi_attach (parse_line + str_pos);
         }
         break;
 

@@ -213,6 +213,7 @@ extern "C"
     uint32_t fdd_io_read      (uint32_t addr, int size);
     void     fdd_io_write     (uint32_t addr, uint32_t val, int size);
     bool     fdd_owns_address (uint32_t addr);
+    bool     fdd_route_address(uint32_t addr);   /* FDD/ACSI dispatch gate */
     /* real bus-master DMA mirror coherence - see dma_snoop.h */
     int      dma_snoop_active (void);
     int      dma_snoop_owns   (uint32_t addr);
@@ -847,7 +848,7 @@ static void st_rez_sync_trace(uint32_t a, uint8_t v)
         hz = (last_sync & 2) ? 50.0 : 60.0;
     if (hz > 0.0)
         pistorm_guest_hz = hz;
-
+#if (0)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s  guest=%.1fHz\n",
             (unsigned long long)ts.tv_sec,
@@ -855,6 +856,7 @@ static void st_rez_sync_trace(uint32_t a, uint8_t v)
             (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
             (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "",
             hz);
+#endif
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)
@@ -1653,7 +1655,7 @@ static uae_u32 io_lget(uaecptr a)
         hardware_exception2(a, 0, true, false, sz_long);
         return 0xFFFFFFFFu; /* not reached */
     }
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
         return fdd_io_read(a, 4);
     /* host-emulated STE DMA sound: serve reads from the register shadow
        (the range bus-errors on the real ST bus - hardware is host-side) */
@@ -1776,7 +1778,7 @@ static void io_lput(uaecptr a, uae_u32 v)
         hardware_exception2(a, v, false, false, sz_long);
         return; /* not reached */
     }
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 4);
         return;
@@ -1814,7 +1816,7 @@ static void io_wput(uaecptr a, uae_u32 v)
         hardware_exception2(a, v, false, false, sz_word);
         return; /* not reached */
     }
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 2);
         return;
@@ -1855,7 +1857,7 @@ static void io_bput(uaecptr a, uae_u32 v)
         hardware_exception2(a, v, false, false, sz_byte);
         return; /* not reached */
     }
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 1);
         return;
@@ -2500,7 +2502,7 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
 
 static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 4);
         return;
@@ -2522,7 +2524,7 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
 
 static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 2);
         return;
@@ -2537,7 +2539,7 @@ static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
 
 static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 1);
         return;
@@ -2552,7 +2554,7 @@ static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
 
 static inline uae_u32 hw_fdd_lget(uaecptr a)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
         return fdd_io_read(a, 4);
     uae_u32 v = hw_bus_lget(a);
     if (dma_snoop_active() && dma_snoop_owns(a))
@@ -2562,7 +2564,7 @@ static inline uae_u32 hw_fdd_lget(uaecptr a)
 
 static inline uae_u32 hw_fdd_wget(uaecptr a)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
         return (uae_u16)fdd_io_read(a, 2);
     uae_u32 v = hw_bus_wget(a);
     if (dma_snoop_active() && dma_snoop_owns(a))
@@ -2572,7 +2574,7 @@ static inline uae_u32 hw_fdd_wget(uaecptr a)
 
 static inline uae_u32 hw_fdd_bget(uaecptr a)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
         return (uae_u8)fdd_io_read(a, 1);
     uae_u32 v = hw_bus_bget(a);
     if (dma_snoop_active() && dma_snoop_owns(a))
@@ -2582,7 +2584,7 @@ static inline uae_u32 hw_fdd_bget(uaecptr a)
 
 static inline void hw_fdd_lput(uaecptr a, uae_u32 v)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 4);
         return;
@@ -2594,7 +2596,7 @@ static inline void hw_fdd_lput(uaecptr a, uae_u32 v)
 
 static inline void hw_fdd_wput(uaecptr a, uae_u32 v)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 2);
         return;
@@ -2606,7 +2608,7 @@ static inline void hw_fdd_wput(uaecptr a, uae_u32 v)
 
 static inline void hw_fdd_bput(uaecptr a, uae_u32 v)
 {
-    if (FDD_enabled && fdd_owns_address(a))
+    if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 1);
         return;

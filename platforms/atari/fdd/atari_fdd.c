@@ -32,6 +32,15 @@
 #define FDD_LOG(fmt, ...)  fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
 #define FDD_DBG(fmt, ...)  //fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
 
+#include "acsi.h"
+
+/* When the floppy itself is NOT emulated (no "fdd" cfg lines) but
+ * emulated ACSI targets are attached, this file still owns the DMA-port
+ * window - FDC-selected traffic must then PASS THROUGH to the real bus
+ * (a real drive/Gotek may be connected), while HDC-selected traffic is
+ * routed between emulated targets and the real ACSI bus per ID. */
+extern bool FDD_enabled;
+
 /* =========================================================================
  * Global state
  * ========================================================================= */
@@ -112,6 +121,34 @@ static void dma_copy_from_ram(uint32_t addr, uint8_t *buf, size_t count)
 }
 
 /* =========================================================================
+ * Services for the emulated ACSI targets (acsi.c). The DMA chip state -
+ * base pointer, mode direction, status - is one set of registers shared
+ * by the FDC and the ACSI port, and it lives here.
+ * ========================================================================= */
+
+/* the LIVE address counter (fdc.dma_addr) - it is what transfers read
+ * and advance, and what the guest sees on $8609/0B/0D readback; the
+ * programmed base (dma_base_addr) stays put, as on real hardware */
+uint32_t fdd_dma_base(void)               { return fdc.dma_addr; }
+void     fdd_dma_base_advance(uint32_t n) { fdc.dma_addr += n; }
+int      fdd_dma_dir_is_write(void)
+{
+    return (fdc.dma_mode & DMA_MODE_RW) != 0;
+}
+void fdd_dma_note_ok(int count_zero)
+{
+    fdc.dma_status = DMA_STATUS_OK | (count_zero ? DMA_STATUS_SCZERO : 0);
+}
+void fdd_dma_copy_to_ram(uint32_t addr, const uint8_t *buf, uint32_t count)
+{
+    dma_copy_to_ram(addr, buf, count);
+}
+void fdd_dma_copy_from_ram(uint32_t addr, uint8_t *buf, uint32_t count)
+{
+    dma_copy_from_ram(addr, buf, count);
+}
+
+/* =========================================================================
  * Public API
  * ========================================================================= */
 
@@ -119,6 +156,21 @@ bool fdd_owns_address(uint32_t addr)
 {
     if (addr >= 0xFF8600u && addr <= 0xFF860Fu) return true;
     if (addr >= 0xFF8800u && addr <= 0xFF8803u) return true;
+    return false;
+}
+
+/* Dispatcher gate: route this address into fdd_io_*?
+ *
+ * Floppy emulated: the full window incl. the PSG shadow (drive/side
+ * select lives there). ACSI-only: JUST the DMA-port window - the PSG
+ * must stay on its normal path or the local shadow would swallow real
+ * PSG accesses. Neither: nothing routes here. */
+bool fdd_route_address(uint32_t addr)
+{
+    if (FDD_enabled)
+        return fdd_owns_address(addr);
+    if (acsi_enabled())
+        return addr >= 0xFF8600u && addr <= 0xFF860Fu;
     return false;
 }
 
@@ -312,6 +364,9 @@ uint8_t fdd_gpip(uint8_t other_gpip)
      * When our FDC is idle, the real line passes through untouched (the
      * real WD1772 receives no commands from us, so its INTRQ stays quiet;
      * anything else on the line is real and belongs to the guest). */
+    if (acsi_irq_active())
+        return other_gpip & ~(1u << 5);   /* emulated ACSI target asserts */
+
     if (fdc.selected_drive >= 0 &&
         fdc.drives[fdc.selected_drive].disk_inserted &&
         fdd_irq_active())
@@ -532,15 +587,21 @@ uint32_t fdd_io_read(uint32_t addr, int size)
             if (fdc.dma_mode & DMA_MODE_SCREG)
                 /* DMA chip's own count register (bit 3 is not consulted by
                  * the GLUE here): whoever ran the DMA last answers */
-                val = hdc_active ? bus_read(addr, size)
-                                 : fdc_read_addr(addr, size);
+                val = acsi_owns_dma() ? acsi_residual_count()
+                    : hdc_active      ? bus_read(addr, size)
+                                      : fdc_read_addr(addr, size);
             else if (hdc_selected()) {
-                val = bus_read(addr, size);   /* ACSI status byte */
-                if (fdc.hdc_pending)
-                    hdc_sync_pull();          /* end-of-command handshake:
+                if (acsi_owns_dma())
+                    val = acsi_status_read();  /* emulated status byte */
+                else {
+                    val = bus_read(addr, size);   /* ACSI status byte */
+                    if (fdc.hdc_pending)
+                        hdc_sync_pull();      /* end-of-command handshake:
                                                  bring the mirror up to date */
+                }
             } else
-                val = fdc_read_addr(addr, size);
+                val = FDD_enabled ? fdc_read_addr(addr, size)
+                                  : bus_read(addr, size);
         } else if (addr == DMA_MODE_REG ||
                    addr == DMA_BASE_HIGH || addr == DMA_BASE_MID ||
                    addr == DMA_BASE_LOW) {
@@ -588,10 +649,29 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
                 fdc_write_addr(addr, val, size);  /* local latch (floppy) */
                 bus_write(addr, val, size);       /* real chip (ACSI) */
             } else if (hdc_selected()) {
-                hdc_claim_count();                /* ACSI command byte */
+                /* ACSI command byte. Emulated targets get first refusal;
+                 * the mode register's A-bits mark the FIRST byte of a CDB
+                 * (TOS writes mode $88 for it, $8A for the rest). */
+                bool first = (fdc.dma_mode &
+                              (DMA_MODE_A0 | DMA_MODE_A1)) == 0;
+                if (acsi_cmd_byte((uint8_t)val, first)) {
+                    /* consumed by an emulated target: the count that was
+                     * programmed belongs to it, not to a real device */
+                    hdc_count_fresh = 0;
+                    fdc.hdc_pending = false;
+                } else {
+                    hdc_claim_count();            /* real ACSI device  */
+                    bus_write(addr, val, size);
+                }
+            } else if (!FDD_enabled) {
+                /* floppy not emulated (ACSI-only config): FDC commands
+                 * belong to a real drive on the real bus */
+                acsi_release();
+                hdc_active = 1;   /* real device owns the DMA regs now */
                 bus_write(addr, val, size);
             } else {
                 /* emulated FDC command: the DMA is floppy's again */
+                acsi_release();
                 hdc_active = 0;
                 hdc_count_fresh = 0;
                 fdc.hdc_pending = false;
@@ -705,16 +785,24 @@ static void dma_write_addr(uint32_t addr, uint32_t val, int size)
         fdc.dma_mode = v16;
         break;
 
+    /* The real DMA chip has ONE address counter: writing $8609/0B/0D
+     * loads it directly, transfers advance it, reads return it. Keep
+     * the programmed copy too (the floppy path re-latches from it at
+     * transfer start - now a no-op, behaviour unchanged), but the live
+     * counter must follow writes or an ACSI transfer that runs without
+     * a floppy-style latch starts from a stale counter. */
     case DMA_BASE_HIGH:
         fdc.dma_base_addr = (fdc.dma_base_addr & 0x00FFFFu) | ((uint32_t)(v8 & 0x3Fu) << 16);
+        fdc.dma_addr      = (fdc.dma_addr      & 0x00FFFFu) | ((uint32_t)(v8 & 0x3Fu) << 16);
         FDD_DBG("DMA base addr: 0x%06X", fdc.dma_base_addr);
         break;
     case DMA_BASE_MID:
         fdc.dma_base_addr = (fdc.dma_base_addr & 0xFF00FFu) | ((uint32_t)v8 << 8);
+        fdc.dma_addr      = (fdc.dma_addr      & 0xFF00FFu) | ((uint32_t)v8 << 8);
         break;
     case DMA_BASE_LOW:
         fdc.dma_base_addr = (fdc.dma_base_addr & 0xFFFF00u) | v8;
-        //FDD_DBG("DMA base addr: 0x%06X", fdc.dma_base_addr);
+        fdc.dma_addr      = (fdc.dma_addr      & 0xFFFF00u) | v8;
         break;
 
     default:
