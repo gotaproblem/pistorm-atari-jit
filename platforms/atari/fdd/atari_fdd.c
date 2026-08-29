@@ -32,6 +32,22 @@
 #define FDD_LOG(fmt, ...)  fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
 #define FDD_DBG(fmt, ...)  //fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
 
+/* PISTORM_ACSI_DEBUG=1: trace the first accesses to the DMA-port window
+ * so "guest never sent anything" and "sent but misrouted" are separable
+ * from one boot log. Bounded; silent when unset. */
+static int acsi_dbg_on(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_ACSI_DEBUG");
+        v = (e && *e == '1') ? 1 : 0;
+    }
+    return v;
+}
+static int acsi_dbg_count;
+#define ACSI_DBG_LIMIT 120
+
+
 #include "acsi.h"
 
 /* When the floppy itself is NOT emulated (no "fdd" cfg lines) but
@@ -571,7 +587,11 @@ uint32_t fdd_io_read(uint32_t addr, int size)
 {
     uint32_t val;
 
-    //fprintf(stderr, "[IO] READ  addr=0x%06X size=%d\n", addr, size);
+    if (acsi_dbg_on() && addr >= 0xFF8600u && addr <= 0xFF860Fu &&
+        acsi_dbg_count < ACSI_DBG_LIMIT) {
+        acsi_dbg_count++;
+        FDD_LOG("dbg R %06X sz%d (mode %03X)", addr, size, fdc.dma_mode);
+    }
 
     /* Handle longword reads as two word reads */
     if (size == 4) {
@@ -622,7 +642,12 @@ uint32_t fdd_io_read(uint32_t addr, int size)
 
 void fdd_io_write(uint32_t addr, uint32_t val, int size)
 {
-    //fprintf(stderr, "[IO] WRITE addr=0x%06X val=0x%04X size=%d\n", addr, val, size);
+    if (acsi_dbg_on() && addr >= 0xFF8600u && addr <= 0xFF860Fu &&
+        acsi_dbg_count < ACSI_DBG_LIMIT) {
+        acsi_dbg_count++;
+        FDD_LOG("dbg W %06X = %0*X sz%d (mode %03X)",
+                addr, size * 2, val, size, fdc.dma_mode);
+    }
 
     /* Handle longword writes as two word writes */
     if (size == 4) {
