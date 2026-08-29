@@ -1065,6 +1065,11 @@ void *foldchk_thread(void *arg)
     if (real0[i] != model0[i]) eq_model = 0;
     if (real0[i] != real4[i])  eq_fold = 0;
   }
+  /* always include the guest state: when the screen looks right but the
+   * machine is stalled (compat-core bring-up), the stuck PC is the
+   * evidence that matters */
+  pistorm_crash_dump_guest();
+
   if (eq_model)
     fprintf(stderr, "[FOLDCHK] VERDICT: real DRAM matches the model - real "
             "MMU is sane; suspect the shifter base registers\n");
