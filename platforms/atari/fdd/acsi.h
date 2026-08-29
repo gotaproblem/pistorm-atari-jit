@@ -35,9 +35,11 @@
 extern "C" {
 #endif
 
-/* Attach an image to the next free ACSI ID (0..7, in cfg order).
- * Returns the ID, or -1 on failure. */
+/* Attach an image. Accepts an optional "N:" prefix (N = 0..7) pinning
+ * the ACSI ID - "acsi 3:disk.img" in the cfg; without it the lowest
+ * free ID is used. Returns the ID, or -1 on failure. */
 int  acsi_attach(const char *path);
+int  acsi_attach_at(int id, const char *path);   /* id -1 = lowest free */
 
 /* Any targets attached at all? (gates the whole subsystem) */
 bool acsi_enabled(void);

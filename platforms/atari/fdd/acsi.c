@@ -110,14 +110,22 @@ static void synth_root(acsi_target_t *t, uint32_t hfs_sectors)
     r[0x1D1] = (uint8_t)hfs_sectors;
 }
 
-int acsi_attach(const char *path)
+int acsi_attach_at(int id, const char *path)
 {
     tgt_init_once();
-    if (n_targets >= ACSI_MAX_TARGETS) {
-        ACSI_LOG("attach %s: all %d IDs in use", path, ACSI_MAX_TARGETS);
+    if (id < 0) {
+        /* auto: lowest free ID */
+        for (id = 0; id < ACSI_MAX_TARGETS && tgt[id].fd >= 0; id++)
+            ;
+    }
+    if (id >= ACSI_MAX_TARGETS) {
+        ACSI_LOG("attach %s: no free ID (max %d)", path, ACSI_MAX_TARGETS);
         return -1;
     }
-    int id = n_targets;
+    if (tgt[id].fd >= 0) {
+        ACSI_LOG("attach %s: ID %d already has %s", path, id, tgt[id].path);
+        return -1;
+    }
     acsi_target_t *t = &tgt[id];
 
     int fd = open(path, O_RDWR);
@@ -150,6 +158,14 @@ int acsi_attach(const char *path)
              t->total_lba, t->total_lba / 2048,
              t->hfs ? ", bare HFS volume (AHDI root synthesized)" : "");
     return id;
+}
+
+int acsi_attach(const char *path)
+{
+    /* optional "N:" prefix pins the ID; otherwise lowest free */
+    if (path[0] >= '0' && path[0] <= '7' && path[1] == ':')
+        return acsi_attach_at(path[0] - '0', path + 2);
+    return acsi_attach_at(-1, path);
 }
 
 static int read_lba(acsi_target_t *t, uint32_t lba, uint8_t *buf)
