@@ -7782,6 +7782,8 @@ static void jit_recover_from_fault(int vec)
 /* WILD-PC GUARD: which guest addresses may instructions be fetched
  * from. Defined in emulator.c, next to the RAM-layout globals. */
 extern "C" int pistorm_pc_executable(unsigned int pc);
+/* guest post-mortem printer (pistorm_natmem.cpp) - used by cpu_halt */
+extern "C" void pistorm_crash_dump_guest(void);
 #endif
 
 static void m68k_run_jit(void)
@@ -8168,6 +8170,17 @@ void cpu_halt(int id)
 	if (!regs.halted)
 	{
 		write_log(_T("CPU halted: reason = %d PC=%08x\n"), id, M68K_GETPC);
+#ifdef PISTORM_ATARI
+		{
+			/* The one-line message names the vector, not the culprit.
+			 * Dump the full guest state (registers, instruction_pc,
+			 * opcode, vectors, stack) so a double fault names the
+			 * instruction that started the cascade - a guest that has
+			 * rebuilt its vector table (Spectre in Mac mode, games)
+			 * leaves no other trace. */
+			pistorm_crash_dump_guest();
+		}
+#endif
 		if (currprefs.crash_auto_reset)
 		{
 			write_log(_T("Forcing hard reset\n"));
