@@ -42,6 +42,7 @@ extern "C"
                                        int m68k_speed, int m68k_speed_set,
                                        int jit_cache, int jit_cache_set);
   extern void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit);
+  extern void jit_cpu_set_compatible(int on);
   extern void jit_cpu_reset(void);
   extern void jit_cpu_execute(void);
   extern void pistorm_set_blitter_enabled(int enabled);
@@ -1590,6 +1591,7 @@ int main (int argc, char *argv[])
   /* Initialise JIT CPU core */
   fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
+  jit_cpu_set_compatible(config->cpu_compatible ? 1 : 0);
   jit_cpu_set_perf_options(config->cpu_clock_multiplier,
                            config->cpu_clock_multiplier_set ? 1 : 0,
                            config->m68k_speed,
@@ -2304,6 +2306,13 @@ extern "C"
 
     st_video_snoop8(address, (uint8_t)value);
 
+    /* PSG shadow for the HDMI sink. The natmem dispatcher snoops this
+     * (HW_PAGE_PSG); this legacy path did not, so any PSG write routed
+     * here reached the real chip but never the emulated one - native
+     * audio perfect, HDMI audio missing writes. */
+    if (ym2149_active())
+      ym2149_snoop8(address, (uint8_t)value);
+
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {
       dmasnd_snoop8 (address, (uint8_t)value); /* host owns the STE sound regs */
@@ -2438,6 +2447,9 @@ extern "C"
 
     st_video_snoop16(address, (uint16_t)value);
 
+    if (ym2149_active())                        /* see the 8-bit path */
+      ym2149_snoop16(address, (uint16_t)value);
+
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {
       dmasnd_snoop16 (address, (uint16_t)value); /* host owns the STE sound regs */
@@ -2552,6 +2564,11 @@ extern "C"
 
     st_video_snoop32(address, (uint32_t)value);
     pistorm_stram_memcfg_snoop(address & 0x00FFFFFFu, value, 4);
+
+    if (ym2149_active())                        /* see the 8-bit path;
+                                                 * catches the classic
+                                                 * move.l #$RR00VV00,$FF8800 */
+      ym2149_snoop32(address, (uint32_t)value);
 
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {

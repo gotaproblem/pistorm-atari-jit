@@ -17,6 +17,7 @@ extern void set_hard_drive_image_file_atari ( uint8_t, char* );
 typedef enum {
   CONFITEM_NONE,
   CONFITEM_CPU,
+  CONFITEM_CPU_COMPATIBLE,
   CONFITEM_JIT,
   CONFITEM_FPU,
   CONFITEM_LOOPCYCLES,
@@ -78,6 +79,7 @@ const char *cpu_types[M68K_CPU_TYPES] = {
 
 static const config_switch_def config_switches[] = {
   { "cpu", CONFITEM_CPU },
+  { "cpu_compatible", CONFITEM_CPU_COMPATIBLE },
   { "jit", CONFITEM_JIT },
   { "fpu", CONFITEM_FPU },
   { "loopcycles", CONFITEM_LOOPCYCLES },
@@ -588,6 +590,13 @@ struct emulator_config *load_config_file(char *filename) {
       case CONFITEM_JIT:
         cfg->jit = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] JIT %s\n", cfg->jit ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_CPU_COMPATIBLE:
+        cfg->cpu_compatible = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] CPU compatible mode %s (prefetch-accurate 68000 core, "
+                "needs jit disabled)\n",
+                cfg->cpu_compatible ? "enabled" : "disabled");
         break;
 
       case CONFITEM_FPU:

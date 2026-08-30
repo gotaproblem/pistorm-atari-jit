@@ -88,6 +88,25 @@ static int send_cdb(const uint8_t *c, int n)
     return 1;
 }
 
+/* P.Putnik autoboot-loader pattern: every CDB byte is a LONG write to
+ * $FF8604, so the data lands first and the mode for the NEXT byte lands
+ * after - the mode change lags one byte, and this loader leaves $0088
+ * (A1 LOW) in the first long, so CDB byte 1 arrives still looking like
+ * a "new command". A real target keeps counting; so must we. */
+static int send_cdb_pp(const uint8_t *c, int n)
+{
+    fdd_io_write(DMA_MODE_REG, 0x088, 2);          /* mode := first    */
+    for (int i = 0; i < n; i++) {
+        /* move.l #(data<<16)|nextmode,(a5) - decomposed as the bus does */
+        fdd_io_write(FDC_DATA_REG, c[i], 2);       /* data, mode as-is  */
+        if (i + 1 < n && !gpip_irq()) return 0;    /* per-byte IRQ      */
+        /* the mode the loader puts in the low word: $0088 after the
+         * FIRST byte (the bug trigger), $008A thereafter */
+        fdd_io_write(DMA_MODE_REG, i == 0 ? 0x088 : 0x08A, 2);
+    }
+    return 1;
+}
+
 static uint8_t read_status(void)
 {
     fdd_io_write(DMA_MODE_REG, 0x08A, 2);
@@ -187,6 +206,60 @@ int main(void)
         CHECK(send_cdb(c1, 6), "hfs: READ LBA1 handshake");
         CHECK(read_status() == 0x00, "hfs: LBA1 good");
         CHECK(ram[0x41000] == 0x80, "hfs: LBA1 = file offset 0 (seed)");
+    }
+
+    /* ---- lagging-mode CDB (P.Putnik autoboot loader) ------------------ */
+    {
+        /* exactly what the loader on a PP autoboot disk issues:
+         * READ(6) 11 blocks from LBA 2, every byte a long write */
+        uint8_t c[6] = { 0x08, 0x00, 0x00, 0x02, 0x0B, 0x00 };
+        memset(ram + 0x70000, 0, 11 * 512);
+        dma_set_base(0x70000);
+        dma_set_count(11);
+        CHECK(send_cdb_pp(c, 6), "PP loader: lagging-mode CDB handshake");
+        CHECK(gpip_irq(), "PP loader: completion IRQ");
+        CHECK(read_status() == 0x00, "PP loader: good status");
+        CHECK(read_count() == 0, "PP loader: residual 0");
+        CHECK(dma_ptr() == 0x70000 + 11 * 512,
+              "PP loader: DMA pointer advanced 11 sectors");
+        /* the whole point: data must actually be there. Sector n of the
+         * backing image is filled with byte (seed + n). */
+        CHECK(ram[0x70000] == (uint8_t)(0x10 + 2) &&
+              ram[0x70000 + 10 * 512] == (uint8_t)(0x10 + 12),
+              "PP loader: 11 sectors from LBA 2 really landed in RAM");
+    }
+
+    /* ---- truncated CDB must NOT report the previous good status ------- */
+    {
+        uint8_t ok[6] = { 0x12, 0, 0, 0, 32, 0 };      /* INQUIRY: good  */
+        dma_set_base(0x80000);
+        dma_set_count(1);
+        CHECK(send_cdb(ok, 6), "stale-status: priming command handshake");
+        CHECK(read_status() == 0x00, "stale-status: priming command good");
+
+        /* now start a command and stop half way through the CDB */
+        fdd_io_write(DMA_MODE_REG, 0x088, 2);
+        fdd_io_write(FDC_DATA_REG, 0x08, 2);           /* opcode only    */
+        fdd_io_write(DMA_MODE_REG, 0x08A, 2);
+        fdd_io_write(FDC_DATA_REG, 0x00, 2);
+        CHECK(read_status() == 0x02,
+              "stale-status: incomplete CDB reports CHECK CONDITION");
+    }
+
+    /* ---- REPORT LUNS via the ICD wrapper (HDDRIVER probes with it) ---- */
+    {
+        /* $1F escape, then a 12-byte CDB: A0 .. alloc=16 .. */
+        uint8_t c[13] = { 0x1F, 0xA0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0 };
+        memset(ram + 0x60000, 0xAA, 32);
+        dma_set_base(0x60000);
+        dma_set_count(1);
+        CHECK(send_cdb(c, 13), "REPORT LUNS handshake (12-byte ICD CDB)");
+        CHECK(read_status() == 0x00, "REPORT LUNS: good status");
+        CHECK(ram[0x60000] == 0 && ram[0x60001] == 0 &&
+              ram[0x60002] == 0 && ram[0x60003] == 8,
+              "REPORT LUNS: list length 8 (one LUN)");
+        for (int i = 8; i < 16; i++)
+            CHECK(ram[0x60000 + i] == 0, "REPORT LUNS: LUN 0 entry is zero");
     }
 
     /* ---- error path: bad LBA then REQUEST SENSE ----------------------- */

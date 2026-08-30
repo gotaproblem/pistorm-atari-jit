@@ -190,6 +190,23 @@ sudo systemctl start pistorm     # test now
 journalctl -u pistorm -f         # watch its output
 ```
 
+### Ctrl+Alt+Del reboots the Pi — disarm it
+
+On the ST, **Ctrl+Alt+Del is the warm-reset combo**, so muscle memory will
+produce it. But systemd binds that same combo on the Linux console to
+**reboot the Pi**. If the USB keyboard isn't grabbed by the emulator at that
+moment (F12 toggled off, `kbd usb nograb`, or the emulator not running), the
+whole machine goes down mid-session. The installer offers to mask it; to do
+it by hand:
+
+```bash
+sudo systemctl mask ctrl-alt-del.target      # console combo becomes a no-op
+sudo systemctl unmask ctrl-alt-del.target    # undo
+```
+
+While the keyboard **is** grabbed, the combo never reaches Linux and acts as
+a normal ST reset on the Atari — masking only removes the console trap.
+
 ### Samba share
 
 Adds a guest-writable `[pistorm]` share pointing at the runtime tree so you can

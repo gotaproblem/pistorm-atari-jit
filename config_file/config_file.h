@@ -88,6 +88,7 @@ typedef struct VGA
 struct emulator_config {
   uint8_t cpu_type;
   bool jit;
+  bool cpu_compatible;   /* prefetch-accurate 68000 core (interpreter only) */
   int loop_cycles;
   bool fpu;
   VGA_s graphics;

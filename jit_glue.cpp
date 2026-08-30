@@ -135,6 +135,18 @@ static int perf_m68k_speed_set;
 static int perf_jit_cache;
 static int perf_jit_cache_set;
 
+/* cfg 'cpu_compatible' switch, set from emulator.c before jit_cpu_init().
+ * The env var PISTORM_CPU_COMPAT=1 remains as an override for quick A/B
+ * tests without editing the cfg. Both are honoured only for a 68000 with
+ * the JIT disabled - the prefetch core exists for exact 68000 group-0
+ * frames and has never been validated for anything else. */
+static bool cfg_cpu_compatible;
+
+extern "C" void jit_cpu_set_compatible(int on)
+{
+    cfg_cpu_compatible = on != 0;
+}
+
 extern "C" void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
                                          int m68k_speed, int m68k_speed_set,
                                          int jit_cache, int jit_cache_set)
@@ -214,11 +226,16 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
      * experimental alongside real-pin IPL until proven. */
     {
         const char *e = getenv("PISTORM_CPU_COMPAT");
-        bool compat = (e && *e == '1') && disable_jit;
+        bool wanted = cfg_cpu_compatible || (e && *e == '1');
+        bool compat = wanted && disable_jit && m == 68000;
         currprefs.cpu_compatible = changed_prefs.cpu_compatible = compat;
         if (compat)
-            write_log("[JITGLUE] cpu_compatible=1: prefetch-accurate core, "
-                      "exact group-0 frames (PISTORM_CPU_COMPAT)\n");
+            write_log("[JITGLUE] cpu_compatible=1: prefetch-accurate 68000 "
+                      "core, exact group-0 frames\n");
+        else if (wanted)
+            write_log("[JITGLUE] cpu_compatible requested but IGNORED: "
+                      "needs 'cpu 68000' and 'jit disabled' (have %d, jit %s)\n",
+                      m, disable_jit ? "off" : "on");
     }
 
     /* Keep the Atari bus map 24-bit unless TT-RAM or addr32 is explicitly

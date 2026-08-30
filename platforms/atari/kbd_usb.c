@@ -41,6 +41,7 @@
 #include <linux/input.h>
 
 #include "kbd_usb.h"
+#include "fdd/atari_fdd.h"                 /* fdd_toggle_disk (F11) */
 
 /* Per-second [KBD] state line: off unless explicitly built in. */
 #ifndef KBD_USB_DIAG
@@ -1377,6 +1378,13 @@ static void handle_event(const struct input_event *ev, int is_mouse)
     {
         if (pressed && in_state.grab_wanted)
             grab_set(!atomic_load(&in_state.grab_active));
+        return;
+    }
+
+    if (ev->code == KEY_F11)                     /* floppy A eject/insert */
+    {                                            /* (no F11 on an ST, so  */
+        if (pressed)                             /* the key is free)      */
+            fdd_toggle_disk(0);
         return;
     }
 

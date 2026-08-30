@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include <strings.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -36,6 +37,20 @@ extern void     fdd_dma_copy_from_ram(uint32_t addr, uint8_t *buf,
 
 #define ACSI_LOG(...) do { fprintf(stderr, "[ACSI] " __VA_ARGS__); \
                            fprintf(stderr, "\n"); } while (0)
+
+/* Per-command trace, PISTORM_ACSI_DEBUG=1. Prints the whole CDB, the
+ * DMA destination and the first bytes actually delivered, so a driver's
+ * command stream can be followed without inferring it from the DMA-port
+ * register writes. */
+static int acsi_trace(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("PISTORM_ACSI_DEBUG");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on;
+}
 
 /* ---- targets ----------------------------------------------------------- */
 
@@ -76,6 +91,7 @@ static int      icd;                 /* $1F extended-command wrapper */
 static uint8_t  status_byte;
 static bool     irq;                 /* GPIP5 assert (active low line) */
 static bool     owns;                /* DMA-port registers answer here  */
+static bool     status_valid;        /* status_byte describes a command */
 static uint16_t residual;            /* SCREG readback after commands   */
 
 bool acsi_enabled(void)      { return n_targets > 0; }
@@ -218,6 +234,7 @@ static void finish(uint8_t st, uint8_t sense, uint32_t lba)
     t->sense = sense;
     t->sense_lba = lba;
     phase = PH_STATUS;
+    status_valid = true;              /* this status describes a command */
     irq = true;                       /* command complete               */
     fdd_dma_note_ok(residual == 0);
 }
@@ -247,9 +264,15 @@ static void exec_read(acsi_target_t *t, uint32_t lba, uint32_t blocks)
 {
     uint8_t buf[512];
     if (lba + blocks > t->total_lba || lba + blocks < lba) {
+        if (acsi_trace())
+            ACSI_LOG("ID %d READ lba=%u blocks=%u REJECTED (disk has %u)",
+                     cur_id, lba, blocks, t->total_lba);
         finish_check(SENSE_INVALID_LBA, lba);
         return;
     }
+    if (acsi_trace())
+        ACSI_LOG("ID %d READ lba=%u blocks=%u -> dma $%06X",
+                 cur_id, lba, blocks, fdd_dma_base());
     for (uint32_t i = 0; i < blocks; i++) {
         if (read_lba(t, lba + i, buf) < 0) {
             residual = (uint16_t)(blocks - i);
@@ -358,6 +381,13 @@ static void exec_command(void)
     const uint8_t *c = icd ? cdb + 1 : cdb;
     uint8_t op = icd ? c[0] : (uint8_t)(c[0] & 0x1F);
 
+    if (acsi_trace()) {
+        char b[64]; int n = 0;
+        for (int i = 0; i < cdb_got && n < (int)sizeof b - 4; i++)
+            n += snprintf(b + n, sizeof b - n, "%02X ", cdb[i]);
+        ACSI_LOG("ID %d CDB%s: %s", cur_id, icd ? " (ICD)" : "", b);
+    }
+
     if (!t->probed) {
         /* one line per ID at first guest contact: proves the driver's
          * probe reached the emulated target (an EmuTOS/AHDI boot scan
@@ -435,6 +465,25 @@ static void exec_command(void)
             }
             finish_check(SENSE_INVALID_OP, 0);
             break;
+        case 0xA0: {                                  /* REPORT LUNS     */
+            /* 12-byte op HDDRIVER issues while enumerating a target.
+             * Answering it (rather than CHECK CONDITION) is what tells
+             * the driver this is a single-LUN device it can use; the
+             * classic bridges predate the command, but modern drivers
+             * probe with it first and only fall back on a clean reply. */
+            if (!icd) { finish_check(SENSE_INVALID_OP, 0); break; }
+            uint32_t alloc = ((uint32_t)c[6] << 24) | ((uint32_t)c[7] << 16) |
+                             ((uint32_t)c[8] << 8) | c[9];
+            uint8_t d[16];
+            memset(d, 0, sizeof d);
+            d[3] = 8;                     /* list length: one 8-byte LUN */
+            /* d[8..15] = LUN 0, already zero */
+            if (alloc > sizeof d) alloc = sizeof d;
+            if (alloc) dma_out(d, alloc);
+            residual = 0;
+            finish_good();
+            break;
+        }
         case 0x28:                                    /* READ(10)        */
         case 0x2A: {                                  /* WRITE(10)       */
             if (!icd) { finish_check(SENSE_INVALID_OP, 0); break; }
@@ -470,6 +519,25 @@ bool acsi_cmd_byte(uint8_t v, bool first_byte)
 {
     if (!n_targets)
         return false;
+
+    /* A1 low means "new CDB", but a REAL target counts the bytes of a
+     * command itself: once a CDB is under way it consumes bytes until
+     * the CDB is complete, whatever A1 does in the meantime.
+     *
+     * This matters. Drivers write each command byte as a LONG to
+     * $FF8604, so the data word goes to $FF8604 and the mode for the
+     * NEXT byte to $FF8606 - the mode change therefore lags one byte.
+     * TOS's own boot read puts $008A in that first long, so its bytes
+     * 1.. carry A1 high; P.Putnik's autoboot loader puts $0088 there,
+     * so its byte 1 still has A1 LOW. Treating that as a fresh command
+     * dropped the opcode, left the CDB one byte short so it never
+     * executed, and (since the per-byte IRQ kept firing and the status
+     * read returned the previous command's status) the loader believed
+     * the driver had loaded and jumped into an empty buffer. */
+    if (first_byte && owns && phase == PH_CDB &&
+        cdb_got > 0 && cdb_got < cdb_len)
+        first_byte = false;
+
     if (first_byte) {
         int id = (v >> 5) & 7;
         if (tgt[id].fd < 0) {
@@ -480,6 +548,7 @@ bool acsi_cmd_byte(uint8_t v, bool first_byte)
         cur_id = id;
         owns = true;
         phase = PH_CDB;
+        status_valid = false;          /* nothing completed yet          */
         icd = ((v & 0x1F) == 0x1F);
         cdb_got = 0;
         cdb_len = icd ? 2 : 6;         /* ICD: length known at 2nd byte */
@@ -509,6 +578,27 @@ bool acsi_cmd_byte(uint8_t v, bool first_byte)
 uint8_t acsi_status_read(void)
 {
     irq = false;
+
+    /* Status for a command that never executed. A stale "good" here is
+     * the worst failure mode this target has: the P.Putnik loader bug
+     * was invisible for exactly this reason - its CDB was truncated, no
+     * command ran, and the status read handed back the PREVIOUS
+     * command's 0x00, so the driver believed a transfer had happened
+     * and jumped into an empty buffer. Report CHECK CONDITION instead,
+     * and leave sense set so a REQUEST SENSE explains why. */
+    if (!status_valid) {
+        if (cur_id >= 0 && cur_id < ACSI_MAX_TARGETS &&
+            tgt[cur_id].fd >= 0)
+            tgt[cur_id].sense = SENSE_INVALID_CDB;
+        ACSI_LOG("ID %d: status read with no completed command "
+                 "(CDB %d of %d bytes) - reporting CHECK CONDITION",
+                 cur_id, cdb_got, cdb_len);
+        status_byte = 0x02;
+        status_valid = true;           /* report once, not every poll   */
+        phase = PH_IDLE;
+        return status_byte;
+    }
+
     if (phase == PH_STATUS)
         phase = PH_IDLE;
     /* ownership persists so the count/base readbacks that follow the

@@ -4417,10 +4417,16 @@ void REGPARAM2 Exception_cpu(int nr)
 
 /* Ring of the LAST 64 exceptions (diag mode): caps and scrollback can
  * hide the first bad exception of a cascade; the ring, dumped at
- * cpu_halt, cannot. */
+ * cpu_halt, cannot. Fault-class entries (vec 2/3/4/11) additionally
+ * carry 10 code bytes host-read at pc and the full register file, so
+ * patient zero of a cascade can be disassembled from the dump alone. */
+extern "C" int pistorm_pc_executable(unsigned int pc);
 struct pistorm_exc_ring_e {
 	uae_u16 vec, sr;
 	uae_u32 pc, sp, fault, target;
+	uae_u16 code[5];        /* words at pc (0 = pc unmapped)  */
+	uae_u8  has_regs;
+	uae_u32 dreg[8], areg[8];
 };
 static pistorm_exc_ring_e pistorm_exc_ring[64];
 static unsigned pistorm_exc_ring_i;
@@ -4437,6 +4443,16 @@ void pistorm_exc_ring_dump(void)
 			&pistorm_exc_ring[(pistorm_exc_ring_i - n + k) & 63];
 		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X vect->%08X\n",
 				e->vec, e->pc, e->sp, e->sr, e->fault, e->target);
+		if (e->has_regs) {
+			fprintf(stderr, "[EXCRING]   code@pc: %04X %04X %04X %04X %04X\n",
+					e->code[0], e->code[1], e->code[2], e->code[3], e->code[4]);
+			fprintf(stderr, "[EXCRING]   D 0-7: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+					e->dreg[0], e->dreg[1], e->dreg[2], e->dreg[3],
+					e->dreg[4], e->dreg[5], e->dreg[6], e->dreg[7]);
+			fprintf(stderr, "[EXCRING]   A 0-7: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+					e->areg[0], e->areg[1], e->areg[2], e->areg[3],
+					e->areg[4], e->areg[5], e->areg[6], e->areg[7]);
+		}
 	}
 }
 
@@ -4475,6 +4491,24 @@ void REGPARAM2 Exception(int nr)
 			}
 
 			bool faultclass = (nr == 2 || nr == 3 || nr == 4 || nr == 11);
+
+			/* fault-class: capture the instruction and register file so
+			 * the first bad lap is self-explanatory in the dump */
+			e->has_regs = faultclass ? 1 : 0;
+			memset(e->code, 0, sizeof e->code);
+			if (faultclass) {
+				uae_u32 cpc = e->pc & 0x00FFFFFEu;
+				if (pistorm_pc_executable(cpc)) {
+					uae_u8 *nm = natmem_offset;
+					for (int w = 0; w < 5; w++)
+						e->code[w] = ((uae_u16)nm[cpc + 2*w] << 8) | nm[cpc + 2*w + 1];
+				}
+				for (int r = 0; r < 8; r++) {
+					e->dreg[r] = m68k_dreg(regs, r);
+					e->areg[r] = m68k_areg(regs, r);
+				}
+			}
+
 			if (faultclass && g_buserr_addr == last_fault)
 			{
 				if (++same_fault_run >= 48)

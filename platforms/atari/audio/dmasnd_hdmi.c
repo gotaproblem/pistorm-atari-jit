@@ -104,6 +104,25 @@ int dmasnd_init(const char *device)
         snprintf(buf, sizeof(buf), "%d", n);
         SDL_SetHint("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", buf);
     }
+    /* Real-time audio thread. This device's single thread services EVERY
+     * bound stream - STE DMA, YM2149, MP3, vidplay, STBOX - and the YM
+     * renderer alone computes 250k samples per second of output. It is
+     * created from the main thread, so by default it is plain
+     * SCHED_OTHER, while cpu_task runs SCHED_FIFO priority 99 pinned to
+     * CPU 2 and (with the CPU no longer throttled) never yields. The
+     * audio thread only survived on the slack the emulator used to
+     * leave; on a machine where isolcpus does not keep them apart it
+     * loses outright, which sounds like breakup rather than silence.
+     *
+     * SDL promotes its audio thread to SCHED_RR on Linux only when this
+     * hint permits it. OFF by default: enabling it unconditionally was
+     * seen to get the process SIGKILLed on this hardware, so it is an
+     * experiment you opt into with PISTORM_AUDIO_RT=1, not a default. */
+    {
+        const char *rt = getenv("PISTORM_AUDIO_RT");
+        if (rt && *rt == '1')
+            SDL_SetHint("SDL_THREAD_FORCE_REALTIME_TIME_CRITICAL", "1");
+    }
     if (!SDL_Init(SDL_INIT_AUDIO)) {
         fprintf(stderr, "[dmasnd] SDL_Init(AUDIO) failed: %s\n", SDL_GetError());
         return -1;

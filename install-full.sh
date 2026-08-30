@@ -80,6 +80,12 @@ uninstall() {
     warn "No pistorm.service — skipped"
   fi
 
+  # Ctrl+Alt+Del guard
+  if [ "$(systemctl is-enabled ctrl-alt-del.target 2>/dev/null)" = "masked" ]; then
+    say "Re-enabling Ctrl+Alt+Del console reboot"
+    sudo systemctl unmask ctrl-alt-del.target
+  fi
+
   # Samba share
   if [ -e /etc/samba/smb.conf ] && grep -q '^\[pistorm\]' /etc/samba/smb.conf; then
     say "Removing Samba [pistorm] share"
@@ -419,6 +425,19 @@ UNIT
   sudo systemctl enable pistorm.service
   warn "Enabled: starts on next boot. Test now with:  sudo systemctl start pistorm"
   warn "Change the config file by editing /etc/systemd/system/pistorm.service"
+fi
+
+# --------------------------------------------------------------------------
+# 5b. Ctrl+Alt+Del guard. On the ST that combo is the WARM RESET, so habit
+#     WILL produce it - but systemd binds it on the Linux console to
+#     REBOOT THE PI. If the USB keyboard is not grabbed at that moment
+#     (F12 toggled off, 'kbd usb nograb', emulator not running) the whole
+#     machine goes down. Masking makes the console combo a no-op; the
+#     grabbed path still delivers it to the Atari as a normal ST reset.
+# --------------------------------------------------------------------------
+if ask CADGUARD "Disable Ctrl+Alt+Del console reboot (it is the ST reset combo)?" y; then
+  sudo systemctl mask ctrl-alt-del.target
+  say "ctrl-alt-del.target masked (undo: sudo systemctl unmask ctrl-alt-del.target)"
 fi
 
 # --------------------------------------------------------------------------

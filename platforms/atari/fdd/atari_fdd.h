@@ -225,6 +225,7 @@ void     fdd_shutdown(void);
 /* Mount/unmount disk images */
 int      fdd_insert_disk(int drive, const char *image_path, bool write_protect);
 void     fdd_eject_disk(int drive);
+void     fdd_toggle_disk(int drive);   /* runtime eject/re-insert (F11) */
 void     fdd_set_write_protect(int drive, bool wp);
 
 /* Call from MFP GPIP read handler to get FDC interrupt state.

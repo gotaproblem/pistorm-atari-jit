@@ -227,6 +227,94 @@ void fdd_shutdown(void)
     FDD_LOG("Shutdown");
 }
 
+/* =========================================================================
+ * MSA: Magic Shadow Archiver images (magic $0E0F, big-endian header,
+ * per-track data blocks, RLE with $E5 marker - same format STBOX
+ * decodes). Detected by MAGIC, not suffix. Decoded once at insert time
+ * into an anonymous unlinked temp file, so the rest of the FDC model
+ * only ever sees a raw .ST layout. The decoded copy is throwaway: MSA
+ * mounts are forced read-only, there is no write-back into the archive.
+ *
+ * Returns: decoded fd (>= 0), -1 = not an MSA (caller opens it raw),
+ * -2 = is an MSA but corrupt (caller must fail the mount).
+ * ========================================================================= */
+static int msa_open_decoded(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t *raw = NULL, *img = NULL;
+
+    if (!f)
+        return -1;                          /* let the raw open() report */
+
+    uint8_t magic[2];
+    if (fread(magic, 1, 2, f) != 2 || magic[0] != 0x0E || magic[1] != 0x0F) {
+        fclose(f);
+        return -1;                          /* plain .ST / raw image     */
+    }
+
+    fseek(f, 0, SEEK_END);
+    long fsz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsz < 12 || fsz > 2 * 1024 * 1024) goto bad;
+    raw = malloc((size_t)fsz);
+    if (!raw || fread(raw, 1, (size_t)fsz, f) != (size_t)fsz) goto bad;
+    fclose(f); f = NULL;
+
+    uint16_t spt    = (uint16_t)((raw[2] << 8) | raw[3]);
+    uint16_t sides  = (uint16_t)(((raw[4] << 8) | raw[5]) + 1);
+    uint16_t tstart = (uint16_t)((raw[6] << 8) | raw[7]);
+    uint16_t tend   = (uint16_t)((raw[8] << 8) | raw[9]);
+    uint32_t tlen   = 512u * spt;
+    uint32_t total  = tlen * sides * (uint32_t)(tend - tstart + 1);
+    if (!spt || spt > 12 || sides > 2 || tend < tstart ||
+        total > 2048u * 1024) goto bad;
+    img = calloc(1, total);
+    if (!img) goto bad;
+
+    uint32_t src = 10, dst = 0;
+    for (uint32_t t = 0; t < (uint32_t)(tend - tstart + 1) * sides; t++) {
+        if (src + 2 > (uint32_t)fsz) goto bad;
+        uint32_t dlen = (uint32_t)((raw[src] << 8) | raw[src + 1]);
+        src += 2;
+        if (src + dlen > (uint32_t)fsz || dst + tlen > total) goto bad;
+        if (dlen == tlen) {
+            memcpy(img + dst, raw + src, tlen);
+        } else {                                    /* RLE */
+            uint32_t o = dst, e = src + dlen, i = src;
+            while (i < e && o < dst + tlen) {
+                uint8_t b = raw[i++];
+                if (b != 0xE5) { img[o++] = b; continue; }
+                if (i + 3 > e) goto bad;
+                uint8_t v = raw[i];
+                uint32_t n = (uint32_t)((raw[i + 1] << 8) | raw[i + 2]);
+                i += 3;
+                while (n-- && o < dst + tlen) img[o++] = v;
+            }
+        }
+        src += dlen;
+        dst += tlen;
+    }
+    free(raw); raw = NULL;
+
+    char tmpl[] = "/tmp/pistorm_msa_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) goto bad;
+    unlink(tmpl);                           /* anonymous: gone on close  */
+    if (write(fd, img, total) != (ssize_t)total) { close(fd); goto bad; }
+    lseek(fd, 0, SEEK_SET);
+    free(img);
+    FDD_LOG("MSA '%s' decoded: %u tracks %u spt %u sides (%u KB, read-only)",
+            path, (unsigned)(tend - tstart + 1), spt, sides, total / 1024);
+    return fd;
+
+bad:
+    FDD_LOG("MSA '%s': corrupt or unsupported archive", path);
+    if (f) fclose(f);
+    free(raw);
+    free(img);
+    return -2;
+}
+
 int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
 {
     if (drive < 0 || drive >= FDD_MAX_DRIVES) return -1;
@@ -240,8 +328,17 @@ int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
         drv->fd = -1;
     }
 
-    int flags = write_protect ? O_RDONLY : O_RDWR;
-    int fd = open(image_path, flags);
+    int fd = msa_open_decoded(image_path);
+    if (fd == -2) {
+        //pthread_mutex_unlock(&fdc.lock);
+        return -1;                          /* MSA but broken            */
+    }
+    if (fd >= 0) {
+        write_protect = true;               /* no write-back into MSA    */
+    } else {
+        int flags = write_protect ? O_RDONLY : O_RDWR;
+        fd = open(image_path, flags);
+    }
     if (fd < 0) {
         FDD_LOG("Failed to open '%s': %s", image_path, strerror(errno));
         //pthread_mutex_unlock(&fdc.lock);
@@ -349,6 +446,33 @@ void fdd_eject_disk(int drive)
     drv->num_sides = 2;
     FDD_LOG("Drive %c: ejected", 'A' + drive);
     //pthread_mutex_unlock(&fdc.lock);
+}
+
+/* Runtime eject / re-insert toggle (F11 on the USB keyboard). Spectre
+ * asks for the boot floppy to be removed before switching to Mac mode
+ * and waits for the WP-sensor change; this is the only way to oblige an
+ * emulated drive. Pressing again re-mounts the same image. */
+void fdd_toggle_disk(int drive)
+{
+    static bool last_wp[FDD_MAX_DRIVES];
+
+    if (drive < 0 || drive >= FDD_MAX_DRIVES) return;
+    fdd_drive_t *drv = &fdc.drives[drive];
+
+    if (drv->disk_inserted) {
+        last_wp[drive] = drv->write_protected;
+        fdd_eject_disk(drive);
+        printf("[FDD] F11: drive %c ejected (F11 re-inserts)\n", 'A' + drive);
+    } else if (drv->image_path[0]) {
+        char path[sizeof(drv->image_path)];
+        strncpy(path, drv->image_path, sizeof(path) - 1);
+        path[sizeof(path) - 1] = 0;
+        if (fdd_insert_disk(drive, path, last_wp[drive]) == 0)
+            printf("[FDD] F11: drive %c re-inserted '%s'\n", 'A' + drive, path);
+        else
+            printf("[FDD] F11: drive %c re-insert of '%s' FAILED\n",
+                   'A' + drive, path);
+    }
 }
 
 void fdd_set_write_protect(int drive, bool wp)
@@ -868,6 +992,23 @@ static uint32_t fdc_read_addr(uint32_t addr, int size)
     switch (fdc_reg_index()) {
     case FDC_REG_CMD_STATUS:
         val = fdc.status;
+
+        /* Type I status bit 6 mirrors the drive's WP sensor LIVE on a
+         * real WD1772 - and with no disk in the drive the sensor reads
+         * "protected". That live bit is the media-change signal TOS and
+         * Spectre poll to notice a disk being removed; without it an
+         * eject is invisible to the guest. Type II/III writes set the
+         * bit explicitly at command time, so only Type I is composed
+         * here ((cmd & 0x80) == 0). */
+        if ((fdc.command & 0x80u) == 0 &&
+            fdc.selected_drive >= 0 && fdc.selected_drive < FDD_MAX_DRIVES) {
+            fdd_drive_t *sd = &fdc.drives[fdc.selected_drive];
+            if (!sd->disk_inserted || sd->write_protected)
+                val |= FDC_STATUS_WRTPROT;
+            else
+                val &= ~FDC_STATUS_WRTPROT;
+        }
+
         //fprintf(stderr, "[FDC] READ status -> 0x%02X\n", val);
         /* Reading status register clears the IRQ (WD1772 hardware) */
         fdc_clear_irq();
