@@ -18,6 +18,7 @@ extern "C" {
  * (ps_protocol.c). IPL samples from GPLEV0 taken while set may contain
  * driven data bits instead of the CPLD's IPL lines - discard them. */
 extern volatile uint8_t ps_bus_active;
+extern volatile int ps_gpip7_force;   /* GPIP7 monitor detect: 0 real, 1 mono, 2 colour */
 
 
 #ifdef USING_PI_CLK

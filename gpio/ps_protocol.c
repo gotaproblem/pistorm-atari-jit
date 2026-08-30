@@ -40,6 +40,12 @@
 _Alignas(uint64_t) volatile _Atomic uint8_t g_buserr = 0;
 static volatile uint32_t g_status;
 
+/* Monitor-detect force for MFP GPIP bit 7, applied in ps_read_txn.
+ * 0 = real wire, 1 = force mono (bit low), 2 = force colour (bit high).
+ * Set once from the config after load; volatile because the CPU thread
+ * reads it while the main thread writes it at startup. */
+volatile int ps_gpip7_force = 0;
+
 volatile uint32_t *gpio;
 volatile uint32_t *ioset;
 volatile uint32_t *ioclr;
@@ -449,6 +455,32 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
   *clr = TXN_END;
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
+
+  /* Monitor-detect override (cfg `monitor mono|colour`).
+   *
+   * MFP GPIP bit 7 ($FFFA01) is the ST's monitor-detect wire: LOW =
+   * SM124 mono, HIGH = colour. TOS reads it ONCE, in its first dozen
+   * instructions, to choose the boot resolution - and that read was
+   * observed to bypass every dispatcher-level shim we placed (TOS 1.04
+   * took its colour branch at $FC00AA with no shimmed GPIP read logged,
+   * while all other MFP traffic showed). This is the layer nothing can
+   * bypass: every guest read - fast core, compat core, FC-tagged, byte,
+   * word, or the long composed of two words - terminates in this
+   * transaction, so the force is applied to the wire itself.
+   *
+   * Addressing: GPIP is the LOW byte. A byte read of $FFFA01 extracts
+   * the low byte of data; a word read of $FFFA00 carries GPIP in its
+   * low byte; the high byte of either is not GPIP. */
+  if (__builtin_expect (ps_gpip7_force != 0, 0)) {
+    uint32_t a = ps_io->addr & 0x00FFFFFFu;
+    if ((ps_io->io_type == READ_BYTE && a == 0x00FFFA01u) ||
+        (ps_io->io_type == READ_WORD && a == 0x00FFFA00u)) {
+      if (ps_gpip7_force == 1)
+        ps_io->data &= ~0x0080u;     /* mono monitor present   */
+      else
+        ps_io->data |=  0x0080u;     /* colour monitor present */
+    }
+  }
   return status;
 }
 

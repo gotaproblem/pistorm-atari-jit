@@ -126,6 +126,13 @@ typedef struct {
 typedef struct {
   uint8_t  PAL;
   uint8_t  shift_mode;
+  /* The Shifter's ACTUAL mode: written ONLY by snoops of the hardware
+   * register $FF8260. shift_mode above is also fed from sysvar $44C by
+   * rtg_write_snoop, so it reflects software convention and loses races
+   * with TOS's sysvar initialisation - the mono boot rendered as colour
+   * garbage because a $44C write stomped the correct REZ value. The
+   * native-ST HDMI renderer must key off the hardware, i.e. this. */
+  uint8_t  hw_rez;
   uint8_t  res_changed;
   uint32_t vram_base;
   uint8_t  low;

@@ -142,6 +142,10 @@ static int perf_jit_cache_set;
  * frames and has never been validated for anything else. */
 static bool cfg_cpu_compatible;
 
+/* 1 = the guest address space is 24-bit (no TT-RAM/addr32): address bits
+ * 24-31 do not exist on the bus and must be ignored everywhere. */
+extern "C" { int pistorm_addr24 = 0; }
+
 extern "C" void jit_cpu_set_compatible(int on)
 {
     cfg_cpu_compatible = on != 0;
@@ -241,6 +245,10 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     /* Keep the Atari bus map 24-bit unless TT-RAM or addr32 is explicitly
      * enabled. This lets us test 32-bit address decode without exposing TT-RAM. */
     currprefs.address_space_24 = changed_prefs.address_space_24 = !(enable_ttram || enable_addr32);
+    /* published for C-side users (pistorm_pc_executable): a 68000 has 24
+     * address pins, so with a 24-bit map, bits 24-31 of any address are
+     * to be IGNORED, not judged - Mac software tags pointers there */
+    pistorm_addr24 = currprefs.address_space_24 ? 1 : 0;
 
     currprefs.cachesize = changed_prefs.cachesize = disable_jit ? 0 : jit_cache; // KB; >0 enables JIT default 8192KB
     /* pissoff_value == compiled-chain budget (countdown is #defined to pissoff):

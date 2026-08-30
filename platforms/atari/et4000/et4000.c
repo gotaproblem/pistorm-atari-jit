@@ -2642,7 +2642,12 @@ void *render_frame(void *vptr)
                 g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
                 blit_st_native(g_et4000,
                                st_native_frame_source(rtg.vram_base, rtg.natmem + rtg.vram_base),
-                               rtg.shift_mode); /* Native ST screen, including real blitter DMA writes. */
+                               rtg.hw_rez);  /* the Shifter's ACTUAL mode ($FF8260
+                                              * snoops only). rtg.shift_mode is also
+                                              * overwritten from sysvar $44C and lost
+                                              * the race with TOS's sysvar init - a
+                                              * mono boot then rendered as colour
+                                              * garbage. See rtg_s in et4000.h. */
                 render_source = "st";
                 rendered = true;
                 source_active = true;

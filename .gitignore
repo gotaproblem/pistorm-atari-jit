@@ -30,3 +30,7 @@ pistorm-rpi-ffmpeg-*.tar.gz.sha256
 /.ffmpeg-choice
 drmprobe
 /cdev/
+emulator
+ataritest
+*.o
+*.d

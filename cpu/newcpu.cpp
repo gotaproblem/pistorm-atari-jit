@@ -4425,11 +4425,108 @@ struct pistorm_exc_ring_e {
 	uae_u16 vec, sr;
 	uae_u32 pc, sp, fault, target;
 	uae_u16 code[5];        /* words at pc (0 = pc unmapped)  */
+	uae_u16 pre[6];         /* the 12 bytes BEFORE pc         */
 	uae_u8  has_regs;
 	uae_u32 dreg[8], areg[8];
 };
 static pistorm_exc_ring_e pistorm_exc_ring[64];
 static unsigned pistorm_exc_ring_i;
+
+/* Memory snapshot taken THE MOMENT the ring freezes, i.e. at the first
+ * sign of a cascade - not at halt. This distinction matters: a runaway
+ * smears exception frames over everything, so by the time the machine
+ * halts, whatever the guest was pointing at has been destroyed. Dumping
+ * a GEMDOS argument at halt showed only the cascade's own debris.
+ * PISTORM_DUMP_ADDR=addr[,addr...] selects up to 4 regions. */
+#define SNAP_N     4
+#define SNAP_BYTES 64
+static struct { uae_u32 addr; uae_u8 data[SNAP_BYTES]; int valid; }
+	pistorm_snap[SNAP_N];
+/* Re-captured at the START OF EVERY fault run, overwriting the previous.
+ * A one-shot capture is wrong: the first bus error of a session is
+ * typically TOS's own memory probe during boot, so the snapshot showed
+ * cleared RAM from long before the guest of interest had even loaded.
+ * Recording is confined to `!frozen`, so the last capture to survive is
+ * the one taken as the fatal cascade began - which is what we want. */
+static void pistorm_snap_capture(void)
+{
+	const char *spec = getenv("PISTORM_DUMP_ADDR");
+	if (!spec || !natmem_offset)
+		return;
+	for (int i = 0; i < SNAP_N; i++)
+		pistorm_snap[i].valid = 0;
+	for (int i = 0; i < SNAP_N && spec && *spec; i++) {
+		char *end = NULL;
+		unsigned long a = strtoul(spec, &end, 0);
+		if (end == spec)
+			break;
+		uae_u32 base = (uae_u32)(a & 0x00FFFFF0u);
+		pistorm_snap[i].addr = base;
+		for (int b = 0; b < SNAP_BYTES; b++)
+			pistorm_snap[i].data[b] = natmem_offset[(base + b) & 0x00FFFFFFu];
+		pistorm_snap[i].valid = 1;
+		spec = (*end == ',') ? end + 1 : end;
+	}
+}
+
+static void pistorm_snap_print(void)
+{
+	for (int i = 0; i < SNAP_N; i++) {
+		if (!pistorm_snap[i].valid)
+			continue;
+		fprintf(stderr, "[SNAP] @%06X captured at first fault "
+				"(pre-cascade):\n", pistorm_snap[i].addr);
+		for (int row = 0; row < SNAP_BYTES / 16; row++) {
+			fprintf(stderr, "[SNAP]   %06X:",
+					pistorm_snap[i].addr + row * 16);
+			for (int b = 0; b < 16; b++)
+				fprintf(stderr, "%s%02X", (b & 1) ? "" : " ",
+						pistorm_snap[i].data[row * 16 + b]);
+			fprintf(stderr, "  ");
+			for (int b = 0; b < 16; b++) {
+				uae_u8 c = pistorm_snap[i].data[row * 16 + b];
+				fputc((c >= 0x20 && c < 0x7F) ? c : '.', stderr);
+			}
+			fprintf(stderr, "\n");
+		}
+	}
+}
+
+/* Guest state at a RESET instruction (called from cpu_pulse_reset).
+ *
+ * RESET pulses the peripheral reset line for 124 clocks; the CPU, its
+ * registers and RAM are untouched and execution continues at the next
+ * instruction. Software that switches worlds uses it that way - Spectre
+ * GCR issues one on its way into Macintosh mode - so this is the last
+ * known-good instant before that switch. Worth logging unconditionally:
+ * a RESET is rare in normal operation, and every crash dump we had until
+ * now showed only the aftermath. */
+/* Current guest PC for IO-side diagnostics (pistorm_natmem.cpp cannot
+ * reach the regs machinery directly). WHO reads a hardware register is
+ * often the entire question - e.g. distinguishing TOS's boot-time
+ * monitor-detect read from its once-per-VBL monitor-swap poll. */
+extern "C" uae_u32 pistorm_guest_pc(void)
+{
+	return m68k_getpc();
+}
+
+extern "C" void pistorm_reset_state_dump(void)
+{
+	fprintf(stderr, "[RESET] soft CPU RST at pc=%08X sr=%04X (%s) "
+			"usp=%08X isp=%08X\n",
+			m68k_getpc(), regs.sr, regs.s ? "SUP" : "usr",
+			regs.usp, regs.isp);
+	if (getenv("PISTORM_RESET_DEBUG")) {
+		fprintf(stderr, "[RESET]   D:");
+		for (int i = 0; i < 8; i++)
+			fprintf(stderr, " %08X", m68k_dreg(regs, i));
+		fprintf(stderr, "\n[RESET]   A:");
+		for (int i = 0; i < 8; i++)
+			fprintf(stderr, " %08X", m68k_areg(regs, i));
+		fprintf(stderr, "\n");
+	}
+	fflush(stderr);
+}
 
 void pistorm_exc_ring_dump(void)
 {
@@ -4444,6 +4541,8 @@ void pistorm_exc_ring_dump(void)
 		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X vect->%08X\n",
 				e->vec, e->pc, e->sp, e->sr, e->fault, e->target);
 		if (e->has_regs) {
+			fprintf(stderr, "[EXCRING]   pre-pc : %04X %04X %04X %04X %04X %04X\n",
+					e->pre[0], e->pre[1], e->pre[2], e->pre[3], e->pre[4], e->pre[5]);
 			fprintf(stderr, "[EXCRING]   code@pc: %04X %04X %04X %04X %04X\n",
 					e->code[0], e->code[1], e->code[2], e->code[3], e->code[4]);
 			fprintf(stderr, "[EXCRING]   D 0-7: %08X %08X %08X %08X %08X %08X %08X %08X\n",
@@ -4454,6 +4553,7 @@ void pistorm_exc_ring_dump(void)
 					e->areg[4], e->areg[5], e->areg[6], e->areg[7]);
 		}
 	}
+	pistorm_snap_print();
 }
 
 void REGPARAM2 Exception(int nr)
@@ -4490,6 +4590,14 @@ void REGPARAM2 Exception(int nr)
 				            ((uae_u32)nm[va+2] << 8) | nm[va+3];
 			}
 
+			/* Capture registers+code for anything that might be a fault.
+			 * Vector 11 (line-F) is included because an F-line at a wild
+			 * PC is a real symptom - but see the freeze rule below: it
+			 * must NOT be treated as cascade evidence, because software
+			 * that dispatches through line-F legitimately (Spectre's Mac
+			 * trap handler fires thousands of them) would otherwise
+			 * freeze the ring during normal operation and we would never
+			 * see the actual crash. */
 			bool faultclass = (nr == 2 || nr == 3 || nr == 4 || nr == 11);
 
 			/* fault-class: capture the instruction and register file so
@@ -4502,6 +4610,17 @@ void REGPARAM2 Exception(int nr)
 					uae_u8 *nm = natmem_offset;
 					for (int w = 0; w < 5; w++)
 						e->code[w] = ((uae_u16)nm[cpc + 2*w] << 8) | nm[cpc + 2*w + 1];
+					/* ...and the 6 words BEFORE it. On a 68000 group-0
+					 * frame the reported PC is approximate and sits past
+					 * the offending instruction, so the store that
+					 * actually faulted - and whatever loaded the address
+					 * register it went through - is behind us, not at pc. */
+					for (int w = 0; w < 6; w++) {
+						uae_u32 a = cpc - 12 + 2 * (uae_u32)w;
+						e->pre[w] = pistorm_pc_executable(a)
+						            ? (uae_u16)(((uae_u16)nm[a] << 8) | nm[a + 1])
+						            : 0;
+					}
 				}
 				for (int r = 0; r < 8; r++) {
 					e->dreg[r] = m68k_dreg(regs, r);
@@ -4509,15 +4628,95 @@ void REGPARAM2 Exception(int nr)
 				}
 			}
 
-			if (faultclass && g_buserr_addr == last_fault)
+			/* Cascade detection. Two conditions beyond "same fault twice",
+			 * both learned the hard way:
+			 *
+			 *   - vector 11 does NOT count. Spectre dispatches the Mac
+			 *     Toolbox through line-F, so a healthy machine emits
+			 *     thousands of them; counting those froze the ring during
+			 *     normal execution and the run that mattered captured
+			 *     nothing but working trap dispatch.
+			 *   - a fault address of 0 does NOT count. g_buserr_addr is
+			 *     sticky, so exceptions that are not bus faults at all
+			 *     leave it at whatever it was - usually 0 - which made
+			 *     any repeated exception look like a cascade. */
+			/* GEMDOS call trace, PISTORM_GEMDOS_DEBUG=1: name the calls
+			 * that matter for file access, with their string arguments
+			 * read host-side from the mirror. Exists because a guest
+			 * (Spectre) was observed retrying a failing Pexec until it
+			 * destroyed itself, and nothing in the wreckage says WHAT
+			 * file it wanted - this does. At trap entry the frame is
+			 * already pushed, so the caller's args start at sp+6 for a
+			 * supervisor caller, or at the USP for a user caller. */
+			if (nr == 33 && getenv("PISTORM_GEMDOS_DEBUG"))
 			{
-				if (++same_fault_run >= 48)
+				static int logged;
+				if (logged < 200) {
+					uae_u8 *nm = natmem_offset;
+					uae_u32 args = (regs.sr & 0x2000)
+					               ? (m68k_areg(regs, 7) + 6) & 0x00FFFFFF
+					               : regs.usp & 0x00FFFFFF;
+					uae_u16 fn = ((uae_u16)nm[args] << 8) | nm[args + 1];
+					char what[128] = "";
+					if (fn == 0x4B || fn == 0x3D || fn == 0x4E || fn == 0x3B) {
+						/* Pexec(mode.w,name.l..) / Fopen(name.l,mode.w)
+						 * / Fsfirst(name.l,attr.w) / Dsetpath(name.l) */
+						uae_u32 strp = (fn == 0x4B)
+						    ? (((uae_u32)nm[args+4]<<24)|((uae_u32)nm[args+5]<<16)|
+						       ((uae_u32)nm[args+6]<<8)|nm[args+7])
+						    : (((uae_u32)nm[args+2]<<24)|((uae_u32)nm[args+3]<<16)|
+						       ((uae_u32)nm[args+4]<<8)|nm[args+5]);
+						strp &= 0x00FFFFFF;
+						int i;
+						for (i = 0; i < 63; i++) {
+							uae_u8 c = nm[(strp + i) & 0x00FFFFFF];
+							if (c < 0x20 || c > 0x7E) break;
+							what[i] = (char)c;
+						}
+						what[i] = 0;
+					}
+					logged++;
+					fprintf(stderr, "[GEMDOS] fn=$%02X%s%s%s%s pc=%08X sp=%08X sr=%04X\n",
+							fn,
+							fn==0x4B?" Pexec":fn==0x3D?" Fopen":
+							fn==0x4E?" Fsfirst":fn==0x3B?" Dsetpath":"",
+							what[0]?" \"":"", what, what[0]?"\"":"",
+							m68k_getpc(), m68k_areg(regs, 7), regs.sr);
+				}
+			}
+
+			bool cascade_evidence = (nr == 2 || nr == 3 || nr == 4);
+			(void)last_fault;
+
+			/* Freeze on a RUN of bus/address faults, not on a repeated
+			 * fault ADDRESS. The address is the wrong signal: a runaway
+			 * marches its stack pointer downwards, so every lap faults
+			 * at a different address (00FFA662, 00FFA666, ...) and an
+			 * equality test never fires - the ring then rolls until
+			 * nothing but cascade is left, which is precisely what it
+			 * did. A healthy machine never takes 32 bus faults in a row
+			 * without an interrupt or trap in between, so that is the
+			 * reliable tell. Freezing here keeps the ~32 entries before
+			 * the cascade, which is where patient zero lives. */
+			if (cascade_evidence)
+			{
+				/* Snapshot on the FIRST fault, before the runaway has a
+				 * chance to overwrite what the guest was pointing at. */
+				if (same_fault_run == 0)
+					pistorm_snap_capture();
+				if (++same_fault_run >= 32)
 					frozen = true;
 			}
-			else
+			else if (nr != 11)
 			{
+				/* Line-F is NEUTRAL: it neither proves a cascade nor
+				 * disproves one. Counting it froze the ring during
+				 * Spectre's normal Toolbox dispatch; letting it RESET
+				 * the run meant the 2/11-alternating cascade (the shape
+				 * of the first Spectre crash) never froze at all. Only
+				 * a genuinely normal exception - an interrupt or trap -
+				 * breaks the run. */
 				same_fault_run = 0;
-				last_fault = g_buserr_addr;
 			}
 		}
 	}
@@ -4568,10 +4767,37 @@ void REGPARAM2 ExceptionL(int nr, uaecptr address)
 	ExceptionX(nr, address, 0xffffffff);
 }
 
+/* Total budget for the bus-error traces (BE/HWX2), shared between them.
+ *
+ * The per-address de-duplication these had was useless against the case
+ * that matters: a runaway moves BOTH its PC and its fault address every
+ * lap, so nothing ever repeated and every single fault printed. A single
+ * crash produced thousands of lines and pushed the EXCRING - the part
+ * that actually identifies the fault - off the top of the scrollback.
+ * The ring is the diagnostic; these traces are just colour, so they get
+ * a hard cap. PISTORM_BE_TRACE=n raises it (0 = silent). */
+static int pistorm_be_budget(void)
+{
+	static int budget = -1;
+	if (budget < 0) {
+		const char *e = getenv("PISTORM_BE_TRACE");
+		budget = e ? atoi(e) : 24;
+		if (budget < 0)
+			budget = 0;
+	}
+	if (budget == 0)
+		return 0;
+	if (--budget == 0)
+		fprintf(stderr, "[BE] trace budget exhausted - further bus errors "
+				"silent (PISTORM_BE_TRACE=n raises it). The EXCRING dump "
+				"at halt is the authoritative record.\n");
+	return 1;
+}
+
 static void bus_error()
 {
 #if CPU_BUSERR_TRACE
-	if (pistorm_cpu_diag())
+	if (pistorm_cpu_diag() && pistorm_be_budget())
 		fprintf(stderr, "[BE] getpc=%08x instr_pc=%08x fault=%08x\n",
 				m68k_getpc(), regs.instruction_pc, last_fault_for_exception_3);
 #endif
@@ -10841,7 +11067,7 @@ void hardware_exception2(uaecptr addr, uae_u32 v, bool read, bool ins, int size)
 		last_pc = pc;
 		repeat_count = 0;
 	}
-	if (pistorm_cpu_diag() && repeat_count < 8)
+	if (pistorm_cpu_diag() && repeat_count < 8 && pistorm_be_budget())
 	{
 		/* include instruction_pc and the code bytes AROUND the faulting
 		 * instruction (read host-side from the mirror - cannot fault),

@@ -18,6 +18,7 @@ typedef enum {
   CONFITEM_NONE,
   CONFITEM_CPU,
   CONFITEM_CPU_COMPATIBLE,
+  CONFITEM_MONITOR,
   CONFITEM_JIT,
   CONFITEM_FPU,
   CONFITEM_LOOPCYCLES,
@@ -80,6 +81,7 @@ const char *cpu_types[M68K_CPU_TYPES] = {
 static const config_switch_def config_switches[] = {
   { "cpu", CONFITEM_CPU },
   { "cpu_compatible", CONFITEM_CPU_COMPATIBLE },
+  { "monitor", CONFITEM_MONITOR },
   { "jit", CONFITEM_JIT },
   { "fpu", CONFITEM_FPU },
   { "loopcycles", CONFITEM_LOOPCYCLES },
@@ -178,6 +180,14 @@ bool emulator_config_machine_set(uint32_t *mch)
 bool emulator_config_fpu(void)
 {
   return current_config ? current_config->fpu : false;
+}
+
+/* MFP GPIP7 monitor-detect override: 0 = use the real wire, 1 = force
+ * mono (SM124), 2 = force colour. Read on every GPIP access, so keep it
+ * trivial. See the `monitor` case in the parser for why this exists. */
+int emulator_config_monitor_force(void)
+{
+  return current_config ? current_config->monitor_force : 0;
 }
 
 bool emulator_config_shifter_ste(void)
@@ -590,6 +600,42 @@ struct emulator_config *load_config_file(char *filename) {
       case CONFITEM_JIT:
         cfg->jit = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] JIT %s\n", cfg->jit ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_MONITOR:
+        {
+          /* Forces the MFP GPIP7 monitor-detect bit the guest reads, so
+           * TOS can be told a monitor is attached that physically is
+           * not. `mono` is what lets software needing ST high resolution
+           * run on a colour setup - Spectre GCR presents a 512x342
+           * one-bit Mac screen and requires 640x400. The real monitor
+           * then shows garbage by definition; use native_hdmi to see the
+           * true output. Default (key absent) reads the real wire. */
+          char arg[32];
+          int p = 0;
+          memset(arg, 0, sizeof(arg));
+          get_next_string(parse_line + str_pos, arg, &p, ' ');
+          for (int i = 0; arg[i]; i++)
+            arg[i] = (char)tolower((unsigned char)arg[i]);
+
+          if (!strcmp(arg, "mono") || !strcmp(arg, "monochrome") ||
+              !strcmp(arg, "sm124") || !strcmp(arg, "high"))
+            cfg->monitor_force = 1;
+          else if (!strcmp(arg, "colour") || !strcmp(arg, "color") ||
+                   !strcmp(arg, "rgb") || !strcmp(arg, "sc1224"))
+            cfg->monitor_force = 2;
+          else if (!strcmp(arg, "auto") || !arg[0])
+            cfg->monitor_force = 0;
+          else {
+            printf("[CFG] monitor: unknown value '%s' - expected "
+                   "mono/colour/auto; using the real monitor wire\n", arg);
+            cfg->monitor_force = 0;
+          }
+          printf("[CFG] monitor detect: %s\n",
+                 cfg->monitor_force == 1 ? "forced MONO (GPIP7 low)" :
+                 cfg->monitor_force == 2 ? "forced COLOUR (GPIP7 high)" :
+                                           "real hardware wire");
+        }
         break;
 
       case CONFITEM_CPU_COMPATIBLE:

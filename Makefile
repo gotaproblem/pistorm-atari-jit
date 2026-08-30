@@ -27,6 +27,7 @@ EXENAME = emulator
 # -----------------------------------------------------------------
 CFILES = config_file/config_file.c \
          gpio/ps_protocol.c \
+         gpio/bus_lock.c \
          platforms/atari/IDE.c \
          platforms/atari/machine_cookie.c \
          platforms/atari/idedriver.c \
@@ -394,7 +395,7 @@ platforms/atari/stbox/stbox_psg.o: platforms/atari/stbox/stbox_psg.c
 platforms/atari/video/vidplane.o: platforms/atari/video/vidplane.c
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-ataritest: ataritest.c gpio/ps_protocol.c
+ataritest: ataritest.c gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS)
 
 %.o: %.c

@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include "emulator.h"
+#include "gpio/bus_lock.h"
 #include "gpio/ps_protocol.h"
 
 #define SIZE_KILO 1024
@@ -167,12 +168,23 @@ int check_emulator ()
 
         if (fp) {
             if ( (fscanf(fp, "%ld (%[^)]) %c", &pid, pname, &state)) != 3 ){
-                printf("fscanf failed, assuming emulator running\n");
+                /* NOT a reason to bail out: /proc entries come and go
+                 * while we scan, so a process exiting mid-read lands
+                 * here. Treating that as "emulator running" made the
+                 * tool refuse to start for an unrelated passer-by. */
                 fclose(fp);
-                closedir(dir);
-                return 1;
+                continue;
             }
-            if (!strcmp(pname, name)) {
+            /* Skip the DEAD. A zombie ('Z') is a process-table entry
+             * whose process has already exited - it holds no memory, no
+             * file descriptors and no GPIO mapping, so it cannot be
+             * using the bus. Matching it by name alone locked the tool
+             * out until reboot, because a zombie cannot be killed: only
+             * its parent reaping it makes it go away. 'X' is likewise a
+             * corpse being torn down. */
+            if (!strcmp(pname, name) && state != 'Z' && state != 'X') {
+                printf("found live '%s' at pid %ld (state %c)\n",
+                       pname, lpid, state);
                 fclose(fp);
                 closedir(dir);
                 return 1;
@@ -194,7 +206,20 @@ int main ( int argc, char *argv[] )
 
     cur_loop = 1;
 
-    if ( check_emulator () ) 
+    /* Exclusive claim on the bus (gpio/bus_lock.c). This replaces the
+     * old /proc name scan, which counted a ZOMBIE emulator as running -
+     * and since a zombie cannot be killed, only reaped by its parent,
+     * that locked this tool out until a reboot. A kernel file lock is
+     * released whenever the holder dies, zombie or not. check_emulator()
+     * is kept below as a fallback for the case where the emulator
+     * predates the lock (an old binary still running). */
+    if ( pistorm_bus_lock ( "ataritest" ) != 0 )
+    {
+        printf("PiStorm emulator running, please stop this before running ataritest\n");
+        return 1;
+    }
+
+    if ( check_emulator () )
     {
         printf("PiStorm emulator running, please stop this before running ataritest\n");
         return 1;

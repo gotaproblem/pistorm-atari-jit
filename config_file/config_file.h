@@ -89,6 +89,7 @@ struct emulator_config {
   uint8_t cpu_type;
   bool jit;
   bool cpu_compatible;   /* prefetch-accurate 68000 core (interpreter only) */
+  int  monitor_force;    /* MFP GPIP7 monitor detect: 0 real, 1 mono, 2 colour */
   int loop_cycles;
   bool fpu;
   VGA_s graphics;
@@ -157,6 +158,7 @@ const struct emulator_config *emulator_config_current(void);
 bool emulator_config_machine_set(uint32_t *mch);
 int emulator_config_machine_kind(void); /* -1 unset, 0 st, 1 ste, 2 megast */
 bool emulator_config_fpu(void);
+int  emulator_config_monitor_force(void); /* GPIP7: 0 real, 1 mono, 2 colour */
 bool emulator_config_shifter_ste(void);
 bool emulator_config_blitter_enabled(void);
 int  emulator_config_blitter_mode(void);  /* 0=off 1=real 2=emulated */

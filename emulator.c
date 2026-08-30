@@ -43,6 +43,9 @@ extern "C"
                                        int jit_cache, int jit_cache_set);
   extern void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit);
   extern void jit_cpu_set_compatible(int on);
+  extern void pistorm_reset_state_dump(void);   /* cpu/newcpu.cpp */
+  extern uint8_t pistorm_mfp_gpip_shim(uint8_t); /* pistorm_natmem.cpp */
+  extern void pistorm_rez_sync_trace(uint32_t a, uint8_t v); /* pistorm_natmem.cpp */
   extern void jit_cpu_reset(void);
   extern void jit_cpu_execute(void);
   extern void pistorm_set_blitter_enabled(int enabled);
@@ -64,6 +67,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/fdd/platform_atari_fdd.h"
 #include "platforms/atari/network/platform_atari_network.h"
 #include "platforms/atari/kbd_usb.h"
+#include "gpio/bus_lock.h"
 
 #define IDEBASEADDR 0x00F00000
 #define IDETOPADDR 0x00F00100
@@ -890,6 +894,15 @@ extern "C"
 #endif
 int pistorm_pc_executable(unsigned int pc)
 {
+  /* 24-bit machine: address bits 24-31 do not exist on a 68000's bus.
+   * Mac software (via Spectre) tags pointers there and jumps through
+   * them; judging the untruncated value declared perfectly good PCs
+   * unmapped. Mask first, judge after. */
+  {
+    extern int pistorm_addr24;                          /* jit_glue.cpp  */
+    if (pistorm_addr24)
+      pc &= 0x00FFFFFFu;
+  }
   if (pc < 0x400000u)                                   /* ST-RAM window */
     return 1;
   if (tt_ram_available &&
@@ -1151,6 +1164,17 @@ int main (int argc, char *argv[])
   time_t t;
   char config_file[256];
 
+  /* Claim the bus before anything touches the GPIO (gpio/bus_lock.c).
+   * Two processes driving the same pins mid-cycle is not a cosmetic
+   * problem, so refuse to start if ataritest - or a second emulator -
+   * already holds it. The kernel drops this lock whenever the holder
+   * dies, so it can never be left stale. */
+  if (pistorm_bus_lock("emulator") != 0) {
+    fprintf(stderr, "[MAIN] the PiStorm bus is already in use - "
+                    "stop the other process first\n");
+    return 1;
+  }
+
   {
     // extern unsigned char *natmem_offset;       /* defined in pistorm_natmem.cpp */
     extern void *pushall_call_handler; /* defined in compemu_support */
@@ -1360,6 +1384,17 @@ int main (int argc, char *argv[])
 
   if (config->ide)
     InitIDE();
+
+  /* 24-bit address space decision, needed BEFORE the bank table is
+   * built: map_region replicates every mapping across the 256 16MB
+   * mirrors of the 32-bit space when the machine is 24-bit (a 68000
+   * ignores address bits 24-31 - Mac software under Spectre tags
+   * pointers there and jumps through them). jit_cpu_init() computes the
+   * same value later from the same inputs; this must exist first. */
+  {
+    extern int pistorm_addr24;                 /* jit_glue.cpp */
+    pistorm_addr24 = !(tt_ram_available || config->addr32);
+  }
 
   /* Initialise JIT memory mapping before any emulation thread exists. The
    * bank table depends on the config-driven flags above, and cpu_task enters
@@ -1592,6 +1627,16 @@ int main (int argc, char *argv[])
   fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
   jit_cpu_set_compatible(config->cpu_compatible ? 1 : 0);
+
+  /* Monitor-detect force lives at the ps_protocol layer (see the note
+   * in ps_read_txn): dispatcher-level shims provably missed TOS's
+   * boot-time read, so the wire itself is overridden. Must be armed
+   * BEFORE the CPU thread starts booting TOS - the deciding read is in
+   * the ROM's first dozen instructions. */
+  {
+    extern volatile int ps_gpip7_force;
+    ps_gpip7_force = config->monitor_force;
+  }
   jit_cpu_set_perf_options(config->cpu_clock_multiplier,
                            config->cpu_clock_multiplier_set ? 1 : 0,
                            config->m68k_speed,
@@ -1627,7 +1672,15 @@ void cpu_pulse_reset(void)
 {
   pulse_reset_inprogress = 1;
 
-  printf("[RESET] soft CPU RST\n");
+  /* Log the guest's state AT the RESET instruction. Software that
+   * switches worlds (Spectre GCR drops into Macintosh mode this way)
+   * issues RESET to clear the peripherals and then continues executing
+   * - the CPU, its registers and RAM must survive untouched. This is
+   * the last known-good instant before that switch, so record where the
+   * guest was: everything we had previously captured was aftermath.
+   * PISTORM_RESET_DEBUG=1 also dumps the registers. */
+  pistorm_reset_state_dump();     /* newcpu.cpp - see note above */
+
   ps_pulse_reset();
   if (DMA_Sound_enabled)
     dmasnd_capture_reset();
@@ -1900,6 +1953,8 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
   }
   else if (a == 0x00FF8260) {
     rtg.shift_mode = value;
+    rtg.hw_rez = value;              /* hardware truth for the renderer */
+    pistorm_rez_sync_trace(a, (uint8_t)value);  /* legacy path was invisible */
     vid_dbg_w(a, value);
   }
 }
@@ -1930,8 +1985,11 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     rtg.hscroll = (uint8_t)(value & 0x0F);
     vid_dbg_w(a, value);
   }
-  else if (a == 0x00FF8260)
+  else if (a == 0x00FF8260) {
     rtg.shift_mode = (uint8_t)(value >> 8);
+    rtg.hw_rez = (uint8_t)(value >> 8);  /* hardware truth for the renderer */
+    pistorm_rez_sync_trace(a, (uint8_t)(value >> 8));
+  }
   else if (a >= 0x00FF8240 && a < 0x00FF8260)
     st_palette[(a - 0x00FF8240) >> 1] = value;
 }
@@ -2060,7 +2118,7 @@ extern "C"
     if (FDD_enabled || acsi_enabled()) {
       if (address == MFP_GPIP) {
         cpu_data_fc();
-        return kbd_usb_gpip_shim (fdd_gpip (ps_read_8 (address)));
+        return pistorm_mfp_gpip_shim (ps_read_8 (address));
       }
 
       if (fdd_route_address (address))
@@ -2082,7 +2140,7 @@ extern "C"
     if (KBD_USB_enabled) {
       if (address == MFP_GPIP) {
         cpu_data_fc();
-        return kbd_usb_gpip_shim (ps_read_8 (address));
+        return pistorm_mfp_gpip_shim (ps_read_8 (address));
       }
       if (address == 0x00FFFC00) {
         cpu_data_fc();
@@ -2181,8 +2239,7 @@ extern "C"
     {
       if (address == MFP_GPIP) {
         cpu_data_fc();
-        uint8_t gpip = ps_read_16 (address);
-        return kbd_usb_gpip_shim (fdd_gpip (gpip));
+        return pistorm_mfp_gpip_shim ((uint8_t)ps_read_16 (address));
       }
 
       if (fdd_route_address (address))
@@ -2193,7 +2250,7 @@ extern "C"
     if (KBD_USB_enabled) {
       if (address == MFP_GPIP) {
         cpu_data_fc();
-        return kbd_usb_gpip_shim ((uint8_t)ps_read_16 (address));
+        return pistorm_mfp_gpip_shim ((uint8_t)ps_read_16 (address));
       }
       if (address == 0x00FFFC00) {
         cpu_data_fc();

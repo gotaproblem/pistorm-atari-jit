@@ -678,6 +678,36 @@ extern "C" void pistorm_crash_dump_guest(void)
                 pistorm_dm_berr_count, pistorm_dm_berr_addr);
     }
 
+    /* PISTORM_DUMP_ADDR=addr[,addr...] - hex+ASCII of 64 bytes at each
+     * address, read host-side from the mirror so it cannot fault. For
+     * chasing what a guest was POINTING at when it died: a GEMDOS call's
+     * argument, the code buffer it was executing from, a basepage. */
+    {
+        const char *spec = getenv("PISTORM_DUMP_ADDR");
+        while (spec && *spec) {
+            char *end = NULL;
+            unsigned long a = strtoul(spec, &end, 0);
+            if (end == spec)
+                break;
+            uae_u32 base = (uae_u32)(a & 0x00FFFFF0u);
+            fprintf(stderr, "[GUEST] dump @%08lX:\n", a);
+            for (int row = 0; row < 4; row++) {
+                uae_u32 at = base + (uae_u32)row * 16;
+                fprintf(stderr, "[GUEST]   %06X:", at);
+                for (int b = 0; b < 16; b++)
+                    fprintf(stderr, "%s%02X", (b & 1) ? "" : " ",
+                            natmem_offset[at + b]);
+                fprintf(stderr, "  ");
+                for (int b = 0; b < 16; b++) {
+                    uae_u8 c = natmem_offset[at + b];
+                    fputc((c >= 0x20 && c < 0x7F) ? c : '.', stderr);
+                }
+                fprintf(stderr, "\n");
+            }
+            spec = (*end == ',') ? end + 1 : end;
+        }
+    }
+
     fprintf(stderr, "[GUEST] vectors ($00-$BF):\n");
     for (uae_u32 a = 0; a < 0xC0; a += 32) {
         fprintf(stderr, "[GUEST]   %03X:", a);
@@ -811,6 +841,7 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     }
     else if (a == 0x00FF8260u) {
         rtg.shift_mode = value;
+        rtg.hw_rez = value;          /* hardware truth for the renderer */
         st_rez_sync_trace(a, value);
         vid_dbg_w(a, value);
     }
@@ -831,6 +862,9 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
  * write path, single writer); read by render_frame. */
 extern "C" { volatile double pistorm_guest_hz = 0.0; }
 
+extern "C" uae_u32 pistorm_guest_pc(void);      /* cpu/newcpu.cpp */
+extern "C" int pistorm_addr24;                  /* jit_glue.cpp   */
+
 static void st_rez_sync_trace(uint32_t a, uint8_t v)
 {
     static uint8_t last_rez = 0xFF, last_sync = 0xFF;
@@ -849,15 +883,31 @@ static void st_rez_sync_trace(uint32_t a, uint8_t v)
         hz = (last_sync & 2) ? 50.0 : 60.0;
     if (hz > 0.0)
         pistorm_guest_hz = hz;
-#if (0)
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X%s  guest=%.1fHz\n",
-            (unsigned long long)ts.tv_sec,
-            (unsigned long long)(ts.tv_nsec / 1000000L),
-            (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
-            (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "",
-            hz);
-#endif
+    /* NOTE this print spent its life inside "#if (0)" while the comment
+     * above the function said "ALWAYS on" - so every conclusion of the
+     * form "no REZ line, therefore TOS never switched resolution" was
+     * built on a trace that could not print. Runtime-gated now; the
+     * writes are deduplicated above and number a handful per boot, so
+     * the gate is the only cost. */
+    if (getenv("PISTORM_MFP_DEBUG")) {
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X pc=%08X%s  guest=%.1fHz\n",
+                (unsigned long long)ts.tv_sec,
+                (unsigned long long)(ts.tv_nsec / 1000000L),
+                (a == 0x00FF8260u) ? "REZ  $FF8260" : "SYNC $FF820A", v,
+                pistorm_guest_pc(),
+                (a == 0x00FF8260u && (v & 3) == 2) ? "  << MONO/71.4Hz" : "",
+                hz);
+    }
+}
+
+/* The legacy dispatcher in emulator.c updates rtg.shift_mode itself and
+ * never came through here, so resolution changes taken on that route
+ * were invisible to both the trace and the guest-Hz publication. It now
+ * calls this. */
+extern "C" void pistorm_rez_sync_trace(uint32_t a, uint8_t v)
+{
+    st_rez_sync_trace(a, v);
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)
@@ -2415,6 +2465,7 @@ static inline void hw_blitter_bput(uaecptr a, uae_u32 v)
 }
 
 extern "C" uint8_t IDE_intrq_pending(void);
+extern "C" uae_u32 pistorm_guest_pc(void);      /* cpu/newcpu.cpp */
 
 static inline uae_u8 mfp_gpip_shim(uae_u8 v)
 {
@@ -2431,6 +2482,50 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
         v = kbd_usb_gpip_shim(v);  /* GPIP4 low = keyboard irq (active low) */
     if (DMA_Sound_enabled)
         v = dmasnd_gpip_shim(v);   /* GPIP7 ^= virtual XSINT frame parity   */
+
+    /* Monitor-type override (cfg `monitor mono|colour`).
+     *
+     * GPIP bit 7 is the ST's monitor-detect wire: LOW = SM124 mono, HIGH
+     * = colour. TOS samples it at boot to pick the startup resolution,
+     * and the Shifter will only enter 640x400 when it reads mono. On a
+     * PiStorm the bit comes from whatever monitor is physically plugged
+     * in, so software that REQUIRES high resolution cannot run on a
+     * colour setup - Spectre GCR is the case in point: it presents a
+     * 512x342 one-bit Macintosh screen and has nowhere to put it in
+     * 320x200 or 640x200.
+     *
+     * Forcing the bit lets the guest boot mono while the real monitor
+     * stays colour; the picture on the real screen is then wrong by
+     * definition (the Shifter is genuinely in a mode the monitor cannot
+     * display) and `native_hdmi` is the output to watch.
+     *
+     * Applied LAST so it wins over the DMA-sound XSINT shim above, which
+     * toggles the same bit for a completely unrelated purpose on the STE. */
+    {
+        extern int emulator_config_monitor_force(void);   /* 0 none, 1 mono, 2 colour */
+        int m = emulator_config_monitor_force();
+        uae_u8 before = v;
+        if (m == 1)
+            v &= (uae_u8)~0x80;    /* mono monitor present   */
+        else if (m == 2)
+            v |= (uae_u8)0x80;     /* colour monitor present */
+
+        /* First GPIP reads WITH THE GUEST PC THAT MADE THEM. The PC is
+         * the discriminator this trace previously lacked: a read from
+         * early ROM (TOS's boot-time monitor check) and a read from the
+         * VBL handler (its monitor-swap poll) look identical without it,
+         * and "TOS read the forced value and stayed colour" cannot be
+         * explained until we know WHICH read we were looking at. */
+        {
+            static int shown;
+            if (shown < 24 && m) {
+                shown++;
+                fprintf(stderr, "[GPIP] read #%d pc=%08X raw=%02X -> %02X "
+                        "(bit7 %s)\n", shown, pistorm_guest_pc(), before, v,
+                        (v & 0x80) ? "HIGH=colour" : "LOW=mono");
+            }
+        }
+    }
     return v;
 }
 
@@ -2473,6 +2568,52 @@ static inline int kbd_acia_shadowed(uaecptr a)
     return a == KBD_ACIA_DATA && kbd_native_mouse_enabled();
 }
 
+/* MFP register-access trace, PISTORM_MFP_DEBUG=1. Defined here, ABOVE
+ * every MFP accessor, because it is used by both the read and the write
+ * paths and the read path comes first.
+ *
+ * The mono-detect line is not just the GPIP data bit: GPIP7 is also
+ * interrupt channel 15, with its edge polarity in AER ($FFFA03) bit 7
+ * and its enable in IERA ($FFFA07) bit 7. TOS programs those at boot,
+ * so if it decides monitor type from that path rather than from a plain
+ * data read, forcing $FFFA01 alone gets read and ignored - which is
+ * exactly what was observed. This shows the whole conversation so the
+ * mechanism can be READ OFF rather than guessed at. */
+static void mfp_trace(const char *op, uaecptr a, uae_u32 v, int words)
+{
+    static int on = -1, shown;
+    if (on < 0) {
+        const char *e = getenv("PISTORM_MFP_DEBUG");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    if (!on || shown >= 64)
+        return;
+    uae_u32 r = a & 0x00FFFFFFu;
+    if (r < 0x00FFFA01u || r > 0x00FFFA0Fu)
+        return;                       /* GPIP..ISRA only */
+    static const char *nm[8] = { "GPIP", "AER", "DDR", "IERA",
+                                 "IERB", "IPRA", "IPRB", "ISRA" };
+    unsigned idx = (unsigned)((r - 0x00FFFA01u) >> 1);
+    shown++;
+    fprintf(stderr, "[MFP] %s %s ($%06X) = %02X%s\n", op,
+            idx < 8 ? nm[idx] : "?", r, (unsigned)(v & 0xFF),
+            (v & 0x80) ? "   bit7 SET" : "   bit7 clear");
+    (void)words;
+}
+
+/* The ONE GPIP shim, exported so every read path shares it.
+ *
+ * emulator.c's legacy dispatcher had grown its own copy - kbd + fdd only
+ * - so anything added here (the ACSI IRQ merge, the DMA-sound XSINT
+ * toggle, the monitor-detect override) silently did nothing whenever a
+ * read took that route. That is the third time today a shim wired into
+ * one dispatcher and not the other has cost a debugging session; there
+ * is now a single definition and no way to update half of it. */
+extern "C" uint8_t pistorm_mfp_gpip_shim(uint8_t v)
+{
+    return mfp_gpip_shim((uae_u8)v);
+}
+
 static inline uae_u32 hw_mfp_wget(uaecptr a)
 {
     if (a == MFP_GPIP)
@@ -2486,6 +2627,11 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
         if (DMA_Sound_enabled)   /* MFP reg is the LOW byte of a word read */
             v = (uae_u16)((v & 0xFF00u) |
                           dmasnd_mfp_read_shim(a | 1u, (uint8_t)v));
+        /* A WORD read at $FFFA00 sees GPIP in its low byte but skips the
+         * a==MFP_GPIP match above - so it gets neither the shims nor the
+         * monitor-detect force. If software reads the register that way,
+         * this line is how we find out. */
+        mfp_trace("Rw", a | 1u, v & 0xFFu, 1);
         return v;
     }
 }
@@ -2502,6 +2648,7 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
         uae_u8 v = (uae_u8)hw_bus_bget(a);
         if (DMA_Sound_enabled)
             v = dmasnd_mfp_read_shim(a, v);
+        mfp_trace("R", a, v, 0);
         return v;
     }
 }
@@ -2530,6 +2677,7 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
 
 static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
 {
+    mfp_trace("W", a, v, 1);
     if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 2);
@@ -2545,6 +2693,7 @@ static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
 
 static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
 {
+    mfp_trace("W", a, v, 0);
     if (fdd_route_address(a))
     {
         fdd_io_write(a, v, 1);
@@ -3870,15 +4019,50 @@ static addrbank pistorm_vga_io = {
 
 static void map_region(uaecptr start, uint32_t len, addrbank *b)
 {
-    uint64_t end = (uint64_t)start + len;
-    for (uint64_t a = start; a < end; a += 0x10000)
+    /* 24-BIT MIRRORS. A 68000 has 24 address pins: bits 24-31 of any
+     * address do not exist on its bus, so $09000044 and $000044 are THE
+     * SAME LOCATION. Macintosh software leans on this constantly - the
+     * 24-bit Macs kept flags in the top byte of pointers ("24-bit
+     * clean" became a phrase precisely because of it) - and Spectre's
+     * Mac world jumped through such a pointer straight into an unmapped
+     * bank, because this table only mapped each region at its literal
+     * address. WinUAE replicates every mapping across all 256 16MB
+     * images of the 32-bit space when address_space_24 is set (its
+     * map_banks2 hioffs loop); this restores that. Each mirror gets its
+     * own baseaddr so the accessors' baseaddr[page]+addr arithmetic
+     * lands on the right host memory without masking anything on the
+     * hot path. 32-bit configs (TT-RAM/addr32) are untouched: one
+     * mirror, exactly as before. */
+    /* pistorm_addr24, NOT currprefs.address_space_24: the bank table is
+     * built by jit_mem_init() long before jit_cpu_init() fills currprefs,
+     * so the currprefs field is still zero here and the mirrors would
+     * silently not be mapped. emulator.c computes the flag from the same
+     * inputs before mapping starts.
+     *
+     * ONLY regions that live inside the 16MB space are mirrored. The
+     * table also carries 32-bit-only constructs - the FVDI framebuffer,
+     * the guard bank, the 0xFFFFxxxx/0xFFFxxxxx hardware aliases, the
+     * GUEST_RESERVE dummy overlay - and replicating those wraps hi+start
+     * past 2^32 and TRAMPLES THE LOW PAGES: the first attempt mapped a
+     * high bank over page 0, the reset vector then read zeros, and the
+     * machine halted at PC=0 with pc_p pointing 3.5GB into natmem. A
+     * region at or above 16MB maps once, at its literal address, exactly
+     * as before. */
+    unsigned mirrors = (pistorm_addr24 &&
+                        (uint64_t)start + len <= 0x01000000ull) ? 256 : 1;
+    for (unsigned m = 0; m < mirrors; m++)
     {
-        unsigned page = bankindex((uint32_t)a);
-        mem_banks[page] = b;
-        if (b->baseaddr)
-            baseaddr[page] = b->baseaddr - start; // host = baseaddr[page] + addr
-        else
-            baseaddr[page] = (uae_u8 *)(((uae_u8 *)b) + 1);
+        uint64_t hi  = (uint64_t)m << 24;
+        uint64_t end = hi + (uint64_t)start + len;
+        for (uint64_t a = hi + start; a < end; a += 0x10000)
+        {
+            unsigned page = bankindex((uint32_t)a);
+            mem_banks[page] = b;
+            if (b->baseaddr)
+                baseaddr[page] = b->baseaddr - (start + hi); // host = baseaddr[page] + addr
+            else
+                baseaddr[page] = (uae_u8 *)(((uae_u8 *)b) + 1);
+        }
     }
 }
 
