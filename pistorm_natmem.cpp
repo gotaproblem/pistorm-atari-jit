@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <time.h>
 #include "platforms/atari/audio/dmasnd.h"
+#include "platforms/atari/mfp_hub.h"
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
 #include "platforms/atari/kbd_usb.h"
@@ -1873,8 +1874,7 @@ static void io_wput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, true);
-    if (DMA_Sound_enabled)
-        dmasnd_mfp_snoop(a, v, 1);
+    mfp_hub_write_snoop(a, v, 1);
     if (DMA_Sound_enabled && dmasnd_owns(a))
     {
         dmasnd_snoop16(a, (uint16_t)v);  /* host owns the STE sound regs */
@@ -1914,8 +1914,7 @@ static void io_bput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, false);
-    if (DMA_Sound_enabled)
-        dmasnd_mfp_snoop(a, v, 0);
+    mfp_hub_write_snoop(a, v, 0);
     if (DMA_Sound_enabled && dmasnd_owns(a))
     {
         dmasnd_snoop8(a, (uint8_t)v);    /* host owns the STE sound regs */
@@ -2624,13 +2623,16 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
     }
     {
         uae_u16 v = (uae_u16)hw_bus_wget(a);
-        if (DMA_Sound_enabled)   /* MFP reg is the LOW byte of a word read */
-            v = (uae_u16)((v & 0xFF00u) |
-                          dmasnd_mfp_read_shim(a | 1u, (uint8_t)v));
-        /* A WORD read at $FFFA00 sees GPIP in its low byte but skips the
-         * a==MFP_GPIP match above - so it gets neither the shims nor the
-         * monitor-detect force. If software reads the register that way,
-         * this line is how we find out. */
+        /* MFP reg is the LOW byte of a word read. A word read at $FFFA00
+         * sees GPIP in its low byte but skips the a==MFP_GPIP byte match
+         * above - route it through the ONE gpip shim (monitor force, kbd,
+         * dmasnd XSINT, acsi - previously it got only dmasnd's partial
+         * copy). Everything else: the hub merges the virtual IPRA/IPRB/
+         * ISRA/ISRB bits for ALL virtual channels. */
+        uint8_t lo = (uint8_t)v;
+        lo = ((a | 1u) == MFP_GPIP) ? mfp_gpip_shim(lo)
+                                    : mfp_hub_read_shim(a | 1u, lo);
+        v = (uae_u16)((v & 0xFF00u) | lo);
         mfp_trace("Rw", a | 1u, v & 0xFFu, 1);
         return v;
     }
@@ -2646,8 +2648,7 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
     }
     {
         uae_u8 v = (uae_u8)hw_bus_bget(a);
-        if (DMA_Sound_enabled)
-            v = dmasnd_mfp_read_shim(a, v);
+        v = mfp_hub_read_shim(a, v);
         mfp_trace("R", a, v, 0);
         return v;
     }
@@ -2660,18 +2661,9 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
         fdd_io_write(a, v, 4);
         return;
     }
-    if (DMA_Sound_enabled)
-    {
-        /* MFP registers live on odd addresses: a long write covers two */
-        dmasnd_mfp_snoop(a + 1, (v >> 16) & 0xFF, 0);
-        dmasnd_mfp_snoop(a + 3, v & 0xFF, 0);
-    }
-    if (KBD_USB_enabled)
-    {
-        /* MFP registers live on odd addresses: a long write covers two */
-        kbd_usb_mfp_snoop(a + 1, (v >> 16) & 0xFF, 0);
-        kbd_usb_mfp_snoop(a + 3, v & 0xFF, 0);
-    }
+    /* MFP registers live on odd addresses: a long write covers two */
+    mfp_hub_write_snoop(a + 1, (v >> 16) & 0xFF, 0);
+    mfp_hub_write_snoop(a + 3, v & 0xFF, 0);
     hw_bus_lput(a, v);
 }
 
@@ -2684,10 +2676,7 @@ static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, true);
-    if (DMA_Sound_enabled)
-        dmasnd_mfp_snoop(a, v, 1);
-    if (KBD_USB_enabled)
-        kbd_usb_mfp_snoop(a, v, 1);
+    mfp_hub_write_snoop(a, v, 1);
     hw_bus_wput(a, v);
 }
 
@@ -2700,10 +2689,7 @@ static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
         return;
     }
     mfp_note_eoi_write(a, v, false);
-    if (DMA_Sound_enabled)
-        dmasnd_mfp_snoop(a, v, 0);
-    if (KBD_USB_enabled)
-        kbd_usb_mfp_snoop(a, v, 0);
+    mfp_hub_write_snoop(a, v, 0);
     hw_bus_bput(a, v);
 }
 

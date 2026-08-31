@@ -25,6 +25,7 @@
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
 #include "platforms/atari/machine_cookie.h"
+#include "platforms/atari/mfp_hub.h"
 #include "platforms/atari/stbox/stbox.h"
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
@@ -717,21 +718,17 @@ static void *ipl_task(void *)
       jit_request_cpu_exit();
     }
 
-    /* Virtual keyboard (USB/Bluetooth -> IKBD): the real MFP cannot raise
-     * an interrupt for injected bytes (its GPIP4 pin belongs to the real
-     * ACIA), so synthesise the level-6 here. intlev_ack() recognises the
-     * virtual cause and supplies vector 0x46 without a bus IACK cycle. */
-    if (KBD_USB_enabled && kbd_usb_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
-    {
-      g_irq = 6;
-      jit_request_cpu_exit();
-    }
-
-    /* Virtual STE DMA sound frame interrupt (Timer A event count / GPIP7):
-     * the real MFP never sees the host-side frame progress, so the level-6
-     * is synthesised here just like the keyboard's; intlev_ack() supplies
-     * the vector from the snooped MFP state. */
-    if (DMA_Sound_enabled && dmasnd_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
+    /* Virtual MFP channels (mfp_hub): keyboard injection (GPIP4 ch6),
+     * dmasnd Timer A (ch13) / GPIP7 (ch15). The real MFP cannot raise
+     * any of these - synthesise the level-6 here; intlev_ack() gets the
+     * vector from mfp_hub_iack() without a bus IACK cycle. dmasnd_pump()
+     * advances the host-side frame clock (it feeds hub events); it must
+     * run on THIS thread only - the frame clock has a single-writer
+     * t0+=dur sequence (see dmasnd_capture.c field lesson). */
+    if (DMA_Sound_enabled)
+      dmasnd_pump();
+    if ((KBD_USB_enabled || DMA_Sound_enabled) &&
+        mfp_hub_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
     {
       g_irq = 6;
       jit_request_cpu_exit();
@@ -1684,6 +1681,7 @@ void cpu_pulse_reset(void)
   pistorm_reset_state_dump();     /* newcpu.cpp - see note above */
 
   ps_pulse_reset();
+  mfp_hub_reset();   /* stale virtual pending/in-service dies with the reset */
   if (DMA_Sound_enabled)
     dmasnd_capture_reset();
   ym2149_reset();
@@ -2456,11 +2454,9 @@ extern "C"
      * kept its boot value (1MB Mega ST field case) */
     pistorm_stram_memcfg_snoop(address, value, 1);
     mfp_note_eoi_write(address, value, false);
-    if (DMA_Sound_enabled)
-      dmasnd_mfp_snoop (address, value, 0);
+    mfp_hub_write_snoop (address, value, 0);  /* one shadow for all virtual channels */
     if (KBD_USB_enabled)
     {
-      kbd_usb_mfp_snoop (address, value, 0);
       if (address == 0x00FFFC00)
       {
         kbd_usb_ctrl_snoop ((uint8_t)value);
@@ -2593,11 +2589,9 @@ extern "C"
     cpu_data_fc();
     pistorm_stram_memcfg_snoop(address, value, 2);
     mfp_note_eoi_write(address, value, true);
-    if (DMA_Sound_enabled)
-      dmasnd_mfp_snoop (address, value, 1);
+    mfp_hub_write_snoop (address, value, 1);  /* one shadow for all virtual channels */
     if (KBD_USB_enabled)
     {
-      kbd_usb_mfp_snoop (address, value, 1);
       if (address == 0x00FFFC00)
       {
         kbd_usb_ctrl_snoop ((uint8_t)(value >> 8));

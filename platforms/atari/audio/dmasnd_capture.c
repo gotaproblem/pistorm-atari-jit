@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include "../mfp_hub.h"
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -122,8 +123,10 @@ static uint64_t now_ns(void)
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 static atomic_int  g_g7_app;         /* guest vector $13C points into ST RAM */
-static atomic_uint g_vipra;          /* virtual MFP pending bits (irq side)   */
-static atomic_uint g_visra;          /* virtual MFP in-service bits           */
+/* virtual MFP pending/in-service state moved to mfp_hub.c (the shadow
+ * here set in-service at IACK but never CHECKED it before re-raising -
+ * Paula's Timer A re-entered its own handler; same disease class as the
+ * keyboard channel's stack death, fixed once in the hub for all) */
 
 static uint32_t frame_bps(void);         /* defined with the readback side */
 
@@ -423,47 +426,14 @@ uint32_t dmasnd_reg_read32(uint32_t addr)
  * IERA/IMRA/VR/TACR/TADR writes are snooped so masking, the vector base
  * and the Timer A count behave as programmed. */
 
-static atomic_uint g_mfp_iera = 0;
-static atomic_uint g_mfp_imra = 0;
-static atomic_uint g_mfp_vr   = 0x40;    /* TOS/EmuTOS default base */
-static atomic_uint g_mfp_tacr = 0;
-static atomic_uint g_mfp_tadr = 256;     /* TADR: 0 means 256 */
-static atomic_uint g_ta_count = 256;     /* virtual Timer A main counter */
-static atomic_int  g_irq_ta = 0;         /* pending: Timer A (ch 13) */
-static atomic_int  g_irq_g7 = 0;         /* pending: GPIP7   (ch 15) */
+/* IERA/IMRA/VR/TACR/TADR shadows, the Timer A event countdown, pending
+ * latches and the IACK vector all live in mfp_hub.c now; this file just
+ * reports frame-end events (mfp_hub_timer_a_event / mfp_hub_raise). */
 
-/* delivery counters for the =2 summary: boundaries (ev/s) vs interrupts
- * actually RAISED (ta/g7) vs vectors actually TAKEN by the guest (iack).
- * A guest ISR running more often than the frame boundary latches is
- * invisible in ev/s alone - these make it arithmetic. */
-static atomic_uint g_ct_ta;              /* Timer A raised at a boundary  */
-static atomic_uint g_ct_g7;              /* GPIP7   raised at a boundary  */
-static atomic_uint g_ct_iack;            /* vectors handed to the guest   */
+/* delivery counters for the =2 summary */
+static atomic_uint g_ct_g7;              /* GPIP7 raised at a boundary    */
 
-void dmasnd_mfp_snoop(uint32_t addr, uint32_t value, int is_word)
-{
-    uint32_t a = addr & 0x00FFFFFFu;
-    uint8_t  b = (uint8_t)(value & 0xFF); /* low byte lands on odd addr */
-
-    if (is_word)
-        a |= 1;
-    switch (a) {
-    case 0x00FFFA07u: atomic_store(&g_mfp_iera, b); break;
-    case 0x00FFFA0Bu: atomic_fetch_and(&g_vipra, b); break;  /* IPRA: 0 clears */
-    case 0x00FFFA0Fu: atomic_fetch_and(&g_visra, b); break;  /* ISRA: 0 clears */
-    case 0x00FFFA13u: atomic_store(&g_mfp_imra, b); break;
-    case 0x00FFFA17u: atomic_store(&g_mfp_vr,   b); break;
-    case 0x00FFFA19u:                    /* TACR: reprogram re-arms count */
-        atomic_store(&g_mfp_tacr, b & 0x0Fu);
-        atomic_store(&g_ta_count, atomic_load(&g_mfp_tadr));
-        break;
-    case 0x00FFFA1Fu:                    /* TADR: 0 counts as 256 */
-        atomic_store(&g_mfp_tadr, b ? b : 256u);
-        atomic_store(&g_ta_count, b ? b : 256u);
-        break;
-    default: break;
-    }
-}
+/* (MFP register snooping moved wholesale to mfp_hub_write_snoop.) */
 
 
 /* GPIP7 delivery policy. Field-verified both ways: FastBobs installs
@@ -493,24 +463,14 @@ static int g7_deliver(void)
     return m;
 }
 
-/* one frame boundary: fire the enabled synthesized channels */
+/* one frame boundary: report the events; the hub owns the Timer A
+ * event countdown (TACR=8), the pending latches, masking, in-service
+ * gating and the vector */
 static void frame_end_event(unsigned frameno)
 {
-    uint8_t en = (uint8_t)(atomic_load(&g_mfp_iera) & atomic_load(&g_mfp_imra));
-
-    if ((en & 0x20u) && atomic_load(&g_mfp_tacr) == 8u) {
-        unsigned c = atomic_load(&g_ta_count);       /* event count mode */
-        if (c <= 1u) {
-            atomic_store(&g_ta_count, atomic_load(&g_mfp_tadr));
-            atomic_store(&g_irq_ta, 1);
-            atomic_fetch_or(&g_vipra, 0x20u);        /* pending: ch 13 */
-            atomic_fetch_add(&g_ct_ta, 1);
-        } else
-            atomic_store(&g_ta_count, c - 1u);
-    }
-    if ((en & 0x80u) && g7_deliver()) {
-        atomic_store(&g_irq_g7, 1);
-        atomic_fetch_or(&g_vipra, 0x80u);            /* pending: ch 15 */
+    mfp_hub_timer_a_event();                         /* ch 13 when due */
+    if (g7_deliver()) {
+        mfp_hub_raise(15);                           /* GPIP7 / XSINT  */
         atomic_fetch_add(&g_ct_g7, 1);
     }
     if (dmasnd_dbg()) {
@@ -519,11 +479,9 @@ static void frame_end_event(unsigned frameno)
         uint32_t s2 = atomic_load(&g_act_s), e2 = atomic_load(&g_act_e);
         uint32_t b2 = atomic_load(&g_act_bps);
         fprintf(stderr, "[dmasnd] frame#%u act=%05X..%05X len=%u bps=%u "
-                "dur=%uus ta=%d g7=%d tacnt=%u\n",
+                "dur=%uus\n",
                 frameno, s2, e2, e2 - s2, b2,
-                (unsigned)((uint64_t)(e2 - s2) * 1000000u / (b2 ? b2 : 1)),
-                atomic_load(&g_irq_ta), atomic_load(&g_irq_g7),
-                atomic_load(&g_ta_count));
+                (unsigned)((uint64_t)(e2 - s2) * 1000000u / (b2 ? b2 : 1)));
     }
 }
 
@@ -581,34 +539,15 @@ static void frames_advance(void)
     }
 }
 
-/* observer: ipl_task. The frame clock must advance REGARDLESS of
- * pending-interrupt state: real STE DMA keeps playing and re-triggering
- * whether or not the CPU has serviced the interrupt. The previous
- * early-out on pending gated the clock on the guest's IACK latency -
- * field-measured: 798us frames advancing at 4.21ms (the guest's ISR
- * cycle), starving the DAC 5x. The stride keeps the hot ipl_task loop
- * from paying a clock read every iteration (~every 8th is plenty:
- * >100kHz check rate against 1.25kHz frame rate). */
-int dmasnd_irq_wanted(void)
-{
-    static unsigned stride;
-
-    if (atomic_load(&g_enabled) && !atomic_load(&g_parked) &&
-        !(++stride & 7u))
-        frames_advance();
-    return atomic_load(&g_irq_ta) || atomic_load(&g_irq_g7);
-}
-
-/* PURE pending check for the IACK path (CPU thread). It must NOT call
- * frames_advance: that runs on ipl_task ONLY. Field lesson - routing
- * the advancing call through intlev_ack put two writers on the frame
- * clock's t0+=dur sequence; lost/doubled updates lurched the clock
- * ahead of real time and stalled it (measured: 171 events/s against a
- * needed 1252/s, interleaved frame numbers, x64 catch-up spasms). */
-int dmasnd_irq_pending(void)
-{
-    return atomic_load(&g_irq_ta) || atomic_load(&g_irq_g7);
-}
+/* Frame-clock pump: ipl_task ONLY (single writer on the t0+=dur
+ * sequence - routing it through intlev_ack once put two writers on the
+ * clock and it lurched/stalled: 171 ev/s against a needed 1252/s). The
+ * clock must advance REGARDLESS of pending-interrupt state: real STE
+ * DMA keeps playing and re-triggering whether or not the CPU has
+ * serviced the interrupt (an early-out on pending once starved the DAC
+ * 5x). The stride keeps the hot loop from paying a clock read every
+ * iteration. Arbitration/pending is the hub's job now - this only
+ * FEEDS it (frame_end_event -> mfp_hub_timer_a_event / mfp_hub_raise). */
 
 /* GPIP level shim: on a real STE the XSINT line toggles at each frame
  * end and is XORed onto GPIP7, and handlers confirm "this interrupt is
@@ -656,80 +595,22 @@ uint8_t dmasnd_gpip_shim(uint8_t real)
     return real;
 }
 
-/* Virtual IPRA/ISRA bits for the synthesized channels (bit7 = GPIP7,
- * bit5 = Timer A). A real MFP latches the pending bit when the event
- * arrives and - in software-EOI mode (VR bit 3) - sets the in-service
- * bit during the IACK; handlers identify their interrupt by exactly
- * these bits and clear ISRA before RTE. Our virtual interrupts leave
- * the real MFP blank, so any handler that introspects it concludes
- * "no interrupt happened" and chains to the old vector (field case:
- * Paula -> OS monitor handler -> reset). These shadows are OR-ed into
- * guest reads of IPRA/ISRA and cleared by the guest's own writes
- * (MFP semantics: written 0 bits clear, 1 bits leave). */
-
-uint8_t dmasnd_mfp_read_shim(uint32_t addr, uint8_t real)
-{
-    switch (addr & 0x00FFFFFFu) {
-    case 0x00FFFA01u: return dmasnd_gpip_shim(real);
-    case 0x00FFFA0Bu: return (uint8_t)(real | atomic_load(&g_vipra));
-    case 0x00FFFA0Fu: return (uint8_t)(real | atomic_load(&g_visra));
-    default:          return real;
-    }
-}
-
-/* consumer: virtual IACK (CPU thread). GPIP7 is the higher MFP channel. */
-uint8_t dmasnd_iack_vector(void)
-{
-    uint8_t base = (uint8_t)(atomic_load(&g_mfp_vr) & 0xF0u);
-    uint8_t vec;
-
-    if (atomic_load(&g_irq_g7)) {
-        atomic_store(&g_irq_g7, 0);
-        atomic_fetch_and(&g_vipra, ~0x80u);          /* pending -> taken   */
-        if (atomic_load(&g_mfp_vr) & 0x08u)
-            atomic_fetch_or(&g_visra, 0x80u);        /* software-EOI mode  */
-        vec = (uint8_t)(base | 15u);
-    } else {
-        atomic_store(&g_irq_ta, 0);
-        atomic_fetch_and(&g_vipra, ~0x20u);
-        if (atomic_load(&g_mfp_vr) & 0x08u)
-            atomic_fetch_or(&g_visra, 0x20u);
-        vec = (uint8_t)(base | 13u);
-    }
-    atomic_fetch_add(&g_ct_iack, 1);
-    if (dmasnd_dbg()) {
-        static int logged = 0;
-        if (logged < 12) {
-            logged++;
-            fprintf(stderr, "[dmasnd] IACK -> vector 0x%02X (table @0x%X)\n",
-                    vec, (unsigned)vec * 4u);
-        }
-        /* one-shot: dump the handler the guest will jump to, so a failing
-         * handler can be disassembled from the log instead of guessed at */
-        if (logged == 1 && natmem_offset) {
-            const uint8_t *t = natmem_offset + (unsigned)vec * 4u;
-            uint32_t h = ((uint32_t)t[0] << 24) | ((uint32_t)t[1] << 16) |
-                         ((uint32_t)t[2] << 8)  |  (uint32_t)t[3];
-            if (h >= 0x40u && h < ST_RAM_SIZE - 256u) {
-                /* start 0x40 BEFORE the handler: the busy-guard's failure
-                 * branch and the saved old-vector cell live there */
-                const uint8_t *p = natmem_offset + (h - 0x40u);
-                int i;
-                fprintf(stderr, "[dmasnd] handler-0x40 @0x%06X:", h - 0x40u);
-                for (i = 0; i < 320; i++)
-                    fprintf(stderr, "%s%02X", (i & 15) ? "" :
-                            "\n[dmasnd]   ", p[i]);
-                fprintf(stderr, "\n");
-            }
-        }
-    }
-    return vec;
-}
+/* (Virtual IPRA/ISRA read shims and the IACK vector moved to
+ * mfp_hub_read_shim / mfp_hub_iack - one implementation, all channels,
+ * with the in-service gating this copy set but never enforced.) */
 
 /* =================== pump: snapshot each commit ======================= */
 
 int  dmasnd_is_repeat(void) { return atomic_load(&g_repeat); }
-void dmasnd_pump(void) { /* logic in thread */ }
+
+void dmasnd_pump(void)
+{
+    static unsigned stride;
+
+    if (atomic_load(&g_enabled) && !atomic_load(&g_parked) &&
+        !(++stride & 7u))
+        frames_advance();
+}
 
 static void *pump_thread(void *arg)
 {
@@ -738,9 +619,7 @@ static void *pump_thread(void *arg)
     uint8_t  last_mode = 0xFF;
     uint64_t sum_t0    = now_ns();     /* =2 summary: 1 Hz reporter state */
     unsigned sum_gen   = last_gen;
-    unsigned sum_ta    = atomic_load(&g_ct_ta);
     unsigned sum_g7    = atomic_load(&g_ct_g7);
-    unsigned sum_ia    = atomic_load(&g_ct_iack);
     unsigned sum_rc    = atomic_load(&g_ct_rd_ctrl);
     unsigned sum_ra    = atomic_load(&g_ct_rd_cnt);
     unsigned sum_sg    = atomic_load(&g_ct_stage);
@@ -757,9 +636,7 @@ static void *pump_thread(void *arg)
             uint64_t t = now_ns();
             if (t - sum_t0 >= 1000000000ull) {
                 unsigned gen = atomic_load(&g_gen);
-                unsigned ta  = atomic_load(&g_ct_ta);
                 unsigned g7  = atomic_load(&g_ct_g7);
-                unsigned ia  = atomic_load(&g_ct_iack);
                 unsigned rc  = atomic_load(&g_ct_rd_ctrl);
                 unsigned ra  = atomic_load(&g_ct_rd_cnt);
                 unsigned sg  = atomic_load(&g_ct_stage);
@@ -773,13 +650,13 @@ static void *pump_thread(void *arg)
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
-                        "ta=%u g7=%u iack=%u rdc=%u rda=%u stg=%u rep=%u "
+                        "g7=%u rdc=%u rda=%u stg=%u rep=%u "
                         "i2=%u i4=%u i6=%u gp=%02X%s "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
                         (unsigned long long)(t / 1000000000ull),
                         (unsigned long long)((t / 1000000ull) % 1000ull),
-                        gen - sum_gen, ta - sum_ta, g7 - sum_g7, ia - sum_ia,
+                        gen - sum_gen, g7 - sum_g7,
                         rc - sum_rc, ra - sum_ra, sg - sum_sg, rp - sum_rp,
                         i2 - sum_i2, i4 - sum_i4, i6 - sum_i6,
                         gp, (gp & 0x80u) ? "" : "<MONO!",
@@ -790,9 +667,7 @@ static void *pump_thread(void *arg)
                         atomic_load(&g_enabled), atomic_load(&g_parked),
                         dmasnd_ring_used());
                 sum_gen = gen;
-                sum_ta  = ta;
                 sum_g7  = g7;
-                sum_ia  = ia;
                 sum_rc  = rc;
                 sum_ra  = ra;
                 sum_sg  = sg;
@@ -955,9 +830,6 @@ void dmasnd_capture_reset(void)
     atomic_store(&g_parked, 1);          /* frame clock idle            */
     atomic_store(&g_act_s, 0);
     atomic_store(&g_act_e, 0);
-    atomic_store(&g_irq_ta, 0);          /* no stale virtual interrupts */
-    atomic_store(&g_irq_g7, 0);
-    atomic_store(&g_vipra, 0);
-    atomic_store(&g_visra, 0);
+    mfp_hub_reset();                     /* no stale virtual interrupts */
     dmasnd_output_reset();
 }

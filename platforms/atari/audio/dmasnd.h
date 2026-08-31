@@ -44,12 +44,8 @@ const char *dmasnd_mp3_meta(int which);       /* 0=title 1=artist 2=album */
 
 /* ---- capture (dmasnd_capture.c) ---- */
 int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF8925?      */
-void     dmasnd_mfp_snoop(uint32_t addr, uint32_t value, int is_word);
-int      dmasnd_irq_wanted(void);                  /* ipl_task ONLY: advances clock  */
-int      dmasnd_irq_pending(void);                 /* pure check (CPU thread / IACK) */
-uint8_t  dmasnd_iack_vector(void);                 /* consumer: virtual IACK, CPU thr*/
+/* MFP snoop/arbitration/IACK/read-shims: mfp_hub.h (channels 13 + 15). */
 uint8_t  dmasnd_gpip_shim(uint8_t real);           /* GPIP7 ^= virtual XSINT level   */
-uint8_t  dmasnd_mfp_read_shim(uint32_t addr, uint8_t real); /* +virtual IPRA/ISRA    */
 uint8_t  dmasnd_reg_read8 (uint32_t addr);         /* register readback (reads must  */
 uint16_t dmasnd_reg_read16(uint32_t addr);         /* be served host-side: the range */
 uint32_t dmasnd_reg_read32(uint32_t addr);         /* bus-errors on a plain ST)      */

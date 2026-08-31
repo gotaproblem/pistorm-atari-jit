@@ -30,6 +30,7 @@
 #include "jit/compemu.h"
 #include "platforms/atari/kbd_usb.h"
 #include "platforms/atari/audio/dmasnd.h"
+#include "platforms/atari/mfp_hub.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -489,42 +490,34 @@ void intlev_ack (uint8_t nr)
      * channel priority. The real MFP has nothing to acknowledge for
      * either; a racing real level-6 wins the bus IACK and the
      * synthesised cause stays pending and re-raises. */
+    /* Virtual MFP channels (mfp_hub): keyboard injection GPIP4 ch6,
+     * dmasnd Timer A ch13 / GPIP7 ch15. One arbiter, one IACK, real
+     * 68901 semantics (channel priority, in-service/EOI) - the per-
+     * source copies each missed a different piece of that and died
+     * different deaths (Petra kbd stack overflow, Paula Timer A
+     * re-entry). The real MFP has nothing to acknowledge for any of
+     * these; if the real IPL line is itself at 6, a real interrupt
+     * raced us - acknowledge that on the bus first, the virtual cause
+     * stays pending and re-raises after the guest's RTE. */
+    if (nr == 6)
     {
         extern bool DMA_Sound_enabled;
-        if (nr == 6 && DMA_Sound_enabled && dmasnd_irq_pending())
+        if ((DMA_Sound_enabled || KBD_USB_enabled) && mfp_hub_irq_wanted())
         {
             uint8_t live = 0;
             ps_read_ipl(&live);
             if (live < 6)
             {
-                uint8_t vec = dmasnd_iack_vector();
-                pistorm_iack_vector = vec;
-                pistorm_mfp_last_iack_vector = vec;
-                pistorm_mfp_iack_counts[6]++;
-                return;
+                int vec = mfp_hub_iack();
+                if (vec >= 0)
+                {
+                    pistorm_iack_vector = (uint16_t)vec;
+                    pistorm_mfp_last_iack_vector = (uint16_t)vec;
+                    pistorm_mfp_iack_counts[6]++;
+                    kbd_usb_stat_virtual_iacks++;
+                    return;
+                }
             }
-        }
-    }
-
-    if (nr == 6 && KBD_USB_enabled && kbd_usb_irq_wanted())
-    {
-        uint8_t live = 0;
-        ps_read_ipl(&live);
-        if (live < 6)
-        {
-            pistorm_iack_vector = 0x46;
-            pistorm_mfp_last_iack_vector = 0x46;
-            pistorm_mfp_iack_counts[6]++;
-            kbd_usb_stat_virtual_iacks++;
-            /* real-MFP semantics: this IACK sets the channel's in-service
-             * bit, blocking re-interrupt until the guest's EOI - without
-             * this the still-pending queue re-entered the guest handler
-             * the moment it lowered its IPL (Petra/Paula stack death) */
-            {
-                extern void kbd_usb_virtual_iacked(void);
-                kbd_usb_virtual_iacked();
-            }
-            return;
         }
     }
 

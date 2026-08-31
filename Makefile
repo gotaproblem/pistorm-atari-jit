@@ -47,7 +47,8 @@ CFILES = config_file/config_file.c \
          platforms/atari/avrecord.c \
          platforms/atari/video/vidplane.c \
          platforms/atari/video/vidplay.c \
-         platforms/atari/kbd_usb.c
+         platforms/atari/kbd_usb.c \
+         platforms/atari/mfp_hub.c
 
 # -----------------------------------------------------------------
 # Musashi 68000 core for the STBOX game sandbox (third_party/musashi).

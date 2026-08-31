@@ -85,17 +85,9 @@ extern int kbd_usb_mouse_div;
  * injected packets for ~2 byte-times so we never split a real packet. */
 void kbd_usb_note_real_rx(void);
 
-/* Snoop guest MFP register writes (IERB $FFFA09 / IMRB $FFFA15, plus
- * ISRB $FFFA11 and VR $FFFA17 for in-service/EOI semantics) so injected
- * interrupts respect the guest's keyboard interrupt mask AND its EOI
- * discipline. Call with the raw write; handles byte and word (register
- * byte is on the odd address). */
-void kbd_usb_mfp_snoop(uint32_t addr, uint32_t value, int is_word);
-
-/* Called at the virtual GPIP4 IACK (jit_glue intlev_ack): sets the
- * channel in-service until the guest's EOI, exactly like the real MFP -
- * blocks handler re-entry (Petra/Paula stack-overflow corruption). */
-void kbd_usb_virtual_iacked(void);
+/* MFP register snooping, interrupt arbitration, IACK and in-service/EOI
+ * semantics for the virtual keyboard channel all live in mfp_hub now
+ * (channel 6 = GPIP4, level source registered by kbd_usb_init). */
 
 /* ---- shared register shims ------------------------------------------- */
 /* Merge injected state into a just-read real register value. status/data
@@ -105,9 +97,8 @@ uint8_t kbd_usb_acia_data_shim(void);
 uint8_t kbd_usb_gpip_shim(uint8_t real);
 
 /* ---- ipl_task / IACK ------------------------------------------------- */
-/* True when a level-6 interrupt should be raised for injected input
- * (byte presented AND guest MFP mask allows keyboard interrupts). */
-int kbd_usb_irq_wanted(void);
+/* Arbitration and IACK go through mfp_hub_irq_wanted()/mfp_hub_iack();
+ * this module only registers its level source (see kbd_usb_init). */
 
 /* Diagnostic counters (read-only) */
 extern volatile uint32_t kbd_usb_stat_injected_bytes;
