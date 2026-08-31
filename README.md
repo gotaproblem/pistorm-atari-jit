@@ -100,6 +100,28 @@ And that is pretty much it... Over to you to enjoy
 ## TODO
 ### configuration switches
 
+### Unified virtual interrupt controller (design debt)
+Virtual interrupt sources have grown organically and each carries its
+own copy of the same machinery: kbd_usb keeps IERB/IMRB/ISRB/VR
+shadows and its own gating (added after the Petra/Paula stack-overflow
+corruption - the virtual channel ignored in-service semantics);
+dmasnd_mfp_snoop keeps a second, independent MFP shadow and its own
+virtual IACK vector; mfp_note_eoi_write is a third EOI observer in
+pistorm_natmem; intlev_ack in jit_glue hand-orders virtual sources
+ahead of the real-bus IACK; and the FDD VBL tick rides inside the IPL
+task. Consequences: per-source bugs in logic that should exist once
+(the in-service fix landed in kbd_usb only - dmasnd's virtual channel
+has the same class of hazard), MFP register shadows that can disagree,
+and no single place that understands channel priority across real and
+virtual sources.
+Wanted: one virtual-MFP module owning a single register shadow
+(IERA/B, IMRA/B, ISRA/B, VR fed from both write dispatchers), one
+arbiter merging the real IPL pins with all virtual channels in MFP
+priority order, one IACK resolver, and one host-side timed-event queue
+for periodic ticks (FDD VBL, dmasnd frames, future timers) instead of
+per-subsystem timing. Migrate kbd_usb and dmasnd onto it first; the
+per-source shadows and special cases then delete.
+
 ### JIT + MMU via the Pi's own ARM MMU (idea)
 The emulated MMU (`mmu enabled`) is interpreter-only: UAE's JIT emits
 direct loads/stores with guest address == physical address baked in, so
