@@ -8765,6 +8765,28 @@ static void m68k_run_mmu040()
 		{
 			for (;;)
 			{
+#ifdef PISTORM_ATARI
+				/* Same real-IPL plumbing as m68k_run_2_020: the MFP's
+				 * interrupt lines are physical pins polled by intlev(),
+				 * which is what raises spcflags - stock UAE loops rely
+				 * on an event scheduler this platform doesn't run. The
+				 * mmu040 loop lacked both hooks, so EmuTOS' first STOP
+				 * parked forever: stopped=1 with spcflags stuck at 0. */
+				if (regs.stopped)
+				{
+					do_cycles_stop(4);
+					intlev();
+					if (regs.spcflags)
+					{
+						if (do_specialties(0))
+						{
+							STOPTRY;
+							return;
+						}
+					}
+					continue;
+				}
+#endif
 #if defined(CPU_i386) || defined(CPU_x86_64)
 				f.cznv = regflags.cznv;
 #else // we assume CPU_arm or CPU_AARCH64 here
@@ -8782,6 +8804,9 @@ static void m68k_run_mmu040()
 				cpu_cycles = (*cpufunctbl[regs.opcode])(regs.opcode);
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				regs.instruction_cnt++;
+#ifdef PISTORM_ATARI
+				intlev();
+#endif
 
 				/* Diag heartbeat: EmuTOS under MMU walked its tables OK
 				 * and then went silent - is the CPU stuck in a tight
