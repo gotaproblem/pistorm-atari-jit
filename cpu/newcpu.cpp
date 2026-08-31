@@ -11543,6 +11543,20 @@ bool cpureset(void)
 
 void do_cycles_stop(int c)
 {
+	/* Diag (PISTORM_CPU_DIAG=1): the STOP parking lot. A guest frozen
+	 * here forever is waiting on an interrupt - the mask says whether
+	 * one CAN arrive (intmask 7 = the app HALTED ITSELF, only NMI
+	 * wakes it; below 6 = MFP could wake it and our delivery failed).
+	 * Field case: Paula parks after its rez switch - gdb could not
+	 * read regs (-g1: no variable debug info), so the emulator reports
+	 * the state itself, ~once per few million idle laps. */
+	if (pistorm_cpu_diag()) {
+		static unsigned n;
+		if (!(++n & 0x3FFFFF))
+			fprintf(stderr, "[STOP] pc=%08X sr=%04X intmask=%d ipl=%d spc=%08X\n",
+					m68k_getpc(), regs.sr, regs.intmask,
+					regs.ipl_pin, regs.spcflags);
+	}
 	c *= cpucycleunit;
 	if (!currprefs.cpu_compatible)
 	{
