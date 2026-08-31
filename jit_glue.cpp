@@ -151,6 +151,17 @@ extern "C" void jit_cpu_set_compatible(int on)
     cfg_cpu_compatible = on != 0;
 }
 
+/* cfg 'mmu 68040' switch, set from emulator.c before jit_cpu_init().
+ * UAE's MMU cores exist only in the interpreter (m68k_run_mmu040), so
+ * enabling this forces the JIT off. PISTORM_MMU=68040/0 env override
+ * for quick A/B tests without editing the cfg. */
+static int cfg_mmu_model;
+
+extern "C" void jit_cpu_set_mmu(int model)
+{
+    cfg_mmu_model = model;
+}
+
 extern "C" void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
                                          int m68k_speed, int m68k_speed_set,
                                          int jit_cache, int jit_cache_set)
@@ -168,9 +179,8 @@ extern "C" void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock
 /* ============================================================= */
 extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit)
 {
-    const bool disable_jit = !enable_jit || pistorm_jit_disabled_env();
+    bool disable_jit = !enable_jit || pistorm_jit_disabled_env();
     const bool disable_fpu = !enable_fpu;
-    const char *mode = disable_jit ? "interpreter requested" : "JIT enabled";
     const int jit_cache = (perf_jit_cache_set && perf_jit_cache > 0) ? perf_jit_cache : 8192;
     int cpu_clock_multiplier = perf_cpu_clock_multiplier_set ? perf_cpu_clock_multiplier : 0;
     int m68k_speed = perf_m68k_speed_set ? perf_m68k_speed : -1;
@@ -180,6 +190,37 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
      * baseline and must remain 24-bit/no-FPU/no-JIT. */
     static const int model[] = {68000, 68010, 68020, 68030, 68040, 68060};
     int m = (cpu_level >= 0 && cpu_level < 6) ? model[cpu_level] : 68000;
+
+    /* Resolve the MMU request BEFORE anything derived from disable_jit:
+     * UAE's 040 MMU exists only in the interpreter loop (m68k_run_mmu040
+     * is selected only when cachesize==0), so 'mmu 68040' forces the JIT
+     * off, loudly. Guarded to cpu 68040 - the 030 MMU core also compiles
+     * here but has never been exercised on this platform; widen only
+     * with testing. Env PISTORM_MMU=68040 / PISTORM_MMU=0 overrides the
+     * cfg for A/B tests. */
+    int mmu_model = 0;
+    {
+        int wanted = cfg_mmu_model;
+        const char *e = getenv("PISTORM_MMU");
+        if (e && *e)
+            wanted = atoi(e) == 68040 ? 68040 : 0;
+        if (wanted == 68040 && m == 68040)
+        {
+            mmu_model = 68040;
+            if (!disable_jit)
+                write_log("[JITGLUE] mmu 68040: forcing JIT OFF (MMU runs "
+                          "interpreter-only)\n");
+            disable_jit = true;
+        }
+        else if (wanted)
+        {
+            write_log("[JITGLUE] mmu 68040 requested but IGNORED: needs "
+                      "'cpu 68040' (have %d)\n", m);
+        }
+    }
+
+    const char *mode = mmu_model ? "interpreter + 68040 MMU"
+                                 : disable_jit ? "interpreter requested" : "JIT enabled";
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -210,8 +251,14 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     currprefs.compfpu = changed_prefs.compfpu = !disable_jit && !disable_fpu; // default true Pi must emulate the FPU, false if using hw fpu
     // currprefs.compfpu   = changed_prefs.fpu_softfloat = false;   // does not exist???
 #endif
-    /* MMU off and cycle-exact off are REQUIRED for the JIT loop to be selected. */
-    currprefs.mmu_model = changed_prefs.mmu_model = 0;
+    /* mmu_model 0 (and cycle-exact off) is REQUIRED for the JIT loop to be
+     * selected; when the cfg asks for 'mmu 68040', disable_jit was already
+     * forced above so m68k_run() picks m68k_run_mmu040 and
+     * build_cpufunctbl() installs op_smalltbl_31 (the 040-MMU handlers).
+     * mmu_ec = EC040 (MMU-less 040 variant) - must stay 0: EC would make
+     * MOVEC to TC/URP/SRP fault instead of translating. */
+    currprefs.mmu_model = changed_prefs.mmu_model = mmu_model;
+    currprefs.mmu_ec = changed_prefs.mmu_ec = false;
     currprefs.cpu_cycle_exact = changed_prefs.cpu_cycle_exact = false;
     currprefs.cpu_memory_cycle_exact = changed_prefs.cpu_memory_cycle_exact = false;
 

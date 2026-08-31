@@ -18,6 +18,7 @@ typedef enum {
   CONFITEM_NONE,
   CONFITEM_CPU,
   CONFITEM_CPU_COMPATIBLE,
+  CONFITEM_MMU,
   CONFITEM_MONITOR,
   CONFITEM_JIT,
   CONFITEM_FPU,
@@ -81,6 +82,7 @@ const char *cpu_types[M68K_CPU_TYPES] = {
 static const config_switch_def config_switches[] = {
   { "cpu", CONFITEM_CPU },
   { "cpu_compatible", CONFITEM_CPU_COMPATIBLE },
+  { "mmu", CONFITEM_MMU },
   { "monitor", CONFITEM_MONITOR },
   { "jit", CONFITEM_JIT },
   { "fpu", CONFITEM_FPU },
@@ -643,6 +645,37 @@ struct emulator_config *load_config_file(char *filename) {
         printf ("[CFG] CPU compatible mode %s (prefetch-accurate 68000 core, "
                 "needs jit disabled)\n",
                 cfg->cpu_compatible ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_MMU:
+        {
+          /* Full 68040 MMU emulation. Runs interpreter-only (UAE's MMU
+           * cores have no JIT path), so this forces the JIT off. Needed
+           * by guests that program real translation: Basilisk II (040),
+           * MagiCMac, MiNT memory protection. Value: 68040, or off. */
+          char arg[32];
+          int p = 0;
+          memset(arg, 0, sizeof(arg));
+          get_next_string(parse_line + str_pos, arg, &p, ' ');
+          for (int i = 0; arg[i]; i++)
+            arg[i] = (char)tolower((unsigned char)arg[i]);
+
+          if (!strcmp(arg, "68040") || !strcmp(arg, "040") ||
+              !strcmp(arg, "on") || !strcmp(arg, "enabled"))
+            cfg->mmu_model = 68040;
+          else if (!strcmp(arg, "off") || !strcmp(arg, "none") ||
+                   !strcmp(arg, "disabled") || !arg[0])
+            cfg->mmu_model = 0;
+          else {
+            printf("[CFG] mmu: unknown value '%s' - expected 68040 or off; "
+                   "MMU stays off\n", arg);
+            cfg->mmu_model = 0;
+          }
+          printf("[CFG] MMU %s%s\n",
+                 cfg->mmu_model ? "68040 enabled" : "disabled",
+                 cfg->mmu_model ? " (interpreter only - JIT will be forced off; "
+                                  "requires cpu 68040)" : "");
+        }
         break;
 
       case CONFITEM_FPU:
