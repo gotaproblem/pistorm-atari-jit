@@ -398,6 +398,18 @@ bool mmu_is_super_access(bool read)
 
 void mmu_bus_error(uaecptr addr, uae_u32 val, int fc, bool write, int size,uae_u32 status060, bool nonmmu)
 {
+	/* Diag: first MMU-raised bus errors. Under a healthy OS these can be
+	 * routine (demand paging), but during EmuTOS boot right after TC
+	 * enable each one is signal. */
+	{
+		static int shown;
+		if (shown < 16) {
+			shown++;
+			fprintf(stderr, "[MMU040] BERR %s addr=%08X fc=%d size=%d nonmmu=%d pc=%08X\n",
+					write ? "write" : "read", addr, fc, size, (int)nonmmu,
+					m68k_getpc());
+		}
+	}
 	if (currprefs.mmu_model == 68040) {
 		uae_u16 ssw = 0;
 
@@ -783,6 +795,21 @@ fail:
 			l->valid = 1;
 			l->tag = tag;
 			status = l->phys | l->status;
+		}
+
+		/* Diag: the first table walks, log->phys, resident or not. R clear
+		 * means the walk found no valid page = bus error to the guest. */
+		{
+			static int walks;
+			if (walks < 24) {
+				walks++;
+				fprintf(stderr, "[MMU040] walk %s%s log=%08X -> phys=%08X st=%03X %s pc=%08X\n",
+						super ? "S" : "U", write ? "w" : "r",
+						addr, l->phys | (addr & mmu_pagemask),
+						l->status,
+						(l->status & MMU_MMUSR_R) ? "OK" : "FAULT",
+						m68k_getpc());
+			}
 		}
 
 		RESTORE_EXCEPTION;
@@ -1591,6 +1618,14 @@ uae_u16 REGPARAM2 mmu_set_tc(uae_u16 tc)
 	mmu_flush_atc_all(true);
 
 	write_log(_T("%d MMU: TC=%04x enabled=%d page8k=%d PC=%08x\n"), currprefs.mmu_model, tc, regs.mmu_enabled, mmu_pagesize_8k, m68k_getpc());
+	/* Diag: the full translation setup at the moment it goes live. The
+	 * TT registers matter most - EmuTOS/Basilisk map nearly everything
+	 * transparently and page-table only a small window; a hang right
+	 * after enable usually means one of these is being mis-honoured. */
+	if (regs.mmu_enabled)
+		fprintf(stderr, "[MMU040] enable: srp=%08X urp=%08X itt0=%08X itt1=%08X dtt0=%08X dtt1=%08X pc=%08X\n",
+				regs.srp, regs.urp, regs.itt0, regs.itt1,
+				regs.dtt0, regs.dtt1, m68k_getpc());
 	return tc;
 }
 
