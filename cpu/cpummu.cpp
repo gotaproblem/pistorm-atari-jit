@@ -396,12 +396,27 @@ bool mmu_is_super_access(bool read)
 	}
 }
 
+/* PISTORM_MMU_DEBUG=1 arms the [MMU040] boot diagnostics (enable-time
+ * register dump, first walks, first faults, run-loop heartbeat). All
+ * budgeted; free when off (cached getenv, checked at most once per
+ * budgeted event). These found the flush_icache NULL call and the
+ * missing intlev() hooks - keep them. */
+int pistorm_mmu_debug(void)
+{
+	static int v = -1;
+	if (v < 0) {
+		const char *e = getenv("PISTORM_MMU_DEBUG");
+		v = (e && *e == '1') ? 1 : 0;
+	}
+	return v;
+}
+
 void mmu_bus_error(uaecptr addr, uae_u32 val, int fc, bool write, int size,uae_u32 status060, bool nonmmu)
 {
 	/* Diag: first MMU-raised bus errors. Under a healthy OS these can be
 	 * routine (demand paging), but during EmuTOS boot right after TC
 	 * enable each one is signal. */
-	{
+	if (pistorm_mmu_debug()) {
 		static int shown;
 		if (shown < 16) {
 			shown++;
@@ -799,7 +814,7 @@ fail:
 
 		/* Diag: the first table walks, log->phys, resident or not. R clear
 		 * means the walk found no valid page = bus error to the guest. */
-		{
+		if (pistorm_mmu_debug()) {
 			static int walks;
 			if (walks < 24) {
 				walks++;
@@ -1622,7 +1637,7 @@ uae_u16 REGPARAM2 mmu_set_tc(uae_u16 tc)
 	 * TT registers matter most - EmuTOS/Basilisk map nearly everything
 	 * transparently and page-table only a small window; a hang right
 	 * after enable usually means one of these is being mis-honoured. */
-	if (regs.mmu_enabled)
+	if (regs.mmu_enabled && pistorm_mmu_debug())
 		fprintf(stderr, "[MMU040] enable: srp=%08X urp=%08X itt0=%08X itt1=%08X dtt0=%08X dtt1=%08X pc=%08X\n",
 				regs.srp, regs.urp, regs.itt0, regs.itt1,
 				regs.dtt0, regs.dtt1, m68k_getpc());

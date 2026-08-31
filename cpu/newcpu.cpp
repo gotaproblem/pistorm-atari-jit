@@ -8808,16 +8808,18 @@ static void m68k_run_mmu040()
 				intlev();
 #endif
 
-				/* Diag heartbeat: EmuTOS under MMU walked its tables OK
-				 * and then went silent - is the CPU stuck in a tight
-				 * spin (pc barely moving = probably waiting on a timer
-				 * interrupt that never arrives) or still progressing?
-				 * Every ~4M instructions; interpreter does tens of
-				 * millions/s so expect a few lines per second. */
-				if (__builtin_expect((regs.instruction_cnt & 0x3FFFFF) == 0, 0))
-					fprintf(stderr, "[MMU040] hb pc=%08X sr=%04X intmask=%d spc=%08X stopped=%d\n",
-							m68k_getpc(), regs.sr, regs.intmask,
-							regs.spcflags, regs.stopped);
+				/* Diag heartbeat (PISTORM_MMU_DEBUG=1): pinned pc =
+				 * spinning on an interrupt that never arrives; no
+				 * lines at all = parked in do_specialties (STOP).
+				 * Every ~4M instructions; the counter test is the only
+				 * per-instruction cost when disarmed. */
+				if (__builtin_expect((regs.instruction_cnt & 0x3FFFFF) == 0, 0)) {
+					extern int pistorm_mmu_debug(void); /* cpummu.cpp */
+					if (pistorm_mmu_debug())
+						fprintf(stderr, "[MMU040] hb pc=%08X sr=%04X intmask=%d spc=%08X stopped=%d\n",
+								m68k_getpc(), regs.sr, regs.intmask,
+								regs.spcflags, regs.stopped);
+				}
 
 				if (regs.spcflags)
 				{
