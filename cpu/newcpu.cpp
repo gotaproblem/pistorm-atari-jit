@@ -11553,10 +11553,17 @@ void do_cycles_stop(int c)
 	if (pistorm_cpu_diag()) {
 		static unsigned n;
 		if (!(++n & 0x3FFFFF)) {
+			/* ep2/4/6 = ipl_task's per-level assertion-episode counters:
+			 * frozen between heartbeats = the LINE is silent (fault on
+			 * the real-hardware side); climbing while g_irq stays 0 =
+			 * ipl_task's gating is eating deliverable interrupts. */
+			extern volatile unsigned pistorm_ipl_ep2, pistorm_ipl_ep4,
+			                         pistorm_ipl_ep6;
 			fprintf(stderr, "[STOP] pc=%08X sr=%04X intmask=%d spc=%08X "
-					"g_irq=%d g_ipl=%d g_irq_mask=%d\n",
+					"g_irq=%d g_ipl=%d g_irq_mask=%d ep2=%u ep4=%u ep6=%u\n",
 					m68k_getpc(), regs.sr, regs.intmask, regs.spcflags,
-					(int)g_irq, (int)g_ipl, (int)g_irq_mask);
+					(int)g_irq, (int)g_ipl, (int)g_irq_mask,
+					pistorm_ipl_ep2, pistorm_ipl_ep4, pistorm_ipl_ep6);
 		}
 	}
 	c *= cpucycleunit;
