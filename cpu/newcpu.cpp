@@ -11559,11 +11559,15 @@ void do_cycles_stop(int c)
 			 * ipl_task's gating is eating deliverable interrupts. */
 			extern volatile unsigned pistorm_ipl_ep2, pistorm_ipl_ep4,
 			                         pistorm_ipl_ep6;
+			extern volatile unsigned pistorm_ipl_lat2, pistorm_ipl_lat4,
+			                         pistorm_ipl_lat6;
 			fprintf(stderr, "[STOP] pc=%08X sr=%04X intmask=%d spc=%08X "
-					"g_irq=%d g_ipl=%d g_irq_mask=%d ep2=%u ep4=%u ep6=%u\n",
+					"g_irq=%d g_ipl=%d g_irq_mask=%d ep2=%u ep4=%u ep6=%u "
+					"lat2=%u lat4=%u lat6=%u\n",
 					m68k_getpc(), regs.sr, regs.intmask, regs.spcflags,
 					(int)g_irq, (int)g_ipl, (int)g_irq_mask,
-					pistorm_ipl_ep2, pistorm_ipl_ep4, pistorm_ipl_ep6);
+					pistorm_ipl_ep2, pistorm_ipl_ep4, pistorm_ipl_ep6,
+					pistorm_ipl_lat2, pistorm_ipl_lat4, pistorm_ipl_lat6);
 		}
 	}
 	c *= cpucycleunit;
