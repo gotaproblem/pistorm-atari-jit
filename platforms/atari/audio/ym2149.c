@@ -25,6 +25,19 @@
  *   PISTORM_YM=0          disable at startup
  *   PISTORM_YM_GAIN=x.y   stream gain (default 1.0, clamped 0..4)
  *   PISTORM_YM_LAG_MS=n   render-behind-realtime margin (default 20, 5..200)
+ *
+ * DIAGNOSTIC TAPS (for the HDMI quality investigation - measure, don't guess)
+ *   PISTORM_YM_TAP=path    dump the exact PCM handed to SDL: raw S16LE mono
+ *                          250000 Hz. Play with:
+ *                            ffplay -f s16le -ar 250000 -ch_layout mono path
+ *                          This is the pipeline's midpoint: a clean tap with
+ *                          bad HDMI output puts the fault in SDL's resampler
+ *                          or the device; a dirty tap puts it in the register
+ *                          timing or the emu2149 core.
+ *   PISTORM_YM_EVLOG=path  binary log of register writes AS APPLIED by the
+ *                          renderer: {u64 t_ns, u64 sample_idx, u8 reg,
+ *                          u8 val, u16 pad} x N. Lets the same write stream
+ *                          be re-rendered offline and compared to the tap.
  */
 
 #include <SDL3/SDL.h>
@@ -69,6 +82,12 @@ static uint64_t g_lag_ns   = 20000000ull;    /* render this far behind now */
 /* Stream level = user's fixed trim x the emulated LMC1992's current level. */
 static float g_user_gain = 1.0f;
 static float g_lmc_gain  = 1.0f;
+
+/* diagnostic taps (audio thread only; buffered, NULL when disarmed) */
+static FILE    *g_tap   = NULL;              /* raw S16LE mono 250 kHz  */
+static FILE    *g_evlog = NULL;              /* applied register writes */
+static uint64_t g_sample_idx = 0;            /* samples rendered so far */
+typedef struct { uint64_t t, sample; uint8_t reg, val; uint16_t pad; } ym_evrec;
 
 static void ym_apply_gain(void)
 {
@@ -166,6 +185,12 @@ static void SDLCALL ym_feed_cb(void *ud, SDL_AudioStream *stream,
         while (t_idx != h_idx && g_ring[t_idx & RING_MASK].t <= g_render_t) {
             PSG_writeReg(g_psg, g_ring[t_idx & RING_MASK].reg,
                                 g_ring[t_idx & RING_MASK].val);
+            if (g_evlog) {
+                ym_evrec r = { g_ring[t_idx & RING_MASK].t, g_sample_idx,
+                               g_ring[t_idx & RING_MASK].reg,
+                               g_ring[t_idx & RING_MASK].val, 0 };
+                fwrite(&r, sizeof r, 1, g_evlog);
+            }
             t_idx++;
         }
         int32_t s = PSG_calc(g_psg);
@@ -173,14 +198,20 @@ static void SDLCALL ym_feed_cb(void *ud, SDL_AudioStream *stream,
         g_dc_acc += ((s << 12) - g_dc_acc) >> 12;
         s -= g_dc_acc >> 12;
         buf[n++] = (int16_t)s;
+        g_sample_idx++;
         if (n == (int)(sizeof(buf) / sizeof(buf[0]))) {
             SDL_PutAudioStreamData(stream, buf, n * (int)sizeof(int16_t));
+            if (g_tap)
+                fwrite(buf, sizeof(int16_t), (size_t)n, g_tap);
             n = 0;
         }
         g_render_t += STEP_NS;
     }
-    if (n)
+    if (n) {
         SDL_PutAudioStreamData(stream, buf, n * (int)sizeof(int16_t));
+        if (g_tap)
+            fwrite(buf, sizeof(int16_t), (size_t)n, g_tap);
+    }
     atomic_store_explicit(&g_tail, t_idx, memory_order_release);
 }
 
@@ -236,6 +267,26 @@ int ym2149_init(void)
         if (ms > 200) ms = 200;
         g_lag_ns = (uint64_t)ms * 1000000ull;
     }
+    {   /* diagnostic taps: big stdio buffers so the audio-thread fwrite is
+         * a memcpy; the kernel flush happens on fclose or buffer-full. At
+         * 500 KB/s (250 kHz S16) a 4 MB buffer flushes every ~8 s. */
+        const char *tp = getenv("PISTORM_YM_TAP");
+        const char *ev = getenv("PISTORM_YM_EVLOG");
+        if (tp && *tp) {
+            g_tap = fopen(tp, "wb");
+            if (g_tap)
+                setvbuf(g_tap, NULL, _IOFBF, 4u << 20);
+            fprintf(stderr, "[ym2149] TAP %s: %s (S16LE mono 250000 Hz)\n",
+                    tp, g_tap ? "armed" : "OPEN FAILED");
+        }
+        if (ev && *ev) {
+            g_evlog = fopen(ev, "wb");
+            if (g_evlog)
+                setvbuf(g_evlog, NULL, _IOFBF, 1u << 20);
+            fprintf(stderr, "[ym2149] EVLOG %s: %s\n",
+                    ev, g_evlog ? "armed" : "OPEN FAILED");
+        }
+    }
 
     SDL_SetAudioStreamGetCallback(g_ym, ym_feed_cb, NULL);
     if (!SDL_BindAudioStream(dev, g_ym)) {
@@ -279,4 +330,6 @@ void ym2149_close(void)
         PSG_delete(g_psg);
         g_psg = NULL;
     }
+    if (g_tap)   { fclose(g_tap);   g_tap   = NULL; }
+    if (g_evlog) { fclose(g_evlog); g_evlog = NULL; }
 }
