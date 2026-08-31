@@ -11552,10 +11552,12 @@ void do_cycles_stop(int c)
 	 * the state itself, ~once per few million idle laps. */
 	if (pistorm_cpu_diag()) {
 		static unsigned n;
-		if (!(++n & 0x3FFFFF))
-			fprintf(stderr, "[STOP] pc=%08X sr=%04X intmask=%d ipl=%d spc=%08X\n",
-					m68k_getpc(), regs.sr, regs.intmask,
-					regs.ipl_pin, regs.spcflags);
+		if (!(++n & 0x3FFFFF)) {
+			fprintf(stderr, "[STOP] pc=%08X sr=%04X intmask=%d spc=%08X "
+					"g_irq=%d g_ipl=%d g_irq_mask=%d\n",
+					m68k_getpc(), regs.sr, regs.intmask, regs.spcflags,
+					(int)g_irq, (int)g_ipl, (int)g_irq_mask);
+		}
 	}
 	c *= cpucycleunit;
 	if (!currprefs.cpu_compatible)
