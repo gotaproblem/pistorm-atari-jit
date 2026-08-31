@@ -8691,6 +8691,24 @@ static void m68k_run_mmu060()
 		{
 			for (;;)
 			{
+#ifdef PISTORM_ATARI
+				/* Real-IPL hooks, as in m68k_run_mmu040/_2_020: without
+				 * them a STOP parks forever (stopped=1, spcflags==0). */
+				if (regs.stopped)
+				{
+					do_cycles_stop(4);
+					intlev();
+					if (regs.spcflags)
+					{
+						if (do_specialties(0))
+						{
+							STOPTRY;
+							return;
+						}
+					}
+					continue;
+				}
+#endif
 #if defined(CPU_i386) || defined(CPU_x86_64)
 				f.cznv = regflags.cznv;
 #else // we assume CPU_arm or CPU_AARCH64 here
@@ -8711,6 +8729,9 @@ static void m68k_run_mmu060()
 
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				regs.instruction_cnt++;
+#ifdef PISTORM_ATARI
+				intlev();
+#endif
 
 				if (regs.spcflags)
 				{
@@ -8881,6 +8902,24 @@ static void m68k_run_mmu030(void)
 		{
 			for (;;)
 			{
+#ifdef PISTORM_ATARI
+				/* Real-IPL hooks, as in m68k_run_mmu040/_2_020: without
+				 * them a STOP parks forever (stopped=1, spcflags==0). */
+				if (regs.stopped)
+				{
+					do_cycles_stop(4);
+					intlev();
+					if (regs.spcflags)
+					{
+						if (do_specialties(0))
+						{
+							STOPTRY;
+							return;
+						}
+					}
+					continue;
+				}
+#endif
 				int cnt;
 			insretry:
 				regs.instruction_pc = m68k_getpc();
@@ -8975,6 +9014,9 @@ static void m68k_run_mmu030(void)
 
 					cpu_cycles = adjust_cycles(cpu_cycles);
 					regs.instruction_cnt++;
+#ifdef PISTORM_ATARI
+					intlev();
+#endif
 					if (regs.spcflags)
 					{
 						if (do_specialties(cpu_cycles))

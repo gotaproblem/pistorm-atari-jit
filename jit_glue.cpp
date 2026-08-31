@@ -192,30 +192,38 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     int m = (cpu_level >= 0 && cpu_level < 6) ? model[cpu_level] : 68000;
 
     /* Resolve the MMU request BEFORE anything derived from disable_jit:
-     * UAE's 040 MMU exists only in the interpreter loop (m68k_run_mmu040
-     * is selected only when cachesize==0), so 'mmu 68040' forces the JIT
-     * off, loudly. Guarded to cpu 68040 - the 030 MMU core also compiles
-     * here but has never been exercised on this platform; widen only
-     * with testing. Env PISTORM_MMU=68040 / PISTORM_MMU=0 overrides the
-     * cfg for A/B tests. */
+     * UAE's MMU cores exist only in the interpreter loops (m68k_run_mmu030
+     * /040/060 are selected only when cachesize==0), so 'mmu' forces the
+     * JIT off, loudly. The cfg value must MATCH the cpu model - each MMU
+     * core is model-specific (mmu030's PMMU/PMOVE machinery vs the
+     * 040/060 ATC). 68040 is the exercised path (Basilisk II); 030/060
+     * have the same platform hooks (intlev/stopped-idle) but are
+     * otherwise UNTESTED here. Env PISTORM_MMU=68030/68040/68060/0
+     * overrides the cfg for A/B tests. */
     int mmu_model = 0;
     {
         int wanted = cfg_mmu_model;
         const char *e = getenv("PISTORM_MMU");
         if (e && *e)
-            wanted = atoi(e) == 68040 ? 68040 : 0;
-        if (wanted == 68040 && m == 68040)
         {
-            mmu_model = 68040;
+            int v = atoi(e);
+            wanted = (v == 68030 || v == 68040 || v == 68060) ? v : 0;
+        }
+        if (wanted && wanted == m)
+        {
+            mmu_model = m;
             if (!disable_jit)
-                write_log("[JITGLUE] mmu 68040: forcing JIT OFF (MMU runs "
-                          "interpreter-only)\n");
+                write_log("[JITGLUE] mmu %d: forcing JIT OFF (MMU runs "
+                          "interpreter-only)\n", m);
+            if (m != 68040)
+                write_log("[JITGLUE] mmu %d: NOTE - untested path on this "
+                          "platform (68040 is the exercised one)\n", m);
             disable_jit = true;
         }
         else if (wanted)
         {
-            write_log("[JITGLUE] mmu 68040 requested but IGNORED: needs "
-                      "'cpu 68040' (have %d)\n", m);
+            write_log("[JITGLUE] mmu %d requested but IGNORED: must match "
+                      "the cpu model (have cpu %d)\n", wanted, m);
         }
     }
 

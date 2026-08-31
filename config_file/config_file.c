@@ -649,10 +649,11 @@ struct emulator_config *load_config_file(char *filename) {
 
       case CONFITEM_MMU:
         {
-          /* Full 68040 MMU emulation. Runs interpreter-only (UAE's MMU
-           * cores have no JIT path), so this forces the JIT off. Needed
-           * by guests that program real translation: Basilisk II (040),
-           * MagiCMac, MiNT memory protection. Value: 68040, or off. */
+          /* Full MMU emulation. Runs interpreter-only (UAE's MMU cores
+           * have no JIT path), so this forces the JIT off. Needed by
+           * guests that program real translation: Basilisk II, MagiCMac,
+           * MiNT memory protection. Value must MATCH the cpu line:
+           * 68030, 68040 or 68060 - or off. 040 is the tested one. */
           char arg[32];
           int p = 0;
           memset(arg, 0, sizeof(arg));
@@ -660,21 +661,27 @@ struct emulator_config *load_config_file(char *filename) {
           for (int i = 0; arg[i]; i++)
             arg[i] = (char)tolower((unsigned char)arg[i]);
 
-          if (!strcmp(arg, "68040") || !strcmp(arg, "040") ||
-              !strcmp(arg, "on") || !strcmp(arg, "enabled"))
+          if (!strcmp(arg, "68030") || !strcmp(arg, "030"))
+            cfg->mmu_model = 68030;
+          else if (!strcmp(arg, "68040") || !strcmp(arg, "040") ||
+                   !strcmp(arg, "on") || !strcmp(arg, "enabled"))
             cfg->mmu_model = 68040;
+          else if (!strcmp(arg, "68060") || !strcmp(arg, "060"))
+            cfg->mmu_model = 68060;
           else if (!strcmp(arg, "off") || !strcmp(arg, "none") ||
                    !strcmp(arg, "disabled") || !arg[0])
             cfg->mmu_model = 0;
           else {
-            printf("[CFG] mmu: unknown value '%s' - expected 68040 or off; "
-                   "MMU stays off\n", arg);
+            printf("[CFG] mmu: unknown value '%s' - expected 68030/68040/"
+                   "68060 or off; MMU stays off\n", arg);
             cfg->mmu_model = 0;
           }
-          printf("[CFG] MMU %s%s\n",
-                 cfg->mmu_model ? "68040 enabled" : "disabled",
-                 cfg->mmu_model ? " (interpreter only - JIT will be forced off; "
-                                  "requires cpu 68040)" : "");
+          if (cfg->mmu_model)
+            printf("[CFG] MMU %d enabled (interpreter only - JIT will be "
+                   "forced off; requires matching 'cpu %d')\n",
+                   cfg->mmu_model, cfg->mmu_model);
+          else
+            printf("[CFG] MMU disabled\n");
         }
         break;
 
