@@ -4721,6 +4721,25 @@ void REGPARAM2 Exception(int nr)
 					e->dreg[r] = m68k_dreg(regs, r);
 					e->areg[r] = m68k_areg(regs, r);
 				}
+
+				/* One-shot: dump the ring the FIRST time a fault arrives
+				 * with a wild PC (above all mapped guest memory - ST-RAM/
+				 * ROM/IO < 0x01000000, TT-RAM < 0x09000000). Field case:
+				 * Petra/Paula corruption crashes jump to a different wild
+				 * address each run (43F00014, 5DB00118, 5DEA0000) at a
+				 * rez switch; the run never halts, so the halt-time dump
+				 * never fires and the launch instruction was never seen.
+				 * The ring at this moment holds the JSR/RTS/vector that
+				 * went wild plus the code stream leading to it. */
+				if (faultclass && e->pc >= 0x09000000u && pistorm_cpu_diag()) {
+					static int wild_dumped;
+					if (!wild_dumped) {
+						wild_dumped = 1;
+						fprintf(stderr, "[WILDPC] first fault with pc=%08X "
+								"(vec=%d) - ring follows\n", e->pc, nr);
+						pistorm_exc_ring_dump();
+					}
+				}
 			}
 
 			/* Cascade detection. Two conditions beyond "same fault twice",
