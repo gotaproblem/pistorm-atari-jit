@@ -3145,6 +3145,42 @@ static int effective_interrupt_vector(const int nr, const int vector_nr)
 
 	/* EmuTOS' default vector 24 handler panics. Do not let a stale failed-IACK
 	 * marker leak into a later autovector exception. */
+	/* Level-6 resolution trace (diag): whether each MFP interrupt was
+	 * dispatched VECTORED (bus IACK vector 0x40-0x4F) or fell back to
+	 * AUTOVECTOR - and through which VBR. Real hardware never uses the
+	 * level-6 autovector: the MFP always supplies its vector. EmuTOS'
+	 * default table hides an autovector fallback (it has a handler
+	 * there); a guest that installs its own VBR (Basilisk) leaves that
+	 * slot as garbage and dies on the first fallback. This line is the
+	 * difference between those two dispatches, per interrupt. */
+	if (level == 6 && pistorm_cpu_diag())
+	{
+		/* Budgeted PER VBR VALUE, not globally: the first attempt spent
+		 * its whole budget on EmuTOS' boot traffic (vbr=0) and the run
+		 * of interest - after the guest moved the VBR - was never
+		 * sampled. A VBR change re-arms the counter. */
+		static int shown;
+		static uae_u32 last_vbr = 0xFFFFFFFFu;
+		if (regs.vbr != last_vbr)
+		{
+			last_vbr = regs.vbr;
+			shown = 0;
+			fprintf(stderr, "[IACKRES] --- vbr changed to %08X ---\n",
+					regs.vbr);
+		}
+		if (shown < 48)
+		{
+			shown++;
+			fprintf(stderr, "[IACKRES] raw=%04X -> %s vec=%02X vbr=%08X\n",
+					pistorm_iack_vector,
+					(pistorm_iack_vector == 0xFFFE) ? "FAILED->auto" :
+					(pistorm_iack_vector == 0xFFFF) ? "none->auto" :
+					atari_iack_vector_is_valid(level, bus_vector)
+					    ? "VECTORED" : "invalid->auto",
+					bus_vector, regs.vbr);
+		}
+	}
+
 	if (pistorm_iack_vector == 0xFFFE)
 		return vector_nr;
 
@@ -4426,6 +4462,9 @@ struct pistorm_exc_ring_e {
 	uae_u32 pc, sp, fault, target;
 	uae_u16 code[5];        /* words at pc (0 = pc unmapped)  */
 	uae_u16 pre[6];         /* the 12 bytes BEFORE pc         */
+	uae_u16 effvec;         /* interrupt: vector actually used
+	                         * after IACK substitution (0 = n/a) */
+	uae_u32 efftarget;      /* ...and where it dispatches      */
 	uae_u8  has_regs;
 	uae_u32 dreg[8], areg[8];
 };
@@ -4460,10 +4499,18 @@ static void pistorm_snap_capture(void)
 		unsigned long a = strtoul(spec, &end, 0);
 		if (end == spec)
 			break;
-		uae_u32 base = (uae_u32)(a & 0x00FFFFF0u);
+		/* Full 32-bit addresses: TT-RAM lives at $01000000+ and a guest
+		 * with a relocated VBR keeps its vector table there. The old
+		 * 24-bit mask silently dumped ST-RAM at the truncated address -
+		 * a page of zeros presented as the guest's vector table. Guard
+		 * against the natmem ceiling instead of masking. */
+		uae_u32 base = (uae_u32)(a & 0xFFFFFFF0u);
 		pistorm_snap[i].addr = base;
-		for (int b = 0; b < SNAP_BYTES; b++)
-			pistorm_snap[i].data[b] = natmem_offset[(base + b) & 0x00FFFFFFu];
+		for (int b = 0; b < SNAP_BYTES; b++) {
+			uae_u32 at = base + (uae_u32)b;
+			pistorm_snap[i].data[b] =
+				(at < 0x09000000u) ? natmem_offset[at] : 0xEE;
+		}
 		pistorm_snap[i].valid = 1;
 		spec = (*end == ',') ? end + 1 : end;
 	}
@@ -4538,8 +4585,11 @@ void pistorm_exc_ring_dump(void)
 	for (unsigned k = 0; k < n; k++) {
 		pistorm_exc_ring_e *e =
 			&pistorm_exc_ring[(pistorm_exc_ring_i - n + k) & 63];
-		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X vect->%08X\n",
+		fprintf(stderr, "[EXCRING] vec=%2u pc=%08X sp=%08X sr=%04X fault=%08X vect->%08X",
 				e->vec, e->pc, e->sp, e->sr, e->fault, e->target);
+		if (e->effvec)
+			fprintf(stderr, "  EFF=%02X->%08X", e->effvec, e->efftarget);
+		fprintf(stderr, "\n");
 		if (e->has_regs) {
 			fprintf(stderr, "[EXCRING]   pre-pc : %04X %04X %04X %04X %04X %04X\n",
 					e->pre[0], e->pre[1], e->pre[2], e->pre[3], e->pre[4], e->pre[5]);
@@ -4578,16 +4628,53 @@ void REGPARAM2 Exception(int nr)
 			pistorm_exc_ring_e *e = &pistorm_exc_ring[pistorm_exc_ring_i++ & 63];
 			e->vec = (uae_u16)nr;
 			e->sr = regs.sr;
-			e->pc = m68k_getpc();
+			/* instruction_pc, NOT m68k_getpc(): getpc derives from
+			 * pc + (pc_p - pc_oldp), which is stale mid-cascade - it
+			 * reported $20B2 while the CPU was demonstrably executing
+			 * at $0109A64E (pc_p agreed). The code/pre-pc captures key
+			 * off this, so they were sampling the wrong memory too. */
+			e->pc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
 			e->sp = m68k_areg(regs, 7);
 			e->fault = g_buserr_addr;
 			{
 				/* the address this exception will dispatch to, read
 				 * host-side from the mirror (cannot fault) */
-				uae_u32 va = (regs.vbr + 4u * (uae_u32)nr) & 0x00FFFFFCu;
+				/* FULL 32-bit vbr arithmetic. A guest with the VBR moved
+				 * into TT-RAM ($0109B800) had this masked to 24 bits, so
+				 * every vect-> shown came from the wrong address. */
+				uae_u32 va = (regs.vbr + 4u * (uae_u32)nr) & 0xFFFFFFFCu;
 				uae_u8 *nm = natmem_offset;
-				e->target = ((uae_u32)nm[va] << 24) | ((uae_u32)nm[va+1] << 16) |
-				            ((uae_u32)nm[va+2] << 8) | nm[va+3];
+				e->target = (va + 3 < 0x09000000u)
+				    ? (((uae_u32)nm[va] << 24) | ((uae_u32)nm[va+1] << 16) |
+				       ((uae_u32)nm[va+2] << 8) | nm[va+3])
+				    : 0xEEEEEEEEu;
+
+				/* For interrupts, the AUTOVECTOR label above is not what
+				 * dispatches: effective_interrupt_vector() substitutes
+				 * the bus IACK vector (MFP 0x40-0x4F) when valid. Record
+				 * the substituted vector and ITS target too - the ring
+				 * otherwise cannot distinguish "MFP vectored through
+				 * $45" from "genuine autovector fallback", and that
+				 * distinction IS the question when a guest's autovector
+				 * slot and its MFP slots point at different worlds. */
+				e->effvec = 0;
+				e->efftarget = 0;
+				if (nr >= 25 && nr <= 31) {
+					extern uae_u16 pistorm_iack_vector;
+					int bus_vec = pistorm_iack_vector & 0xFF;
+					if (pistorm_iack_vector != 0xFFFE &&
+					    pistorm_iack_vector != 0xFFFF &&
+					    bus_vec >= 0x40 && bus_vec <= 0x4F) {
+						uae_u32 ea = (regs.vbr + 4u * (uae_u32)bus_vec)
+						             & 0xFFFFFFFCu;
+						e->effvec = (uae_u16)bus_vec;
+						e->efftarget = (ea + 3 < 0x09000000u)
+						    ? (((uae_u32)nm[ea] << 24) |
+						       ((uae_u32)nm[ea+1] << 16) |
+						       ((uae_u32)nm[ea+2] << 8) | nm[ea+3])
+						    : 0xEEEEEEEEu;
+					}
+				}
 			}
 
 			/* Capture registers+code for anything that might be a fault.
@@ -4605,7 +4692,8 @@ void REGPARAM2 Exception(int nr)
 			e->has_regs = faultclass ? 1 : 0;
 			memset(e->code, 0, sizeof e->code);
 			if (faultclass) {
-				uae_u32 cpc = e->pc & 0x00FFFFFEu;
+				/* full 32-bit pc (TT-RAM code!); only strip the odd bit */
+				uae_u32 cpc = e->pc & 0xFFFFFFFEu;
 				if (pistorm_pc_executable(cpc)) {
 					uae_u8 *nm = natmem_offset;
 					for (int w = 0; w < 5; w++)
@@ -5826,11 +5914,28 @@ uae_u32 REGPARAM2 op_illg(uae_u32 opcode)
 	}
 	if ((opcode & 0xFF00) == 0x7100)
 	{
-		write_log(_T("ARAnyM EMULOP %04X at %08X -> illegal instruction (no EMULOP handler)\n"), opcode, pc);
+		/* $71xx is used both by ARAnyM EMULOPs and by Basilisk II's
+		 * EMUL_OP mechanism: Basilisk patches the Mac ROM with $71xx
+		 * opcodes and services them from its own illegal-instruction
+		 * handler (vector 4). Falling through to Exception(4) below is
+		 * therefore CORRECT and required - but it also means this path
+		 * is red-hot while Basilisk runs, so the diagnostic must be
+		 * capped or it floods the log and wrecks performance. */
+		static int emulop_warned = 0;
+		if (emulop_warned < 8)
+		{
+			write_log(_T("ARAnyM EMULOP %04X at %08X -> illegal instruction exception (Basilisk EMUL_OP? further messages suppressed after 8)\n"), opcode, pc);
+			emulop_warned++;
+		}
 	}
 	else if (opcode == 0x7300 || opcode == 0x7301)
 	{
-		write_log(_T("ARAnyM NatFeat opcode %04X reached illegal handler at %08X\n"), opcode, pc);
+		static int natfeat_warned = 0;
+		if (natfeat_warned < 8)
+		{
+			write_log(_T("ARAnyM NatFeat opcode %04X reached illegal handler at %08X\n"), opcode, pc);
+			natfeat_warned++;
+		}
 	}
 	if (warned < 20)
 	{
