@@ -168,12 +168,33 @@ static void SDLCALL ym_feed_cb(void *ud, SDL_AudioStream *stream,
     int frames = (additional + (int)sizeof(int16_t) - 1) / (int)sizeof(int16_t);
 
     /* Keep the render clock ~lag behind wall time so every event we render
-     * already carries its final timestamp; hard-resync on gross drift
-     * (startup, underrun, suspend). */
+     * already carries its final timestamp.
+     *
+     * MEASURED (ym.pcm/ym.ev tap, 97s digidrum capture): the original
+     * hard-resync (g_render_t > now -> slam back by lag) fought SDL's
+     * queue refill in a ~1 Hz limit cycle - +19 ms rewind, then ~4
+     * catch-up steps of -5.4 ms - warping register-event application by
+     * +-5..20 ms continuously. On a 4 kHz volume-write stream that IS
+     * the audible flutter/stutter. Fine jitter between lurches was
+     * 0.047 ms, so only the clock discipline was at fault.
+     *
+     * So: never jump the clock (except first call / >1s gross desync,
+     * e.g. suspend). Slew toward (now - lag) by at most 0.5% of this
+     * callback's span - drift between CLOCK_MONOTONIC and the device
+     * crystal becomes an inaudible rate bias instead of a lurch. */
     uint64_t now = now_ns();
-    if (g_render_t == 0 || g_render_t > now ||
-        now - g_render_t > g_lag_ns + 300000000ull)
-        g_render_t = (now > g_lag_ns) ? now - g_lag_ns : 0;
+    uint64_t target = (now > g_lag_ns) ? now - g_lag_ns : 0;
+    if (g_render_t == 0 ||
+        (g_render_t > target ? g_render_t - target
+                             : target - g_render_t) > 1000000000ull) {
+        g_render_t = target;
+    } else {
+        int64_t diff = (int64_t)target - (int64_t)g_render_t;
+        int64_t max_slew = (int64_t)((uint64_t)frames * STEP_NS) / 200;
+        if (diff >  max_slew) diff =  max_slew;
+        if (diff < -max_slew) diff = -max_slew;
+        g_render_t += diff;
+    }
 
     unsigned t_idx = atomic_load_explicit(&g_tail, memory_order_relaxed);
     unsigned h_idx = atomic_load_explicit(&g_head, memory_order_acquire);
