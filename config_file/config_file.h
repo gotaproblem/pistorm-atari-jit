@@ -89,7 +89,8 @@ struct emulator_config {
   uint8_t cpu_type;
   bool jit;
   bool cpu_compatible;   /* prefetch-accurate 68000 core (interpreter only) */
-  int  mmu_model;        /* 0 = off, 68040 = full 040 MMU (interpreter only) */
+  bool mmu;              /* full MMU emulation, model follows cpu_type
+                            (68030/040/060 only; interpreter only) */
   int  monitor_force;    /* MFP GPIP7 monitor detect: 0 real, 1 mono, 2 colour */
   int loop_cycles;
   bool fpu;

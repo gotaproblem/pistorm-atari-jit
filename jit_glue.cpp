@@ -151,15 +151,16 @@ extern "C" void jit_cpu_set_compatible(int on)
     cfg_cpu_compatible = on != 0;
 }
 
-/* cfg 'mmu 68040' switch, set from emulator.c before jit_cpu_init().
- * UAE's MMU cores exist only in the interpreter (m68k_run_mmu040), so
- * enabling this forces the JIT off. PISTORM_MMU=68040/0 env override
- * for quick A/B tests without editing the cfg. */
-static int cfg_mmu_model;
+/* cfg 'mmu enabled' switch, set from emulator.c before jit_cpu_init().
+ * The MMU model follows the cpu model (68030/040/060). UAE's MMU cores
+ * exist only in the interpreter loops, so enabling this forces the JIT
+ * off. PISTORM_MMU=1/0 env override for quick A/B tests without
+ * editing the cfg. */
+static bool cfg_mmu_enable;
 
-extern "C" void jit_cpu_set_mmu(int model)
+extern "C" void jit_cpu_set_mmu(int on)
 {
-    cfg_mmu_model = model;
+    cfg_mmu_enable = on != 0;
 }
 
 extern "C" void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
@@ -194,36 +195,29 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     /* Resolve the MMU request BEFORE anything derived from disable_jit:
      * UAE's MMU cores exist only in the interpreter loops (m68k_run_mmu030
      * /040/060 are selected only when cachesize==0), so 'mmu' forces the
-     * JIT off, loudly. The cfg value must MATCH the cpu model - each MMU
-     * core is model-specific (mmu030's PMMU/PMOVE machinery vs the
-     * 040/060 ATC). 68040 is the exercised path (Basilisk II); 030/060
-     * have the same platform hooks (intlev/stopped-idle) but are
-     * otherwise UNTESTED here. Env PISTORM_MMU=68030/68040/68060/0
+     * JIT off, loudly. The model follows the cpu line - each MMU core is
+     * model-specific (mmu030's PMMU/PMOVE machinery vs the 040/060 ATC);
+     * all three boot EmuTOS on this platform. A 68000/010/020 has no
+     * MMU: enabled-with-such-a-cpu logs IGNORED. Env PISTORM_MMU=1/0
      * overrides the cfg for A/B tests. */
     int mmu_model = 0;
     {
-        int wanted = cfg_mmu_model;
+        bool wanted = cfg_mmu_enable;
         const char *e = getenv("PISTORM_MMU");
         if (e && *e)
-        {
-            int v = atoi(e);
-            wanted = (v == 68030 || v == 68040 || v == 68060) ? v : 0;
-        }
-        if (wanted && wanted == m)
+            wanted = atoi(e) != 0;
+        if (wanted && (m == 68030 || m == 68040 || m == 68060))
         {
             mmu_model = m;
             if (!disable_jit)
-                write_log("[JITGLUE] mmu %d: forcing JIT OFF (MMU runs "
-                          "interpreter-only)\n", m);
-            if (m != 68040)
-                write_log("[JITGLUE] mmu %d: NOTE - untested path on this "
-                          "platform (68040 is the exercised one)\n", m);
+                write_log("[JITGLUE] mmu enabled: %d MMU, forcing JIT OFF "
+                          "(MMU runs interpreter-only)\n", m);
             disable_jit = true;
         }
         else if (wanted)
         {
-            write_log("[JITGLUE] mmu %d requested but IGNORED: must match "
-                      "the cpu model (have cpu %d)\n", wanted, m);
+            write_log("[JITGLUE] mmu requested but IGNORED: cpu %d has no "
+                      "MMU (needs 68030/68040/68060)\n", m);
         }
     }
 

@@ -1628,7 +1628,7 @@ int main (int argc, char *argv[])
   fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
   jit_cpu_set_compatible(config->cpu_compatible ? 1 : 0);
-  jit_cpu_set_mmu(config->mmu_model);
+  jit_cpu_set_mmu(config->mmu ? 1 : 0);
 
   /* Monitor-detect force lives at the ps_protocol layer (see the note
    * in ps_read_txn): dispatcher-level shims provably missed TOS's

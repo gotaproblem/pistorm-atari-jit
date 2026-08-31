@@ -649,39 +649,20 @@ struct emulator_config *load_config_file(char *filename) {
 
       case CONFITEM_MMU:
         {
-          /* Full MMU emulation. Runs interpreter-only (UAE's MMU cores
-           * have no JIT path), so this forces the JIT off. Needed by
-           * guests that program real translation: Basilisk II, MagiCMac,
-           * MiNT memory protection. Value must MATCH the cpu line:
-           * 68030, 68040 or 68060 - or off. 040 is the tested one. */
-          char arg[32];
-          int p = 0;
-          memset(arg, 0, sizeof(arg));
-          get_next_string(parse_line + str_pos, arg, &p, ' ');
-          for (int i = 0; arg[i]; i++)
-            arg[i] = (char)tolower((unsigned char)arg[i]);
-
-          if (!strcmp(arg, "68030") || !strcmp(arg, "030"))
-            cfg->mmu_model = 68030;
-          else if (!strcmp(arg, "68040") || !strcmp(arg, "040") ||
-                   !strcmp(arg, "on") || !strcmp(arg, "enabled"))
-            cfg->mmu_model = 68040;
-          else if (!strcmp(arg, "68060") || !strcmp(arg, "060"))
-            cfg->mmu_model = 68060;
-          else if (!strcmp(arg, "off") || !strcmp(arg, "none") ||
-                   !strcmp(arg, "disabled") || !arg[0])
-            cfg->mmu_model = 0;
-          else {
-            printf("[CFG] mmu: unknown value '%s' - expected 68030/68040/"
-                   "68060 or off; MMU stays off\n", arg);
-            cfg->mmu_model = 0;
-          }
-          if (cfg->mmu_model)
-            printf("[CFG] MMU %d enabled (interpreter only - JIT will be "
-                   "forced off; requires matching 'cpu %d')\n",
-                   cfg->mmu_model, cfg->mmu_model);
-          else
-            printf("[CFG] MMU disabled\n");
+          /* Full MMU emulation, model picked up from the cpu line
+           * (68030/68040/68060 - a 68000/010/020 has no MMU and logs an
+           * IGNORED warning at CPU init). Runs interpreter-only (UAE's
+           * MMU cores have no JIT path), so this forces the JIT off.
+           * Needed by guests that program real translation: Basilisk II,
+           * MagiCMac, MiNT memory protection.
+           * Accepts enabled/disabled; legacy explicit values like
+           * 'mmu 68040' still parse as enabled (model still comes from
+           * the cpu line). */
+          cfg->mmu = get_bool_default_true(parse_line + str_pos);
+          printf("[CFG] MMU %s%s\n",
+                 cfg->mmu ? "enabled" : "disabled",
+                 cfg->mmu ? " (model follows the cpu line; interpreter "
+                            "only - JIT will be forced off)" : "");
         }
         break;
 
