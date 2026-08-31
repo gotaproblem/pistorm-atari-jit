@@ -100,6 +100,24 @@ And that is pretty much it... Over to you to enjoy
 ## TODO
 ### configuration switches
 
+### JIT + MMU via the Pi's own ARM MMU (idea)
+The emulated MMU (`mmu enabled`) is interpreter-only: UAE's JIT emits
+direct loads/stores with guest address == physical address baked in, so
+per-access translation can't be interposed (a QEMU-style software TLB
+would be a redesign of the JIT's memory layer). But those direct
+accesses already pass through the Pi's ARM MMU on their way to natmem.
+For coarse, mostly-static guest mappings - Basilisk II's remapped page
+0 is the canonical case - the guest's translation could be mirrored
+into host mappings with mmap/mremap aliasing: remap the host page
+backing the guest page, JIT'd code lands in the right place at zero
+per-access cost, invalid pages arrive as SIGSEGV (which the JIT already
+catches) to be turned into guest bus errors. Constraints: guest and
+host page size must match (both 4K on Pi4), only worth it for guests
+that set up translation once and leave it alone (not MiNT per-process
+memory protection churn), and the SIGSEGV -> precise 68040 bus-error
+frame plumbing is the hard part. Would give Basilisk-class guests full
+JIT speed WITH real translation.
+
 ## Known Issues
 ~~68000, 68010 are not supported~~
 ~~GEM based games can not be played, they will likely run, but you will not see a meaningful native Atari screen output~~
