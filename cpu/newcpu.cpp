@@ -11563,16 +11563,32 @@ void do_cycles_stop(int c)
 			                         pistorm_ipl_lat6;
 			/* icnt separates "never wakes" (frozen) from "wakes, runs the
 			 * VBL handler, loops back into STOP because the handler never
-			 * satisfies the wait" (climbing ~handler-size*50/s). vec28 =
-			 * whose level-4 handler runs. */
+			 * satisfies the wait" (climbing). vec28 = whose level-4
+			 * handler runs. frc/vbc/sem = the VBL sysvars a Vsync-style
+			 * wait polls (_frclock $462, _vbclock $466, vblsem $452):
+			 * the one NOT advancing names the unsatisfied condition. */
 			fprintf(stderr, "[STOP] pc=%08X sr=%04X intmask=%d spc=%08X "
 					"g_irq=%d g_ipl=%d g_irq_mask=%d ep4=%u lat4=%u "
-					"icnt=%llu vec28=%08X\n",
+					"icnt=%llu vec28=%08X frc=%08X vbc=%08X sem=%08X\n",
 					m68k_getpc(), regs.sr, regs.intmask, regs.spcflags,
 					(int)g_irq, (int)g_ipl, (int)g_irq_mask,
 					pistorm_ipl_ep4, pistorm_ipl_lat4,
 					(unsigned long long)regs.instruction_cnt,
-					get_long(regs.vbr + 0x70));
+					get_long(regs.vbr + 0x70),
+					get_long(0x462), get_long(0x466), get_long(0x452));
+			/* one-shot: the code around the wait, so the loop condition
+			 * can be read instead of guessed */
+			{
+				static int code_dumped;
+				if (!code_dumped) {
+					code_dumped = 1;
+					uae_u32 cpc = m68k_getpc() & 0xFFFFFFFEu;
+					fprintf(stderr, "[STOP] code@%08X:", cpc - 16);
+					for (int w = -8; w < 12; w++)
+						fprintf(stderr, " %04X", get_word(cpc + 2*w));
+					fprintf(stderr, "\n");
+				}
+			}
 		}
 	}
 	c *= cpucycleunit;
