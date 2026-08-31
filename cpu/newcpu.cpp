@@ -214,7 +214,14 @@ static int fallback_new_cpu_model;
 
 int cpu_last_stop_vpos, cpu_stopped_lines;
 
-void (*flush_icache)(int);
+/* flush_icache is only (re)assigned inside JIT init (compemu_support_arm:
+ * build_comp), which never runs when cachesize==0. But the 040-MMU opcode
+ * handlers (op_f408_31 etc: CINV/CPUSH with bit7 set) call it UNGUARDED -
+ * first EmuTOS CPUSHA under 'mmu 68040' jumped through NULL (host pc=0,
+ * lr in op_f408_31_ff). Give it a no-op default so interpreter-only runs
+ * are safe; JIT init overwrites it with the real lazy/hard flush. */
+static void flush_icache_noop(int v) { (void)v; }
+void (*flush_icache)(int) = flush_icache_noop;
 
 #if COUNT_INSTRS
 static unsigned long int instrcount[65536];
