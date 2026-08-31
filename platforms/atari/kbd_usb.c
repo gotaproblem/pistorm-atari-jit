@@ -99,6 +99,29 @@ static _Atomic int      in_packet;       /* mid-injected-packet flag     */
 static _Atomic uint8_t  mfp_ierb = 0xFF;
 static _Atomic uint8_t  mfp_imrb = 0xFF;
 
+/* Virtual GPIP4 in-service state. On a real MFP, IACK of a channel sets
+ * its ISRB bit (software-EOI mode), and that bit BLOCKS the channel from
+ * re-interrupting until the handler writes the EOI (a 0 into the bit at
+ * $FFFA11). kbd_usb_irq_wanted() used to ignore this: with bytes pending
+ * it kept level 6 asserted straight through the guest's handler, so the
+ * moment the handler lowered its IPL (EmuTOS runs parts at mask 5) we
+ * re-entered it - nested until the supervisor stack ran through the
+ * sysvars and the machine died on corruption. Field case: Petra/Paula,
+ * whose 9-19 kHz replay ISRs widen the window enormously; EXCRING showed
+ * 60+ vec=30/EFF=46 entries with a monotonically descending sp, ending
+ * in a wild jump.
+ * mfp_vr shadows $FFFA17: S bit (0x08) clear = auto-EOI mode, in which
+ * the real chip never holds in-service - so neither do we. TOS/EmuTOS
+ * use software EOI ($48); default matches. */
+static _Atomic uint8_t  kbd_in_service = 0;
+static _Atomic uint8_t  mfp_vr = 0x48;
+
+void kbd_usb_virtual_iacked(void)
+{
+    if (atomic_load_explicit(&mfp_vr, memory_order_relaxed) & 0x08)
+        atomic_store_explicit(&kbd_in_service, 1, memory_order_relaxed);
+}
+
 /* ------------------------------------------------------------------ */
 /* Real IKBD presence state (see the detection section further down)   */
 /* ------------------------------------------------------------------ */
@@ -666,6 +689,15 @@ void kbd_usb_mfp_snoop(uint32_t addr, uint32_t value, int is_word)
         atomic_store_explicit(&mfp_ierb, b, memory_order_relaxed);
     else if (a == 0x00FFFA15u)              /* IMRB */
         atomic_store_explicit(&mfp_imrb, b, memory_order_relaxed);
+    else if (a == 0x00FFFA11u) {            /* ISRB: 0-bits written = EOI */
+        if ((b & 0x40) == 0)                /* GPIP4's in-service cleared */
+            atomic_store_explicit(&kbd_in_service, 0, memory_order_relaxed);
+    }
+    else if (a == 0x00FFFA17u) {            /* VR: S=0 -> auto-EOI mode  */
+        atomic_store_explicit(&mfp_vr, b, memory_order_relaxed);
+        if ((b & 0x08) == 0)
+            atomic_store_explicit(&kbd_in_service, 0, memory_order_relaxed);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1020,6 +1052,12 @@ void kbd_usb_diag_tick(void) { }
 int kbd_usb_irq_wanted(void)
 {
     if (!kbd_usb_rx_ready() && !kbd_usb_rx_priority())
+        return 0;
+    /* in-service: channel is inside its handler (IACKed, EOI not yet
+     * written) - a real MFP cannot re-interrupt from this channel now,
+     * and neither may we (see kbd_in_service above: the alternative is
+     * nested re-entry until the supervisor stack dies). */
+    if (atomic_load_explicit(&kbd_in_service, memory_order_relaxed))
         return 0;
     /* respect the guest's MFP keyboard interrupt mask (GPIP4 = bit 6)   */
     uint8_t en = atomic_load_explicit(&mfp_ierb, memory_order_relaxed) &

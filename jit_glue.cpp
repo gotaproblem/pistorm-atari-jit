@@ -516,6 +516,14 @@ void intlev_ack (uint8_t nr)
             pistorm_mfp_last_iack_vector = 0x46;
             pistorm_mfp_iack_counts[6]++;
             kbd_usb_stat_virtual_iacks++;
+            /* real-MFP semantics: this IACK sets the channel's in-service
+             * bit, blocking re-interrupt until the guest's EOI - without
+             * this the still-pending queue re-entered the guest handler
+             * the moment it lowered its IPL (Petra/Paula stack death) */
+            {
+                extern void kbd_usb_virtual_iacked(void);
+                kbd_usb_virtual_iacked();
+            }
             return;
         }
     }
