@@ -100,6 +100,19 @@ And that is pretty much it... Over to you to enjoy
 ## TODO
 ### configuration switches
 
+### Regression test package (run automatically on every new branch)
+One command that answers "did I break anything?" before hardware time
+is spent. Pieces that already exist and want gathering: the acsi_test
+57-check harness, ataritest's memory/acsi suites, the host-side .hfs
+wrapper unit test, gcc/g++ -fsyntax-only sweeps of the heavy TUs. Add:
+a boot-smoke matrix over the cfg axes that keep biting (cpu 68000/030/
+040 x jit on/off x mmu on/off x machine st/ste - boot EmuTOS to
+desktop, assert hz200 advancing and no EXCRING fault-class entries),
+and an interrupt-storm soak (scripted mouse-motion flood + a Timer A
+replay workload) since storms found the last three bugs. Wire as a
+make target (make check) plus a git hook or branch script so it runs
+without being remembered.
+
 ### Unified virtual interrupt controller (design debt)
 Virtual interrupt sources have grown organically and each carries its
 own copy of the same machinery: kbd_usb keeps IERB/IMRB/ISRB/VR
