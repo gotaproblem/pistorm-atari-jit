@@ -153,7 +153,20 @@ static void ide_xlate_errno(struct ide_taskfile *t, int len)
 
 static void ide_fault ( struct ide_drive *d, const char *p )
 {
-  printf ( "ide: %s: %d: %s\n", d->controller->name,
+  /* Diagnostic only - silent unless PISTORM_IDE_DEBUG is set.
+   *
+   * Boot-time hard-disk drivers probe BOTH drives on the port and poke
+   * registers this model does not implement, entirely as a matter of
+   * course - so every boot printed dozens of "ide: cf: 1: not present"
+   * / "bogus register" lines while IDE worked perfectly. Faults that
+   * matter when bringing up a NEW driver are one env var away. */
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("PISTORM_IDE_DEBUG");
+    on = (e && *e && *e != '0') ? 1 : 0;
+  }
+  if (on)
+    printf ( "ide: %s: %d: %s\n", d->controller->name,
 			(int)(d - d->controller->drive), p );
 }
 
