@@ -31,7 +31,12 @@ static inline int pistorm_cpu_diag(void)
 	return v;
 }
 #ifndef ATARI_MFP_IACK_DIAG
-#define ATARI_MFP_IACK_DIAG 0
+/* Runtime via PISTORM_CPU_DIAG=1 (was compile-time 0): the IACK drop
+ * paths are exactly where in-service orphans are born - Timer A's wedge
+ * (Paula, isra=20) came from BADMFPACK, and a Timer C wedge (isrb=20,
+ * hz200 dead, machine crawls) followed from a path these prints would
+ * have named while the compile-time 0 kept them dark. */
+#define ATARI_MFP_IACK_DIAG pistorm_cpu_diag()
 
 /* Ring of the last 256 interpreter PCs (stored always - one cheap write
  * per instruction); dumped at a RESET instruction when diag is on. */
