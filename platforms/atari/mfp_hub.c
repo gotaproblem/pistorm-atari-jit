@@ -13,6 +13,19 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+/* PISTORM_MFP_HUB_DEBUG=1: budgeted trace of raises/IACKs/EOIs plus a
+ * once-per-1024-arbitrations state line. Free when off (cached getenv). */
+static int hub_dbg(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_MFP_HUB_DEBUG");
+        v = (e && *e == '1') ? 1 : 0;
+    }
+    return v;
+}
 
 /* ---- register shadows (guest-programmed) ------------------------------ */
 /* Boot defaults: everything enabled/unmasked, software EOI - the old
@@ -150,11 +163,30 @@ void mfp_hub_raise(int ch)
 
 void mfp_hub_timer_a_event(void)
 {
-    if (atomic_load(&g_tacr) != 8u)          /* only event-count mode    */
+    if (atomic_load(&g_tacr) != 8u) {        /* only event-count mode    */
+        if (hub_dbg()) {
+            static int shown;
+            if (shown < 4) {
+                shown++;
+                fprintf(stderr, "[mfphub] timerA event IGNORED: tacr=%02X "
+                        "(not event-count mode 8)\n", atomic_load(&g_tacr));
+            }
+        }
         return;
+    }
     uint32_t c = atomic_load(&g_tacnt);
     if (c <= 1u) {
         atomic_store(&g_tacnt, atomic_load(&g_tadr));
+        if (hub_dbg()) {
+            static int shown;
+            if (shown < 16) {
+                shown++;
+                fprintf(stderr, "[mfphub] timerA count expired -> raise ch13 "
+                        "(ier=%04X imr=%04X vpend=%04X visr=%04X)\n",
+                        atomic_load(&g_ier), atomic_load(&g_imr),
+                        atomic_load(&g_vpend), atomic_load(&g_visr));
+            }
+        }
         mfp_hub_raise(13);
     } else {
         atomic_store(&g_tacnt, c - 1u);
@@ -207,6 +239,15 @@ int mfp_hub_iack(void)
     if (atomic_load(&g_vr) & 0x08u)              /* software-EOI mode   */
         atomic_fetch_or(&g_visr, bit);
 
+    if (hub_dbg()) {
+        static int shown;
+        if (shown < 16) {
+            shown++;
+            fprintf(stderr, "[mfphub] IACK ch%d -> vec %02X (visr now %04X)\n",
+                    ch, (unsigned)((atomic_load(&g_vr) & 0xF0u) | (unsigned)ch),
+                    atomic_load(&g_visr));
+        }
+    }
     return (int)((atomic_load(&g_vr) & 0xF0u) | (unsigned)ch);
 }
 
