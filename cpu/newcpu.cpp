@@ -3103,13 +3103,30 @@ static uae_u8 atari_recover_mfp_vector_from_isrb(void)
 {
 #ifdef PISTORM_ATARI
 	uint8_t berr = 0;
+
+	/* ISRA first: channels 8-15 (Timer A/B, GPIP4-7) OUTRANK all of
+	 * ISRB, and the channel the chip just acknowledged is by definition
+	 * the highest in-service bit. The original ISRB-only read could not
+	 * see a stuck Timer A (ch 13) - which is exactly what wedged under
+	 * Paula: isra=20 held forever, everything at or below ch13 deaf. */
+	const uae_u8 isra = ps_read_8_fc(0x00FFFA0Fu, 5, &berr);
+	if (berr)
+	{
+		g_buserr = 0;
+		return 0;
+	}
+	for (int bit = 7; bit >= 0; bit--)
+	{
+		if (isra & (1u << bit))
+			return 0x48 + bit;
+	}
+
 	const uae_u8 isrb = ps_read_8_fc(0x00FFFA11u, 5, &berr);
 	if (berr)
 	{
 		g_buserr = 0;
 		return 0;
 	}
-
 	for (int bit = 7; bit >= 0; bit--)
 	{
 		if (isrb & (1u << bit))
@@ -5129,19 +5146,49 @@ static void do_interrupt (int nr)
 			}
 		else if (vec < 0x40 || vec > 0x4F)
 		{
-			noack_retries = 0;
-			const uae_u8 corrected_vec = vec & ~0x38;
-			noack_candidate_vec = (corrected_vec >= 0x40 && corrected_vec <= 0x4F) ? corrected_vec : 0;
+			/* The physical IACK cycle COMPLETED - the MFP set the acked
+			 * channel's in-service bit and cleared its pending bit - but
+			 * the vector byte arrived garbled. The old response (drop and
+			 * retry the IACK) re-acknowledged a chip whose pending was
+			 * already consumed, so the first channel's in-service bit was
+			 * never delivered against and never EOI'd: it WEDGED,
+			 * blocking itself and every lower channel. Field case: Paula's
+			 * Timer A at replay rate - isra=20 stuck with ipra=20 pending,
+			 * machine deaf below ch13 within seconds of the tune starting.
+			 * The chip itself knows which channel it acked: the highest
+			 * in-service bit. Recover the vector from ISRA/ISRB and
+			 * DELIVER. Only if no in-service bit is found (IACK probably
+			 * did not complete after all) fall back to the old retry. */
+			const uae_u8 isr_vector = atari_recover_mfp_vector_from_isrb();
 			static uint32_t bad_iack_count;
-			if (ATARI_MFP_IACK_DIAG && (bad_iack_count < 8 || (bad_iack_count & 0x3ff) == 0))
+			noack_retries = 0;
+			noack_candidate_vec = 0;
+			if (isr_vector >= 0x40 && isr_vector <= 0x4F)
 			{
-				fprintf(stderr, "[BADMFPACK->RETRY] iack=%04X vec=%02X cand=%02X pc=%08X stopped=%d count=%u\n",
-					(unsigned)pistorm_iack_vector, (unsigned)vec, (unsigned)noack_candidate_vec,
-				(unsigned)m68k_getpc(), regs.stopped, bad_iack_count + 1);
+				pistorm_iack_vector = isr_vector;
+				if (ATARI_MFP_IACK_DIAG && (bad_iack_count < 8 || (bad_iack_count & 0x3ff) == 0))
+				{
+					fprintf(stderr, "[BADMFPACK->ISRDELIVER] iack-vec=%02X recovered=%02X pc=%08X stopped=%d count=%u\n",
+						(unsigned)vec, (unsigned)isr_vector,
+						(unsigned)m68k_getpc(), regs.stopped, bad_iack_count + 1);
+				}
+				bad_iack_count++;
+				/* interrupt_taken stays true: deliver via the recovered
+				 * vector (Exception(nr+24) resolves through
+				 * pistorm_iack_vector / effective_interrupt_vector). */
 			}
-			bad_iack_count++;
-			interrupt_taken = false;
-			clear_irq_latch = false;
+			else
+			{
+				if (ATARI_MFP_IACK_DIAG && (bad_iack_count < 8 || (bad_iack_count & 0x3ff) == 0))
+				{
+					fprintf(stderr, "[BADMFPACK->RETRY] iack=%04X vec=%02X no-isr pc=%08X stopped=%d count=%u\n",
+						(unsigned)pistorm_iack_vector, (unsigned)vec,
+						(unsigned)m68k_getpc(), regs.stopped, bad_iack_count + 1);
+				}
+				bad_iack_count++;
+				interrupt_taken = false;
+				clear_irq_latch = false;
+			}
 		}
 		else
 		{
