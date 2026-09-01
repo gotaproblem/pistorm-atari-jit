@@ -11599,7 +11599,7 @@ void do_cycles_stop(int c)
 			{
 				static unsigned mfp_n;
 				if (!(mfp_n++ & 7)) {
-					extern uint8_t ps_read_8(uint32_t);
+					extern "C" uint8_t ps_read_8(uint32_t);
 					fprintf(stderr, "[STOP-MFP] iera=%02X ierb=%02X "
 							"ipra=%02X iprb=%02X isra=%02X isrb=%02X "
 							"imra=%02X imrb=%02X tacr=%02X\n",
