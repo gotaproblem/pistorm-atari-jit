@@ -282,8 +282,16 @@ int ym2149_init(void)
         ym_apply_gain();      /* folds in whatever the LMC shadow already holds */
     }
     {
+        /* Default raised 20 -> 100ms. MEASURED (tap + evlog): SDL's pull
+         * cadence bursts up to ~25ms ahead of real time in a ~1Hz limit
+         * cycle; any burst that outruns the render-behind margin applies
+         * pending register events early/bunched = audible flutter on
+         * digidrum-class streams. 20ms was inside the burst; field
+         * results: 50ms usable, 100ms clean. Cost is fixed audio
+         * latency, fine for music; PISTORM_YM_LAG_MS tunes it down for
+         * latency-sensitive use. */
         const char *l = getenv("PISTORM_YM_LAG_MS");
-        long ms = l ? atol(l) : 20;
+        long ms = l ? atol(l) : 100;
         if (ms < 5) ms = 5;
         if (ms > 200) ms = 200;
         g_lag_ns = (uint64_t)ms * 1000000ull;
