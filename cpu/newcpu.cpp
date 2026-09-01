@@ -11589,6 +11589,27 @@ void do_cycles_stop(int c)
 					fprintf(stderr, "\n");
 				}
 			}
+			/* REAL MFP register dump, every 8th heartbeat: ep6 freezing
+			 * mid-tune with VBL alive = level-6 totally silent. A stuck
+			 * in-service bit on the REAL chip (an EOI that never landed)
+			 * blocks that channel and everything below it - Timer A
+			 * stuck would kill replay + Timer C + keyboard in one
+			 * stroke, exactly the observed set. We ARE the CPU thread,
+			 * so real bus reads are safe here. */
+			{
+				static unsigned mfp_n;
+				if (!(mfp_n++ & 7)) {
+					extern uint8_t ps_read_8(uint32_t);
+					fprintf(stderr, "[STOP-MFP] iera=%02X ierb=%02X "
+							"ipra=%02X iprb=%02X isra=%02X isrb=%02X "
+							"imra=%02X imrb=%02X tacr=%02X\n",
+							ps_read_8(0x00FFFA07u), ps_read_8(0x00FFFA09u),
+							ps_read_8(0x00FFFA0Bu), ps_read_8(0x00FFFA0Du),
+							ps_read_8(0x00FFFA0Fu), ps_read_8(0x00FFFA11u),
+							ps_read_8(0x00FFFA13u), ps_read_8(0x00FFFA15u),
+							ps_read_8(0x00FFFA19u));
+				}
+			}
 		}
 	}
 	c *= cpucycleunit;
