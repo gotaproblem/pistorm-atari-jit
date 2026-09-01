@@ -575,6 +575,49 @@ static void *ipl_task(void *)
         machine_cookie_tick();
     }
 
+    /* MFP in-service orphan watchdog. A garbled IACK vector read can
+     * leave the real chip with a channel's in-service bit set that no
+     * guest handler will ever EOI - that channel and everything below
+     * it then go silent forever. Field cases, both caught in [STOP-MFP]
+     * register dumps: Timer A (isra=20) killing Paula's replay, and
+     * Timer C (isrb=20) killing hz200 so the whole machine crawls. The
+     * BADMFPACK->ISRDELIVER fix covers the path we identified; this
+     * covers whichever rare siblings remain. Signature that no healthy
+     * machine shows: in-service AND same-channel pending, persisting
+     * across two ~1s samples (real handlers hold in-service for
+     * microseconds). Recovery: host-side EOI (write a 0 to the bit;
+     * 1s leave other channels untouched), logged loudly. */
+    {
+      static unsigned wd_stride;
+      static uint16_t wd_prev;
+      if (!(++wd_stride & 0xFFFFu))          /* ~every second at 15us/pass */
+      {
+        uint16_t isr = ((uint16_t)ps_read_8(0x00FFFA0Fu) << 8) |
+                        ps_read_8(0x00FFFA11u);
+        uint16_t ipr = ((uint16_t)ps_read_8(0x00FFFA0Bu) << 8) |
+                        ps_read_8(0x00FFFA0Du);
+        uint16_t orph = isr & ipr;           /* in-service + re-pending  */
+        uint16_t fire = orph & wd_prev;      /* seen two samples running */
+        wd_prev = orph;
+        if (fire)
+        {
+          int ch;
+          for (ch = 15; ch >= 0; ch--)
+          {
+            if (fire & (1u << ch))
+            {
+              uint32_t reg = (ch >= 8) ? 0x00FFFA0Fu : 0x00FFFA11u;
+              ps_write_8(reg, (uint8_t)~(1u << (ch & 7)));
+              fprintf(stderr, "[MFP-WD] orphaned in-service ch%d cleared "
+                      "(isr=%04X ipr=%04X) - garbled-IACK wedge recovered\n",
+                      ch, isr, ipr);
+            }
+          }
+          wd_prev = 0;
+        }
+      }
+    }
+
     /* STBOX sandbox micro-slice: the second, Musashi-emulated ST. Admission
      * rule compliant by construction - stbox_slice() is memory-only (the
      * whole sandbox machine lives in process memory; file I/O, DRM and
