@@ -472,7 +472,15 @@ static int g7_deliver(void)
         const uint8_t *p = natmem_offset + 0x13Cu;
         uint32_t vec = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
                        ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
-        return (vec != 0 && vec < 0x00400000u);
+        /* "App handler installed" = vector NOT pointing into ROM. The
+         * previous predicate (vec < 4MB = ST RAM) rejected handlers in
+         * TT-RAM (0x01000000+), where a fastram-loaded player lives -
+         * Paula's handler is exactly there on TT-RAM machines. ROM
+         * windows: 0xE00000-0xEFFFFF (1MB image) and the 0xFC0000
+         * legacy TOS window. */
+        int rom = (vec >= 0x00E00000u && vec < 0x00F00000u) ||
+                  (vec >= 0x00FC0000u && vec < 0x01000000u);
+        return (vec != 0 && !rom);
     }
     return m;
 }
