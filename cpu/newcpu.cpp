@@ -2870,6 +2870,7 @@ extern volatile uint8_t g_buserr;
  * in x0 - a random one-byte memory scribble on every call (crashed in
  * ps_read_ipl with si_addr=0 under heavy IDE+TimerA load). */
 extern "C" void ps_read_ipl(uint8_t *ipl);
+extern "C" uint8_t ps_read_8(uint32_t address);
 extern "C" uint8_t ps_read_8_fc(uint32_t addr, uint8_t fc_value, uint8_t *berr_out);
 extern "C" volatile uint32_t pistorm_mfp_iack_counts[16];
 extern "C" volatile uint8_t pistorm_mfp_last_iack_vector;
@@ -11598,8 +11599,7 @@ void do_cycles_stop(int c)
 			 * so real bus reads are safe here. */
 			{
 				static unsigned mfp_n;
-				if (!(mfp_n++ & 7)) {
-					extern "C" uint8_t ps_read_8(uint32_t);
+				if (!(mfp_n++ & 7)) {   /* ps_read_8: file-scope extern "C" above */
 					fprintf(stderr, "[STOP-MFP] iera=%02X ierb=%02X "
 							"ipra=%02X iprb=%02X isra=%02X isrb=%02X "
 							"imra=%02X imrb=%02X tacr=%02X\n",
