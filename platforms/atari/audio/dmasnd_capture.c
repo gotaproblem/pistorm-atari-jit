@@ -458,8 +458,22 @@ static int g7_mode(void)
 static int g7_deliver(void)
 {
     int m = g7_mode();
-    if (m == 2)
-        return atomic_load(&g_g7_app);
+    if (m == 2) {
+        /* AUTO policy, sampled FRESH at every frame boundary (50Hz x a
+         * 4-byte natmem read - free). The old cached verdict was taken
+         * at the sound-ENABLE commit; Paula's STE mode enables DMA
+         * first and installs its $13C handler + IERA bit7 AFTER, so
+         * the cache said "OS/ROM: withhold" forever and the frame
+         * interrupt never came - the guest looped one buffer (rep=51/s,
+         * stg=0, position frozen). PISTORM_DMASND_GPIP7=1 confirmed:
+         * forced delivery = full-rate playback. Reading live removes
+         * the ordering assumption entirely; the reboot protection
+         * (ROM monitor-detect handler = withhold) is preserved. */
+        const uint8_t *p = natmem_offset + 0x13Cu;
+        uint32_t vec = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                       ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+        return (vec != 0 && vec < 0x00400000u);
+    }
     return m;
 }
 
