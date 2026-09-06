@@ -8509,3 +8509,428 @@ MIDFUNC(3,jnf_MEM_WRITEMEMBANK,(RR4 adr, RR4 source, IM8 offset))
 	compemu_raw_call_r(REG_WORK3);
 }
 MENDFUNC(3,jnf_MEM_WRITEMEMBANK,(RR4 adr, RR4 source, IM8 offset))
+
+/*************************************************************************
+ * PiStorm additions: MOVE to/from CCR, MOVE from SR, TAS, CHK
+ *
+ * Flag model reminder: the 68k N/Z/V/C live in the native NZCV register
+ * (N=31 Z=30 C=29 V=28, C possibly inverted while flags_carry_inverted),
+ * X is the virtual register FLAGX holding 0/1 in bit 0.
+ *************************************************************************/
+
+/* Build the 68k CCR byte (X N Z V C in bits 4..0) into REG_WORK2 from the
+ * live native flags plus the X register x. Clobbers REG_WORK1/REG_WORK3.
+ * Caller must have done make_flags_live() at compile time. */
+STATIC_INLINE void arm64_ccr_to_work2(int x)
+{
+	MRS_NZCV_x(REG_WORK1);
+	if (flags_carry_inverted)
+		EOR_xxCflag(REG_WORK1, REG_WORK1);   /* read-only fixup, state untouched */
+	UBFX_wwii(REG_WORK2, REG_WORK1, 30, 2);  /* bit1=N bit0=Z */
+	LSL_wwi(REG_WORK2, REG_WORK2, 2);        /* N->3, Z->2   */
+	UBFX_wwii(REG_WORK3, REG_WORK1, 28, 1);  /* V            */
+	BFI_wwii(REG_WORK2, REG_WORK3, 1, 1);
+	UBFX_wwii(REG_WORK3, REG_WORK1, 29, 1);  /* C            */
+	BFI_wwii(REG_WORK2, REG_WORK3, 0, 1);
+	BFI_wwii(REG_WORK2, x, 4, 1);            /* X            */
+}
+
+/*
+ * MOVE <ea>,CCR
+ * X N Z V C all set from bits 4..0 of the source.
+ */
+MIDFUNC(1,jff_MOVE2CCR,(RR4 s))
+{
+	if (isconst(s)) {
+		uae_u32 v = live.state[s].val;
+		MOV_wish(REG_WORK1, ARM_CCR_MAP[v & 0xf] >> 16, 16);
+		MSR_NZCV_x(REG_WORK1);
+		int x = writereg(FLAGX);
+		MOV_wi(x, (v >> 4) & 1);
+		unlock2(x);
+	} else {
+		s = readreg(s);
+		int x = writereg(FLAGX);
+		UBFX_wwii(x, s, 4, 1);                   /* X */
+		UBFX_wwii(REG_WORK1, s, 2, 2);           /* bit1=N bit0=Z */
+		LSL_wwi(REG_WORK1, REG_WORK1, 30);       /* N->31, Z->30 */
+		UBFX_wwii(REG_WORK2, s, 1, 1);           /* V -> 28 */
+		BFI_wwii(REG_WORK1, REG_WORK2, 28, 1);
+		UBFX_wwii(REG_WORK2, s, 0, 1);           /* C -> 29 */
+		BFI_wwii(REG_WORK1, REG_WORK2, 29, 1);
+		MSR_NZCV_x(REG_WORK1);
+		unlock2(x);
+		unlock2(s);
+	}
+	flags_carry_inverted = false;
+}
+MENDFUNC(1,jff_MOVE2CCR,(RR4 s))
+
+/*
+ * MOVE CCR,<ea>   (word: upper byte 0)
+ * Flags unchanged. Caller does make_flags_live() first.
+ */
+MIDFUNC(1,jnf_MOVE_CCR2,(RW2 d))
+{
+	int x = readreg(FLAGX);
+	INIT_WREG_w(d);
+
+	arm64_ccr_to_work2(x);
+	if (targetIsReg) {
+		BFI_wwii(d, REG_WORK2, 0, 16);
+	} else {
+		MOV_ww(d, REG_WORK2);
+	}
+
+	unlock2(d);
+	unlock2(x);
+}
+MENDFUNC(1,jnf_MOVE_CCR2,(RW2 d))
+
+/*
+ * MOVE SR,<ea>
+ * SR = T1<<15 | T0<<14 | S<<13 | M<<12 | IPL<<8 | CCR, assembled exactly
+ * like MakeSR(). Flags unchanged. Caller does make_flags_live() first and
+ * is responsible for the privilege check (see compemu_arm.cpp).
+ */
+MIDFUNC(1,jnf_MOVE_SR2,(RW2 d))
+{
+	int x = readreg(FLAGX);
+	INIT_WREG_w(d);
+
+	arm64_ccr_to_work2(x);
+
+	uintptr base = (uintptr)&regs;
+	LDRB_wXi(REG_WORK1, R_REGSTRUCT, (uintptr)&regs.t1 - base);
+	BFI_wwii(REG_WORK2, REG_WORK1, 15, 1);
+	LDRB_wXi(REG_WORK1, R_REGSTRUCT, (uintptr)&regs.t0 - base);
+	BFI_wwii(REG_WORK2, REG_WORK1, 14, 1);
+	LDRB_wXi(REG_WORK1, R_REGSTRUCT, (uintptr)&regs.s - base);
+	BFI_wwii(REG_WORK2, REG_WORK1, 13, 1);
+	LDRB_wXi(REG_WORK1, R_REGSTRUCT, (uintptr)&regs.m - base);
+	BFI_wwii(REG_WORK2, REG_WORK1, 12, 1);
+	LDR_wXi(REG_WORK1, R_REGSTRUCT, (uintptr)&regs.intmask - base);
+	BFI_wwii(REG_WORK2, REG_WORK1, 8, 3);
+
+	if (targetIsReg) {
+		BFI_wwii(d, REG_WORK2, 0, 16);
+	} else {
+		MOV_ww(d, REG_WORK2);
+	}
+
+	unlock2(d);
+	unlock2(x);
+}
+MENDFUNC(1,jnf_MOVE_SR2,(RW2 d))
+
+/*
+ * TAS <ea>
+ * N,Z from the byte, V,C cleared, X unaffected; then bit 7 is set.
+ */
+MIDFUNC(1,jff_TAS,(RW1 d))
+{
+	INIT_REG_b(d);
+
+	SIGNED8_REG_2_REG(REG_WORK1, d);
+	TST_ww(REG_WORK1, REG_WORK1);
+	SET_xxbit(d, d, 7);              /* only touches bit 7, byte-safe for Dn */
+
+	flags_carry_inverted = false;
+	unlock2(d);
+}
+MENDFUNC(1,jff_TAS,(RW1 d))
+
+/*
+ * CHK.W / CHK.L <ea>,Dn
+ * Exception 6 if Dn < 0 or Dn > bound (signed). Flags: N,Z from Dn, V,C
+ * cleared (exact 68000 behaviour; the 020+ "undefined" V is approximated).
+ * Signalled through regs.jit_exception like DIVU/DIVS - the handler must
+ * call register_possible_exception().
+ */
+STATIC_INLINE void arm64_chk_common(int dn, int bound)
+{
+	/* REG_WORK1 = Dn, REG_WORK2 = bound (both already sign-extended) */
+	CMP_ww(REG_WORK1, REG_WORK2);
+	CSET_wc(REG_WORK3, NATIVE_CC_GT);                  /* Dn > bound */
+	ORR_wwwLSRi(REG_WORK3, REG_WORK3, REG_WORK1, 31);  /* | Dn < 0   */
+	CBZ_wi(REG_WORK3, 3);                              /* in range: skip MOV+STR */
+	MOV_wi(REG_WORK3, 6);
+	uintptr idx = (uintptr)(&regs.jit_exception) - (uintptr)(&regs);
+	STR_wXi(REG_WORK3, R_REGSTRUCT, idx);
+	TST_ww(REG_WORK1, REG_WORK1);
+	(void)dn; (void)bound;
+}
+
+MIDFUNC(2,jff_CHK_w,(RR4 d, RR4 s))
+{
+	int s_is_d = (s == d);
+	s = readreg(s);
+	d = s_is_d ? s : readreg(d);
+
+	SIGNED16_REG_2_REG(REG_WORK1, d);
+	SIGNED16_REG_2_REG(REG_WORK2, s);
+	arm64_chk_common(d, s);
+
+	flags_carry_inverted = false;
+	unlock2(s);
+	if (!s_is_d)
+		unlock2(d);
+}
+MENDFUNC(2,jff_CHK_w,(RR4 d, RR4 s))
+
+MIDFUNC(2,jff_CHK_l,(RR4 d, RR4 s))
+{
+	int s_is_d = (s == d);
+	s = readreg(s);
+	d = s_is_d ? s : readreg(d);
+
+	MOV_ww(REG_WORK1, d);
+	MOV_ww(REG_WORK2, s);
+	arm64_chk_common(d, s);
+
+	flags_carry_inverted = false;
+	unlock2(s);
+	if (!s_is_d)
+		unlock2(d);
+}
+MENDFUNC(2,jff_CHK_l,(RR4 d, RR4 s))
+
+/*************************************************************************
+ * PiStorm addition: guarded WRITE fast path (mirror of MEM_READ_GUARDED).
+ *
+ * With jit_n_addr_unsafe forced on, every compiled store previously went
+ * through jnf_MEM_WRITEMEMBANK (a full bank-handler call). Under a TT-RAM-
+ * resident workload (DOSBox, GCC, large MiNT apps) that was measured at
+ * ~4.4% of the whole system in tt_lput/tt_wput/tt_bput/tt_xlate.
+ *
+ * These emit a runtime bank check: bank->jit_write_flag (addrbank offset
+ * 0x70) == 0 means "inline-store-safe RAM" and the store goes straight to
+ * [R_MEMSTART + adr] with the 68k big-endian byte order; nonzero routes to
+ * the bank put() exactly as before.
+ *
+ * SAFETY: after this change the ONLY bank with jit_write_flag == 0 is
+ * TT-RAM, whose SMC coherency is mprotect-based (a store into a protected
+ * code page faults and the handler invalidates) - so an inline store is
+ * identical in effect to tt_lput. ST-RAM (software pistorm_smc), ROM and
+ * all I/O keep jit_write_flag = S_WRITE and stay on the handler path, so
+ * SMC and register semantics are untouched for them. Gated by the same
+ * PISTORM_JIT_GUARD env knob as the read path (mode 0 disables).
+ *************************************************************************/
+
+MIDFUNC(3,jnf_MEM_WRITE_GUARDED_b,(RR4 adr, RR4 source, IM8 offset))
+{
+	clobber_flags();
+
+	adr = readreg_specific(adr, REG_PAR1);
+	source = readreg_specific(source, REG_PAR2);
+	prepare_for_call_1();
+	unlock2(adr);
+	unlock2(source);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);   // WORK3 = mem_banks[page]
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x70);               // WORK1 = bank->jit_write_flag
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);                                          // nonzero => I/O or SMC RAM => slow
+
+	// FAST: direct byte store to natmem (no byte swap for a byte)
+	STRB_wXx(REG_PAR2, REG_PAR1, R_MEMSTART);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	// SLOW: call bank->bput(adr, value)  (WORK3 still holds the bank pointer)
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+}
+MENDFUNC(3,jnf_MEM_WRITE_GUARDED_b,(RR4 adr, RR4 source, IM8 offset))
+
+MIDFUNC(3,jnf_MEM_WRITE_GUARDED_w,(RR4 adr, RR4 source, IM8 offset))
+{
+	clobber_flags();
+
+	adr = readreg_specific(adr, REG_PAR1);
+	source = readreg_specific(source, REG_PAR2);
+	prepare_for_call_1();
+	unlock2(adr);
+	unlock2(source);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x70);
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	// FAST: byte-swap to big-endian, direct halfword store
+	REV16_ww(REG_WORK1, REG_PAR2);
+	STRH_wXx(REG_WORK1, REG_PAR1, R_MEMSTART);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+}
+MENDFUNC(3,jnf_MEM_WRITE_GUARDED_w,(RR4 adr, RR4 source, IM8 offset))
+
+MIDFUNC(3,jnf_MEM_WRITE_GUARDED_l,(RR4 adr, RR4 source, IM8 offset))
+{
+	clobber_flags();
+
+	adr = readreg_specific(adr, REG_PAR1);
+	source = readreg_specific(source, REG_PAR2);
+	prepare_for_call_1();
+	unlock2(adr);
+	unlock2(source);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x70);
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);
+
+	// FAST: byte-swap to big-endian, direct word store
+	REV_ww(REG_WORK1, REG_PAR2);
+	STR_wXx(REG_WORK1, REG_PAR1, R_MEMSTART);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+}
+MENDFUNC(3,jnf_MEM_WRITE_GUARDED_l,(RR4 adr, RR4 source, IM8 offset))
+
+/*************************************************************************
+ * PiStorm addition: guarded address-translation fast path.
+ *
+ * get_n_addr() turns a guest address into a host pointer (natmem + addr)
+ * for MOVEM / MOVE16, which then read AND write through that pointer
+ * directly. The bank xlate() already returns a raw natmem pointer for every
+ * direct bank (it adds no SMC), so inlining is identical in effect - this
+ * just skips the C call. Gated on jit_write_flag == 0, so only TT-RAM (the
+ * hot tt_xlate, ~0.9% under DOSBox) inlines; ST-RAM/ROM/I/O keep the xlate
+ * handler unchanged. mprotect SMC covers inline TT-RAM writes as before.
+ *************************************************************************/
+MIDFUNC(3,jnf_MEM_GETADR_GUARDED,(W4 dest, RR4 adr, IM8 offset))
+{
+	clobber_flags();
+	if (dest != adr) {
+		COMPCALL(forget_about)(dest);
+	}
+
+	adr = readreg_specific(adr, REG_PAR1);
+	prepare_for_call_1();
+	unlock2(adr);
+	prepare_for_call_2();
+
+	uintptr idx = (uintptr)(&regs.mem_banks) - (uintptr)(&regs);
+	LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+	LSR_wwi(REG_WORK1, REG_PAR1, 16);
+	LDR_xXxLSLi(REG_WORK3, REG_WORK2, REG_WORK1, 1);   // WORK3 = mem_banks[page]
+	LDR_wXi(REG_WORK1, REG_WORK3, 0x70);               // WORK1 = bank->jit_write_flag
+	CMP_wi(REG_WORK1, 0);
+	uae_u32 *b_slow = (uae_u32 *)get_target();
+	BNE_i(0);                                          // nonzero => not plain RAM => slow
+
+	// FAST: host pointer = R_MEMSTART + (zero-extended) guest addr
+	ADD_xxwEX(REG_RESULT, R_MEMSTART, REG_PAR1, EX_UXTW);
+	uae_u32 *b_done = (uae_u32 *)get_target();
+	B_i(0);
+
+	// SLOW: call bank->xlate(adr) -> pointer in REG_RESULT (WORK3 = bank ptr)
+	write_jmp_target(b_slow, (uintptr)get_target());
+	LDR_xXi(REG_WORK3, REG_WORK3, offset);
+	compemu_raw_call_r(REG_WORK3);
+
+	write_jmp_target(b_done, (uintptr)get_target());
+
+	live.nat[REG_RESULT].holds[0] = dest;
+	live.nat[REG_RESULT].nholds = 1;
+	live.nat[REG_RESULT].touched = touchcnt++;
+
+	live.state[dest].realreg = REG_RESULT;
+	live.state[dest].realind = 0;
+	live.state[dest].val = 0;
+	set_status(dest, DIRTY);
+}
+MENDFUNC(3,jnf_MEM_GETADR_GUARDED,(W4 dest, RR4 adr, IM8 offset))
+
+/*************************************************************************
+ * PiStorm addition: BFEXTU, register (Dn) source, immediate offset/width.
+ *
+ * GCC emits BFEXTU for C struct bitfield reads; under DOSBox it was the
+ * most-executed non-idle interpreted opcode. Left interpreted it is not a
+ * big direct cost, but it is cflow=0 (mid-block), so each one forced a
+ * flush-all + reinit bracket that fragmented the surrounding compiled block.
+ *
+ * Semantics (68020+ BFEXTU Dn): rotate the source left by <offset> so the
+ * field's MSB reaches bit 31, then logical-shift-right by (32-width) to
+ * right-justify and zero-extend into the destination Dn. Flags: N = field
+ * MSB, Z = field==0, V=C=0, X untouched - matching op_e9c0_40_ff exactly.
+ * The register wrap of a data-register bitfield is handled for free by ROR.
+ * Only the immediate offset AND immediate width case is compiled here; the
+ * register offset/width forms fall back to the interpreter (see handler).
+ *************************************************************************/
+MIDFUNC(4,jnf_BFEXTU_ii,(W4 d, RR4 s, IM8 offs, IM8 width))
+{
+	s = readreg(s);
+	if (offs)
+		ROR_wwi(REG_WORK1, s, (32 - offs) & 31);   // rotate LEFT by offs
+	else
+		MOV_ww(REG_WORK1, s);
+	unlock2(s);
+
+	d = writereg(d);
+	if (width < 32)
+		LSR_wwi(d, REG_WORK1, 32 - width);         // right-justify, zero-extend
+	else
+		MOV_ww(d, REG_WORK1);
+	unlock2(d);
+}
+MENDFUNC(4,jnf_BFEXTU_ii,(W4 d, RR4 s, IM8 offs, IM8 width))
+
+MIDFUNC(4,jff_BFEXTU_ii,(W4 d, RR4 s, IM8 offs, IM8 width))
+{
+	s = readreg(s);
+	if (offs)
+		ROR_wwi(REG_WORK1, s, (32 - offs) & 31);
+	else
+		MOV_ww(REG_WORK1, s);
+	unlock2(s);
+
+	d = writereg(d);
+	if (width < 32)
+		LSR_wwi(d, REG_WORK1, 32 - width);
+	else
+		MOV_ww(d, REG_WORK1);
+
+	// Flags: put the field's MSB at bit 31 so a plain TST gives N and Z.
+	if (width < 32)
+		LSL_wwi(REG_WORK2, d, 32 - width);
+	else
+		MOV_ww(REG_WORK2, d);
+	TST_ww(REG_WORK2, REG_WORK2);                  // N=field MSB, Z=field==0, C=V=0
+	flags_carry_inverted = false;
+
+	unlock2(d);
+}
+MENDFUNC(4,jff_BFEXTU_ii,(W4 d, RR4 s, IM8 offs, IM8 width))

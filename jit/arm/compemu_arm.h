@@ -85,13 +85,13 @@ typedef union {
 #define MAXCYCLES (1000 * CYCLE_UNIT)
 
 #define BYTES_PER_INST 10240  /* paranoid ;-) */
-#if defined(CPU_arm)
-#define LONGEST_68K_INST 256 /* The number of bytes the longest possible
-			       68k instruction takes */
-#else
-#define LONGEST_68K_INST 16 /* The number of bytes the longest possible
-			       68k instruction takes */
-#endif
+/* Bytes added past the START of the last instruction of a block when sizing
+ * its checksum range (compile_block: csi->length = max_pcp - min_pcp + this).
+ * The longest 68020+ instruction is 22 bytes (opcode + two 10-byte full-format
+ * EAs); 68000 is 10. The old ARM value of 256 made every block checksum ~234
+ * bytes of whatever followed it, and any data write in that window forced a
+ * needless recompile. calc_checksum rounds to 4-byte words, so 22 -> 24 read. */
+#define LONGEST_68K_INST 22
 #define MAX_CHECKSUM_LEN 2048 /* The maximum size we calculate checksums
 				 for. Anything larger will be flushed
 				 unconditionally even with SOFT_FLUSH */
@@ -130,6 +130,7 @@ typedef union {
  * compemu_support.c */
 extern void compiler_init(void);
 extern void compiler_exit(void);
+extern void compiler_dump_stats(void);
 extern void build_comp(void);
 extern void set_cache_state(int enabled);
 #ifdef JIT

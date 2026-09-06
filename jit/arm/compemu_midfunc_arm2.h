@@ -472,3 +472,23 @@ DECLARE_MIDFUNC(jnf_MEM_READ_GUARDED_NS_l(W4 d, RR4 adr));
 DECLARE_MIDFUNC(jnf_MEM_READ_GUARDED_NS_w(W4 d, RR4 adr));
 DECLARE_MIDFUNC(jnf_MEM_READ_GUARDED_NS_b(W4 d, RR4 adr));
 DECLARE_MIDFUNC(jnf_MEM_WRITEMEMBANK(RR4 adr, RR4 source, IM8 offset));
+
+// PiStorm additions (AArch64 backend only; handlers are guarded by CPU_AARCH64)
+DECLARE_MIDFUNC(jff_MOVE2CCR(RR4 s));
+DECLARE_MIDFUNC(jnf_MOVE_CCR2(RW2 d));
+DECLARE_MIDFUNC(jnf_MOVE_SR2(RW2 d));
+DECLARE_MIDFUNC(jff_TAS(RW1 d));
+DECLARE_MIDFUNC(jff_CHK_w(RR4 d, RR4 s));
+DECLARE_MIDFUNC(jff_CHK_l(RR4 d, RR4 s));
+
+/* NOTE: the guarded-WRITE fast path (jnf_MEM_WRITE_GUARDED_{b,w,l}) is
+ * declared locally in compemu_support_arm.cpp instead of here. Nothing in
+ * compemu_arm.cpp (the ~20-minute generated object) references it, and this
+ * header is pulled in by compemu_arm.h -> compemu_arm.cpp, so declaring it
+ * here would rebuild that huge TU on every memory-path tweak. Keep memory
+ * fast-path declarations out of this shared header. */
+
+// PiStorm addition: BFEXTU register-source, immediate offset/width (used by
+// hand-written op_e9c0.._e9c7 handlers in compemu_arm.cpp).
+DECLARE_MIDFUNC(jnf_BFEXTU_ii(W4 d, RR4 s, IM8 offs, IM8 width));
+DECLARE_MIDFUNC(jff_BFEXTU_ii(W4 d, RR4 s, IM8 offs, IM8 width));

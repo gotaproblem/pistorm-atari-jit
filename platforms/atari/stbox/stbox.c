@@ -52,7 +52,8 @@ static uint8_t  g_rom[512 * 1024]; /* TOS image                         */
 static uint32_t g_rom_base;        /* 0xE00000 or 0xFC0000, from header */
 static uint32_t g_rom_size;
 
-static volatile int g_armed;       /* slice engine may run              */
+volatile int stbox_core_armed_flag; /* slice engine may run (exported for the inline gate) */
+#define g_armed stbox_core_armed_flag
 static volatile int g_reset_req;   /* cold reset on next slice          */
 
 /* pacing */
@@ -514,6 +515,8 @@ static void fdc_command(uint8_t v)
         stbox_rfdc.done = 0;
         __atomic_thread_fence(__ATOMIC_RELEASE);
         stbox_rfdc.req = 1;
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        stbox_errand_active = 1;
         stbox_rfdc.kick = 1;
         g_rfdc_next_kick = g_total_cyc + RFDC_KICK_CYC;
         stbox_cpu_kick();

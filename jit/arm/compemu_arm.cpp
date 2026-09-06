@@ -54526,6 +54526,1357 @@ uae_u32 REGPARAM2 op_f620_0_comp_nf(uae_u32 opcode) {
 	return 0;
 }
 
+
+/*************************************************************************
+ * PiStorm hand-added handlers (not from gencomp): MOVE to/from CCR,
+ * MOVE from SR, TAS, CHK. Midfuncs live in compemu_midfunc_arm64_2.cpp.
+ * The _nf tables point at these same _ff handlers (see compstbl_arm.cpp).
+ *************************************************************************/
+
+/* MV2SR.B Dn,CCR */
+uae_u32 REGPARAM2 op_44c0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = srcreg;
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (An),CCR */
+uae_u32 REGPARAM2 op_44d0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (An)+,CCR */
+uae_u32 REGPARAM2 op_44d8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	arm_ADD_l_ri8(srcreg + 8, 2);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B -(An),CCR */
+uae_u32 REGPARAM2 op_44e0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	arm_SUB_l_ri8(srcreg + 8, 2);
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (d16,An),CCR */
+uae_u32 REGPARAM2 op_44e8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	lea_l_brr(srca, 8 + srcreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (d8,An,Xn),CCR */
+uae_u32 REGPARAM2 op_44f0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	calc_disp_ea_020(srcreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (xxx).W,CCR */
+uae_u32 REGPARAM2 op_44f8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (xxx).L,CCR */
+uae_u32 REGPARAM2 op_44f9_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (d16,PC),CCR */
+uae_u32 REGPARAM2 op_44fa_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
+	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
+	mov_l_ri(srca, address + PC16off);
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B (d8,PC,Xn),CCR */
+uae_u32 REGPARAM2 op_44fb_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	int pctmp = alloc_scratch();
+	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
+	mov_l_ri(pctmp, address);
+	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	release_scratch(pctmp);
+	int src = alloc_scratch();
+	readword(srca, src);
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MV2SR.B #<data>.W,CCR */
+uae_u32 REGPARAM2 op_44fc_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = alloc_scratch();
+	mov_l_ri(src, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	dont_care_flags();
+	jff_MOVE2CCR(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,Dn */
+uae_u32 REGPARAM2 op_42c0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = srcreg;
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,(An) */
+uae_u32 REGPARAM2 op_42d0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,(An)+ */
+uae_u32 REGPARAM2 op_42d8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	arm_ADD_l_ri8(srcreg + 8, 2);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,-(An) */
+uae_u32 REGPARAM2 op_42e0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	arm_SUB_l_ri8(srcreg + 8, 2);
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,(d16,An) */
+uae_u32 REGPARAM2 op_42e8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	lea_l_brr(srca, 8 + srcreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,(d8,An,Xn) */
+uae_u32 REGPARAM2 op_42f0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	calc_disp_ea_020(srcreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,(xxx).W */
+uae_u32 REGPARAM2 op_42f8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.B CCR,(xxx).L */
+uae_u32 REGPARAM2 op_42f9_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_CCR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,Dn */
+uae_u32 REGPARAM2 op_40c0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int src = srcreg;
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,(An) */
+uae_u32 REGPARAM2 op_40d0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,(An)+ */
+uae_u32 REGPARAM2 op_40d8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	arm_ADD_l_ri8(srcreg + 8, 2);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,-(An) */
+uae_u32 REGPARAM2 op_40e0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = srcreg + 8;
+	arm_SUB_l_ri8(srcreg + 8, 2);
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,(d16,An) */
+uae_u32 REGPARAM2 op_40e8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = alloc_scratch();
+	lea_l_brr(srca, 8 + srcreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,(d8,An,Xn) */
+uae_u32 REGPARAM2 op_40f0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = alloc_scratch();
+	calc_disp_ea_020(srcreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,(xxx).W */
+uae_u32 REGPARAM2 op_40f8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = alloc_scratch();
+	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* MVSR2.W SR,(xxx).L */
+uae_u32 REGPARAM2 op_40f9_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	/* Privileged on 68010+. Decided at compile time: a block compiled while in
+	 * user mode stays interpreted so the privilege violation (which TOS uses to
+	 * emulate this instruction) is raised with an exact CPU state. */
+	if (currprefs.cpu_model >= 68010 && !regs.s) {
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int srca = alloc_scratch();
+	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
+	int src = alloc_scratch();
+	make_flags_live();
+	jnf_MOVE_SR2(src);
+	writeword(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B Dn */
+uae_u32 REGPARAM2 op_4ac0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = srcreg;
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B (An) */
+uae_u32 REGPARAM2 op_4ad0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B (An)+ */
+uae_u32 REGPARAM2 op_4ad8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	arm_ADD_l_ri8(srcreg + 8, 1);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B -(An) */
+uae_u32 REGPARAM2 op_4ae0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	arm_SUB_l_ri8(srcreg + 8, 1);
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B (d16,An) */
+uae_u32 REGPARAM2 op_4ae8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	lea_l_brr(srca, 8 + srcreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B (d8,An,Xn) */
+uae_u32 REGPARAM2 op_4af0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	calc_disp_ea_020(srcreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B (xxx).W */
+uae_u32 REGPARAM2 op_4af8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* TAS.B (xxx).L */
+uae_u32 REGPARAM2 op_4af9_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
+	int src = alloc_scratch();
+	readbyte(srca, src);
+	dont_care_flags();
+	jff_TAS(src);
+	live_flags();
+	writebyte(srca, src);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W Dn,Dn */
+uae_u32 REGPARAM2 op_4180_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = srcreg;
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (An),Dn */
+uae_u32 REGPARAM2 op_4190_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (An)+,Dn */
+uae_u32 REGPARAM2 op_4198_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	arm_ADD_l_ri8(srcreg + 8, 2);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W -(An),Dn */
+uae_u32 REGPARAM2 op_41a0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	arm_SUB_l_ri8(srcreg + 8, 2);
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (d16,An),Dn */
+uae_u32 REGPARAM2 op_41a8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	lea_l_brr(srca, 8 + srcreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (d8,An,Xn),Dn */
+uae_u32 REGPARAM2 op_41b0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	calc_disp_ea_020(srcreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (xxx).W,Dn */
+uae_u32 REGPARAM2 op_41b8_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (xxx).L,Dn */
+uae_u32 REGPARAM2 op_41b9_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (d16,PC),Dn */
+uae_u32 REGPARAM2 op_41ba_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
+	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
+	mov_l_ri(srca, address + PC16off);
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W (d8,PC,Xn),Dn */
+uae_u32 REGPARAM2 op_41bb_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	int pctmp = alloc_scratch();
+	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
+	mov_l_ri(pctmp, address);
+	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	release_scratch(pctmp);
+	int src = alloc_scratch();
+	readword(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.W #<data>.W,Dn */
+uae_u32 REGPARAM2 op_41bc_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = alloc_scratch();
+	mov_l_ri(src, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_w(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L Dn,Dn */
+uae_u32 REGPARAM2 op_4100_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = srcreg;
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (An),Dn */
+uae_u32 REGPARAM2 op_4110_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (An)+,Dn */
+uae_u32 REGPARAM2 op_4118_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	arm_ADD_l_ri8(srcreg + 8, 4);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L -(An),Dn */
+uae_u32 REGPARAM2 op_4120_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = srcreg + 8;
+	arm_SUB_l_ri8(srcreg + 8, 4);
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (d16,An),Dn */
+uae_u32 REGPARAM2 op_4128_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	lea_l_brr(srca, 8 + srcreg, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (d8,An,Xn),Dn */
+uae_u32 REGPARAM2 op_4130_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_s32 srcreg = (opcode & 7);
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	calc_disp_ea_020(srcreg + 8, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (xxx).W,Dn */
+uae_u32 REGPARAM2 op_4138_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2));
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (xxx).L,Dn */
+uae_u32 REGPARAM2 op_4139_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	mov_l_ri(srca, comp_get_ilong((m68k_pc_offset += 4) - 4)); /* absl */
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (d16,PC),Dn */
+uae_u32 REGPARAM2 op_413a_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
+	uae_s32 PC16off = (uae_s32) (uae_s16) comp_get_iword((m68k_pc_offset += 2) - 2);
+	mov_l_ri(srca, address + PC16off);
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L (d8,PC,Xn),Dn */
+uae_u32 REGPARAM2 op_413b_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int srca = alloc_scratch();
+	int pctmp = alloc_scratch();
+	uae_u32 address = start_pc + ((char *) comp_pc_p - (char *) start_pc_p) + m68k_pc_offset;
+	mov_l_ri(pctmp, address);
+	calc_disp_ea_020(pctmp, comp_get_iword((m68k_pc_offset += 2) - 2), srca);
+	release_scratch(pctmp);
+	int src = alloc_scratch();
+	readlong(srca, src);
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* CHK.L #<data>.L,Dn */
+uae_u32 REGPARAM2 op_413c_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 dstreg = (opcode >> 9) & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	int src = alloc_scratch();
+	mov_l_ri(src, comp_get_ilong((m68k_pc_offset += 4) - 4));
+	int dst = dstreg;
+	dont_care_flags();
+	register_possible_exception();
+	jff_CHK_l(dst, src);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+
+/*************************************************************************
+ * PiStorm hand-added: BFEXTU register (Dn) source, immediate offset/width.
+ * One handler covers e9c0..e9c7 (source Dn from opcode&7); the dispatcher
+ * maps the whole register-direct class here. Register offset/width forms
+ * (Do/Dw set) fall back to the interpreter. Midfuncs in
+ * compemu_midfunc_arm64_2.cpp; see there for the semantics/flags note.
+ *************************************************************************/
+
+/* BFEXTU.L Dn */
+uae_u32 REGPARAM2 op_e9c0_0_comp_ff(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 srcreg = opcode & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	uae_u16 extra = comp_get_iword((m68k_pc_offset += 2) - 2);
+	if (extra & 0x0820) {           /* register offset or width: fall back */
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int offs = (extra >> 6) & 0x1f;
+	int width = ((extra - 1) & 0x1f) + 1;
+	int dst = (extra >> 12) & 7;
+	dont_care_flags();
+	jff_BFEXTU_ii(dst, srcreg, offs, width);
+	live_flags();
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
+/* BFEXTU.L Dn (noflags) */
+uae_u32 REGPARAM2 op_e9c0_0_comp_nf(uae_u32 opcode) {
+#if !defined(CPU_AARCH64)
+	FAIL(1);
+	return 0;
+#else
+	uae_u32 srcreg = opcode & 7;
+	uae_u32 m68k_pc_offset_thisinst = m68k_pc_offset;
+	m68k_pc_offset += 2;
+	uae_u16 extra = comp_get_iword((m68k_pc_offset += 2) - 2);
+	if (extra & 0x0820) {           /* register offset or width: fall back */
+		FAIL(1);
+		m68k_pc_offset = m68k_pc_offset_thisinst;
+		return 0;
+	}
+	int offs = (extra >> 6) & 0x1f;
+	int width = ((extra - 1) & 0x1f) + 1;
+	int dst = (extra >> 12) & 7;
+	jnf_BFEXTU_ii(dst, srcreg, offs, width);
+	if (m68k_pc_offset > SYNC_PC_OFFSET) sync_m68k_pc();
+	return 0;
+#endif
+}
+
 #endif
 
 #endif

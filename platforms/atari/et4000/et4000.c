@@ -1423,10 +1423,16 @@ static void sdl_pump(void)
     SDL_Event e;
     while (SDL_PollEvent(&e))
     {
-        if (e.type == SDL_QUIT ||
-            (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE &&
-             (e.key.keysym.mod & KMOD_CTRL)))
+        if (e.type == SDL_QUIT)
+        {
+            fprintf(stderr, "[QUIT] SDL_QUIT (window close) - stopping emulation\n");
             cpu_emulation_running = 0;
+        }
+        /* NOTE: the former Ctrl+Esc host quit shortcut was removed. Ctrl+Esc is
+         * a standard DOS/Windows key, so inside DOSBox a guest keypress leaked
+         * to this handler and silently killed the whole emulator (clean exit 0,
+         * no crash, nothing in dmesg). Window-close (SDL_QUIT) is now the only
+         * quit from this window; Ctrl+C in the terminal still works too. */
     }
 }
 

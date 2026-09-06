@@ -259,7 +259,14 @@ extern uint32_t ROM_END;
 #define ROM_TOP (0x00F00000u)      // ROM_END
 #define ROM_MAX_SIZE (0x00100000u) // up to IDE @ 0xF00000 => 1MB max at 0xE00000
 #define TT_RAM_BASE (0x01000000u)
-#define TT_RAM_SIZE (0x08000000u) // 128MB
+/* TT_RAM_SIZE is the RESERVE ceiling: it sizes the natmem mmap (MAP_NORESERVE,
+ * so a larger virtual reserve costs no physical RAM until pages are touched)
+ * and the code_page[] table. The runtime TT-RAM size (tt_ram_size, from the
+ * cfg 'ttram' line) must never exceed this - emulator.c clamps it to match.
+ * Ceiling here is 256MB: TT-RAM spans 0x01000000..0x11000000, still well below
+ * the FVDI framebuffer at 0x20000000 (512MB), so no address-map collision.
+ * Going beyond ~496MB would require relocating FVDI_FB_BASE above the TT top. */
+#define TT_RAM_SIZE (0x10000000u) // 256MB reserve ceiling
 #define IO_IDE_BASE (0x00F00000u)
 #define IO_IDE_SIZE (0x00000100u)
 #define IO_HW_BASE (0x00FF8000u) //(0x00FF8000u)                  // shifter/DMA/PSG/MFP/ACIA
@@ -275,7 +282,7 @@ extern uint32_t ROM_END;
 
 #define PISTORM_LEGACY_MEM_HOOKS 0
 
-#define GUEST_RESERVE (TT_RAM_BASE + TT_RAM_SIZE) // 0x01000000 + 0x08000000 = 16MB + 128MB
+#define GUEST_RESERVE (TT_RAM_BASE + TT_RAM_SIZE) // 0x01000000 + 0x10000000 = 16MB + 256MB
 
 uae_u8 *natmem_offset = NULL; // the one array; x27 in JIT
 extern rtg_s rtg;
@@ -3230,7 +3237,12 @@ static addrbank pistorm_lowram_bank = {
     lo_xlate, lo_check, NULL, "ST-RAM-LOW", "ST-RAM-LOW",
     lo_lget, lo_wget,
     ABFLAG_RAM | ABFLAG_DIRECTACCESS,
-    0, 0 /* force JIT handler access for TOS system variables */
+    /* jit_read_flag = 0: reads inline via the read-guard (fast, no SMC needed).
+     * jit_write_flag = S_WRITE: writes MUST take the handler (lo_?put calls
+     * pistorm_smc for software SMC on ST-RAM). This also keeps TT-RAM as the
+     * ONLY jit_write_flag==0 bank, which is exactly what the JIT write-guard
+     * (jnf_MEM_WRITE_GUARDED_*) inlines - so no ST-RAM store can bypass SMC. */
+    0, S_WRITE
 };
 
 /* ---- in jit_mem_init(), in the baseaddr block (next to the others): ----

@@ -96,6 +96,8 @@ static unsigned pistorm_pc_ring_i;
 #include "devices.h"
 #include "platforms/atari/psctrl/psctrl.h"
 extern "C" void stbox_errand_pump(void);   /* real-FDC bus errands (STBOX) */
+extern "C" { extern volatile int stbox_errand_active; }
+static inline void stbox_errand_pump_if_active(void) { if (stbox_errand_active) stbox_errand_pump(); }
 
 extern void warpmode(int mode);
 
@@ -4955,12 +4957,103 @@ static int get_ipl()
 	return regs.ipl[0];
 }
 
+/* HBL fast-reject verdict for the IPL sampler (emulator.c, core 3).
+ *
+ * The GLUE asserts IPL=2 (HBL) every scan line (~15 kHz). When the guest's
+ * level-2 autovector is a bare RTE, delivering it has zero effect - but the
+ * old path still yanked the CPU thread out of compiled code, ran the whole
+ * do_interrupt() suppression, and re-entered, ~14 k times/sec (measured 3.5%
+ * in do_interrupt alone, several times that counting the block exit/re-entry).
+ *
+ * This lets the sampler decide, BEFORE raising the interrupt, whether the HBL
+ * handler is a no-op, so it can skip the round-trip entirely. Reads are from
+ * natmem (host memory, no bus); regs.vbr is read racily but VBR is effectively
+ * static after boot. Bound the reads to the low 16 MB (ST-RAM + TOS ROM), the
+ * only place a level-2 handler ever lives. Returns 1 only for a bare RTE - a
+ * real handler (or EmuTOS int_hbl, which has a small effect) returns 0 and is
+ * delivered normally so do_interrupt() handles it as before. */
+extern "C" int pistorm_hbl_handler_is_rte(void)
+{
+	extern uae_u8 *natmem_offset;
+	if (!natmem_offset)
+		return 0;
+	const uae_u32 LOWLIM = 0x01000000u;   /* ST-RAM + ROM window */
+	uae_u32 vecaddr = regs.vbr + 0x68;    /* level-2 autovector (vector 26) */
+	if (vecaddr + 4 > LOWLIM)
+		return 0;
+	uae_u32 h = ((uae_u32)natmem_offset[vecaddr]     << 24) |
+	            ((uae_u32)natmem_offset[vecaddr + 1] << 16) |
+	            ((uae_u32)natmem_offset[vecaddr + 2] << 8)  |
+	             (uae_u32)natmem_offset[vecaddr + 3];
+	if (h == 0 || (h & 1) || h + 12 > LOWLIM)
+		return 0;
+	/* Read up to 6 opcode words of the handler (big-endian in natmem). */
+	uae_u16 w[6];
+	for (int i = 0; i < 6; i++)
+		w[i] = ((uae_u16)natmem_offset[h + 2*i] << 8) | natmem_offset[h + 2*i + 1];
+
+	/* kind 1: bare RTE - no effect at all. */
+	if (w[0] == 0x4e73)
+		return 1;
+
+	/* kind 2: EmuTOS int_hbl (3F00 302F 0002 0240 0700 6606 ...). Its only
+	 * observable effect is "if the interrupted IPL was 0, raise it to 3" -
+	 * which the guest undoes every line (hence the 15 kHz storm), so it never
+	 * persists and dropping it is a wash. Same skip as kind 1. A real raster
+	 * handler matches neither pattern and returns 0 -> delivered normally. */
+	if (w[0] == 0x3f00 && w[1] == 0x302f && w[2] == 0x0002 &&
+	    w[3] == 0x0240 && w[4] == 0x0700 && w[5] == 0x6606)
+		return 1;
+
+	return 0;
+}
+
 static void do_interrupt (int nr)
 {
 	extern uae_u16 pistorm_iack_vector;
 	extern void intlev_ack(uint8_t nr);
 	extern volatile uint8_t g_irq;
 	extern volatile uint8_t g_intmask;
+
+	/* Interrupt-servicing cost meter, placed at the do_interrupt() chokepoint
+	 * so it catches every delivery path (intlev, do_specialties, the run-loop
+	 * forks). Fully self-contained: NO DIAG build needed, no [LAT] machinery.
+	 * Enable at runtime with PISTORM_IRQ_STATS=1. The scope guard's destructor
+	 * fires on every return path, so the timing is complete regardless of which
+	 * early-out do_interrupt takes. First call prints a confirmation line so a
+	 * stale build or wrong path is immediately obvious. */
+	extern uint64_t get_time_us(void);
+	static int irq_stats = -1;
+	if (irq_stats < 0) {
+		const char *e = getenv("PISTORM_IRQ_STATS");
+		irq_stats = (e && e[0] == '1') ? 1 : 0;
+		if (irq_stats)
+			fprintf(stderr, "[IRQSTAT] enabled - do_interrupt path is live\n");
+	}
+	struct irq_meter_t {
+		int on, lvl; uint64_t t0;
+		irq_meter_t(int o, int l) : on(o), lvl(l) { if (on) t0 = get_time_us(); }
+		~irq_meter_t() {
+			if (!on) return;
+			static uint64_t win = 0, acc = 0, mx = 0;
+			static uint32_t n = 0, per[8] = {0};
+			uint64_t d = get_time_us() - t0;
+			acc += d; n++; if (d > mx) mx = d;
+			if (lvl >= 0 && lvl < 8) per[lvl]++;
+			if (!win) win = t0;
+			if (t0 - win >= 1000000) {
+				fprintf(stderr,
+					"[IRQSTAT] n=%u total=%lluus max=%lluus (%.2f%% of 1s) "
+					"by-level l1=%u l2=%u l3=%u l4=%u l5=%u l6=%u l7=%u\n",
+					n, (unsigned long long)acc, (unsigned long long)mx,
+					acc / 10000.0,
+					per[1], per[2], per[3], per[4], per[5], per[6], per[7]);
+				win = t0; n = 0; acc = 0; mx = 0;
+				for (int i = 0; i < 8; i++) per[i] = 0;
+			}
+		}
+	} _irq_meter(irq_stats, nr);
+
 	bool interrupt_taken = true;
 	bool clear_irq_latch = true;
 	int exception_nr = nr + 24;
@@ -5320,6 +5413,10 @@ volatile uint64_t g_irq_latch_us = 0;
 uint32_t g_jp_smc, g_jp_lazy, g_jp_lazy_maxus, g_jp_hard;
 uint32_t g_jp_comp, g_jp_comp_us, g_jp_comp_maxus;
 uint32_t g_jp_chk,  g_jp_chk_us,  g_jp_chk_maxus;
+/* irq = do_interrupt() servicing cost: full exception delivery (frame build,
+ * MakeSR/MakeFromSR, vector fetch) measured at the intlev() call site. This is
+ * the "interrupt penalty" - n per second, total us, worst single us. */
+uint32_t g_jp_irq, g_jp_irq_us, g_jp_irq_maxus;
 
 uint64_t get_time_us(void);    /* emulator.c (built as C++) */
 
@@ -5510,17 +5607,20 @@ int intlev (void)
 							irqlat.n, irqlat.max_us, irqlat.over1ms,
 							irqlat.over2500us, irqlat.alltime_max_us);
 					if (irqlat.win_start_us &&
-					    (g_jp_smc | g_jp_lazy | g_jp_hard | g_jp_comp | g_jp_chk))
+					    (g_jp_smc | g_jp_lazy | g_jp_hard | g_jp_comp | g_jp_chk | g_jp_irq))
 						fprintf(stderr,
 							"[JIT] smc=%u lazy=%u lazymax=%uus hard=%u "
 							"comp=%u compus=%u compmax=%uus "
-							"chk=%u chkus=%u chkmax=%uus\n",
+							"chk=%u chkus=%u chkmax=%uus "
+							"irq=%u irqus=%u irqmax=%uus\n",
 							g_jp_smc, g_jp_lazy, g_jp_lazy_maxus, g_jp_hard,
 							g_jp_comp, g_jp_comp_us, g_jp_comp_maxus,
-							g_jp_chk, g_jp_chk_us, g_jp_chk_maxus);
+							g_jp_chk, g_jp_chk_us, g_jp_chk_maxus,
+							g_jp_irq, g_jp_irq_us, g_jp_irq_maxus);
 					g_jp_smc = g_jp_lazy = g_jp_lazy_maxus = g_jp_hard = 0;
 					g_jp_comp = g_jp_comp_us = g_jp_comp_maxus = 0;
 					g_jp_chk = g_jp_chk_us = g_jp_chk_maxus = 0;
+					g_jp_irq = g_jp_irq_us = g_jp_irq_maxus = 0;
 					{
 						char hb[256];
 						int hl = 0, any = 0;
@@ -8426,7 +8526,7 @@ static void m68k_run_jit(void)
 						 * Field failure: box TOS waits on the FDC, pump never
 						 * runs, input stays captured - everything "locks up".
 						 * The pump is a single load when idle. */
-						stbox_errand_pump();
+						stbox_errand_pump_if_active();
 						do_cycles_stop(4);
 						const uae_u8 pending_irq = g_irq;
 						if (pending_irq > regs.intmask)
@@ -8554,7 +8654,7 @@ static void m68k_run_jit(void)
 						/* Outside compiled code: the one safe place for
 						 * host-driven bus traffic. No-op unless the STBOX
 						 * real-FDC bridge has an errand posted. */
-						stbox_errand_pump();
+						stbox_errand_pump_if_active();
 						if (do_specialties(0))
 						{
 							STOPTRY;

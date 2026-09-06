@@ -111,6 +111,20 @@ typedef struct {
 extern stbox_rfdc_t stbox_rfdc;
 
 void stbox_errand_pump(void);             /* CPU thread, spcflags window    */
+/* Hot-path gate. stbox_errand_pump() sits in m68k_run_jit's post-block
+ * window AND its STOPped spin loop; as an out-of-line call it measured 3.3%
+ * of all samples on an idle desktop (perf, no box running). This flag is
+ * 1 whenever an errand is posted or in flight, 0 otherwise, so the caller
+ * does one inline load and skips the call. Set by the poster AFTER req
+ * (release fence in between); cleared by the pump only when it retires
+ * an errand to ST_IDLE, so a spurious 1 costs one harmless call and a
+ * posted errand can never be lost. */
+extern volatile int stbox_errand_active;
+static inline void stbox_errand_pump_if_active(void)
+{
+    if (stbox_errand_active)
+        stbox_errand_pump();
+}
 void stbox_rfdc_abort(void);              /* refuse new errands (teardown)  */
 void stbox_rfdc_set_buffer(uint32_t guest_addr, uint32_t len);
 void stbox_rfdc_enable(int on);
@@ -135,6 +149,8 @@ void stbox_joy_event(int joy, uint8_t state);        /* ST joystick bits       *
  * 8 MHz pace owes any; returns immediately when idle or stopped. */
 void stbox_slice(uint64_t now);
 int  stbox_core_armed(void);              /* plain load, safe every pass    */
+/* Same idea for the ipl_task spin loop: test the armed flag inline. */
+extern volatile int stbox_core_armed_flag;
 
 /* ------------------------------------------------------------------ */
 /* core <-> host glue (stbox_host.c only)                             */

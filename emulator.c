@@ -111,6 +111,9 @@ bool tt_ram_available;
 extern "C" void *fdd_vbl_thread(void *arg);
 extern "C" void fdd_vbl(void);
 
+/* JIT statistics dump (C++ linkage, jit/arm/compemu_support_arm.cpp) */
+extern void compiler_dump_stats(void);
+
 /* IPL latch counters per level, read by the dmasnd =2 summary line
  * (i2/i4/i6): how many interrupt requests ipl_task presented to the CPU
  * per level. Single writer (ipl_task); the 1 Hz reader tolerates tears. */
@@ -127,6 +130,11 @@ volatile unsigned pistorm_ipl_lat6 = 0;
 volatile unsigned pistorm_ipl_ep2 = 0;
 volatile unsigned pistorm_ipl_ep4 = 0;
 volatile unsigned pistorm_ipl_ep6 = 0;
+/* HBL no-op skips: level-2 assertions dropped at the sampler because the
+ * guest's HBL vector is a bare RTE (see pistorm_hbl_handler_is_rte). */
+volatile unsigned pistorm_ipl_hbl_skipped = 0;
+/* Verdict helper, defined in cpu/newcpu.cpp (needs regs.vbr). */
+int pistorm_hbl_handler_is_rte(void);
 }
 bool FDD_enabled;
 
@@ -597,23 +605,43 @@ static void *ipl_task(void *)
         uint16_t ipr = ((uint16_t)ps_read_8(0x00FFFA0Bu) << 8) |
                         ps_read_8(0x00FFFA0Du);
         uint16_t orph = isr & ipr;           /* in-service + re-pending  */
-        uint16_t fire = orph & wd_prev;      /* seen two samples running */
-        wd_prev = orph;
-        if (fire)
+
+        /* Sanity gate. A genuine orphaned-IACK wedge is ONE channel (the
+         * field cases were single Timer A / Timer C). 0xFFFF - or any byte
+         * reading all-ones - is a floating/bus-errored read, not a real MFP
+         * state: the CPU services one interrupt at a time, so "every channel
+         * in-service AND pending at once" cannot happen. Acting on it fired
+         * 16 host-side EOIs into the real MFP on an already-erroring bus.
+         * Reject any implausible sample (all-ones bytes, or more than one
+         * orphaned channel) and drop the persistence chain so a bad read
+         * cannot combine with the next sample to trigger a recovery. */
+        int orph_n = __builtin_popcount((unsigned)orph);
+        if (isr == 0xFFFFu || ipr == 0xFFFFu ||
+            (isr & 0x00FFu) == 0x00FFu || (isr & 0xFF00u) == 0xFF00u ||
+            orph_n > 1)
         {
-          int ch;
-          for (ch = 15; ch >= 0; ch--)
+          wd_prev = 0;                       /* invalid: distrust, don't act */
+        }
+        else
+        {
+          uint16_t fire = orph & wd_prev;    /* same channel, two samples    */
+          wd_prev = orph;
+          if (fire)
           {
-            if (fire & (1u << ch))
+            int ch;
+            for (ch = 15; ch >= 0; ch--)
             {
-              uint32_t reg = (ch >= 8) ? 0x00FFFA0Fu : 0x00FFFA11u;
-              ps_write_8(reg, (uint8_t)~(1u << (ch & 7)));
-              fprintf(stderr, "[MFP-WD] orphaned in-service ch%d cleared "
-                      "(isr=%04X ipr=%04X) - garbled-IACK wedge recovered\n",
-                      ch, isr, ipr);
+              if (fire & (1u << ch))
+              {
+                uint32_t reg = (ch >= 8) ? 0x00FFFA0Fu : 0x00FFFA11u;
+                ps_write_8(reg, (uint8_t)~(1u << (ch & 7)));
+                fprintf(stderr, "[MFP-WD] orphaned in-service ch%d cleared "
+                        "(isr=%04X ipr=%04X) - garbled-IACK wedge recovered\n",
+                        ch, isr, ipr);
+              }
             }
+            wd_prev = 0;
           }
-          wd_prev = 0;
         }
       }
     }
@@ -625,7 +653,7 @@ static void *ipl_task(void *)
      * at most one 64-guest-cycle burst per call (~200-400 ns host), only
      * when the 8 MHz pace owes one. stbox_core_armed() is a plain load,
      * false whenever no box is running. */
-    if (stbox_core_armed())
+    if (stbox_core_armed_flag)
     {
       uint64_t sb_now;
       __asm__ volatile("mrs %0, cntvct_el0" : "=r"(sb_now));
@@ -647,8 +675,8 @@ static void *ipl_task(void *)
       continue;
     }
     status = *ioread;
-    if (ps_bus_active)
-      continue;                       /* transaction raced the sample */
+    //if (ps_bus_active)
+    //  continue;                       /* transaction raced the sample */
     if (status & 0x01)
     {
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
@@ -737,6 +765,22 @@ static void *ipl_task(void *)
       av_held = 0;                      /* line left the level: re-arm */
     if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask && ipl != av_held)
     {
+      /* HBL fast-reject: the GLUE asserts level 2 every scan line (~15 kHz).
+       * If the guest's HBL autovector is a bare RTE, delivering it does
+       * nothing - so skip the entire CPU-thread round-trip (block exit,
+       * do_interrupt, re-entry) that do_interrupt() would only suppress
+       * anyway. Latch the episode (av_held) so we re-check once per HBL line,
+       * not per sample; the line self-clears after the blank, re-arming
+       * av_held. A real HBL handler returns 0 here and is delivered normally. */
+      if (ipl == 2)
+      {
+        if (pistorm_hbl_handler_is_rte())
+        {
+          av_held = 2;
+          pistorm_ipl_hbl_skipped++;
+          continue;
+        }
+      }
       if (ipl == 4 && av4_refract_ticks)
       {
         uint64_t nowt;
@@ -970,7 +1014,10 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
   uintptr_t et4k_vram = (uintptr_t)et4000_engine_vram_ptr();
 
   fprintf(stderr, "[%s] host=%p natmem=%p",
-          sig == SIGILL ? "SIGILL" : "SIGSEGV",
+          sig == SIGILL ? "SIGILL" :
+          sig == SIGBUS ? "SIGBUS" :
+          sig == SIGFPE ? "SIGFPE" :
+          sig == SIGABRT ? "SIGABRT" : "SIGSEGV",
           si->si_addr, (void *)natmem_offset);
   if (natmem_offset && host >= base && guest < PISTORM_NATMEM_LIMIT)
     fprintf(stderr, " guest_addr=0x%08lX\n", (unsigned long)guest);
@@ -1038,11 +1085,14 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
             insn, (unsigned long)((char *)si->si_addr - (char *)pushall_call_handler));
   }
 
-  if (sig == SIGSEGV)
+  if (sig == SIGSEGV || sig == SIGBUS || sig == SIGABRT || sig == SIGFPE)
   {
     void *bt[32];
     int n = backtrace(bt, 32);
-    fprintf(stderr, "[SEGV] si_addr=%p backtrace=%d\n", si->si_addr, n);
+    fprintf(stderr, "[%s] si_addr=%p si_code=%d backtrace=%d\n",
+            sig == SIGBUS ? "BUS" : sig == SIGFPE ? "FPE" :
+            sig == SIGABRT ? "ABRT" : "SEGV",
+            si->si_addr, si->si_code, n);
     backtrace_symbols_fd(bt, n, STDERR_FILENO);
   }
 
@@ -1144,6 +1194,9 @@ void sigint_handler(int sig_num)
 
   printf("\n[MAIN] Exiting\n");
 
+  /* JIT statistics (PROFILE_UNTRANSLATED_INSNS: top-50 interpreted opcodes) */
+  compiler_dump_stats();
+
   /* display ATARI logo on exit (HDMI) */
   // if ( RTG_enabled )
   //   logo ();
@@ -1226,6 +1279,14 @@ int main (int argc, char *argv[])
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
+    /* SIGBUS was previously unhandled: on AArch64 a store to a mapped-but-not-
+     * backed page (e.g. past the end of the natmem/TT-RAM mmap) raises SIGBUS,
+     * not SIGSEGV, so such a fault killed the process silently ("Bus error",
+     * no dump). Route it - plus SIGFPE/SIGABRT - through the same post-mortem.
+     * Signal handlers add no bus/pipeline traffic; they run only at death. */
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
     fprintf(stderr, "[DBG] crash handler installed\n"); /* sanity check */
   }
 
@@ -1398,8 +1459,11 @@ int main (int argc, char *argv[])
     {
       tt_ram_available = true;
       tt_ram_size = config->ttram_size ? config->ttram_size : (128u * 1024u * 1024u);
-      if (tt_ram_size > 128u * 1024u * 1024u)
-        tt_ram_size = 128u * 1024u * 1024u;
+      /* Clamp to the natmem reserve ceiling (TT_RAM_SIZE in pistorm_natmem.cpp,
+       * currently 256MB). Going higher needs both that reserve raised AND the
+       * FVDI framebuffer at 0x20000000 relocated - see the note there. */
+      if (tt_ram_size > 256u * 1024u * 1024u)
+        tt_ram_size = 256u * 1024u * 1024u;
       printf("[INIT] TT-RAM allocated - %uMB\n", tt_ram_size >> 20);
     }
   }

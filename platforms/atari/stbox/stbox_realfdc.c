@@ -62,6 +62,7 @@ extern volatile uint8_t g_buserr;
 enum { ST_IDLE, ST_SETUP, ST_POLL, ST_DRAIN, ST_FINISH };
 
 static int      g_state = ST_IDLE;
+volatile int    stbox_errand_active;    /* see stbox.h: inline gate       */
 static uint8_t  g_saved_psg14;
 static uint32_t g_polls;
 static uint32_t g_drain_pos;        /* bytes drained so far           */
@@ -126,6 +127,7 @@ void stbox_errand_pump(void)
                 r->status = 0x10;              /* RNF: give up        */
                 r->xferred = 0;
                 g_state = ST_IDLE;
+                stbox_errand_active = 0;
                 r->done = 1;
                 if (++g_failures >= 3) {
                     r->enabled = 0;
@@ -239,6 +241,7 @@ void stbox_errand_pump(void)
         if (!(r->status & 0x10))
             g_failures = 0;                    /* success resets fuse  */
         g_state = ST_IDLE;
+        stbox_errand_active = 0;
         g_buserr = 0;                          /* never hand the guest
                                                   a phantom fault      */
         __atomic_thread_fence(__ATOMIC_RELEASE);

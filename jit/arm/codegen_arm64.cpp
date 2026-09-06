@@ -251,12 +251,19 @@ STATIC_INLINE void raw_reg_to_flags(int r)
 //
 LOWFUNC(WRITE,RMW,2,compemu_raw_inc_opcount,(IM16 op))
 {
-  uintptr idx = (uintptr) &(regs.raw_cputbl_count) - (uintptr) &regs;
-  LDR_xXi(REG_WORK2, R_REGSTRUCT, idx);
+#ifdef PROFILE_UNTRANSLATED_INSNS
+  /* Absolute address of the static counter array: regs.raw_cputbl_count is
+   * cleared by the CPU reset after compiler_init(), so never go through regs.
+   * Only emitted when profiling is on (the array only exists then, and this
+   * function is only ever called from the profiler-gated site in compile_block). */
+  LOAD_U64(REG_WORK2, (uintptr)raw_cputbl_count);
   MOV_xi(REG_WORK3, op);
   LDR_wXxLSLi(REG_WORK1, REG_WORK2, REG_WORK3, 1);
   ADD_wwi(REG_WORK1, REG_WORK1, 1);
   STR_wXxLSLi(REG_WORK1, REG_WORK2, REG_WORK3, 1);
+#else
+  (void)op;
+#endif
 }
 LENDFUNC(WRITE,RMW,1,compemu_raw_inc_opcount,(IM16 op))
 

@@ -1162,8 +1162,10 @@ struct emulator_config *load_config_file(char *filename) {
     {
       if (cfg->ttram_size == 0)
         cfg->ttram_size = 128u * SIZE_MEGA;
-      if (cfg->ttram_size > 128u * SIZE_MEGA)
-        cfg->ttram_size = 128u * SIZE_MEGA;
+      /* Ceiling matches the natmem reserve (TT_RAM_SIZE in pistorm_natmem.cpp)
+       * and the emulator.c clamp: 256MB. All three must agree. */
+      if (cfg->ttram_size > 256u * SIZE_MEGA)
+        cfg->ttram_size = 256u * SIZE_MEGA;
       cfg->addr32 = true;
       printf ("[CFG] TT-RAM enabled - %uMB\n", cfg->ttram_size >> 20);
     }

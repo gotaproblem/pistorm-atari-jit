@@ -191,7 +191,40 @@ static inline int distrust_addr(void)
 //#if DEBUG
 //#define PROFILE_COMPILE_TIME        1
 //#endif
-//#define PROFILE_UNTRANSLATED_INSNS    1
+//#define PROFILE_UNTRANSLATED_INSNS    1  /* top-50 interpreted opcodes printed at compiler_exit() */
+/*
+ * -------------------------------------------------------------------------
+ * JIT untranslated-instruction notes (for a future optimisation pass)
+ * -------------------------------------------------------------------------
+ * PROFILE_UNTRANSLATED_INSNS (above) prints the top-50 opcodes that hit the
+ * interpreter fallback, at compiler_exit() / SIGINT. Re-enable it to refresh
+ * this. IMPORTANT: it counts EXECUTIONS, not time. Every candidate below was
+ * high-count but perf(1) showed it low in actual time - always confirm with a
+ * perf run before compiling anything here.
+ *
+ * Snapshot (FreeMiNT desktop + DOSBox, 2026): total ~1.4e8 interp executions.
+ *   STOP (4e72)              idle loop - NOT a cost (CPU parked). Ignore.
+ *   ORSR (007c) / MV2SR(46cx)  SR writes. cflow=fl_trap => already block-enders,
+ *                             so compiling them saves ~nothing. Skip.
+ *   RTE (4e73)               end-of-exception, inherently interpreter. Skip.
+ *   MOVEC/MOVE2C (4e7a/4e7b), MVUSP2R/MVR2USP (4e69/4e61), PFLUSHA (f518),
+ *   CPUSHA (f478)            privileged/system, block-enders. Low value.
+ *   FSAVE/FRESTORE (f328/f368)  FPU frame blobs on task switch. Hard, skip.
+ *
+ * Genuine remaining candidates (mid-block, cflow=0, they FRAGMENT blocks):
+ *   1. FPP integer-source moves (f201/f202/f203 ~13M) - FMOVE.L Dn,FPx etc.
+ *      fall back in compemu_fpp_arm.cpp. Largest remaining fragmenter. Runs on
+ *      the hardware FPU when compiled (fpu_mode=0). Biggest but also complex.
+ *   2. BFEXTU memory forms (e9ee = BFEXTU (d16,An); ~1.3M) - GCC struct
+ *      bitfields via a pointer/frame. Register form (e9c0-e9c7) is DONE;
+ *      memory form needs a multi-byte field read (get_bitfield equivalent).
+ *   3. BFTST (e8c3/e8c1/...) and BFCLR (ecc0) - never compiled; lower count.
+ *
+ * Already handled this pass: BFEXTU register form; guarded WRITE + GETADR
+ * fast paths (killed tt_lput/wput/bput; tt_xlate residual <1%); LONGEST_68K_INST
+ * checksum shrink; SR/TAS/CHK opcodes; stbox hot-loop gating.
+ * -------------------------------------------------------------------------
+ */
 
 #ifdef JIT_DEBUG
 #undef abort
@@ -228,7 +261,7 @@ static uae_u32 raw_cputbl_count[65536] = { 0, };
 static uae_u16 opcode_nums[65536];
 
 
-static int __cdecl untranslated_compfn(const void* e1, const void* e2)
+static int untranslated_compfn(const void* e1, const void* e2)
 {
     int v1 = *(const uae_u16*)e1;
     int v2 = *(const uae_u16*)e2;
@@ -2156,12 +2189,40 @@ void compiler_init(void)
     initialized = true;
 
 #ifdef PROFILE_UNTRANSLATED_INSNS
+    regs.raw_cputbl_count = raw_cputbl_count;   /* compemu_raw_inc_opcount() indexes through regs */
     jit_log("<JIT compiler> : gather statistics on untranslated insns count");
 #endif
 
 #ifdef PROFILE_COMPILE_TIME
     jit_log("<JIT compiler> : gather statistics on translation time");
     emul_start_time = clock();
+#endif
+}
+
+/* Print-only statistics; safe to call from the SIGINT path while the CPU
+ * thread may still be running translated code (nothing is freed here). */
+void compiler_dump_stats(void)
+{
+#ifdef PROFILE_UNTRANSLATED_INSNS
+    uae_u64 untranslated_count = 0;
+    for (int i = 0; i < 65536; i++) {
+        opcode_nums[i] = i;
+        untranslated_count += raw_cputbl_count[i];
+    }
+    jit_log("Sorting out untranslated instructions count, total %llu...", (unsigned long long)untranslated_count);
+    qsort(opcode_nums, 65536, sizeof(uae_u16), untranslated_compfn);
+    jit_log("Rank  Opc      Count Name\n");
+    for (int i = 0; i < untranslated_top_ten; i++) {
+        uae_u32 count = raw_cputbl_count[opcode_nums[i]];
+        struct instr* dp;
+        struct mnemolookup* lookup;
+        if (!count)
+            break;
+        dp = table68k + opcode_nums[i];
+        for (lookup = lookuptab; lookup->mnemo != (instrmnem)dp->mnemo; lookup++)
+            ;
+        jit_log("%03d: %04x %10u %s", i, opcode_nums[i], count, lookup->name);
+    }
 #endif
 }
 
@@ -2216,27 +2277,7 @@ void compiler_exit(void)
     jit_log("Total compilation time : %.1f sec (%.1f%%)", double(compile_time) / double(CLOCKS_PER_SEC), 100.0 * double(compile_time) / double(emul_time));
 #endif
 
-#ifdef PROFILE_UNTRANSLATED_INSNS
-    uae_u64 untranslated_count = 0;
-    for (int i = 0; i < 65536; i++) {
-        opcode_nums[i] = i;
-        untranslated_count += raw_cputbl_count[i];
-    }
-    bug("Sorting out untranslated instructions count, total %llu...\n", untranslated_count);
-    qsort(opcode_nums, 65536, sizeof(uae_u16), untranslated_compfn);
-    jit_log("Rank  Opc      Count Name\n");
-    for (int i = 0; i < untranslated_top_ten; i++) {
-        uae_u32 count = raw_cputbl_count[opcode_nums[i]];
-        struct instr* dp;
-        struct mnemolookup* lookup;
-        if (!count)
-            break;
-        dp = table68k + opcode_nums[i];
-        for (lookup = lookuptab; lookup->mnemo != (instrmnem)dp->mnemo; lookup++)
-            ;
-        bug(_T("%03d: %04x %10u %s\n"), i, opcode_nums[i], count, lookup->name);
-    }
-#endif
+    compiler_dump_stats();
 
 #ifdef RECORD_REGISTER_USAGE
     int reg_count_ids[16];
@@ -2453,6 +2494,19 @@ static uintptr get_handler(uintptr addr)
     return (uintptr)bi->direct_handler_to_use;
 }
 
+/* Guard-mode selector (defined further down with the read path); forward-
+ * declared here so writebyte/word/long can share the read path's runtime knob. */
+static int pistorm_jit_guard_mode(void);
+
+/* Guarded-WRITE fast path. Declared here rather than in the shared
+ * compemu_midfunc_arm2.h so that editing it does not rebuild the huge
+ * compemu_arm.cpp object (which never uses these). Defined, like the other
+ * midfuncs, in compemu_midfunc_arm64_2.cpp, #included into this TU below. */
+extern void jnf_MEM_WRITE_GUARDED_b(RR4 adr, RR4 source, IM8 offset);
+extern void jnf_MEM_WRITE_GUARDED_w(RR4 adr, RR4 source, IM8 offset);
+extern void jnf_MEM_WRITE_GUARDED_l(RR4 adr, RR4 source, IM8 offset);
+extern void jnf_MEM_GETADR_GUARDED(W4 dest, RR4 adr, IM8 offset);
+
 /* This version assumes that it is writing *real* memory, and *will* fail
  *  if that assumption is wrong! No branches, no second chances, just
  *  straight go-for-it attitude */
@@ -2481,7 +2535,11 @@ static inline void writemem_special(int address, int source, int offset)
 
 void writebyte(int address, int source)
 {
-    if ((special_mem & S_WRITE) || distrust_byte() || jit_n_addr_unsafe)
+    if ((special_mem & S_WRITE) || distrust_byte())
+        writemem_special(address, source, SIZEOF_VOID_P * 5);
+    else if (jit_n_addr_unsafe && pistorm_jit_guard_mode() != 0)
+        jnf_MEM_WRITE_GUARDED_b(address, source, SIZEOF_VOID_P * 5);
+    else if (jit_n_addr_unsafe)
         writemem_special(address, source, SIZEOF_VOID_P * 5);
     else
         writemem_real(address, source, 1);
@@ -2489,7 +2547,11 @@ void writebyte(int address, int source)
 
 void writeword(int address, int source)
 {
-    if ((special_mem & S_WRITE) || distrust_word() || jit_n_addr_unsafe)
+    if ((special_mem & S_WRITE) || distrust_word())
+        writemem_special(address, source, SIZEOF_VOID_P * 4);
+    else if (jit_n_addr_unsafe && pistorm_jit_guard_mode() != 0)
+        jnf_MEM_WRITE_GUARDED_w(address, source, SIZEOF_VOID_P * 4);
+    else if (jit_n_addr_unsafe)
         writemem_special(address, source, SIZEOF_VOID_P * 4);
     else
         writemem_real(address, source, 2);
@@ -2497,7 +2559,11 @@ void writeword(int address, int source)
 
 void writelong(int address, int source)
 {
-    if ((special_mem & S_WRITE) || distrust_long() || jit_n_addr_unsafe)
+    if ((special_mem & S_WRITE) || distrust_long())
+        writemem_special(address, source, SIZEOF_VOID_P * 3);
+    else if (jit_n_addr_unsafe && pistorm_jit_guard_mode() != 0)
+        jnf_MEM_WRITE_GUARDED_l(address, source, SIZEOF_VOID_P * 3);
+    else if (jit_n_addr_unsafe)
         writemem_special(address, source, SIZEOF_VOID_P * 3);
     else
         writemem_real(address, source, 4);
@@ -2506,7 +2572,11 @@ void writelong(int address, int source)
 // Now the same for clobber variant
 void writeword_clobber(int address, int source)
 {
-    if ((special_mem & S_WRITE) || distrust_word() || jit_n_addr_unsafe)
+    if ((special_mem & S_WRITE) || distrust_word())
+        writemem_special(address, source, SIZEOF_VOID_P * 4);
+    else if (jit_n_addr_unsafe && pistorm_jit_guard_mode() != 0)
+        jnf_MEM_WRITE_GUARDED_w(address, source, SIZEOF_VOID_P * 4);
+    else if (jit_n_addr_unsafe)
         writemem_special(address, source, SIZEOF_VOID_P * 4);
     else
         writemem_real(address, source, 2);
@@ -2515,7 +2585,11 @@ void writeword_clobber(int address, int source)
 
 void writelong_clobber(int address, int source)
 {
-    if ((special_mem & S_WRITE) || distrust_long() || jit_n_addr_unsafe)
+    if ((special_mem & S_WRITE) || distrust_long())
+        writemem_special(address, source, SIZEOF_VOID_P * 3);
+    else if (jit_n_addr_unsafe && pistorm_jit_guard_mode() != 0)
+        jnf_MEM_WRITE_GUARDED_l(address, source, SIZEOF_VOID_P * 3);
+    else if (jit_n_addr_unsafe)
         writemem_special(address, source, SIZEOF_VOID_P * 3);
     else
         writemem_real(address, source, 4);
@@ -2565,6 +2639,9 @@ static int pistorm_jit_guard_mode(void)
         else if (e[0] == '0') v = 0;
         else if (e[0] == '2') v = 2;
         else                 v = 1;
+        fprintf(stderr, "[JIT] memory-guard mode = %d (env PISTORM_JIT_GUARD=%s)"
+                        "  [0=always-getter 1=spill 2=no-spill]\n",
+                v, e ? e : "(unset)");
     }
     return v;
 }
@@ -2633,7 +2710,11 @@ STATIC_INLINE void get_n_addr_real(int address, int dest)
 
 void get_n_addr(int address, int dest)
 {
-    if (special_mem || distrust_addr() || jit_n_addr_unsafe)
+    if (special_mem || distrust_addr())
+        get_n_addr_old(address, dest);
+    else if (jit_n_addr_unsafe && pistorm_jit_guard_mode() != 0)
+        jnf_MEM_GETADR_GUARDED(dest, address, SIZEOF_VOID_P * 6);
+    else if (jit_n_addr_unsafe)
         get_n_addr_old(address, dest);
     else
         get_n_addr_real(address, dest);
