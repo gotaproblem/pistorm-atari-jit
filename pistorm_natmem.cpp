@@ -20,6 +20,7 @@
 
 #include "sysconfig.h"
 #include "sysdeps.h"
+#include "pistorm_hugepage.h"
 #include "options.h"
 #include "memory.h"
 #include "newcpu.h"
@@ -4233,9 +4234,14 @@ __asm__(
 
 extern "C" void jit_mem_init(void)
 {
-    natmem_offset = (uae_u8 *)mmap(NULL, GUEST_RESERVE,
+    /* 2 MB pages for the guest mirror (ST space + TT-RAM). Guest code and
+     * data live here and the JIT touches it on every emulated access; with
+     * 4 KB pages the A72's TLB covers ~4 MB of the 144 MB, so TT-RAM-heavy
+     * MiNT/GEM work pays a page-table walk on most misses. See
+     * pistorm_hugepage.h for the backends and the PISTORM_HUGEPAGE switch. */
+    natmem_offset = (uae_u8 *)pistorm_mmap_huge(GUEST_RESERVE,
                                    PROT_READ | PROT_WRITE,// | PROT_EXEC,
-                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                                   MAP_NORESERVE, "natmem");
     if (natmem_offset == MAP_FAILED)
     {
         perror("natmem mmap");
@@ -4246,10 +4252,9 @@ extern "C" void jit_mem_init(void)
      * so TOS memory sizing finds the PHYSICAL amount (native display) */
     stram_alias_init();
 
-    pistorm_fvdi_fb = (uint8_t *)mmap(NULL, FVDI_FB_MAX_BYTES,
+    pistorm_fvdi_fb = (uint8_t *)pistorm_mmap_huge(FVDI_FB_MAX_BYTES,
                                       PROT_READ | PROT_WRITE,
-                                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
-                                      -1, 0);
+                                      MAP_NORESERVE, "fvdi-fb");
     if (pistorm_fvdi_fb == MAP_FAILED)
     {
         perror("fVDI framebuffer mmap");

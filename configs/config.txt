@@ -21,7 +21,13 @@ gpu_mem=32
 
 
 [pi4]
-#over_voltage=6 # works for 2100
+# --- Clock ---------------------------------------------------------------
+# CoreMark scales linearly with arm_freq (Emu68 chart: 1020 @1.5 GHz CM4 vs
+# 1572 @2.2 GHz Pi 4B). 1500 is the safe, silent default. The two lines
+# below are the tested overclock (see PERF-TUNING.md): needs a heatsink and
+# ideally a fan; temp_limit=80 below throttles before harm. Uncomment both.
+#over_voltage=6
+#arm_freq=2100
 arm_freq=1500
 # 128 MB minimum - do NOT reduce. The VPU H.264 decoder (VIDPLAY film
 # playback) and encoder (avrecord screen recording) allocate their frame

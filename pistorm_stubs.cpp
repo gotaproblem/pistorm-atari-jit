@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sys/mman.h> /* uae_vm_alloc: executable JIT translation cache */
+#include "pistorm_hugepage.h" /* 2 MB pages for the translation cache */
 
 /* ================================================================= *
  * 1. Preferences globals (normally defined in cfgfile.cpp).
@@ -222,7 +223,12 @@ void *uae_vm_alloc(size_t size, int flags, int protect)
         prot |= PROT_EXEC;
     if (prot == 0)
         prot = PROT_READ | PROT_WRITE;
-    void *p = mmap(NULL, size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    /* The combined popallspace+translation-cache block (8-16 MB, RWX) comes
+     * through here. Put it on 2 MB pages: translated code is fetched from
+     * all over this block and every I-side TLB miss stalls the JIT core.
+     * Small requests (Pool, x87 stubs) fall through to a plain mmap. */
+    void *p = pistorm_mmap_huge(size, prot, 0,
+                                (prot & PROT_EXEC) ? "jit-cache" : "vm-alloc");
     return (p == MAP_FAILED) ? NULL : p;
 }
 

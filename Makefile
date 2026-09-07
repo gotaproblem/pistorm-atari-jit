@@ -26,6 +26,7 @@ EXENAME = emulator
 # Pure C source — your existing pistorm platform drivers (unchanged)
 # -----------------------------------------------------------------
 CFILES = config_file/config_file.c \
+         pistorm_hugepage.c \
          gpio/ps_protocol.c \
          gpio/bus_lock.c \
          platforms/atari/IDE.c \

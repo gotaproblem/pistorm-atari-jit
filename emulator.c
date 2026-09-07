@@ -70,6 +70,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/network/platform_atari_network.h"
 #include "platforms/atari/kbd_usb.h"
 #include "gpio/bus_lock.h"
+#include "pistorm_hugepage.h"
 
 #define IDEBASEADDR 0x00F00000
 #define IDETOPADDR 0x00F00100
@@ -1232,6 +1233,13 @@ void *cpu_task(void *)
   mlockall(MCL_CURRENT | MCL_FUTURE);
 
   while (!cpu_emulation_running);
+
+  /* main() has now returned from jit_cpu_init(), so the translation cache
+   * exists, and mlockall(MCL_CURRENT|MCL_FUTURE) has faulted every mapping
+   * in: this is the moment the 2 MB-page coverage of natmem / JIT cache /
+   * fVDI FB is final. (Before the spin-wait it would race jit_cpu_init and
+   * usually miss the cache.) One pass over /proc/self/smaps, once. */
+  pistorm_hugepage_report();
 
   usleep(1000000);
 
