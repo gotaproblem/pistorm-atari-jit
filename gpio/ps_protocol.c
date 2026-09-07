@@ -76,12 +76,12 @@ static inline void ps_lock_bus(void)
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
   ps_bus_active = 1;
-  asm volatile ("dmb sy" ::: "memory");
+  //asm volatile ("dmb sy" ::: "memory");
 }
 
 static inline void ps_unlock_bus(void)
 {
-  asm volatile ("dmb sy" ::: "memory");
+  //asm volatile ("dmb sy" ::: "memory");
   ps_bus_active = 0;
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
@@ -93,8 +93,7 @@ static inline void ps_wait_idle(void)
 }
 
 
-static 
-void create_dev_mem_mapping () 
+static void create_dev_mem_mapping () 
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
   
@@ -153,8 +152,7 @@ gpio + 34 = GPAFEN  GPIO Pin Asysnchronous Falling Edge Detect Enable 0
 #define PLLD 6 /* CORE CLOCK - gpu_freq this should be used for a stable 200 MHz PI_CLK as it is NOT affected by overclocking CPU */
 #define PLL_TO_USE PLLD
 
-static 
-void setup_gpclk ( void ) 
+static void setup_gpclk (void) 
 {
   int cpuf, coref;
   FILE *fp;
@@ -226,8 +224,7 @@ void setup_gpclk ( void )
 #endif
 }
 
-
-void ps_setup_protocol ( void ) 
+void ps_setup_protocol (void) 
 {
   create_dev_mem_mapping ();
   setup_gpclk ();
@@ -265,8 +262,8 @@ typedef struct {
 static inline void txn_pulse (volatile uint32_t *const set,
                               volatile uint32_t *const clr)
 {
-  *set = PIN_WR; *set = PIN_WR;
-  *clr = PIN_WR; *clr = PIN_WR;
+  //*set = PIN_WR; //*set = PIN_WR;
+  *clr = PIN_WR;
   *clr = TXN_END;
 }
 
@@ -286,17 +283,17 @@ void ps_write ( ps_io_t *ps_io );
  * their own - the second back-to-back dmb the old bodies carried was
  * pure overhead. */
 
-static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
+static inline uint32_t ps_write_txn (ps_io_t *ps_io)
 {
   volatile uint32_t *const set = ioset;
   volatile uint32_t *const clr = ioclr;
   volatile uint32_t *const lev = ioread;
   uint32_t status;
 
-  *set = (ps_io->data << 8) | REG_DATA;
+  *set = (ps_io->data << 8) | REG_DATA | PIN_WR;
   txn_pulse (set, clr);
 
-  *set = ((ps_io->addr & 0xffff) << 8) | REG_ADDR_LO;
+  *set = ((ps_io->addr & 0xffff) << 8) | REG_ADDR_LO | PIN_WR;
   txn_pulse (set, clr);
 
   /* 
@@ -312,7 +309,7 @@ static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
    * READ WORD  = 0x02
    */
   
-  *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI;
+  *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) | REG_ADDR_HI | PIN_WR;
   txn_pulse (set, clr);
 
   /* the GPLEV sample that shows the transaction complete already
@@ -326,14 +323,12 @@ static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
   return status;
 }
 
-inline
-void ps_write ( ps_io_t *ps_io )
+inline void ps_write (ps_io_t *ps_io)
 {
   ps_lock_bus ();
   ps_write_txn (ps_io);
   ps_unlock_bus();
 }
-
 
 inline void ps_write_8 (uint32_t addr, uint16_t data) 
 {
@@ -346,7 +341,7 @@ inline void ps_write_8 (uint32_t addr, uint16_t data)
 
   ps_write (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect (ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -363,7 +358,7 @@ inline void ps_write_16 (uint32_t addr, uint16_t data)
 
   ps_write (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect (ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -386,16 +381,17 @@ inline void ps_write_32 (uint32_t addr, uint32_t data)
   /* one lock + one barrier pair for the whole longword */
   ps_lock_bus ();
   ps_write_txn (&hi);
+  //asm volatile ("dmb sy" ::: "memory");
   ps_write_txn (&lo);
   ps_unlock_bus ();
 
-  if (hi.berr) {
+  //if (hi.berr) {
+  //  g_buserr = 1;
+  //  g_buserr_addr = addr;
+  //}
+  if (__builtin_expect (lo.berr, 0)) {
     g_buserr = 1;
-    g_buserr_addr = addr;
-  }
-  if (lo.berr) {
-    g_buserr = 1;
-    g_buserr_addr = addr + 2;
+    g_buserr_addr = lo.addr; //addr + 2;
   }
 }
 
@@ -408,14 +404,13 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
   volatile uint32_t *const lev = ioread;
   uint32_t status;
 
-  *set = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO;
+  *set = ( (ps_io->addr & 0xffff) << 8 ) | REG_ADDR_LO | PIN_WR;
   txn_pulse (set, clr);
 
-  *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
+  *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI | PIN_WR;
   txn_pulse (set, clr);
 
-  *set = REG_DATA;
-  *set = PIN_RD;
+  *set = REG_DATA | PIN_WR;
 
   do {
     status = *lev;
@@ -438,6 +433,7 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
    *
    * Each extra GPLEV read adds ~50-100ns of settle after the TXN edge.
    * Sweep result: 1 was not enough, 4 is clean. PISTORM_RD_SETTLE tunes. */
+#if (0)  
   {
     static int rd_settle = -1;
 
@@ -451,8 +447,11 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
     for (int i = 0; i < rd_settle; i++)
       status = *lev;
   }
+#endif
 
+  *clr = PIN_WR;
   *clr = TXN_END;
+
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
 
@@ -481,11 +480,11 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
         ps_io->data |=  0x0080u;     /* colour monitor present */
     }
   }
+
   return status;
 }
 
-inline
-void ps_read (ps_io_t *ps_io)
+inline void ps_read (ps_io_t *ps_io)
 {
   ps_lock_bus ();
   ps_read_txn (ps_io);
@@ -503,7 +502,7 @@ inline uint16_t ps_read_16 (uint32_t addr)
 
   ps_read (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect (ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -522,10 +521,10 @@ inline uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_ou
 
   ps_read (&ps_io);
 
-  if (berr_out)
+  if (__builtin_expect (berr_out != NULL, 1))
     *berr_out = ps_io.berr;
 
-  if (ps_io.berr) {
+  else if (__builtin_expect (ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -545,7 +544,7 @@ inline uint8_t ps_read_8 (uint32_t addr)
 
   ps_read (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect (ps_io.berr, 0)) {
     g_buserr = 1; 
     g_buserr_addr = addr;
   } 
@@ -580,16 +579,17 @@ inline uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 
   ps_read (&ps_io);
 
-  if (berr_out)
+  if (__builtin_expect (berr_out != NULL, 1))
     *berr_out = ps_io.berr;
 
-  if (ps_io.berr) {
+  else if (__builtin_expect (ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
 
   if ((addr & 1) == 0)
     return (uint8_t)(ps_io.data >> 8);
+
   return (uint8_t)ps_io.data;
 }
 
@@ -610,16 +610,18 @@ inline uint32_t ps_read_32 (uint32_t addr)
   /* one lock + one barrier pair for the whole longword */
   ps_lock_bus ();
   ps_read_txn (&hi);
+  //asm volatile ("dmb sy" ::: "memory");
   ps_read_txn (&lo);
   ps_unlock_bus ();
 
-  if (hi.berr) {
+  // bus error can't occur on the high word 
+  //if (hi.berr) {
+  //  g_buserr = 1;
+  //  g_buserr_addr = addr;
+  //}
+  if (__builtin_expect (lo.berr, 0)) {
     g_buserr = 1;
-    g_buserr_addr = addr;
-  }
-  if (lo.berr) {
-    g_buserr = 1;
-    g_buserr_addr = addr + 2;
+    g_buserr_addr = lo.addr; //addr + 2;
   }
 
   return ((uint32_t)hi.data << 16) | lo.data;
@@ -627,7 +629,7 @@ inline uint32_t ps_read_32 (uint32_t addr)
 
 
 
-void ps_write_status_reg ( uint16_t value ) 
+void ps_write_status_reg (uint16_t value) 
 {
   static int timeout;
   
@@ -659,12 +661,11 @@ uint32_t ps_read_status_reg ()
   /* make sure no IO in progress */
   ps_wait_idle ();
   
-  *ioset = REG_STATUS;
-  *ioset = PIN_RD;
+  *ioset = REG_STATUS; // thi is now correct - firmware treats the missing cmd strobe as a read
 
   ps_wait_idle ();
 
-  status = *ioread;
+  status = *ioread; status = *ioread;
  	*ioclr = TXN_END;
 
   /* return all 32 bits */
@@ -701,7 +702,7 @@ void ps_pulse_reset ()
  * write PiSTorm latch type 
  * latchtype must be 0 or 1 and is put on status bit 2
  */
-void ps_write_latchtype ( uint16_t latchtype )
+void ps_write_latchtype (uint16_t latchtype)
 {
   uint16_t status;
 
@@ -749,7 +750,7 @@ void ps_read_ipl (uint8_t *ipl)
  * bits 10,9 - 0,0 = release
  * bit 8 - 1 = EPM570, 0 = EPM240
  */
-void ps_get_firmware_revision ( void )
+void ps_get_firmware_revision (void)
 {
   uint16_t fw = (ps_read_status_reg () >> 8) & 0x07FF;
 

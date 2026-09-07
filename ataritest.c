@@ -2757,7 +2757,7 @@ void devTest ( int rw )
 {
     uint16_t d;
 
-    printf ( "\nATARITEST - DEV\n%s address 0x%08X\n", rw ? "READ looping" : "WRITE looping", padd );
+   // printf ( "\nATARITEST - DEV\n%s address 0x%08X\n", rw ? "READ looping" : "WRITE looping", padd );
 
     //ps_reset_state_machine ();
 
@@ -2771,11 +2771,17 @@ void devTest ( int rw )
        
         while ( 1 )
         {
-            status = ps_read_status_reg () & 0x00FFFFFF;
-            //if ((status & 0x040000))
-            //    printf ("OOR\n");
-            printf ( "STATUS 0x%08X\n", status  );
-          
+            printf ( "GPIOs 0x%02X\n", *ioread && 0xFF );
+            usleep ( 1000 );
+            /*
+            for  (int n = 0; n < 0x100; n++) {
+                ps_write_status_reg ( n );
+                status = ps_read_status_reg () & 0x00FFFFFF;
+                
+                printf ( "STATUS 0x%08X\n", status  );
+                usleep ( 100000 );
+            }
+            */
         }
     }
 
