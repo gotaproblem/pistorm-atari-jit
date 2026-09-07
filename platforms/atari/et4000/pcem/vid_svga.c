@@ -422,6 +422,18 @@ void svga_recalctimings(svga_t *svga) {
                                                 svga->render = svga_render_32bpp_highres;
                                         break;
                                 }
+                                /* SEQ1 bit 3 (dot clock / 2) without ATC10 bit 6. The NOVA
+                                 * ET4000 driver programs 640x480x256 this way: 80 chars,
+                                 * 640 bytes/line, half-rate pixel clock. PCem's PC-BIOS model
+                                 * counted it as 16 dots/char above and, with lowres clear,
+                                 * paired that with the 1-pixel-per-byte renderer: 1280 pixels
+                                 * read from 640-byte lines = two desktops side by side. The
+                                 * halved clock changes the timing, not the pixel count, so
+                                 * undo the dot doubling and keep the non-doubling renderer. */
+                                if ((svga->seqregs[1] & 8) && !svga->lowres) {
+                                        svga->hdisp >>= 1;
+                                        svga->hdisp_old = svga->hdisp;
+                                }
                                 break;
                         }
                 }
