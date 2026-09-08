@@ -24,6 +24,11 @@ void unk_ramdac_out(uint16_t addr, uint8_t val, unk_ramdac_t *ramdac, svga_t *sv
 			if (val == 0xFF)  break;
                         ramdac->ctrl = val;
 			oldbpp = svga->bpp;
+                        /* pistorm: 0xF0 = 24bpp on the AT&T 20C49x DAC NOVA
+                         * programs (see et4k_apply_ramdac_ctrl). */
+                        if ((val & 0xF0) == 0xF0)
+                                svga->bpp = 24;
+                        else
                         switch ((val&1)|((val&0xC0)>>5))
                         {
                                 case 0:

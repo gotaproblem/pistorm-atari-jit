@@ -152,6 +152,15 @@ static void et4k_apply_ramdac_ctrl(uint8_t val)
         return;
 
     oldbpp = g_svga->bpp;
+    /* AT&T 20C491/492-class DAC (the one on the 24-bit NOVA ET4000 cards):
+     * command bits 7:5 = 111 with bit 4 set is 24bpp packed. NOVA writes
+     * 0xF0 for its "16 million colours" mode (CRTC[1]=EF, 1920 bytes/line,
+     * B,G,R in VRAM). The Sierra SC1502x table below reads 0xF0 as 16bpp,
+     * which rendered every 3-byte pixel as 1.5 RGB565 words: 960 px wide,
+     * green desktop shown as orange. Other values unchanged. */
+    if ((val & 0xF0) == 0xF0)
+        g_svga->bpp = 24;
+    else
     switch ((val & 1) | ((val & 0xC0) >> 5)) {
         case 0:
             g_svga->bpp = 8;
