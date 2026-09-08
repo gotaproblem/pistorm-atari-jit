@@ -1051,10 +1051,112 @@ extern "C"
 #define PAGE_SHIFT 12
 static uint8_t code_page[GUEST_RESERVE >> PAGE_SHIFT]; // 8KB table for 32MB
 
+/* ------------------------------------------------------------------ */
+/* TT-RAM SMC: host write-protection of pages that produced code        */
+/* ------------------------------------------------------------------ */
+/* ST-RAM stores go through lo_/stram_ handlers that call pistorm_smc(), so
+ * code modified in ST-RAM is caught. TT-RAM stores are inlined by the JIT
+ * (that is the whole point of TT-RAM) and nothing watched them: a guest
+ * that writes fresh code into TT-RAM it has executed before - XVDI regenerates
+ * its 256-colour drawing routines into the same Malloc'd buffer on a mode
+ * change - ran the STALE translation. Real 68030s get away with no cache
+ * flush because their I-cache is 256 bytes; the translation cache is not.
+ *
+ * So: when compile_block() records a TT-RAM page as code, mprotect() its
+ * host page read-only. The next guest store to it SIGSEGVs; the handler
+ * makes the page writable again, drops its code mark, does the same lazy
+ * flush pistorm_smc() does, and returns so the store re-executes. Blocks
+ * from that page fail their checksum on next entry and are recompiled.
+ *
+ * Pages that keep faulting (code and hot data sharing a 4 KB page) are
+ * given up on after TTSMC_MAX_FAULTS - protected no more, logged once - so
+ * a pathological layout costs a bounded number of signals, not a stall.
+ * PISTORM_TTSMC=0 disables the mechanism for A/B. */
+#include <signal.h>
+#define TTSMC_MAX_FAULTS 32
+static uint8_t  ttsmc_prot[GUEST_RESERVE >> PAGE_SHIFT];   /* page is mprotect(PROT_READ) */
+static uint8_t  ttsmc_faults[GUEST_RESERVE >> PAGE_SHIFT]; /* faults taken on this page */
+static int      ttsmc_enabled = -1;
+static struct sigaction ttsmc_prev_sa;
+static unsigned ttsmc_stat_prot, ttsmc_stat_fault, ttsmc_stat_gaveup;
+
+static void ttsmc_sigsegv(int sig, siginfo_t *si, void *uctx)
+{
+    extern uint32_t tt_ram_size;
+    uintptr_t a = (uintptr_t)si->si_addr;
+    uintptr_t base = (uintptr_t)natmem_offset;
+    if (natmem_offset && a >= base + TT_RAM_BASE && a < base + TT_RAM_BASE + tt_ram_size) {
+        uae_u32 g = (uae_u32)(a - base);
+        uae_u32 pg = g >> PAGE_SHIFT;
+        if (ttsmc_prot[pg]) {
+            mprotect(natmem_offset + (pg << PAGE_SHIFT), 1u << PAGE_SHIFT, PROT_READ | PROT_WRITE);
+            ttsmc_prot[pg] = 0;
+            code_page[pg] = 0;
+            ttsmc_stat_fault++;
+            if (ttsmc_faults[pg] < 255)
+                ttsmc_faults[pg]++;
+            if (ttsmc_faults[pg] == TTSMC_MAX_FAULTS) {
+                ttsmc_stat_gaveup++;
+                fprintf(stderr, "[TTSMC] page %08X: %d code/data faults - no longer protected "
+                        "(self-modifying code on this page is now undetected)\n",
+                        pg << PAGE_SHIFT, TTSMC_MAX_FAULTS);
+            }
+            cache_invalidate();          /* lazy flush: blocks re-verify by checksum */
+            return;                      /* re-execute the store */
+        }
+    }
+    /* Not ours: hand on to whatever was installed before (default: die). */
+    if (ttsmc_prev_sa.sa_flags & SA_SIGINFO && ttsmc_prev_sa.sa_sigaction)
+        ttsmc_prev_sa.sa_sigaction(sig, si, uctx);
+    else if (ttsmc_prev_sa.sa_handler == SIG_IGN)
+        return;
+    else if (ttsmc_prev_sa.sa_handler != SIG_DFL && ttsmc_prev_sa.sa_handler)
+        ttsmc_prev_sa.sa_handler(sig);
+    else {
+        signal(SIGSEGV, SIG_DFL);        /* returning re-faults with the default action */
+    }
+}
+
+static void ttsmc_init(void)
+{
+    const char *e = getenv("PISTORM_TTSMC");
+    ttsmc_enabled = !(e && *e == '0');
+    if (!ttsmc_enabled) {
+        fprintf(stderr, "[TTSMC] disabled (PISTORM_TTSMC=0) - TT-RAM self-modifying code undetected\n");
+        return;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = ttsmc_sigsegv;
+    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGSEGV, &sa, &ttsmc_prev_sa);
+    fprintf(stderr, "[TTSMC] TT-RAM code pages write-protected on the host; guest stores to them flush the JIT\n");
+}
+
+extern "C" void pistorm_ttsmc_stats(unsigned *prot, unsigned *faults, unsigned *gaveup)
+{
+    if (prot)   *prot   = ttsmc_stat_prot;
+    if (faults) *faults = ttsmc_stat_fault;
+    if (gaveup) *gaveup = ttsmc_stat_gaveup;
+}
+
 extern void pistorm_mark_code(uaecptr pc) // call from compile_block()
 {
-    if (pc < GUEST_RESERVE)
-        code_page[pc >> PAGE_SHIFT] = 1;
+    if (pc >= GUEST_RESERVE)
+        return;
+    uae_u32 pg = pc >> PAGE_SHIFT;
+    code_page[pg] = 1;
+
+    if (pc < TT_RAM_BASE)
+        return;
+    if (ttsmc_enabled < 0)
+        ttsmc_init();
+    if (!ttsmc_enabled || ttsmc_prot[pg] || ttsmc_faults[pg] >= TTSMC_MAX_FAULTS)
+        return;
+    if (mprotect(natmem_offset + (pg << PAGE_SHIFT), 1u << PAGE_SHIFT, PROT_READ) == 0) {
+        ttsmc_prot[pg] = 1;
+        ttsmc_stat_prot++;
+    }
 }
 
 static inline void pistorm_smc(uaecptr addr, int sz)
