@@ -141,9 +141,12 @@ static uint8_t g_3c6_last  = 0xFF;   /* last value written to 0x3C6 (the origina
 static int     g_3c6_first = 1;      /* first 0x3C6 read returns the 0xE0 RAMDAC id */
 static int     g_3c6_reads = 0;
 
+static uint8_t g_dac_cmd = 0;        /* last RAMDAC command byte (4 reads of 3C6 then write) */
+
 static void et4k_apply_ramdac_ctrl(uint8_t val)
 {
     int oldbpp;
+    g_dac_cmd = val;
 
     if (!g_svga || val == 0xFF)
         return;
@@ -593,7 +596,7 @@ static void et4000_engine_modedbg(const svga_t *s)
         (uint32_t)s->hdisp, (uint32_t)s->dispend, (uint32_t)s->bpp, (uint32_t)s->rowoffset,
         (uint32_t)s->attrregs[0x16] | (uint32_t)s->attrregs[0x10] << 8 | (uint32_t)s->seqregs[1] << 16 | (uint32_t)s->gdcreg[5] << 24,
         (uint32_t)s->crtc[1] | (uint32_t)s->crtc[0x13] << 8 | (uint32_t)s->crtc[0x14] << 16 | (uint32_t)s->crtc[0x17] << 24,
-        (uint32_t)(uintptr_t)s->render, (uint32_t)s->lowres };
+        (uint32_t)(uintptr_t)s->render, (uint32_t)s->lowres | (uint32_t)g_dac_cmd << 8 };
     if (memcmp(last, now, sizeof now) == 0) return;
     memcpy(last, now, sizeof now);
     const char *rn = s->render == svga_render_8bpp_lowres ? "8bpp_lowres" :
@@ -605,10 +608,10 @@ static void et4000_engine_modedbg(const svga_t *s)
                      s->render == svga_render_32bpp_lowres ? "32bpp_lowres" :
                      s->render == svga_render_32bpp_highres ? "32bpp_highres" :
                      s->render == svga_render_blank ? "blank" : "other";
-    fprintf(stderr, "[et4k-mode] %dx%d bpp=%d render=%s lowres=%d rowoffset=%d (%d bytes/line) | "
+    fprintf(stderr, "[et4k-mode] dac-cmd=%02X %dx%d bpp=%d render=%s lowres=%d rowoffset=%d (%d bytes/line) | "
             "CRTC[1]=%02X [13]=%02X [14]=%02X [17]=%02X [34]=%02X [37]=%02X | SEQ[1]=%02X [4]=%02X | "
             "GC[5]=%02X [6]=%02X | ATC[10]=%02X [13]=%02X [16]=%02X | misc=%02X\n",
-            s->hdisp, s->dispend, s->bpp, rn, s->lowres ? 1 : 0, s->rowoffset, s->rowoffset << 3,
+            g_dac_cmd, s->hdisp, s->dispend, s->bpp, rn, s->lowres ? 1 : 0, s->rowoffset, s->rowoffset << 3,
             s->crtc[1], s->crtc[0x13], s->crtc[0x14], s->crtc[0x17], s->crtc[0x34], s->crtc[0x37],
             s->seqregs[1], s->seqregs[4], s->gdcreg[5], s->gdcreg[6],
             s->attrregs[0x10], s->attrregs[0x13], s->attrregs[0x16], s->miscout);
