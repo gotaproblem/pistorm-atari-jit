@@ -6,20 +6,36 @@ from Linux; this file is the list, cheapest first, with what each one is
 expected to do to the 68000-mode CoreMark baseline of **734** (Pi 4, 1.5 GHz,
 PISSOFF 1024). Measure after each step; the projections are +-15%.
 
-| Step | What | Expected | Cost |
-|---|---|---|---|
-| 1 | 2 MB pages for natmem, JIT cache, fVDI FB (this commit, on by default) | +3-6% | none |
-| 2 | `jit_cache 16384` (apj-os.cfg, this commit) | 0-3% on GEM/MiNT, 0 on CoreMark | 8 MB RAM |
-| 3 | `PISTORM_PISSOFF=2048` | +1-2% | slightly wider fallback IRQ window |
-| 4 | `arm_freq=2100` + `over_voltage=6` | +35-40% | heat; needs a heatsink/fan |
-| 5 | hugetlbfs instead of THP (`PISTORM_HUGETLB=1`) | same as 1, but deterministic | 160 MB pinned at boot |
+| Step | What | Expected | Measured (7 Sep 2026, jit-perf-hbl-fixes) | Cost |
+|---|---|---|---|---|
+| 1 | 2 MB pages for natmem, JIT cache, fVDI FB (in code, on by default) | +3-6% | **0 - see below** | none |
+| 2 | `jit_cache 16384` (apj-os.cfg) | 0-3% on GEM/MiNT, 0 on CoreMark | not separately measured | 8 MB RAM |
+| 3 | `PISTORM_PISSOFF=2048` / `4096` | +1-2% | 783 -> 803 (2048) -> 817 (4096) | wider fallback IRQ window |
+| 4 | `arm_freq=2100` + `over_voltage=6` | +35-40% | not yet run | heat; needs a heatsink/fan |
+| 5 | hugetlbfs instead of THP (`PISTORM_HUGETLB=1`) | same as 1 | **moot, see below** | 160 MB pinned at boot |
 
-Steps 1-3 together: ~790. Step 4 on top: ~1,100. That is the "S1 Linux
-tuned" row of the report.
+**Steps 1 and 5 do nothing on stock Raspberry Pi OS.** The 6.18 `rpt-rpi-v8`
+kernel is built with `CONFIG_TRANSPARENT_HUGEPAGE` and `CONFIG_HUGETLBFS` both
+off, so the `[HUGEPAGE]` report shows 0% on 2 MB pages and nothing in user
+space can change that. It would not matter anyway: `perf-tlb.sh` under CoreMark
+(68040 and 68060 mode) shows ~2.5-3 M L1 TLB refills per 30 G instructions -
+one per ~10,000 instructions, under 1% of cycles even at 50 cycles per walk -
+with IPC 2.0. The core is not waiting on page walks. The code stays in because
+it costs nothing and reports what it finds; a THP-enabled kernel would need a
+rebuild (`build-thp-kernel.sh` in the investigation folder) for a gain inside
+the noise. What the counters did show: `l1i_cache_refill` at 44-49 M per 10 s,
+one per 600-750 instructions, ~4-5% of cycles - the translated code and the
+dispatch loop overflow the 48 KB L1I. That is a JIT code-size/layout item.
+
+Step 3 at 4096 is +4.3% over the 783 baseline and was not yet the plateau;
+keep it if MiNT/XaAES input and YM/DMA-sound playback stay clean.
 
 ---
 
-## 1. Huge pages (done in code)
+## 1. Huge pages (in code - inert on the stock kernel)
+
+Check first: `ls /sys/kernel/mm/transparent_hugepage` - if the directory does
+not exist the kernel has no THP support and everything below is a no-op.
 
 `pistorm_hugepage.c` backs the three big mappings with 2 MB pages:
 
@@ -33,7 +49,7 @@ The A72 has a 32-entry L1 DTLB, a 48-entry L1 ITLB and a 1024-entry L2 TLB. With
 4 KB pages the L2 TLB covers 4 MB; with 2 MB pages it covers 2 GB, i.e. the
 whole emulator. That is what Emu68's 1 GB block MMU map gives it for free.
 
-Nothing to configure. On start-up you get:
+Nothing to configure. On a kernel with THP you get at start-up:
 
 ```
 [HUGEPAGE] natmem       147456 KB at 0x7f8a000000 - THP madvise(MADV_HUGEPAGE), 2M aligned
@@ -48,8 +64,10 @@ exists and `mlockall()` has faulted everything in):
 [HUGEPAGE] natmem       147456 KB mapped,   147456 KB resident,   147456 KB on 2M pages (100% of resident)
 ```
 
-If the last column is near 0%, the kernel's THP policy is `never`; the
-emulator flips it to `madvise` itself when running as root, but check:
+If the last column is near 0% and the start-up lines said "THP unavailable
+(madvise failed)", the kernel has no THP (stock Pi OS). If they said THP was
+requested, the policy is `never`; the emulator flips it to `madvise` itself
+when running as root, but check:
 
 ```
 cat /sys/kernel/mm/transparent_hugepage/enabled    # want [madvise] or [always]
@@ -117,13 +135,15 @@ PSCTRL reports the *requested* clock, so look at `vcgencmd` for the truth.
 
 `sudo ./perf-tlb.sh 10` prints the THP state, the emulator's AnonHugePages
 total, and ten seconds of PMU counters on CPU 2 (cycles, instructions,
-L1/L2 TLB refills, cache refills). Run a CoreMark or a GEM stress loop on the
+L1 TLB refills, cache refills; the Cortex-A72 PMU does not expose an L2 TLB
+refill event, so that line is skipped). Run a CoreMark or a GEM stress loop on the
 Atari while it samples. The numbers to compare with `PISTORM_HUGEPAGE=0`:
 
-* `l2d_tlb_refill` - should drop by roughly 10x with huge pages.
-* `instructions / cycles` (IPC) - if this does not improve while TLB refills
-  do, the workload was not TLB-bound and the next lever is the JIT's code
-  quality, not the memory map.
+* `l1d_tlb_refill` + `l1i_tlb_refill` x ~50 cycles / `cycles` - the upper
+  bound on what any page-size change can recover. Measured: under 1%.
+* `instructions / cycles` (IPC) - 2.0 measured; the core is not stalling on
+  memory. The next lever is the JIT's code quality (instructions per emulated
+  instruction, L1I footprint), not the memory map.
 
 For the CoreMark number itself, run the same binary you used for 734, in
 68040 + TT-RAM mode as well as 68000 mode, and record both: the 68040 figure
