@@ -1794,6 +1794,25 @@ static uae_u32 io_lget(uaecptr a){ PROF_IO_R(a); fc_data(); uae_u32 v=m68k_read_
 static uae_u32 io_wget(uaecptr a){ PROF_IO_R(a); fc_data(); uae_u32 v=m68k_read_memory_16(a); pistorm_buserr(a,0,true,sz_word); return (uint16_t)v; }
 static uae_u32 io_bget(uaecptr a){ PROF_IO_R(a); fc_data(); uae_u32 v=m68k_read_memory_8 (a); pistorm_buserr(a,0,true,sz_byte); return (uint8_t)v; }
 */
+
+/* Shifter palette read-back, $FF8240-$FF825F. On an ST/STF the unused bits
+ * of a palette register (3, 7, 11 and 12-15) are not latched and read back
+ * as bus noise; an STE/TT/Falcon returns exactly what was written. Software
+ * written for the later machines takes the read-back at face value - XVDI
+ * derives its console clear colour from palette 0 and painted the screen
+ * with 0xCA3A (= a dark ST 9-bit value plus noise in every undefined bit)
+ * on a 16-bit ET4000 screen. Every palette write is already snooped into
+ * st_palette[] for the native display, so serve reads from that shadow,
+ * masked to the 12 bits a real STE returns. PISTORM_PALETTE_BUS=1 restores
+ * the raw bus read. */
+static inline int palette_shadow_reads(void)
+{
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("PISTORM_PALETTE_BUS"); en = !(e && *e == '1'); }
+    return en;
+}
+static inline int palette_addr(uae_u32 a) { return a >= 0x00FF8240u && a < 0x00FF8260u; }
+
 static uae_u32 io_lget(uaecptr a)
 {
     PROF_IO_R(a);
@@ -1823,6 +1842,13 @@ static uae_u32 io_lget(uaecptr a)
        (the range bus-errors on the real ST bus - hardware is host-side) */
     if (DMA_Sound_enabled && dmasnd_owns(a))
         return dmasnd_reg_read32(a);
+    if (palette_addr(a) && palette_shadow_reads()) {
+        unsigned i = (a - 0x00FF8240u) >> 1;
+        uae_u32 hi = st_palette[i] & 0x0FFFu;
+        uae_u32 lo = (i + 1 < 16) ? (st_palette[i + 1] & 0x0FFFu) : 0;
+        pistorm_buserr(a, 0, true, sz_long);
+        return (hi << 16) | lo;
+    }
     uae_u32 v = ps_bus_lget(a);
     pistorm_buserr(a, 0, true, sz_long);
     acia_trace("R", a, v, 4);
@@ -1865,6 +1891,10 @@ static uae_u32 io_wget(uaecptr a)
     /* host-emulated STE DMA sound: serve reads from the register shadow */
     if (DMA_Sound_enabled && dmasnd_owns(a))
         return dmasnd_reg_read16(a);
+    if (palette_addr(a) && palette_shadow_reads()) {
+        pistorm_buserr(a, 0, true, sz_word);
+        return st_palette[(a - 0x00FF8240u) >> 1] & 0x0FFFu;
+    }
     uae_u16 v = ps_read_16(a);
     pistorm_buserr(a, 0, true, sz_word);
     acia_trace("R", a, v, 2);
@@ -1907,6 +1937,11 @@ static uae_u32 io_bget(uaecptr a)
     /* host-emulated STE DMA sound: serve reads from the register shadow */
     if (DMA_Sound_enabled && dmasnd_owns(a))
         return dmasnd_reg_read8(a);
+    if (palette_addr(a) && palette_shadow_reads()) {
+        uae_u16 w = st_palette[(a - 0x00FF8240u) >> 1] & 0x0FFFu;
+        pistorm_buserr(a, 0, true, sz_byte);
+        return (a & 1) ? (uae_u8)w : (uae_u8)(w >> 8);
+    }
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
     acia_trace("R", a, v, 1);
