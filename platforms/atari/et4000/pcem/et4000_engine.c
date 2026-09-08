@@ -614,6 +614,33 @@ static void et4000_engine_modedbg(const svga_t *s)
             s->attrregs[0x10], s->attrregs[0x13], s->attrregs[0x16], s->miscout);
 }
 
+
+/* PISTORM_VGA_PIXDBG=1: once a second, the raw VRAM bytes of the pixel at the
+ * centre of the screen and the ARGB the renderer produced from them. For
+ * colour-order bugs in the packed modes (which byte is R, G, B, and whether
+ * the guest wrote 3 or 4 bytes per pixel). */
+static void et4000_engine_pixdbg(const svga_t *s, int W, int H, int copy_offset)
+{
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("PISTORM_VGA_PIXDBG"); en = (e && *e == '1'); }
+    if (!en || !buffer32 || W < 8 || H < 2) return;
+    static time_t last;
+    time_t now = time(NULL);
+    if (now == last) return;
+    last = now;
+    int bypp = (s->bpp + 7) / 8;
+    uint32_t mask   = s->vram_display_mask ? s->vram_display_mask : (s->vram_mask ? s->vram_mask : 0xFFFFFu);
+    uint32_t stride = (uint32_t)s->rowoffset << 3;
+    uint32_t base   = ((uint32_t)s->ma_latch << 2) & mask;
+    uint32_t off    = (base + (uint32_t)(H / 2) * stride + (uint32_t)(W / 2) * (uint32_t)bypp) & mask;
+    const uint8_t *v = s->vram;
+    uint32_t px = ((const uint32_t *)buffer32->line[H / 2])[copy_offset + W / 2];
+    fprintf(stderr, "[et4k-pix] bpp=%d stride=%u centre @%06X raw:", s->bpp, stride, off);
+    for (int i = 0; i < 8; i++) fprintf(stderr, " %02X", v[(off + i) & mask]);
+    fprintf(stderr, "  -> rendered ARGB %08X (R=%02X G=%02X B=%02X)\n",
+            px, (px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+}
+
 void et4000_engine_render(uint32_t *argb_dst, int *out_w, int *out_h)
 {
     svga_t *live = g_svga;
@@ -675,6 +702,8 @@ void et4000_engine_render(uint32_t *argb_dst, int *out_w, int *out_h)
     }
     if (t_scan)
         et4000_render_profile_add(ET4K_RENDER_PROF_SCANLINES, et4000_render_profile_now_ns() - t_scan);
+
+    et4000_engine_pixdbg(s, W, H, copy_offset);
 
     uint64_t t_copy = et4000_render_profile_enabled() ? et4000_render_profile_now_ns() : 0;
     for (int y = 0; y < H; y++) {
@@ -818,6 +847,8 @@ void et4000_engine_render_direct(uint32_t *visible_dst, int pitch_px, int left_p
     }
     if (t_scan)
         et4000_render_profile_add(ET4K_RENDER_PROF_SCANLINES, et4000_render_profile_now_ns() - t_scan);
+
+    et4000_engine_pixdbg(s, W, H, copy_offset);
 
     if (out_w) *out_w = W;
     if (out_h) *out_h = H;
