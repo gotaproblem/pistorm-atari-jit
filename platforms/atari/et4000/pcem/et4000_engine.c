@@ -142,6 +142,7 @@ static int     g_3c6_first = 1;      /* first 0x3C6 read returns the 0xE0 RAMDAC
 static int     g_3c6_reads = 0;
 
 static uint8_t g_dac_cmd = 0;        /* last RAMDAC command byte (4 reads of 3C6 then write) */
+static void et4k_resolve_ambiguous_dac(svga_t *snap);
 
 static void et4k_apply_ramdac_ctrl(uint8_t val)
 {
@@ -478,6 +479,7 @@ int et4000_engine_visible_nonzero(void)
     svga_t snap;
     pthread_mutex_lock(&et4000_engine_mutex);
     snap = *live;
+    et4k_resolve_ambiguous_dac(&snap);
     svga_recalctimings(&snap);
     pthread_mutex_unlock(&et4000_engine_mutex);
     svga_t *s = &snap;
@@ -531,6 +533,7 @@ int et4000_engine_current_size(int *out_w, int *out_h)
     svga_t snap;
     pthread_mutex_lock(&et4000_engine_mutex);
     snap = *live;
+    et4k_resolve_ambiguous_dac(&snap);
     svga_recalctimings(&snap);
     pthread_mutex_unlock(&et4000_engine_mutex);
 
@@ -593,6 +596,31 @@ static void et4000_engine_advance_vc(svga_t *s)
 }
 
 
+
+/* DAC command 0xE0 is ambiguous: 16bpp on the Sierra SC1502x (what the NOVA
+ * driver assumes - its 800x608 65k mode writes E0 with 1600 bytes/line) and
+ * 24bpp on the AT&T 20C491 (what XVDI assumes - its 640x480 24-bit mode
+ * writes E0 with 1920 bytes/line). Both must display, so for E0 the depth is
+ * taken from the programmed line length: 24bpp if bytes/line is 3 x a
+ * plausible width and not 2 x one; otherwise 16bpp as PCem decoded it. Only
+ * the render snapshot is touched, never the live register state. */
+static int et4k_plausible_width(uint32_t w)
+{
+    static const uint16_t tab[] = { 320, 640, 720, 800, 832, 1024, 1152, 1280, 1600 };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++)
+        if (w == tab[i]) return 1;
+    return 0;
+}
+
+static void et4k_resolve_ambiguous_dac(svga_t *snap)
+{
+    if (g_dac_cmd != 0xE0 || snap->bpp != 16)
+        return;
+    uint32_t bpl = (uint32_t)snap->crtc[0x13] << 3;    /* rowoffset, bytes per line */
+    if (bpl && (bpl % 3) == 0 && et4k_plausible_width(bpl / 3) && !et4k_plausible_width(bpl / 2))
+        snap->bpp = 24;
+}
+
 /* PISTORM_VGA_MODEDBG=1: print the register state behind the derived geometry
  * once per change. For chasing "two desktops side by side" class bugs, where
  * hdisp / render / pixel-doubling disagree with what the guest driver meant. */
@@ -617,10 +645,10 @@ static void et4000_engine_modedbg(const svga_t *s)
                      s->render == svga_render_32bpp_lowres ? "32bpp_lowres" :
                      s->render == svga_render_32bpp_highres ? "32bpp_highres" :
                      s->render == svga_render_blank ? "blank" : "other";
-    fprintf(stderr, "[et4k-mode] dac-cmd=%02X %dx%d bpp=%d render=%s lowres=%d rowoffset=%d (%d bytes/line) | "
+    fprintf(stderr, "[et4k-mode] dac-cmd=%02X%s %dx%d bpp=%d render=%s lowres=%d rowoffset=%d (%d bytes/line) | "
             "CRTC[1]=%02X [13]=%02X [14]=%02X [17]=%02X [34]=%02X [37]=%02X | SEQ[1]=%02X [4]=%02X | "
             "GC[5]=%02X [6]=%02X | ATC[10]=%02X [13]=%02X [16]=%02X | misc=%02X\n",
-            g_dac_cmd, s->hdisp, s->dispend, s->bpp, rn, s->lowres ? 1 : 0, s->rowoffset, s->rowoffset << 3,
+            g_dac_cmd, (g_dac_cmd == 0xE0 && s->bpp == 24) ? "(->24bpp by line length)" : "", s->hdisp, s->dispend, s->bpp, rn, s->lowres ? 1 : 0, s->rowoffset, s->rowoffset << 3,
             s->crtc[1], s->crtc[0x13], s->crtc[0x14], s->crtc[0x17], s->crtc[0x34], s->crtc[0x37],
             s->seqregs[1], s->seqregs[4], s->gdcreg[5], s->gdcreg[6],
             s->attrregs[0x10], s->attrregs[0x13], s->attrregs[0x16], s->miscout);
@@ -661,6 +689,7 @@ void et4000_engine_render(uint32_t *argb_dst, int *out_w, int *out_h)
     svga_t snap;
     pthread_mutex_lock(&et4000_engine_mutex);
     snap = *live;
+    et4k_resolve_ambiguous_dac(&snap);
     svga_recalctimings(&snap);             /* refresh geometry + s->render from live regs */
     pthread_mutex_unlock(&et4000_engine_mutex);
     svga_t *s = &snap;
@@ -776,6 +805,7 @@ void et4000_engine_render_direct(uint32_t *visible_dst, int pitch_px, int left_p
     svga_t snap;
     pthread_mutex_lock(&et4000_engine_mutex);
     snap = *live;
+    et4k_resolve_ambiguous_dac(&snap);
     svga_recalctimings(&snap);
     pthread_mutex_unlock(&et4000_engine_mutex);
     svga_t *s = &snap;
