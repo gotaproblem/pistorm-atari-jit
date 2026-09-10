@@ -56,6 +56,8 @@
 #include <sys/time.h>
 #include <time.h>
 #include <linux/fb.h>
+#include <poll.h>
+#include <signal.h>
 
 #ifdef PISTORM_ENABLE_SDL_DISPLAY
 #include <SDL2/SDL.h>          /* real SDL2 render backend (opt-in) */
@@ -992,12 +994,7 @@ static void et4000_do_screendump(ET4000State *s)
                 "hole where the picture is\n");
     }
 
-    if (save_png_rgb("screendump.png", src,
-                     s->fb_width, s->fb_height, s->fb_stride / 4) == 0)
-        printf("[DISPLAY] Screendump %ux%u -> screendump.png\n",
-               s->fb_width, s->fb_height);
-    else
-        fprintf(stderr, "[DISPLAY] PNG screendump failed\n");
+    save_png_rgb(NULL, src, s->fb_width, s->fb_height, s->fb_stride / 4);
 
     free(tmp);
 }
@@ -1388,11 +1385,7 @@ static void sdl_present (ET4000State *s)
                                          (int)g_disp_h);
                 if (rc == 0)
                 {
-                    if (save_png_rgb("screendump.png", buf,
-                                     (uint32_t)ow, (uint32_t)oh, (uint32_t)ow) == 0)
-                        printf("[ET4K] Screendump %dx%d -> screendump.png\n", ow, oh);
-                    else
-                        fprintf(stderr, "[ET4000] PNG screendump failed\n");
+                    save_png_rgb(NULL, buf, (uint32_t)ow, (uint32_t)oh, (uint32_t)ow);
                 }
                 else
                 {
@@ -1989,13 +1982,75 @@ int write_png_rgb(const char *path, const uint32_t *pixels,
     return 0;
 }
 
-static int save_png_rgb(const char *path, const uint32_t *pixels,
+/*
+ * Where screendumps go: $PISTORM_SCREENDUMP_DIR, else <exe dir>/../screendumps
+ * (created if missing), else the current directory. Numbered screendumpN.png,
+ * next free N. Done here in C - the old "write screendump.png in the cwd and
+ * let screendump.sh move it" only worked when the emulator was started from
+ * its own directory with ../screendumps already there; otherwise the file
+ * silently overwrote itself somewhere else.
+ */
+static void screendump_next_path(char *out, size_t n)
+{
+    const char *env = getenv("PISTORM_SCREENDUMP_DIR");
+    char dir[1024];
+    struct stat st;
+    int i;
+
+    if (env && *env)
+        snprintf(dir, sizeof dir, "%s", env);
+    else
+    {
+        char exe[1024];
+        ssize_t l = readlink("/proc/self/exe", exe, sizeof exe - 1);
+
+        if (l > 0)
+        {
+            char *sl;
+
+            exe[l] = 0;
+            if ((sl = strrchr(exe, '/')))
+                *sl = 0;
+            snprintf(dir, sizeof dir, "%s/../screendumps", exe);
+        }
+        else
+            snprintf(dir, sizeof dir, "../screendumps");
+    }
+    mkdir(dir, 0755);
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
+        snprintf(dir, sizeof dir, ".");
+
+    for (i = 0; i < 100000; i++)
+    {
+        snprintf(out, n, "%s/screendump%d.png", dir, i);
+        if (access(out, F_OK) != 0)
+            break;
+    }
+}
+
+static int save_png_rgb(const char *unused_path, const uint32_t *pixels,
                         uint32_t w, uint32_t h, uint32_t stride_px)
 {
-    int rc = write_png_rgb(path, pixels, w, h, stride_px);
+    char path[1100];
+    int rc;
+
+    (void)unused_path;
+    screendump_next_path(path, sizeof path);
+    rc = write_png_rgb(path, pixels, w, h, stride_px);
     if (rc == 0)
-        system("bash ./screendump.sh");
+        printf("[DISPLAY] Screendump %ux%u -> %s\n", w, h, path);
+    else
+        fprintf(stderr, "[DISPLAY] Screendump failed: %s (%s)\n", path, strerror(errno));
+    fflush(stdout);
     return rc;
+}
+
+/* SIGUSR1 = take a screendump. Works whatever stdin is (systemd, ssh with
+ * no tty, screen session): kill -USR1 $(pidof emulator) */
+static void screendump_signal(int sig)
+{
+    (void)sig;
+    g_screendump_req = 1;
 }
 
 //void screenDump(int w, int h)
@@ -2008,16 +2063,29 @@ static int save_png_rgb(const char *path, const uint32_t *pixels,
  //   g_screendump_req = 1;
 //}
 
-/* terminal IO */
+/* terminal IO. stdin is put non-blocking by emulator.c; going through
+ * stdio's getchar() on a non-blocking fd leaves EAGAIN in the stream's
+ * error flag, and once an EOF has been seen (Ctrl-D, or the terminal going
+ * away and coming back) glibc's EOF is sticky and every later getchar()
+ * returns EOF forever - the 's' key "stops working". poll() + read() has no
+ * such state. Returns the key, or -1 if none is waiting. */
+static int term_key(void)
+{
+    struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+    unsigned char c;
+
+    if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN))
+        return -1;
+    if (read(STDIN_FILENO, &c, 1) != 1)
+        return -1;
+    return c;
+}
+
 int kbhit(void)
 {
-    int ch = getchar();
-    if (ch != EOF)
-    {
-        ungetc(ch, stdin);
-        return 1;
-    }
-    return 0;
+    struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+
+    return poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN);
 }
 
 #define HZ50 20000
@@ -2504,6 +2572,7 @@ void *render_frame(void *vptr)
     extern rtg_s rtg;
     int took;
     int remaining;
+    int c;
     int render_took = 0;   /* actual render+present time (excludes pacing sleep) */
     struct timeval stop, start;
     int FRAME_RATE = et4000_frame_interval_us ();
@@ -2517,6 +2586,8 @@ void *render_frame(void *vptr)
     double applied_hz = 0.0;
     const char *follow_env = getenv("PISTORM_VID_FOLLOW");
     int follow_guest_hz = (follow_env && *follow_env == '1');
+
+    signal(SIGUSR1, screendump_signal);
 
     et4000_configure_render_thread ();
 
@@ -2702,9 +2773,8 @@ void *render_frame(void *vptr)
              * this could easily be expanded to allow for more commands, 
              * but for now just allow screen dumps and recording
              */
-            if (screenGrab && kbhit())
+            if (screenGrab && (c = term_key()) >= 0)
             {
-                int c = getchar();
 
                 /* screen grab */
                 if (c == 's' || c == 'S')
