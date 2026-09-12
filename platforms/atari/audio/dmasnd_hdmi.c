@@ -670,18 +670,7 @@ static void *fl_worker(void *arg)
         strcpy(path, fl[pick].path);
         pthread_mutex_unlock(&fl_mx);
 
-        {
-            struct timespec t0, t1;
-            long ms;
-            const char *base = strrchr(path, '/');
-
-            clock_gettime(CLOCK_MONOTONIC, &t0);
-            secs = filelen_sync(path);      /* the slow part, no lock held */
-            clock_gettime(CLOCK_MONOTONIC, &t1);
-            ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
-            fprintf(stderr, "[MP3] filelen %s -> %ld s (%ld ms)\n", base ? base + 1 : path, secs, ms);
-            fflush(stdout);                 /* stdout is the journal: a pipe, fully buffered */
-        }
+        secs = filelen_sync(path);          /* the slow part, no lock held */
 
         pthread_mutex_lock(&fl_mx);
         if (fl[pick].state == 1 && strcmp(fl[pick].path, path) == 0) {
