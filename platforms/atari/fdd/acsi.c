@@ -13,6 +13,7 @@
  */
 
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -44,12 +45,7 @@ extern void     fdd_dma_copy_from_ram(uint32_t addr, uint8_t *buf,
  * register writes. */
 static int acsi_trace(void)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("PISTORM_ACSI_DEBUG");
-        on = (e && *e && *e != '0') ? 1 : 0;
-    }
-    return on;
+    return pst_dbg_acsi;
 }
 
 /* ---- targets ----------------------------------------------------------- */

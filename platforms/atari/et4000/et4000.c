@@ -40,6 +40,7 @@
 #include "../../../config_file/config_file.h"
 
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1225,11 +1226,7 @@ static void sdl_present (ET4000State *s)
              * would lose rects from skipped frames - force full then).
              * PISTORM_DRM_DIRTYBAND=0 disables it entirely (full copy
              * every present) as an A/B switch. */
-            static int band_enabled = -1;
-            if (band_enabled < 0) {
-                const char *e = getenv("PISTORM_DRM_DIRTYBAND");
-                band_enabled = (e && *e == '0') ? 0 : 1;
-            }
+            const int band_enabled = pst_drm_dirtyband;   /* live */
             uint32_t fy0 = 0, fy1 = sh ? sh - 1 : 0;
             uint32_t fx0 = 0, fx1 = sw ? sw - 1 : 0;
             int ffull = 1;
@@ -2638,6 +2635,19 @@ void *render_frame(void *vptr)
          * budget always, and the output refresh when the display offers a
          * mode that fits. Opt-in, because a mode switch costs a visible
          * resync and can drop HDMI audio on some sinks. */
+        /* The frame budget used to be a stack local set once, so changing
+         * fps needed a restart. Re-read it every pass: it is one compare
+         * against a global, and it is what makes the Video tab's slider
+         * do anything. The guest-follow branch below still wins when it
+         * is on, because it assigns FRAME_RATE after this. */
+        if (pst_fps >= 10 && pst_fps <= 60)
+        {
+            int want = 1000000 / pst_fps;
+
+            if (want != FRAME_RATE && !follow_guest_hz)
+                FRAME_RATE = want;
+        }
+
         if (follow_guest_hz)
         {
             double hz = pistorm_guest_hz;

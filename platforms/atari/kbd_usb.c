@@ -26,6 +26,7 @@
  */
 
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -360,20 +361,30 @@ static int      nat_mouse_rel = 1;      /* IKBD powers up relative      */
 
 static void mouse_cfg_init(void)
 {
-    const char *e = getenv("PISTORM_MOUSE_THRESH");
-
-    mouse_thresh = (e && *e) ? atoi(e) : 0;
+    mouse_thresh = pst_mouse_thresh;
     if (mouse_thresh < 0)  mouse_thresh = 0;
     if (mouse_thresh > 15) mouse_thresh = 15;
 
-    e = getenv("PISTORM_MOUSE_SCALE");
-    mouse_scale = (e && *e) ? atoi(e) : 1;
+    mouse_scale = pst_mouse_scale;
     if (mouse_scale < 1)  mouse_scale = 1;
     if (mouse_scale > 16) mouse_scale = 16;
 
     if (mouse_thresh)
         printf("[KBD] native mouse: IKBD threshold %d, delta scale %d\n",
                mouse_thresh, mouse_scale);
+}
+
+static void mouse_thresh_arm(uint64_t delay_us);
+
+/*
+ * The settings accessory changed pst_mouse_thresh / _scale. The scale is
+ * read on every packet so it takes at once; the threshold is a command
+ * the real IKBD has to be told about, so re-arm the 0x0B.
+ */
+void kbd_usb_mouse_cfg_changed(void)
+{
+    mouse_cfg_init();
+    mouse_thresh_arm(50000);
 }
 
 /* Queue "0x0B thresh thresh" to the real IKBD, not before now+delay -

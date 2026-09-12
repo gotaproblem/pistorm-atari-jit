@@ -5,6 +5,7 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,9 +41,8 @@ static pistorm_net_state_t g_net = {
 static void pnet_trace_frame(const char *prefix, const uint8_t *frame, size_t len)
 {
   uint16_t type = len >= 14 ? ((uint16_t)frame[12] << 8) | frame[13] : 0;
-  const char *debug = getenv("PISTORM_NET_DEBUG");
-
-  if (!debug || !debug[0] || strcmp(debug, "0") == 0)
+  /* Was an uncached getenv() on the per-frame path. */
+  if (!pst_dbg_net)
     return;
 
   fprintf(stderr,

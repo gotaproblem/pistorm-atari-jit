@@ -44,6 +44,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <time.h>
 
@@ -88,6 +89,28 @@ static FILE    *g_tap   = NULL;              /* raw S16LE mono 250 kHz  */
 static FILE    *g_evlog = NULL;              /* applied register writes */
 static uint64_t g_sample_idx = 0;            /* samples rendered so far */
 typedef struct { uint64_t t, sample; uint8_t reg, val; uint16_t pad; } ym_evrec;
+
+static void ym_apply_gain(void);
+
+/*
+ * Both live knobs in one place, so the settings accessory can move them
+ * on a running machine: gain is a stream property SDL applies to the next
+ * buffer, and the lag is read by the render loop on its next pass.
+ */
+void ym2149_settings_changed(void)
+{
+    float gain = (float)pst_ym_gain_x100 / 100.0f;
+    long  ms   = pst_ym_lag_ms;
+
+    if (gain < 0.0f) gain = 0.0f;
+    if (gain > 4.0f) gain = 4.0f;
+    if (ms < 5)   ms = 5;
+    if (ms > 200) ms = 200;
+
+    g_user_gain = gain;
+    g_lag_ns    = (uint64_t)ms * 1000000ull;
+    ym_apply_gain();      /* folds in whatever the LMC shadow already holds */
+}
 
 static void ym_apply_gain(void)
 {
@@ -273,14 +296,7 @@ int ym2149_init(void)
         return -1;
     }
 
-    {   /* fixed trim (relative level vs the STE DMA stream) */
-        const char *g = getenv("PISTORM_YM_GAIN");
-        float gain = g ? (float)atof(g) : 1.0f;
-        if (gain < 0.0f) gain = 0.0f;
-        if (gain > 4.0f) gain = 4.0f;
-        g_user_gain = gain;
-        ym_apply_gain();      /* folds in whatever the LMC shadow already holds */
-    }
+    ym2149_settings_changed();  /* gain and lag, from psctrl_tunables */
     {
         /* Default raised 20 -> 100ms. MEASURED (tap + evlog): SDL's pull
          * cadence bursts up to ~25ms ahead of real time in a ~1Hz limit
@@ -290,11 +306,8 @@ int ym2149_init(void)
          * results: 50ms usable, 100ms clean. Cost is fixed audio
          * latency, fine for music; PISTORM_YM_LAG_MS tunes it down for
          * latency-sensitive use. */
-        const char *l = getenv("PISTORM_YM_LAG_MS");
-        long ms = l ? atol(l) : 100;
-        if (ms < 5) ms = 5;
-        if (ms > 200) ms = 200;
-        g_lag_ns = (uint64_t)ms * 1000000ull;
+        /* set by ym2149_settings_changed() above; the comment stays here
+         * because this is where the measurement that chose 100 ms lives. */
     }
     {   /* diagnostic taps: big stdio buffers so the audio-thread fwrite is
          * a memcpy; the kernel flush happens on fclose or buffer-full. At

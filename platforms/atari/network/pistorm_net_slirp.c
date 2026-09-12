@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -30,8 +31,7 @@
 #if defined(HAVE_LIBSLIRP)
 static int pnet_slirp_debug_enabled(void)
 {
-  const char *debug = getenv("PISTORM_NET_DEBUG");
-  return debug && debug[0] && strcmp(debug, "0") != 0;
+  return pst_dbg_net;
 }
 
 typedef struct pnet_slirp_timer {

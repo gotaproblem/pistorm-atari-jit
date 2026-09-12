@@ -13,18 +13,14 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 
 /* PISTORM_MFP_HUB_DEBUG=1: budgeted trace of raises/IACKs/EOIs plus a
  * once-per-1024-arbitrations state line. Free when off (cached getenv). */
 static int hub_dbg(void)
 {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("PISTORM_MFP_HUB_DEBUG");
-        v = (e && *e == '1') ? 1 : 0;
-    }
-    return v;
+    return pst_dbg_mfp_hub;         /* live; see psctrl_tunables.h */
 }
 
 /* ---- register shadows (guest-programmed) ------------------------------ */

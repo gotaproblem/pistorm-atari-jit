@@ -33,6 +33,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,16 +64,14 @@ static uint64_t blit_now_ns(void)
 
 static int blit_timing_cfg(void)   /* 0 = instant, else ns per bus access */
 {
-    static int ns = -1;
-    if (ns < 0)
-    {
-        /* default: instant (blitter data + busy both immediate). Timed BUSY
-         * is opt-in via PISTORM_BLIT_TIMED_NS=<ns per bus access> (500 =
-         * realistic STE) for software that paces itself on blitter speed. */
-        const char *n = getenv("PISTORM_BLIT_TIMED_NS");
-        ns = n ? atoi(n) : 0;
-        if (ns < 0 || ns > 100000) ns = 0;
-    }
+    /* Live, re-read per blit: the settings accessory moves it while a
+     * program is running, which is the only way to tell whether a game
+     * paces itself on blitter speed. Default is still instant (0); 500 is
+     * a realistic STE. Note that PISTORM_BLIT_INSTANT, promised by the
+     * comment at the top of this file, never existed - instant is 0. */
+    int ns = pst_blit_timed_ns;
+
+    if (ns < 0 || ns > 100000) ns = 0;
     return ns;
 }
 
@@ -175,16 +174,11 @@ static void blit_run(void)
         xc = 65536;
     g_accesses = 0;
 
-    {   /* PISTORM_BLIT_TRACE=N traces the first N blits to stderr */
-        static int trace_left = -1;
-        if (trace_left < 0)
+    {   /* blit_trace is a budget of blits to trace, not a flag: the
+         * accessory re-arms it by setting it again. */
+        if (pst_dbg_blit_trace > 0)
         {
-            const char *e = getenv("PISTORM_BLIT_TRACE");
-            trace_left = e ? atoi(e) : 0;
-        }
-        if (trace_left > 0)
-        {
-            trace_left--;
+            pst_dbg_blit_trace--;
             fprintf(stderr,
                 "[BLIT] src=%06X sxi=%d syi=%d dst=%06X dxi=%d dyi=%d "
                 "xc=%u yc=%u hop=%d op=%d skew=%d fx=%d nf=%d sm=%d "

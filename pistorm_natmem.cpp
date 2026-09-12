@@ -31,6 +31,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <time.h>
 #include "platforms/atari/audio/dmasnd.h"
 #include "platforms/atari/mfp_hub.h"
@@ -475,12 +476,7 @@ static inline void stram_memcfg_snoop(uaecptr a, uae_u32 v, int size)
          * "TOS wrote nothing" is exactly the distinction that matters
          * (it is how the missing-snoop bug was found). Quiet by
          * default; recfg below still logs actual changes. */
-        static int dbg = -1;
-        if (__builtin_expect(dbg < 0, 0)) {
-            const char *e = getenv("PISTORM_STRAM_DEBUG");
-            dbg = (e && *e == '1') ? 1 : 0;
-        }
-        if (dbg)
+        if (__builtin_expect(pst_dbg_stram != 0, 0))
             fprintf(stderr, "[STRAM] guest memcfg write $%02X\n", mc);
         stram_alias_recfg(mc);
     }
@@ -898,7 +894,9 @@ static void st_rez_sync_trace(uint32_t a, uint8_t v)
      * built on a trace that could not print. Runtime-gated now; the
      * writes are deduplicated above and number a handful per boot, so
      * the gate is the only cost. */
-    if (getenv("PISTORM_MFP_DEBUG")) {
+    /* Was a bare getenv() presence test, so PISTORM_MFP_DEBUG=0 silenced
+     * mfp_trace() below but left this one printing. One flag now. */
+    if (pst_dbg_mfp) {
         clock_gettime(CLOCK_MONOTONIC, &ts);
         fprintf(stderr, "[vid] t=%llu.%03llus %s write = 0x%02X pc=%08X%s  guest=%.1fHz\n",
                 (unsigned long long)ts.tv_sec,
@@ -2725,12 +2723,8 @@ static inline int kbd_acia_shadowed(uaecptr a)
  * mechanism can be READ OFF rather than guessed at. */
 static void mfp_trace(const char *op, uaecptr a, uae_u32 v, int words)
 {
-    static int on = -1, shown;
-    if (on < 0) {
-        const char *e = getenv("PISTORM_MFP_DEBUG");
-        on = (e && *e && *e != '0') ? 1 : 0;
-    }
-    if (!on || shown >= 64)
+    static int shown;
+    if (!pst_dbg_mfp || shown >= 64)
         return;
     uae_u32 r = a & 0x00FFFFFFu;
     if (r < 0x00FFFA01u || r > 0x00FFFA0Fu)

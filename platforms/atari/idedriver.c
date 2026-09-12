@@ -20,6 +20,7 @@
 #define _LARGEFILE64_SOURCE 
 
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
@@ -160,12 +161,7 @@ static void ide_fault ( struct ide_drive *d, const char *p )
    * course - so every boot printed dozens of "ide: cf: 1: not present"
    * / "bogus register" lines while IDE worked perfectly. Faults that
    * matter when bringing up a NEW driver are one env var away. */
-  static int on = -1;
-  if (on < 0) {
-    const char *e = getenv("PISTORM_IDE_DEBUG");
-    on = (e && *e && *e != '0') ? 1 : 0;
-  }
-  if (on)
+  if (pst_dbg_ide)
     printf ( "ide: %s: %d: %s\n", d->controller->name,
 			(int)(d - d->controller->drive), p );
 }

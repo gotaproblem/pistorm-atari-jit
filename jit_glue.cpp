@@ -24,6 +24,7 @@
 #include "sysconfig.h"
 #include "sysdeps.h"
 #include "options.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "memory.h"
 #include "newcpu.h"
 #include "uae.h" /* quit_program, UAE_RESET */
@@ -310,12 +311,12 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
      * Default 1024 measured on HW: 68000 CoreMark 540->734 (~+36%), I/O clean,
      * plateau ~2048; 1024 keeps ~98% of the gain with 2x the fallback margin.
      * Watch for keyboard beep / erratic mouse = a break got delayed; back off. */
-    {
-        int pissoff_mult = 1024;
-        const char *e = getenv("PISTORM_PISSOFF");
-        if (e) { int v = atoi(e); if (v >= 1 && v <= 65536) pissoff_mult = v; }
-        pissoff_value = currprefs.cachesize ? (pissoff_mult * CYCLE_UNIT) : 0;
-    }
+    /* The multiplier now lives in psctrl_tunables (seeded from the .cfg
+     * key jit_power and then from PISTORM_PISSOFF, which still wins), so
+     * the settings accessory can move it on a running machine: every
+     * reload site in events.cpp reads pissoff_value, and writing it is a
+     * single aligned store. */
+    pissoff_value = currprefs.cachesize ? (pst_pissoff_mult * CYCLE_UNIT) : 0;
     pissoff_nojit_value = 0;
     pissoff = currprefs.cachesize ? pissoff_value : 0;
     jit_n_addr_unsafe = 1;

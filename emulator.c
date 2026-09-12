@@ -22,6 +22,7 @@
 #include "platforms/atari/et4000/et4000.h"
 // #include "platforms/atari/et4000/native_vga.h"
 #include "config_file/config_file.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
 #include "platforms/atari/machine_cookie.h"
@@ -506,22 +507,23 @@ static void *ipl_task(void *)
   uint64_t ipl_cand_tick = 0;           /* arch-timer stamp of candidate */
   const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
   const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
-  uint64_t ipl_confirm_ticks;           /* persistence window, arch ticks */
+  /* ipl_confirm_ticks and av4_refract_ticks used to be locals computed
+   * once here. They are now published globals (psctrl_tunables), because
+   * this loop runs on core 3 at SCHED_FIFO and must not divide: the
+   * settings handler does the ns -> tick conversion on the CPU thread and
+   * stores the result, and this loop just reads it. */
+#define ipl_confirm_ticks  ((uint64_t)pst_ipl_confirm_ticks)
+#define av4_refract_ticks  ((uint64_t)pst_vbl_refract_ticks)
   uint8_t  av_held = 0;                 /* autovector level already latched
                                            this assertion episode (2/4)   */
   uint64_t av4_last_tick = 0;           /* last level-4 latch (refractory) */
-  uint64_t av4_refract_ticks;
   {
-    const char *e = getenv("PISTORM_IPL_CONFIRM_NS");
-    const char *r = getenv("PISTORM_VBL_REFRACT_NS");
-    uint64_t ns  = e ? strtoull(e, NULL, 10) : 2000;      /* default 2us */
-    uint64_t rns = r ? strtoull(r, NULL, 10) : 5000000;   /* default 5ms */
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     if (!f)
       f = 54000000ULL;                  /* Pi 4 arch-timer fallback */
-    ipl_confirm_ticks = ns * f / 1000000000ULL;
-    av4_refract_ticks = rns * f / 1000000000ULL;
+    psctrl_cntfrq = f;                  /* the setter needs it too */
+    psctrl_tunables_ipl_recalc();
   }
   bool seen_ipl6 = false;
   unsigned no_ipl6_seconds = 0;
@@ -1401,6 +1403,13 @@ int main (int argc, char *argv[])
     return 1;
   }
   emulator_config_set_current(config);
+  /* Order matters: the .cfg has already set whatever tunables it named
+   * (load_config_file hands unknown keys to psctrl_settings_config_key),
+   * and this now lets a PISTORM_* in the launch script override it, which
+   * is the precedence people already have in their fingers. */
+  psctrl_tunables_init();
+  if (!pst_fps)
+    pst_fps = emulator_config_fps();
   pistorm_set_blitter_mode(emulator_config_blitter_mode());
 
   /*
@@ -1629,12 +1638,14 @@ int main (int argc, char *argv[])
     printf("[MAIN] IPL thread created successfully\n");
   }
 
-  /* PISTORM_IPL_STATS=1: one line per second of interrupt rates. Runs in
-   * its own thread so nothing is printed from ipl_task, which spins on
-   * cpu3 and must not syscall. Off unless the env var is set. */
+  /* One line per second of interrupt rates. Runs in its own thread so
+   * nothing is printed from ipl_task, which spins on cpu3 and must not
+   * syscall. Off unless the ipl flag is on (cfg `debug ipl`, the Debug
+   * tab, or PISTORM_IPL_STATS). The thread is only ever created here, so
+   * turning the flag on later needs a restart - the flag itself is
+   * checked once. */
   {
-    const char *e = getenv("PISTORM_IPL_STATS");
-    if (e && *e == '1')
+    if (pst_dbg_ipl_stats)
     {
       pthread_t stats_tid;
       if (pthread_create(&stats_tid, NULL, &ipl_stats_task, NULL) != 0)

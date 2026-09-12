@@ -21,6 +21,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -108,10 +109,12 @@ int dmasnd_init(const char *device)
      * a late audio-thread wakeup no longer drains the device. Latency cost
      * is inaudible for this use. PISTORM_AUDIO_FRAMES overrides (512-8192). */
     {
-        const char *f = getenv("PISTORM_AUDIO_FRAMES");
-        int n = f ? atoi(f) : 2048;
-        if (n < 512 || n > 8192) n = 2048;
+        /* SDL reads this at device open, so it is a boot-class setting
+         * however it is spelled - the accessory says "restart". */
+        int n = pst_audio_frames;
         char buf[16];
+
+        if (n < 512 || n > 8192) n = 2048;
         snprintf(buf, sizeof(buf), "%d", n);
         SDL_SetHint("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", buf);
     }
@@ -190,12 +193,7 @@ static int lmc_mixing = 1;              /* 1 = DMA + YM (what TOS programs) */
 
 static int lmc_enabled(void)
 {
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("PISTORM_LMC");
-        on = (e && *e == '0') ? 0 : 1;
-    }
-    return on;
+    return pst_lmc;                 /* live; see psctrl_tunables.h */
 }
 
 static float lmc_gain_db(float db) { return powf(10.0f, db / 20.0f); }

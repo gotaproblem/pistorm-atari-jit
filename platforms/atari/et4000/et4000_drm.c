@@ -17,6 +17,7 @@
  */
 
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
@@ -349,8 +350,7 @@ static void drmpres_drain_flip(void)
  * leave g_async=0 and the caller keeps the blocking legacy path. */
 static void drmpres_atomic_setup(void)
 {
-    const char *e = getenv("PISTORM_DRM_ASYNC");
-    if (!(e && *e && strcmp(e, "0") != 0))
+    if (!pst_drm_async)
         return;
     if (drmSetClientCap(g_fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
         fprintf(stderr, "[DRM] atomic cap unavailable; async present off\n");

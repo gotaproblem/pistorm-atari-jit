@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "stbox.h"
 #include "../../../third_party/musashi/m68k.h"
 
@@ -35,7 +36,11 @@
  * of host work on a Pi 4 core - inside the housekeeping admission rule. A
  * single long instruction (DIVS, MOVEM) may overshoot; Musashi stops at the
  * first boundary past the budget and the debt carries. */
-#define SLICE_CYC      64
+/* Live, from the ST Box tab. Was a compile-time 64. The dialog shows the
+ * approximate host cost beside it; the loop counts GUEST cycles, and
+ * converting a nanosecond cap per pass would put a divide in the
+ * admission path, so cycles is what the control sets. */
+#define SLICE_CYC      ((int)pst_stbox_slice_cyc)
 /* If the box falls behind (host stall, heavy IPL traffic), never try to
  * catch up more than one frame - drop the debt instead of marathoning. */
 #define MAX_DEBT_CYC   CYC_PER_VBL
