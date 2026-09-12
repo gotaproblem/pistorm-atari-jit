@@ -549,13 +549,11 @@ const void *dmasnd_mp3_art(long *len)
 }
 
 /*
- * How long a file is, without disturbing the track that is playing. The
- * front-end wants a duration column in its playlist and MP3PLAY only ever
- * knew about the open track; libmpg123 handles are independent, so this
- * opens its own. A CBR file costs a header read, a VBR one a full scan,
- * which is why the guest calls this once per file on load and caches it.
+ * How long a file is, without disturbing the track that is playing.
+ * libmpg123 handles are independent, so this opens its own. Synchronous;
+ * only ever called from the worker below - see dmasnd_mp3_filelen().
  */
-long dmasnd_mp3_filelen(const char *host_path)
+static long filelen_sync(const char *host_path)
 {
     static int ready = 0;
     mpg123_handle *mh;
@@ -589,6 +587,117 @@ long dmasnd_mp3_filelen(const char *host_path)
     }
     mpg123_delete(mh);
     return secs;
+}
+
+/*
+ * The asynchronous face of filelen_sync(), which is what the NatFeat uses.
+ *
+ * A NatFeat handler runs inline on the emulated CPU: for as long as it
+ * takes, the 68k is stalled. mpg123_scan() on a five-minute VBR file is a
+ * second or more, and a stall that long inside a trap took the guest's
+ * timer interrupts down with it - MP3GEM's clock stopped, and only IKBD
+ * traffic from moving the mouse nudged it along. So nothing here may
+ * block. The guest asks, gets -2 (pending) straight away, and asks again
+ * next tick; a worker thread does the reading and the answer is waiting
+ * the next time round. A small cache means a folder is only read once.
+ */
+#include <pthread.h>
+
+#define FL_SLOTS 64
+#define FL_PATH  528                        /* HOSTFS_HOST_PATH_MAX + 16 */
+
+static struct {
+    char path[FL_PATH];
+    long secs;
+    int  state;                         /* 0 free, 1 queued, 2 done */
+    unsigned long age;
+} fl[FL_SLOTS];
+static pthread_mutex_t fl_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  fl_cv = PTHREAD_COND_INITIALIZER;
+static pthread_t       fl_thr;
+static int             fl_started = 0;
+static unsigned long   fl_clock = 0;
+
+static void *fl_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        char path[FL_PATH];
+        int i, pick = -1;
+        long secs;
+
+        pthread_mutex_lock(&fl_mx);
+        for (;;) {
+            for (i = 0; i < FL_SLOTS; i++)
+                if (fl[i].state == 1) { pick = i; break; }
+            if (pick >= 0)
+                break;
+            pthread_cond_wait(&fl_cv, &fl_mx);
+        }
+        strcpy(path, fl[pick].path);
+        pthread_mutex_unlock(&fl_mx);
+
+        secs = filelen_sync(path);          /* the slow part, no lock held */
+
+        pthread_mutex_lock(&fl_mx);
+        if (fl[pick].state == 1 && strcmp(fl[pick].path, path) == 0) {
+            fl[pick].secs = secs;
+            fl[pick].state = 2;
+        }
+        pthread_mutex_unlock(&fl_mx);
+    }
+    return NULL;
+}
+
+long dmasnd_mp3_filelen(const char *host_path)
+{
+    int i, slot = -1;
+    long ret = -2;
+    unsigned long oldest = ~0UL;
+
+    if (!host_path || !*host_path)
+        return -1;
+    if (strlen(host_path) >= sizeof(fl[0].path))
+        return -1;
+
+    pthread_mutex_lock(&fl_mx);
+    if (!fl_started) {
+        if (pthread_create(&fl_thr, NULL, fl_worker, NULL) == 0) {
+            pthread_detach(fl_thr);
+            fl_started = 1;
+        } else {
+            pthread_mutex_unlock(&fl_mx);
+            return -1;
+        }
+    }
+    fl_clock++;
+    for (i = 0; i < FL_SLOTS; i++) {
+        if (fl[i].state && strcmp(fl[i].path, host_path) == 0) {
+            fl[i].age = fl_clock;
+            ret = (fl[i].state == 2) ? fl[i].secs : -2;
+            pthread_mutex_unlock(&fl_mx);
+            return ret;
+        }
+        /* remember the best slot to evict: free first, then the oldest
+         * finished one; never a queued one, the worker owns those */
+        if (fl[i].state == 0) {
+            if (slot < 0 || fl[slot].state != 0) { slot = i; oldest = 0; }
+        } else if (fl[i].state == 2 && (slot < 0 || fl[slot].state != 0) &&
+                   fl[i].age < oldest) {
+            slot = i; oldest = fl[i].age;
+        }
+    }
+    if (slot < 0) {                     /* everything queued: try later */
+        pthread_mutex_unlock(&fl_mx);
+        return -2;
+    }
+    strcpy(fl[slot].path, host_path);
+    fl[slot].secs = 0;
+    fl[slot].state = 1;
+    fl[slot].age = fl_clock;
+    pthread_cond_signal(&fl_cv);
+    pthread_mutex_unlock(&fl_mx);
+    return -2;
 }
 
 /* -1 queries. Applied in the decode callback, so it survives a track change

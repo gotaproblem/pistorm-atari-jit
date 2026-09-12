@@ -151,8 +151,10 @@ enum nf_mp3_ops {
                         through the JIT's self-modifying-code check.          */
   NF_MP3_VOLUME,     /* param0: -1 queries, else 0..200 percent -> the volume  */
   NF_MP3_FILELEN     /* param0 = GEMDOS path -> that file's length in seconds,
-                        0 if it could not be determined, -1 on error. Does not
-                        touch the track that is playing.                      */
+                        -2 = not known yet, ask again next tick; 0 = could not
+                        be determined; -1 = error. NEVER stalls the guest: the
+                        reading happens on a host thread. Does not touch the
+                        track that is playing.                                */
 };
 
 /* VIDPLAY subids. 0..7 are deliberately identical to MP3PLAY so a front-end
