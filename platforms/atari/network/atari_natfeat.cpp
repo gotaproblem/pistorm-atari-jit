@@ -149,7 +149,10 @@ enum nf_mp3_ops {
                         letterboxed. -> bytes written, 0 = no cover, -1 error.
                         Put the buffer in TT-RAM: a write below 4 MB goes
                         through the JIT's self-modifying-code check.          */
-  NF_MP3_VOLUME      /* param0: -1 queries, else 0..200 percent -> the volume  */
+  NF_MP3_VOLUME,     /* param0: -1 queries, else 0..200 percent -> the volume  */
+  NF_MP3_FILELEN     /* param0 = GEMDOS path -> that file's length in seconds,
+                        0 if it could not be determined, -1 on error. Does not
+                        touch the track that is playing.                      */
 };
 
 /* VIDPLAY subids. 0..7 are deliberately identical to MP3PLAY so a front-end
@@ -290,6 +293,7 @@ extern "C" const char *dmasnd_mp3_meta(int which);
 extern "C" long dmasnd_mp3_info(int which);
 extern "C" const void *dmasnd_mp3_art(long *len);
 extern "C" int  dmasnd_mp3_volume(int percent);
+extern "C" long dmasnd_mp3_filelen(const char *host_path);
 
 /* Host video player - platforms/atari/video/vidplay.c */
 extern "C" int  vidplay_play(const char *host_path);
@@ -4858,6 +4862,18 @@ static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
       return (uae_u32)dmasnd_mp3_info((int)nf_get_param(params, 0));
     case NF_MP3_VOLUME:
       return (uae_u32)dmasnd_mp3_volume((int)(int32_t)nf_get_param(params, 0));
+    case NF_MP3_FILELEN: {
+      uaecptr pathp = nf_get_param(params, 0);
+      char gem[512];
+      char host[HOSTFS_HOST_PATH_MAX + 16];
+
+      if (!pathp)
+        return (uae_u32)-1;
+      nf_read_string(pathp, gem, sizeof(gem));
+      if (!mp3_gemdos_to_host(gem, host, sizeof(host)))
+        return (uae_u32)-1;
+      return (uae_u32)dmasnd_mp3_filelen(host);
+    }
     case NF_MP3_ART: {
       uaecptr dstp = nf_get_param(params, 0);
       uae_u32 cap  = nf_get_param(params, 1);

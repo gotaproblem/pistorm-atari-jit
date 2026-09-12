@@ -44,6 +44,7 @@ const char *dmasnd_mp3_meta(int which);       /* 0=title 1=artist 2=album */
 long dmasnd_mp3_info(int which);              /* 0=bitrate kbps 1=ch 2=layer 3=vbr */
 const void *dmasnd_mp3_art(long *len);        /* ID3 cover, encoded; NULL if none  */
 int  dmasnd_mp3_volume(int percent);          /* -1 queries; 0..200                */
+long dmasnd_mp3_filelen(const char *host_path); /* seconds, -1 unreadable          */
 
 /* ---- capture (dmasnd_capture.c) ---- */
 int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF8925?      */

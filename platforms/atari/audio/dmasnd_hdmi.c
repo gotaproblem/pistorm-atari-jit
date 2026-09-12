@@ -548,6 +548,45 @@ const void *dmasnd_mp3_art(long *len)
     return mp3_art;
 }
 
+/*
+ * How long a file is, without disturbing the track that is playing. The
+ * front-end wants a duration column in its playlist and MP3PLAY only ever
+ * knew about the open track; libmpg123 handles are independent, so this
+ * opens its own. A CBR file costs a header read, a VBR one a full scan,
+ * which is why the guest calls this once per file on load and caches it.
+ */
+long dmasnd_mp3_filelen(const char *host_path)
+{
+    static int ready = 0;
+    mpg123_handle *mh;
+    int err = 0, channels = 0, enc = 0;
+    long rate = 0, secs = -1;
+
+    if (!host_path || !*host_path)
+        return -1;
+    if (!ready) {
+        mpg123_init();
+        ready = 1;
+    }
+    mh = mpg123_new(NULL, &err);
+    if (!mh)
+        return -1;
+    if (mpg123_open(mh, host_path) == MPG123_OK &&
+        mpg123_getformat(mh, &rate, &channels, &enc) == MPG123_OK && rate > 0) {
+        off_t frames;
+
+        mpg123_scan(mh);
+        frames = mpg123_length(mh);
+        if (frames > 0)
+            secs = (long)(frames / rate);
+        else
+            secs = 0;
+        mpg123_close(mh);
+    }
+    mpg123_delete(mh);
+    return secs;
+}
+
 /* -1 queries. Applied in the decode callback, so it survives a track change
  * and costs nothing at 100. */
 int dmasnd_mp3_volume(int percent)
