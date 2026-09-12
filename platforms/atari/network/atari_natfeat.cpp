@@ -4757,6 +4757,51 @@ extern "C" void atari_natfeat_raise_network_irq(void)
   atari_request_irq_level(nfeth_interrupt_level());
 }
 
+/* A GEMDOS path is case-insensitive and HOSTFS.XFS resolves it that way,
+ * so the guest can open S:\APJ-OS\BG\FLTD.PNG when the Pi's directory is
+ * really apj-os/bg - and TeraDesk upper-cases every path on a drive that
+ * does not report case sensitivity. The host-side decoders (psimg,
+ * mpg123) get the literal spelling and fail on a case-sensitive
+ * filesystem. So after the drive mapping, resolve each component below
+ * the mount root against the directory as it is: an exact name wins,
+ * otherwise the first case-insensitive match. A component that matches
+ * nothing is left as spelled. */
+static void host_path_fold_case(char *path, size_t root_len)
+{
+  char *p = path + root_len;
+
+  while (*p) {
+    while (*p == '/') p++;
+    if (!*p)
+      break;
+    char *e = p;
+    while (*e && *e != '/') e++;
+    char saved = *e;
+    *e = 0;
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+      char dirpath[PATH_MAX];
+      size_t dl = (size_t)(p - path);
+      if (dl == 0 || dl >= sizeof(dirpath)) { *e = saved; break; }
+      memcpy(dirpath, path, dl);
+      dirpath[dl] = 0;
+      DIR *d = opendir(dirpath);
+      if (!d) { *e = saved; break; }
+      struct dirent *de;
+      while ((de = readdir(d)) != NULL) {
+        if (strlen(de->d_name) == (size_t)(e - p) && strcasecmp(de->d_name, p) == 0) {
+          memcpy(p, de->d_name, (size_t)(e - p));
+          break;
+        }
+      }
+      closedir(d);
+    }
+    *e = saved;
+    p = e;
+  }
+}
+
 /* Translate a GEMDOS path ("S:\dir\file.mp3") to a host path via the mounted
  * HOSTFS drive whose letter matches. Requires an explicit drive letter.
  * fsel under MiNT often hands back UNIFIED-drive paths ("U:\S\dir\file") -
@@ -4813,6 +4858,7 @@ static bool mp3_gemdos_to_host(const char *gem_in, char *out, size_t outsz)
     return false;
   for (char *p = out; *p; p++)
     if (*p == '\\') *p = '/';
+  host_path_fold_case(out, strlen(root));
   return true;
 }
 
