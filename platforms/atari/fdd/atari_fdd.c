@@ -18,6 +18,7 @@
 #include "gpio/ps_protocol.h"
 
 #include <stdio.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -37,12 +38,9 @@
  * from one boot log. Bounded; silent when unset. */
 static int acsi_dbg_on(void)
 {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("PISTORM_ACSI_DEBUG");
-        v = (e && *e == '1') ? 1 : 0;
-    }
-    return v;
+    /* This used to test == '1' while acsi.c tested != '0', so
+     * PISTORM_ACSI_DEBUG=2 turned one trace on and not the other. */
+    return pst_dbg_acsi;
 }
 static int acsi_dbg_count;
 #define ACSI_DBG_LIMIT 120
@@ -473,6 +471,44 @@ void fdd_toggle_disk(int drive)
             printf("[FDD] F11: drive %c re-insert of '%s' FAILED\n",
                    'A' + drive, path);
     }
+}
+
+/*
+ * Report a drive to anything outside this file. Everything interesting is
+ * inside the file-static fdc, so before this there was no way for the
+ * settings NatFeat to say what is in drive A: - fdd_status() is exported
+ * but every fprintf in it is commented out.
+ *
+ * Returns 1 with a disk in, 0 empty, -1 for a bad index. busy is the
+ * FDC's own BUSY bit: transfers here are synchronous on the CPU thread,
+ * so it is essentially never set when asked from elsewhere, but a swap
+ * refuses on it rather than assuming.
+ */
+int fdd_query(int drive, char *path, int pathlen, int *wp, int *busy)
+{
+    fdd_drive_t *d;
+
+    if (drive < 0 || drive >= FDD_MAX_DRIVES)
+        return -1;
+    d = &fdc.drives[drive];
+    if (wp)
+        *wp = d->write_protected ? 1 : 0;
+    if (busy)
+        *busy = (fdc.status & FDC_STATUS_BUSY) ? 1 : 0;
+    if (path && pathlen > 0) {
+        strncpy(path, d->disk_inserted ? d->image_path : "", (size_t)pathlen - 1);
+        path[pathlen - 1] = '\0';
+    }
+    return d->disk_inserted ? 1 : 0;
+}
+
+/* Arm the write-protect flicker described in fdc_read_addr. Call after
+ * any host-side insert or eject. */
+void fdd_pulse_media(int drive)
+{
+    if (drive < 0 || drive >= FDD_MAX_DRIVES)
+        return;
+    fdc.drives[drive].media_changed = true;
 }
 
 void fdd_set_write_protect(int drive, bool wp)
@@ -1007,6 +1043,32 @@ static uint32_t fdc_read_addr(uint32_t addr, int size)
                 val |= FDC_STATUS_WRTPROT;
             else
                 val &= ~FDC_STATUS_WRTPROT;
+            /*
+             * Media change. The ST has no disk-change line: TOS decides a
+             * disk was swapped when flopvbl sees the write-protect state
+             * TOGGLE, and only then does GEMDOS Mediach() answer 2
+             * ("definitely changed") instead of serving the old disk's
+             * cached FAT and directory - which is what corrupts the image
+             * on the first write after a swap.
+             *
+             * media_changed has existed in this struct since the start
+             * and was read by nothing (set in fdd_insert_disk and
+             * fdd_eject_disk, and grep found no consumer). This is that
+             * consumer: the first Type I status read after a swap reports
+             * the WP bit inverted, and the flag clears, so the next read
+             * reports the truth. One toggle is what flopvbl is looking
+             * for.
+             *
+             * UNVERIFIED ON HARDWARE. TOS 1.02 / 1.62 / 2.06 / EmuTOS all
+             * differ slightly here and this is the one part of the floppy
+             * work that cannot be reasoned to confidence from source. The
+             * front end also calls Getbpb() and walks the root directory
+             * after a swap, which is the belt to this braces.
+             */
+            if (sd->media_changed) {
+                val ^= FDC_STATUS_WRTPROT;
+                sd->media_changed = false;
+            }
         }
 
         //fprintf(stderr, "[FDC] READ status -> 0x%02X\n", val);

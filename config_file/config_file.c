@@ -7,6 +7,9 @@
 #include <ctype.h>
 #include <sys/mman.h>
 #include "config_file.h"
+
+/* platforms/atari/psctrl/psctrl_settings.cpp */
+extern int psctrl_settings_config_key(const char *key, const char *value);
 #include "../platforms/atari/fdd/atari_fdd.h"
 //#include "../platforms/atari/fdd/psg.h"
 #include <fcntl.h>
@@ -142,6 +145,15 @@ const char *graphics_card_drivers[GRAPHICS_DRIVERS] = {
 };
 
 char cfg_filename[256];
+
+/* Where the running config came from, so PS_SAVE can edit that same file
+ * rather than guessing. Set by load_config_file(). */
+static char g_cfg_path[512];
+
+const char *emulator_config_path(void)
+{
+  return g_cfg_path;
+}
 
 static config_item get_config_item_type(char *cmd) {
   for (size_t i = 0; i < sizeof(config_switches) / sizeof(config_switches[0]); i++) {
@@ -549,6 +561,8 @@ void get_next_string(char *str, char *str_out, int *strpos, char separator) {
 
 struct emulator_config *load_config_file(char *filename) {
   FILE *in = fopen(filename, "rb");
+
+  snprintf(g_cfg_path, sizeof(g_cfg_path), "%s", filename ? filename : "");
   if (in == NULL) {
     printf ("[CFG] Failed to open config file %s for reading.\n", filename);
     return NULL;
@@ -1130,6 +1144,12 @@ struct emulator_config *load_config_file(char *filename) {
 
       case CONFITEM_NONE:
       default:
+        /* The PSCTRL descriptor table is the second half of the key
+         * namespace: every runtime tunable's name IS its .cfg key, so a
+         * key added there needs no case here and no parser change. It
+         * only warns if neither list knows the key. */
+        if (psctrl_settings_config_key(cur_cmd, parse_line + str_pos))
+          break;
         printf ("[CFG] Unknown config item %s on line %d.\n", cur_cmd, cur_line);
         break;
     }

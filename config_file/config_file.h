@@ -175,6 +175,11 @@ int emulator_config_fps(void);
 const char *emulator_config_stbox_tos(void);   /* "" if unset */
 int emulator_config_stbox_plane(void);         /* 0 if unset  */
 uint32_t emulator_config_stram_size(void);     /* bytes; 0 = flat 4MB */
+/* The file the running config was loaded from - PS_SAVE edits that one */
+const char *emulator_config_path(void);
+/* Rewrite the .cfg in place, keeping comments, ordering and every key the
+ * emulator does not manage. See config_file_save.c. */
+int config_file_save(const char *path, const struct emulator_config *cfg);
 
 #ifdef __cplusplus
 }

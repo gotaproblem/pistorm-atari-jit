@@ -228,6 +228,14 @@ void     fdd_eject_disk(int drive);
 void     fdd_toggle_disk(int drive);   /* runtime eject/re-insert (F11) */
 void     fdd_set_write_protect(int drive, bool wp);
 
+/* Report a drive: 1 disk in, 0 empty, -1 bad index. Any of path/wp/busy
+ * may be NULL. */
+int      fdd_query(int drive, char *path, int pathlen, int *wp, int *busy);
+
+/* Arm the write-protect toggle TOS reads as a media change. Call after a
+ * host-side insert or eject (the guest's own eject already sets it). */
+void     fdd_pulse_media(int drive);
+
 /* Call from MFP GPIP read handler to get FDC interrupt state.
  * Returns other_gpip with bit 5 set correctly:
  *   bit 5 low  = FDC interrupt asserted
