@@ -5202,6 +5202,7 @@ static uae_u32 nf_call_psimg(uae_u32 subid, uaecptr params)
       psimg_free(buf);
 
       printf("[PSIMG] loaded %s as %dx%d@%dbpp\n", host, w, h, bpp);
+      fflush(stdout);
       return 0;
     }
 

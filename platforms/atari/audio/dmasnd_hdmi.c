@@ -615,6 +615,7 @@ static long filelen_sync(const char *host_path)
  * the next time round. A small cache means a folder is only read once.
  */
 #include <pthread.h>
+#include <time.h>
 
 #define FL_SLOTS 64
 #define FL_PATH  528                        /* HOSTFS_HOST_PATH_MAX + 16 */
@@ -650,7 +651,18 @@ static void *fl_worker(void *arg)
         strcpy(path, fl[pick].path);
         pthread_mutex_unlock(&fl_mx);
 
-        secs = filelen_sync(path);          /* the slow part, no lock held */
+        {
+            struct timespec t0, t1;
+            long ms;
+            const char *base = strrchr(path, '/');
+
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            secs = filelen_sync(path);      /* the slow part, no lock held */
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
+            printf("[MP3] filelen %s -> %ld s (%ld ms)\n", base ? base + 1 : path, secs, ms);
+            fflush(stdout);                 /* stdout is the journal: a pipe, fully buffered */
+        }
 
         pthread_mutex_lock(&fl_mx);
         if (fl[pick].state == 1 && strcmp(fl[pick].path, path) == 0) {
