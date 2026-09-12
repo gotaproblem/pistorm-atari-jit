@@ -17,6 +17,7 @@
 
 #include <SDL3/SDL.h>
 #include <mpg123.h>
+#include <sys/stat.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -578,11 +579,23 @@ static long filelen_sync(const char *host_path)
          * runs inside the guest's event loop, one file per tick, so the
          * cheap path matters. */
         frames = mpg123_length(mh);
-        if (frames <= 0) {
-            mpg123_scan(mh);
-            frames = mpg123_length(mh);
+        if (frames > 0) {
+            secs = (long)(frames / rate);
+        } else {
+            /* No Xing/Info header and libmpg123 would not estimate: the
+             * only exact answer is mpg123_scan(), which reads the whole
+             * file - on a share, seconds per file, and MP3GEM's list took
+             * minutes to fill. Estimate from the file size and the first
+             * frame's bit rate instead: exact for CBR, near enough for a
+             * playlist column on VBR. */
+            struct mpg123_frameinfo fi;
+            struct stat st;
+
+            secs = 0;
+            if (mpg123_info(mh, &fi) == MPG123_OK && fi.bitrate > 0 &&
+                stat(host_path, &st) == 0 && st.st_size > 0)
+                secs = (long)((st.st_size * 8LL) / ((long long)fi.bitrate * 1000LL));
         }
-        secs = (frames > 0) ? (long)(frames / rate) : 0;
         mpg123_close(mh);
     }
     mpg123_delete(mh);
