@@ -706,7 +706,30 @@ long dmasnd_mp3_filelen(const char *host_path)
 
     pthread_mutex_lock(&fl_mx);
     if (!fl_started) {
-        if (pthread_create(&fl_thr, NULL, fl_worker, NULL) == 0) {
+        /* Born free, not escaped later: a thread created with default
+         * attributes starts on the creator's core (2) in its class (FIFO
+         * 99) and cannot run even its first instruction until the JIT
+         * thread blocks - which it does only for an interrupt, i.e. when
+         * the mouse moves. Explicit attributes put it on a normal core in
+         * the normal class from the start. */
+        pthread_attr_t at;
+        struct sched_param sp;
+        cpu_set_t set;
+        long n = sysconf(_SC_NPROCESSORS_CONF), i;
+
+        pthread_attr_init(&at);
+        pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
+        pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+        memset(&sp, 0, sizeof(sp));
+        pthread_attr_setschedparam(&at, &sp);
+        CPU_ZERO(&set);
+        if (n < 1) n = 4;
+        for (i = 0; i < n && i < CPU_SETSIZE; i++)
+            if (i != 2 && !(n >= 4 && (i == 0 || i == 3)))
+                CPU_SET((int)i, &set);
+        if (CPU_COUNT(&set) == 0) CPU_SET(0, &set);
+        pthread_attr_setaffinity_np(&at, sizeof(set), &set);
+        if (pthread_create(&fl_thr, &at, fl_worker, NULL) == 0) {
             pthread_detach(fl_thr);
             fl_started = 1;
         } else {
