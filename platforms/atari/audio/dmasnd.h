@@ -41,6 +41,9 @@ long dmasnd_mp3_pos_s(void);                  /* current position, seconds (-1 n
 long dmasnd_mp3_len_s(void);                  /* track length, seconds (0 unknown) */
 void dmasnd_mp3_seek_rel(long delta_s);       /* seek +/- seconds from current */
 const char *dmasnd_mp3_meta(int which);       /* 0=title 1=artist 2=album */
+long dmasnd_mp3_info(int which);              /* 0=bitrate kbps 1=ch 2=layer 3=vbr */
+const void *dmasnd_mp3_art(long *len);        /* ID3 cover, encoded; NULL if none  */
+int  dmasnd_mp3_volume(int percent);          /* -1 queries; 0..200                */
 
 /* ---- capture (dmasnd_capture.c) ---- */
 int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF8925?      */

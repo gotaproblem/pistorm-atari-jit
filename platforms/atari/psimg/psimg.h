@@ -41,6 +41,11 @@ enum psimg_mode {
 int psimg_load_scaled(const char *host_path, int dw, int dh, int bpp,
                       int mode, uint8_t **out, size_t *out_len);
 
+/* Same, but from an image already in memory - an ID3 APIC frame, say.
+ * The bytes are only read during the call. */
+int psimg_load_scaled_mem(const uint8_t *data, size_t len, int dw, int dh,
+                          int bpp, int mode, uint8_t **out, size_t *out_len);
+
 void psimg_free(uint8_t *buf);
 
 /* Probe image dimensions without decoding. Returns 0 on success. */

@@ -51,6 +51,16 @@ static long             mp3_rate_hz = 0;    /* track sample rate (frames/s)   */
 static long             mp3_len_s = 0;      /* track length in seconds        */
 static char             mp3_meta[3][128];   /* 0=title 1=artist 2=album       */
 
+/* Stream facts and the cover image, captured once at open so the GEM app can
+ * read them lock-free afterwards - same rule as mp3_meta. */
+static long             mp3_bitrate = 0;    /* kbps                           */
+static long             mp3_channels = 0;
+static long             mp3_layer = 0;
+static long             mp3_vbr = 0;        /* 1 = VBR or ABR                 */
+static unsigned char   *mp3_art = NULL;     /* ID3 APIC bytes, as stored      */
+static long             mp3_art_len = 0;
+static atomic_int       mp3_gain = 100;     /* percent, applied on the way out */
+
 /* ---------------------------------------------------- lifecycle --------- */
 
 static void SDLCALL dmasnd_postmix(void *ud, const SDL_AudioSpec *spec,
@@ -330,8 +340,15 @@ static void SDLCALL mp3_feed_cb(void *ud, SDL_AudioStream *stream,
         size_t done = 0;
         int rc = mpg123_read(g_mh, buf, want, &done);
         if (done > 0) {
+            int g = atomic_load(&mp3_gain);
             if (!announced) { announced = 1;
                 fprintf(stderr, "[NF] MP3: decoding (first %zu bytes)\n", done); }
+            if (g != 100) {
+                int16_t *sm = (int16_t *)buf;
+                size_t n = done / sizeof(int16_t), k;
+                for (k = 0; k < n; k++)
+                    sm[k] = (int16_t)((int32_t)sm[k] * g / 100);
+            }
             SDL_PutAudioStreamData(stream, buf, (int)done);
             need -= (int)done;
         }
@@ -359,6 +376,12 @@ void dmasnd_mp3_stop(void)
         SDL_DestroyAudioStream(g_mp3);
         g_mp3 = NULL;
     }
+    if (mp3_art) {
+        free(mp3_art);
+        mp3_art = NULL;
+    }
+    mp3_art_len = 0;
+    mp3_bitrate = mp3_channels = mp3_layer = mp3_vbr = 0;
     if (g_mh) {
         mpg123_close(g_mh);
         mpg123_delete(g_mh);
@@ -384,6 +407,9 @@ int dmasnd_mp3_play(const char *host_path)
         fprintf(stderr, "[NF] MP3 mpg123_new: %s\n", mpg123_plain_strerror(err));
         return -1;
     }
+    /* ID3v2 APIC frames are not parsed unless this flag is set, and it has
+     * to be set before the file is opened. */
+    mpg123_param(mh, MPG123_ADD_FLAGS, MPG123_PICTURE, 0.0);
     if (mpg123_open(mh, host_path) != MPG123_OK) {
         fprintf(stderr, "[NF] MP3 open '%s': %s\n", host_path, mpg123_strerror(mh));
         mpg123_delete(mh);
@@ -428,6 +454,40 @@ int dmasnd_mp3_play(const char *host_path)
             const char *b = strrchr(host_path, '/');
             snprintf(mp3_meta[0], sizeof(mp3_meta[0]), "%s", b ? b + 1 : host_path);
         }
+
+        /* what the stream actually is */
+        {
+            struct mpg123_frameinfo fi;
+
+            memset(&fi, 0, sizeof(fi));
+            if (mpg123_info(mh, &fi) == MPG123_OK) {
+                mp3_bitrate  = fi.bitrate;
+                mp3_layer    = fi.layer;
+                mp3_vbr      = (fi.vbr != MPG123_CBR) ? 1 : 0;
+            } else {
+                mp3_bitrate = mp3_layer = mp3_vbr = 0;
+            }
+            mp3_channels = channels;
+        }
+
+        /* the cover, kept as the encoded bytes - the Pi decodes it only if
+         * the front-end actually asks for it */
+        if (v2 && v2->pictures > 0 && v2->picture) {
+            size_t pick = 0, i;
+
+            for (i = 0; i < v2->pictures; i++)
+                if (v2->picture[i].type == mpg123_id3_pic_front_cover) {
+                    pick = i;
+                    break;
+                }
+            if (v2->picture[pick].size > 0 && v2->picture[pick].data) {
+                mp3_art = (unsigned char *)malloc(v2->picture[pick].size);
+                if (mp3_art) {
+                    memcpy(mp3_art, v2->picture[pick].data, v2->picture[pick].size);
+                    mp3_art_len = (long)v2->picture[pick].size;
+                }
+            }
+        }
     }
 
     SDL_AudioSpec src;
@@ -464,6 +524,41 @@ void dmasnd_mp3_pause(int on)
 int dmasnd_mp3_is_paused(void) { return atomic_load(&mp3_paused); }
 
 long dmasnd_mp3_len_s(void) { return mp3_len_s; }
+
+/* 0 = bitrate kbps, 1 = channels, 2 = layer, 3 = 1 if VBR/ABR. -1 if the
+ * track did not say. Sample rate is deliberately not exposed. */
+long dmasnd_mp3_info(int which)
+{
+    if (!atomic_load(&mp3_on) && !g_mh)
+        return -1;
+    switch (which) {
+        case 0: return mp3_bitrate  ? mp3_bitrate  : -1;
+        case 1: return mp3_channels ? mp3_channels : -1;
+        case 2: return mp3_layer    ? mp3_layer    : -1;
+        case 3: return mp3_vbr;
+    }
+    return -1;
+}
+
+/* The cover image exactly as ID3 stored it (JPEG or PNG). NULL if none. */
+const void *dmasnd_mp3_art(long *len)
+{
+    if (len)
+        *len = mp3_art_len;
+    return mp3_art;
+}
+
+/* -1 queries. Applied in the decode callback, so it survives a track change
+ * and costs nothing at 100. */
+int dmasnd_mp3_volume(int percent)
+{
+    if (percent >= 0) {
+        if (percent > 200)
+            percent = 200;
+        atomic_store(&mp3_gain, percent);
+    }
+    return atomic_load(&mp3_gain);
+}
 
 long dmasnd_mp3_pos_s(void)
 {

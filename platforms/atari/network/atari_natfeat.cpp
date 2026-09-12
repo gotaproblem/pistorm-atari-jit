@@ -139,7 +139,17 @@ enum nf_mp3_ops {
   NF_MP3_SEEK,       /* param0: signed seconds relative to current position */
   NF_MP3_POS,        /* -> current position in seconds (-1 if n/a) */
   NF_MP3_LEN,        /* -> track length in seconds (0 if unknown) */
-  NF_MP3_META        /* param0: 0=title 1=artist 2=album; param1: buf; param2: len */
+  NF_MP3_META,       /* param0: 0=title 1=artist 2=album; param1: buf; param2: len */
+  NF_MP3_INFO,       /* param0: 0=bitrate kbps 1=channels 2=layer 3=VBR -> value,
+                        -1 if the track did not say. No sample rate: the
+                        front-end does not show one.                          */
+  NF_MP3_ART,        /* param0 = guest buffer, param1 = its size, param2 = edge.
+                        Decodes the ID3 cover host-side and writes an
+                        edge x edge image in the fVDI 32bpp format (00 RR GG BB),
+                        letterboxed. -> bytes written, 0 = no cover, -1 error.
+                        Put the buffer in TT-RAM: a write below 4 MB goes
+                        through the JIT's self-modifying-code check.          */
+  NF_MP3_VOLUME      /* param0: -1 queries, else 0..200 percent -> the volume  */
 };
 
 /* VIDPLAY subids. 0..7 are deliberately identical to MP3PLAY so a front-end
@@ -277,6 +287,9 @@ extern "C" long dmasnd_mp3_pos_s(void);
 extern "C" long dmasnd_mp3_len_s(void);
 extern "C" void dmasnd_mp3_seek_rel(long delta_s);
 extern "C" const char *dmasnd_mp3_meta(int which);
+extern "C" long dmasnd_mp3_info(int which);
+extern "C" const void *dmasnd_mp3_art(long *len);
+extern "C" int  dmasnd_mp3_volume(int percent);
 
 /* Host video player - platforms/atari/video/vidplay.c */
 extern "C" int  vidplay_play(const char *host_path);
@@ -4840,6 +4853,37 @@ static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
         return (uae_u32)-1;
       nf_write_string(buf, len, dmasnd_mp3_meta((int)which));
       return 0;
+    }
+    case NF_MP3_INFO:
+      return (uae_u32)dmasnd_mp3_info((int)nf_get_param(params, 0));
+    case NF_MP3_VOLUME:
+      return (uae_u32)dmasnd_mp3_volume((int)(int32_t)nf_get_param(params, 0));
+    case NF_MP3_ART: {
+      uaecptr dstp = nf_get_param(params, 0);
+      uae_u32 cap  = nf_get_param(params, 1);
+      int     edge = (int)nf_get_param(params, 2);
+      long    alen = 0;
+      const void *art = dmasnd_mp3_art(&alen);
+      uint8_t *pix = NULL;
+      size_t   plen = 0;
+      uae_u8  *host = NULL;
+
+      if (!art || alen <= 0)
+        return 0;                       /* no cover - draw the placeholder */
+      if (!dstp || edge <= 0 || edge > 512)
+        return (uae_u32)-1;
+      if ((uae_u32)(edge * edge * 4) > cap)
+        return (uae_u32)-1;
+      if (!nf_host_ram_ptr(dstp, (uint32_t)(edge * edge * 4), &host))
+        return (uae_u32)-1;
+      if (psimg_load_scaled_mem((const uint8_t *)art, (size_t)alen,
+                                edge, edge, 32, PSIMG_MODE_FIT,
+                                &pix, &plen) != 0)
+        return (uae_u32)-1;
+      memcpy(host, pix, plen);
+      psimg_free(pix);
+      HOSTFS_LOG("[NF] MP3.ART %dx%d -> %zu bytes\n", edge, edge, plen);
+      return (uae_u32)plen;
     }
   }
   return (uae_u32)-1;

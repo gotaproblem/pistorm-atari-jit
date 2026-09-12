@@ -28,26 +28,16 @@ int psimg_probe(const char *host_path, int *w, int *h)
   return 0;
 }
 
-int psimg_load_scaled(const char *host_path, int dw, int dh, int bpp,
-                      int mode, uint8_t **out, size_t *out_len)
+/* Everything after the decode is the same whether the pixels came from a
+ * file or from memory: scale into a dw x dh box, then convert to the guest
+ * pixel format. Takes ownership of src (frees it). */
+static int psimg_finish(unsigned char *src, int sw, int sh, int dw, int dh,
+                        int bpp, int mode, uint8_t **out, size_t *out_len)
 {
-  int sw, sh, comp;
-  unsigned char *src;
   unsigned char *rgb;
   uint8_t *dst;
   size_t npix, len, i;
   int bw, bh, ox, oy;
-
-  if (dw <= 0 || dh <= 0 || dw > 8192 || dh > 8192)
-    return -1;
-  if (bpp != 16 && bpp != 32)
-    return -1;
-
-  src = stbi_load(host_path, &sw, &sh, &comp, 3);
-  if (!src) {
-    printf("[PSIMG] cannot decode %s: %s\n", host_path, stbi_failure_reason());
-    return -1;
-  }
 
   /* target box inside dw x dh */
 
@@ -124,6 +114,46 @@ int psimg_load_scaled(const char *host_path, int dw, int dh, int bpp,
   *out = dst;
   *out_len = len;
   return 0;
+}
+
+int psimg_load_scaled(const char *host_path, int dw, int dh, int bpp,
+                      int mode, uint8_t **out, size_t *out_len)
+{
+  int sw, sh, comp;
+  unsigned char *src;
+
+  if (dw <= 0 || dh <= 0 || dw > 8192 || dh > 8192)
+    return -1;
+  if (bpp != 16 && bpp != 32)
+    return -1;
+
+  src = stbi_load(host_path, &sw, &sh, &comp, 3);
+  if (!src) {
+    printf("[PSIMG] cannot decode %s: %s\n", host_path, stbi_failure_reason());
+    return -1;
+  }
+  return psimg_finish(src, sw, sh, dw, dh, bpp, mode, out, out_len);
+}
+
+int psimg_load_scaled_mem(const uint8_t *data, size_t len, int dw, int dh,
+                          int bpp, int mode, uint8_t **out, size_t *out_len)
+{
+  int sw, sh, comp;
+  unsigned char *src;
+
+  if (!data || len == 0)
+    return -1;
+  if (dw <= 0 || dh <= 0 || dw > 8192 || dh > 8192)
+    return -1;
+  if (bpp != 16 && bpp != 32)
+    return -1;
+
+  src = stbi_load_from_memory(data, (int)len, &sw, &sh, &comp, 3);
+  if (!src) {
+    printf("[PSIMG] cannot decode embedded image: %s\n", stbi_failure_reason());
+    return -1;
+  }
+  return psimg_finish(src, sw, sh, dw, dh, bpp, mode, out, out_len);
 }
 
 void psimg_free(uint8_t *buf)
