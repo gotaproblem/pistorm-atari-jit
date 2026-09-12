@@ -575,12 +575,16 @@ long dmasnd_mp3_filelen(const char *host_path)
         mpg123_getformat(mh, &rate, &channels, &enc) == MPG123_OK && rate > 0) {
         off_t frames;
 
-        mpg123_scan(mh);
+        /* A Xing/Info header or a CBR file answers from the first frame;
+         * only a VBR file with no header needs the whole thing read. This
+         * runs inside the guest's event loop, one file per tick, so the
+         * cheap path matters. */
         frames = mpg123_length(mh);
-        if (frames > 0)
-            secs = (long)(frames / rate);
-        else
-            secs = 0;
+        if (frames <= 0) {
+            mpg123_scan(mh);
+            frames = mpg123_length(mh);
+        }
+        secs = (frames > 0) ? (long)(frames / rate) : 0;
         mpg123_close(mh);
     }
     mpg123_delete(mh);
