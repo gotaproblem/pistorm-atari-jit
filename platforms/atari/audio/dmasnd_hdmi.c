@@ -615,6 +615,8 @@ static long filelen_sync(const char *host_path)
  * the next time round. A small cache means a folder is only read once.
  */
 #include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <time.h>
 
 #define FL_SLOTS 64
@@ -635,6 +637,23 @@ static unsigned long   fl_clock = 0;
 static void *fl_worker(void *arg)
 {
     (void)arg;
+
+    /* Created on the JIT CPU thread (core 2, SCHED_FIFO 99) and inherits
+     * both - it only ran when the JIT blocked. Escape, as avrecord does. */
+    {
+        cpu_set_t set; struct sched_param sp;
+        long n = sysconf(_SC_NPROCESSORS_CONF), i;
+        CPU_ZERO(&set);
+        if (n < 1) n = 4;
+        for (i = 0; i < n && i < CPU_SETSIZE; i++)
+            if (i != 2 && !(n >= 4 && (i == 0 || i == 3)))
+                CPU_SET((int)i, &set);
+        if (CPU_COUNT(&set) == 0) CPU_SET(0, &set);
+        sched_setaffinity(0, sizeof(set), &set);
+        memset(&sp, 0, sizeof(sp));
+        sched_setscheduler(0, SCHED_OTHER, &sp);
+        setpriority(PRIO_PROCESS, 0, 10);
+    }
     for (;;) {
         char path[FL_PATH];
         int i, pick = -1;
@@ -660,7 +679,7 @@ static void *fl_worker(void *arg)
             secs = filelen_sync(path);      /* the slow part, no lock held */
             clock_gettime(CLOCK_MONOTONIC, &t1);
             ms = (t1.tv_sec - t0.tv_sec) * 1000L + (t1.tv_nsec - t0.tv_nsec) / 1000000L;
-            printf("[MP3] filelen %s -> %ld s (%ld ms)\n", base ? base + 1 : path, secs, ms);
+            fprintf(stderr, "[MP3] filelen %s -> %ld s (%ld ms)\n", base ? base + 1 : path, secs, ms);
             fflush(stdout);                 /* stdout is the journal: a pipe, fully buffered */
         }
 
