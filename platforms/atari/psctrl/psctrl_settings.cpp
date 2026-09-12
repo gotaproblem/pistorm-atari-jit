@@ -178,7 +178,6 @@ static int gen_set(const struct ps_item *it, int v)
 BOOT_BOOL(fpu)
 BOOT_BOOL(mmu)
 BOOT_BOOL(cpu_compatible)
-BOOT_BOOL(ttram)
 BOOT_BOOL(addr32)
 BOOT_BOOL(stram_cache)
 BOOT_BOOL(stram_direct)
@@ -191,7 +190,6 @@ BOOT_BOOL(network_enabled)
 BOOT_BOOL(ide)
 BOOT_INT(monitor_force)
 BOOT_INT(machine_kind)
-BOOT_INT(kbd_mode)
 BOOT_INT(kbd_mouse_div)
 BOOT_INT(stbox_plane)
 
@@ -501,7 +499,13 @@ static int fdlist_scan(void)
   while ((e = readdir(d)) != NULL && g_fdlist_n < 128) {
     if (e->d_name[0] == '.' || !fd_is_image(e->d_name))
       continue;
-    snprintf(g_fdlist[g_fdlist_n], sizeof(g_fdlist[0]), "%s", e->d_name);
+    {
+      size_t len = strlen(e->d_name);
+
+      if (len >= sizeof(g_fdlist[0]))
+        continue;               /* a name we could not hand back intact */
+      memcpy(g_fdlist[g_fdlist_n], e->d_name, len + 1);
+    }
     g_fdlist_n++;
   }
   closedir(d);
@@ -947,8 +951,16 @@ static int item_setstr(const struct ps_item *it, const char *s)
     if (strchr(s, '/'))
       snprintf(path, sizeof(path), "%s", s);
     else {
+      size_t dl, sl;
+
       fddir_default();
-      snprintf(path, sizeof(path), "%s/%s", g_fddir, s);
+      dl = strlen(g_fddir);
+      sl = strlen(s);
+      if (dl + sl + 2 > sizeof(path))
+        return PS_R_REJECT;
+      memcpy(path, g_fddir, dl);
+      path[dl] = '/';
+      memcpy(path + dl + 1, s, sl + 1);
     }
     if (fdd_insert_disk(drive, path, false) != 0)
       return PS_R_REJECT;
