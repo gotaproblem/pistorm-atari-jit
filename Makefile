@@ -65,7 +65,9 @@ MUSASHI_C = third_party/musashi/m68kcpu.c \
 CFILES += $(MUSASHI_C)
 
 # STBOX - the sandboxed ST that Musashi drives (game sandbox in a GEM window)
-CFILES += platforms/atari/stbox/stbox.c \
+CFILES += platforms/atari/psctrl/psctrl_tunables.c \
+          config_file/config_file_save.c \
+          platforms/atari/stbox/stbox.c \
           platforms/atari/stbox/stbox_host.c \
           platforms/atari/stbox/stbox_psg.c \
           platforms/atari/stbox/stbox_realfdc.c
@@ -88,6 +90,7 @@ PISTORM_CPP = emulator.c \
               platforms/atari/et4000/pcem/et4000_engine.c \
               platforms/atari/network/atari_natfeat.cpp \
               platforms/atari/psctrl/psctrl.cpp \
+              platforms/atari/psctrl/psctrl_settings.cpp \
               platforms/atari/psimg/psimg.cpp \
               jit_glue.cpp \
               pistorm_natmem.cpp \

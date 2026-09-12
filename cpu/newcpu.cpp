@@ -68,6 +68,8 @@ static unsigned pistorm_pc_ring_i;
 #include "memory.h"
 #include "custom.h"
 #include "newcpu.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"
+#include "platforms/atari/psctrl/psctrl_settings.h"
 #include "cpummu.h"
 #include "cpummu030.h"
 #include "cputbl.h"
@@ -4787,7 +4789,7 @@ void REGPARAM2 Exception(int nr)
 			 * file it wanted - this does. At trap entry the frame is
 			 * already pushed, so the caller's args start at sp+6 for a
 			 * supervisor caller, or at the USP for a user caller. */
-			if (nr == 33 && getenv("PISTORM_GEMDOS_DEBUG"))
+			if (nr == 33 && pst_dbg_gemdos)
 			{
 				static int logged;
 				if (logged < 200) {
@@ -5023,13 +5025,7 @@ static void do_interrupt (int nr)
 	 * early-out do_interrupt takes. First call prints a confirmation line so a
 	 * stale build or wrong path is immediately obvious. */
 	extern uint64_t get_time_us(void);
-	static int irq_stats = -1;
-	if (irq_stats < 0) {
-		const char *e = getenv("PISTORM_IRQ_STATS");
-		irq_stats = (e && e[0] == '1') ? 1 : 0;
-		if (irq_stats)
-			fprintf(stderr, "[IRQSTAT] enabled - do_interrupt path is live\n");
-	}
+	const int irq_stats = pst_dbg_irq_stats;
 	struct irq_meter_t {
 		int on, lvl; uint64_t t0;
 		irq_meter_t(int o, int l) : on(o), lvl(l) { if (on) t0 = get_time_us(); }
@@ -8655,6 +8651,17 @@ static void m68k_run_jit(void)
 						 * host-driven bus traffic. No-op unless the STBOX
 						 * real-FDC bridge has an errand posted. */
 						stbox_errand_pump_if_active();
+						/* Same reasoning, same place: a PSCTRL setting that
+						 * reallocates or flushes the translation cache was
+						 * parked by the NatFeat handler (which ran inside a
+						 * translated block) and is applied here, where there
+						 * is no compiled frame on the host stack - the same
+						 * nesting level at which the T0/T1/M path below
+						 * already calls flush_icache(3). Before
+						 * do_specialties(), which can return out of the
+						 * function. One predictable load when idle. */
+						if (psctrl_pending_armed)
+							psctrl_apply_pending();
 						if (do_specialties(0))
 						{
 							STOPTRY;

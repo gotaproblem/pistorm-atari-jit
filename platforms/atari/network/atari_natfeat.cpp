@@ -6,6 +6,8 @@
 #include "platforms/atari/network/atari_natfeat.h"
 #include "platforms/atari/network/pistorm_net.h"
 #include "platforms/atari/psctrl/psctrl.h"
+#include "platforms/atari/psctrl/psctrl_settings.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "platforms/atari/psimg/psimg.h"
 
 #include "options.h"
@@ -1107,9 +1109,10 @@ static void hostfs_write_stat64(uaecptr statp, const struct stat *st)
 
 static bool hostfs_debug_enabled(void)
 {
-  const char *debug = getenv("PISTORM_HOSTFS_DEBUG");
-  if (debug && debug[0])
-    return strcmp(debug, "0") != 0;
+  /* Three-valued, as it always was: -1 means "whatever the cfg's hostfs
+   * debug flag says", which is why this is not a plain bool. */
+  if (pst_dbg_hostfs >= 0)
+    return pst_dbg_hostfs != 0;
   return g_nf_config.debug;
 }
 
@@ -1220,9 +1223,8 @@ static const char *nfeth_config_text(const char *name, const char *configured, c
 
 static bool nfeth_debug_enabled(void)
 {
-  const char *debug = getenv("PISTORM_NET_DEBUG");
-  if (debug && debug[0])
-    return strcmp(debug, "0") != 0;
+  if (pst_dbg_net)
+    return true;
   return g_nf_config.debug;
 }
 
@@ -5137,9 +5139,44 @@ static uae_u32 nf_call_video(uae_u32 subid, uaecptr params)
  * Strictly straight-line and side-effect free towards the guest, so it is
  * safe under the JIT invariant documented above atari_natfeat_handle_opcode.
  * The sampler thread is started lazily on first use. */
+/*
+ * The settings half of PSCTRL needs to write records into guest memory
+ * (PS_DESCRIBE, PS_GETSTR) and read a path back (PS_SETSTR). Rather than
+ * teach psctrl_settings.cpp about the memory banks - which would also
+ * stop it compiling on the host for tests - it calls these two.
+ */
+extern "C" void psctrl_guest_write(uae_u32 addr, const void *src, uae_u32 n)
+{
+  const uae_u8 *p = (const uae_u8 *)src;
+  uae_u32 i;
+
+  if (!addr || !src)
+    return;
+  for (i = 0; i < n; i++)
+    nf_write_byte(addr + i, p[i]);
+}
+
+extern "C" void psctrl_guest_read(uae_u32 addr, char *dst, uae_u32 n)
+{
+  nf_read_string(addr, dst, (size_t)n);
+}
+
 static uae_u32 nf_call_psctrl(uae_u32 subid, uaecptr params)
 {
   psctrl_sampler_start();
+
+  /*
+   * Sub-ops 3 and up are the settings surface (psctrl_settings.h). They
+   * are still straight-line as far as the JIT is concerned: the ones that
+   * would not be - anything that touches the translation cache - park the
+   * request and return PS_R_DEFER instead of doing it here.
+   */
+  if (subid >= PSCTRL_GETSTR)
+    return psctrl_settings_call(subid,
+                                nf_get_param(params, 0),
+                                nf_get_param(params, 1),
+                                nf_get_param(params, 2),
+                                nf_get_param(params, 3));
 
   switch (subid) {
     case PSCTRL_VERSION:

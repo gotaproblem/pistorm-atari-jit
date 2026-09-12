@@ -14,6 +14,7 @@
 #include "options.h"
 
 #include "platforms/atari/psctrl/psctrl.h"
+#include "platforms/atari/psctrl/psctrl_settings.h"
 #include "config_file/config_file.h"
 
 #include <pthread.h>
@@ -465,6 +466,11 @@ void psctrl_sampler_start(void)
 
 uint32_t psctrl_getint(uint32_t index)
 {
+  /* Settings live above PS_SET_BASE in the same namespace, so a guest
+   * reads a control's current value with the call it already has. */
+  if (psctrl_settings_owns(index))
+    return psctrl_settings_getint(index);
+
   switch (index) {
     /* configuration */
     case PS_CFG_JIT_ENABLED:

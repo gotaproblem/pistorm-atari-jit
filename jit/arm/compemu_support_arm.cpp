@@ -2818,6 +2818,19 @@ extern "C" uint32_t psctrl_jit_cache_used(void)
 	return get_jitted_size();
 }
 
+/*
+ * "Flush cache now" for the settings accessory. flush_icache_hard() is
+ * static in this TU, which is why this wrapper exists rather than the
+ * caller reaching for it. MUST NOT be called from inside a translated
+ * block - it frees the blocks the caller would return into. PSCTRL only
+ * calls it from psctrl_apply_pending(), which runs at a block boundary
+ * in m68k_run_jit() with jit_in_compiled_code false.
+ */
+extern "C" void psctrl_jit_flush_now(void)
+{
+	flush_icache_hard(3);
+}
+
 extern "C" uint32_t psctrl_jit_cache_total(void)
 {
 	return cache_size * 1024;	/* cache_size is kept in KB; report bytes
