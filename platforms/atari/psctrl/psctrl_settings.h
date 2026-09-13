@@ -86,7 +86,8 @@ enum psctrl_class {
 /* Suffix the dialog prints after the number */
 enum psctrl_unit {
   PS_U_NONE = 0, PS_U_MS, PS_U_NS, PS_U_US, PS_U_KB, PS_U_MB, PS_U_PCT,
-  PS_U_HZ, PS_U_KBPS, PS_U_CYC, PS_U_X100, PS_U_SEC
+  PS_U_HZ, PS_U_KBPS, PS_U_CYC, PS_U_X100, PS_U_SEC,
+  PS_U_PCT10          /* tenths of a percent: 1000 reads as "100.0%" */
 };
 
 /* Descriptor flags */
