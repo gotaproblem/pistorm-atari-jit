@@ -712,8 +712,14 @@ RO_INT("throttled", "Firmware throttle bits", PS_TAB_CPU, PS_U_NONE, ig_thr),
 /* ----------------------------------------------------------- Video --- */
 ITEM("fps", "Host frame rate", PS_TAB_VIDEO, PS_K_INT, PS_C_LIVE, PS_U_HZ,
      10, 60, 1, NULL, 0, 0, NULL, fg_fps, fs_fps, NULL),
+/* Range 0..20 ms in 0.1 ms steps. The old max of 200000 ns (0.2 ms) was
+ * below the tunable's own 5 ms default, so the slider could not represent
+ * the live value: it showed 5.0 ms on entry and then snapped into the
+ * 0..0.2 ms band the moment it was touched. 20 ms is one PAL frame, which
+ * is as long as a VBL refractory could sensibly be; the env clamp already
+ * allows up to 200 ms for anyone who wants more. */
 LIVE_INT("vbl_refract_ns", "VBL refractory", PS_TAB_VIDEO, PS_U_NS,
-         0, 200000, 1000, &pst_vbl_refract_ns, apply_ipl),
+         0, 20000000, 100000, &pst_vbl_refract_ns, apply_ipl),
 LIVE_BOOL("drm_dirtyband", "DRM dirty band", PS_TAB_VIDEO, &pst_drm_dirtyband, NULL),
 ITEM("drm_async", "DRM async page flip", PS_TAB_VIDEO, PS_K_BOOL, PS_C_BOOT,
      PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_drm_async, gen_get, gen_set, NULL),
