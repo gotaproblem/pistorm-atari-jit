@@ -180,7 +180,7 @@ int main(void)
 
   /* a plausible machine */
   memset(&g_cfg, 0, sizeof(g_cfg));
-  g_cfg.cpu_type = 4;            /* 68030 (enum - 1) */
+  g_cfg.cpu_type = 4;            /* 68040: the parser stores enum - 1 */
   g_cfg.fpu = true;
   g_cfg.machine_set = true;
   g_cfg.machine_kind = 1;        /* ste */
@@ -257,7 +257,55 @@ int main(void)
       fail("tab %d is empty", i);
   }
 
-  /* --- the three classes answer differently ---------------------- */
+  /*
+   * --- a boot row must show what the CONFIG SAYS ------------------
+   *
+   * Not the label one either side of it. This is worth its own check
+   * because the enums here are indices into two different tables -
+   * cpu_type is the M68K_CPU_TYPE_* enum minus one, the dialog wants a
+   * plain 0..5, and the cfg writer wants the enum back - and an
+   * off-by-one in any of the three is invisible except as a machine
+   * quietly reporting the wrong CPU. Which is exactly what happened:
+   * a 68040 read as 68030 on hardware.
+   */
+  {
+    static const struct { const char *key, *want; } expect[] = {
+      { "cpu",     "68040" },     /* g_cfg.cpu_type = 4 */
+      { "machine", "ste"   },     /* machine_kind = 1   */
+      { "blitter", "emulated" },  /* blitter && !real   */
+      { "ttram",   "128M"  },     /* 128 MB             */
+    };
+    unsigned k;
+
+    for (k = 0; k < sizeof(expect) / sizeof(expect[0]); k++) {
+      int found = 0;
+
+      for (i = 0; i < n; i++) {
+        parse(i, &r);
+        if (strcmp(r.name, expect[k].key))
+          continue;
+        found = 1;
+        if (r.value < 0 || r.value >= r.nenum)
+          fail("%s: value %ld is outside its %d labels",
+               r.name, r.value, r.nenum);
+        else if (strcmp(r.label[r.value], expect[k].want))
+          fail("%s reads '%s', the config says '%s'",
+               r.name, r.label[r.value], expect[k].want);
+        break;
+      }
+      if (!found)
+        fail("no %s row in the table", expect[k].key);
+    }
+  }
+
+  /*
+   * --- the three classes answer differently -----------------------
+   *
+   * From here on the table is MUTATED, so anything that checks a value
+   * against the config has to have run above this point. The first
+   * version of the check above sat below it and failed because this
+   * block had already set `machine` to st.
+   */
   {
     int live = -1, defer = -1, boot = -1;
 

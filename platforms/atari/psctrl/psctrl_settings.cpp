@@ -193,13 +193,20 @@ BOOT_INT(machine_kind)
 BOOT_INT(kbd_mouse_div)
 BOOT_INT(stbox_plane)
 
-/* cpu_type is stored as the M68K_CPU_TYPE_* enum minus one; the dialog
- * wants a 0..5 index over {68000,68010,68020,68030,68040,68060}. */
+/*
+ * cpu_type is ALREADY the M68K_CPU_TYPE_* enum minus one - the parser
+ * stores `get_m68k_cpu_type(...) - 1`, so 68000 is 0 and 68040 is 4 -
+ * which is exactly the 0..5 index the dialog wants over
+ * {68000,68010,68020,68030,68040,68060}. Subtracting one again here made
+ * the CPU row read one model low: a machine configured 68040 showed
+ * 68030. (config_file_save.c's cpu_name() takes cpu_type + 1 because IT
+ * indexes the enum-shaped cpu_types[] table, and that was right.)
+ */
 static int bg_cpu(const struct ps_item *it)
 {
   (void)it;
   boot_seed();
-  return (int)g_boot.cpu_type - 1;      /* enum 1 == 68000 */
+  return (int)g_boot.cpu_type;
 }
 
 static int bs_cpu(const struct ps_item *it, int v)
@@ -207,7 +214,7 @@ static int bs_cpu(const struct ps_item *it, int v)
   if (v < it->min || v > it->max)
     return PS_R_REJECT;
   boot_seed();
-  g_boot.cpu_type = (uint8_t)(v + 1);
+  g_boot.cpu_type = (uint8_t)v;
   g_boot_dirty = 1;
   return PS_R_RESTART;
 }
@@ -426,6 +433,10 @@ static int ig_total(const struct ps_item *it) { (void)it; return (int)(psctrl_ge
 static int ig_flush(const struct ps_item *it) { (void)it; return (int)psctrl_getint(PS_STAT_FLUSHES_TOTAL); }
 static int ig_smc(const struct ps_item *it)   { (void)it; return (int)psctrl_getint(PS_STAT_SMC_INV); }
 static int ig_temp(const struct ps_item *it)  { (void)it; return (int)(psctrl_getint(PS_HOST_SOC_TEMP_MC) / 1000u); }
+/* what the emulator is ACTUALLY running, as against what the cfg asks
+ * for - they differ whenever a cfg change has not been restarted into */
+static int ig_cpu_run(const struct ps_item *it) { (void)it; return (int)psctrl_getint(PS_CFG_CPU_MODEL); }
+static int ig_fpu_run(const struct ps_item *it) { (void)it; return (int)psctrl_getint(PS_CFG_FPU_MODEL); }
 static int ig_thr(const struct ps_item *it)   { (void)it; return (int)psctrl_getint(PS_HOST_THROTTLED); }
 
 /* --- live tunables that need a poke after the store -------------------- */
@@ -687,6 +698,8 @@ ITEM("rom", "TOS image", PS_TAB_CPU, PS_K_STR, PS_C_BOOT, PS_U_NONE,
 /* live, and it lives here because it is a bus-timing knob, not a video one */
 LIVE_INT("blit_timed_ns", "Blitter bus cost (0 = instant)", PS_TAB_CPU,
          PS_U_NS, 0, 2000, 50, &pst_blit_timed_ns, NULL),
+RO_INT("cpu_running", "CPU now running", PS_TAB_CPU, PS_U_NONE, ig_cpu_run),
+RO_INT("fpu_running", "FPU now running", PS_TAB_CPU, PS_U_NONE, ig_fpu_run),
 RO_INT("soc_temp", "SoC temperature", PS_TAB_CPU, PS_U_NONE, ig_temp),
 RO_INT("throttled", "Firmware throttle bits", PS_TAB_CPU, PS_U_NONE, ig_thr),
 
