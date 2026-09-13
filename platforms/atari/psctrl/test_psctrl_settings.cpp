@@ -38,6 +38,18 @@
 
 struct uae_prefs currprefs, changed_prefs;
 int pissoff_value = 0;
+int config_changed = 0;
+
+/* The real one sets SPCFLAG_MODE_CHANGE and the CPU loop re-derives
+ * cpucycleunit. Here it just does what that eventually does to the
+ * prefs, so the deferred multiplier can be checked end to end. */
+void check_prefs_changed_cpu(void)
+{
+  if (!config_changed)
+    return;
+  currprefs.cpu_clock_multiplier = changed_prefs.cpu_clock_multiplier;
+  config_changed = 0;
+}
 
 extern "C" void jit_request_cpu_exit(void) { }
 extern "C" void psctrl_jit_flush_now(void) { }
@@ -367,6 +379,39 @@ int main(void)
       psctrl_apply_pending();
       if (currprefs.cachesize == 0)
         fail("jit_power could not be turned back on");
+      break;
+    }
+
+    /*
+     * The clock multiplier is a SLOWDOWN and 0 is off - the fastest
+     * setting, and the one the emulator boots with. The row shipped
+     * with min 1, so its own default was outside its slider. It must
+     * reach 0, it must not pretend to apply live (cpucycleunit is
+     * derived in update_68k_cycles(), not poked), and a negative value
+     * is not a faster setting - jit_cpu_init() clamps it to 0.
+     */
+    for (i = 0; i < n; i++) {
+      parse(i, &r);
+      if (strcmp(r.name, "cpu_clock_multiplier"))
+        continue;
+      if (r.min != 0)
+        fail("the clock multiplier cannot reach 0, its own default");
+      if (r.klass != PS_C_DEFER)
+        fail("the clock multiplier claims to apply live");
+      if ((int)psctrl_settings_call(PSCTRL_SETINT, i, -1, 0, 0) != PS_R_REJECT)
+        fail("a negative clock multiplier was accepted");
+      if ((int)psctrl_settings_call(PSCTRL_SETINT, i, 4, 0, 0) != PS_R_DEFER)
+        fail("the clock multiplier was not deferred");
+      if (currprefs.cpu_clock_multiplier == 4)
+        fail("the clock multiplier reached currprefs before the boundary");
+      psctrl_apply_pending();
+      if (currprefs.cpu_clock_multiplier != 4)
+        fail("the clock multiplier did not apply at the boundary");
+      if ((int)psctrl_settings_call(PSCTRL_SETINT, i, 0, 0, 0) != PS_R_DEFER)
+        fail("the clock multiplier could not be set back to 0");
+      psctrl_apply_pending();
+      if (currprefs.cpu_clock_multiplier != 0)
+        fail("the clock multiplier did not go back to 0 (off)");
       break;
     }
   }

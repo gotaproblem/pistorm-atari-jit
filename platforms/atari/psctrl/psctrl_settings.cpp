@@ -381,13 +381,31 @@ static int js_speed(const struct ps_item *it, int v)
   return PS_R_OK;
 }
 
-static int jg_mult(const struct ps_item *it)   { (void)it; return currprefs.cpu_clock_multiplier; }
+/*
+ * The clock multiplier is a SLOWDOWN, and 0 is off.
+ *
+ * update_68k_cycles() reads it as: 0 leaves cpucycleunit at its default
+ * and the CPU is not clock-limited at all; 1..255 make cpucycleunit
+ * CYCLE_UNIT * n, which is n times SLOWER; 256 and up are a fixed-point
+ * divider (n >> 8), so 512 would be twice as fast - a range this dialog
+ * does not offer and the emulator does not use. jit_cpu_init() also
+ * clamps a negative value to 0, so -1 is not a faster setting, it is 0
+ * spelt differently; and it turns m68k_speed=max into timed scheduling
+ * the moment it is non-zero. So 0 is the fastest setting and it must be
+ * reachable - the row shipped with min 1, which put the default out of
+ * range of its own slider.
+ *
+ * Writing currprefs directly did nothing useful either: cpucycleunit is
+ * derived in update_68k_cycles(), which is not called for a poke. Set
+ * changed_prefs and let the CPU loop apply it at a mode change, which is
+ * what the deferred queue is for.
+ */
+static int jg_mult(const struct ps_item *it)   { (void)it; return changed_prefs.cpu_clock_multiplier; }
 static int js_mult(const struct ps_item *it, int v)
 {
   if (v < it->min || v > it->max)
     return PS_R_REJECT;
-  currprefs.cpu_clock_multiplier = changed_prefs.cpu_clock_multiplier = v;
-  return PS_R_OK;
+  return defer(item_index("cpu_clock_multiplier"), v);
 }
 
 static const int cache_kb[] = { 0, 2048, 4096, 8192, 16384 };
@@ -426,12 +444,6 @@ static int js_flush(const struct ps_item *it, int v)
 }
 
 /* read-only readouts, so the JIT tab is a diagnostic and not just a form */
-static int ig_hit(const struct ps_item *it)   { (void)it; return (int)psctrl_getint(PS_JIT_HITRATE_X10); }
-static int ig_idle(const struct ps_item *it)  { (void)it; return (int)psctrl_getint(PS_JIT_IDLE_X10); }
-static int ig_used(const struct ps_item *it)  { (void)it; return (int)(psctrl_getint(PS_STAT_CACHE_USED) / 1024u); }
-static int ig_total(const struct ps_item *it) { (void)it; return (int)(psctrl_getint(PS_STAT_CACHE_TOTAL) / 1024u); }
-static int ig_flush(const struct ps_item *it) { (void)it; return (int)psctrl_getint(PS_STAT_FLUSHES_TOTAL); }
-static int ig_smc(const struct ps_item *it)   { (void)it; return (int)psctrl_getint(PS_STAT_SMC_INV); }
 static int ig_temp(const struct ps_item *it)  { (void)it; return (int)(psctrl_getint(PS_HOST_SOC_TEMP_MC) / 1000u); }
 /* what the emulator is ACTUALLY running, as against what the cfg asks
  * for - they differ whenever a cfg change has not been restarted into */
@@ -653,8 +665,8 @@ ITEM("jit_power", "JIT power", PS_TAB_JIT, PS_K_INT, PS_C_LIVE, PS_U_NONE,
      0, 6, 1, NULL, 0, 0, NULL, jg_power, js_power, NULL),
 ITEM("m68k_speed", "68k speed", PS_TAB_JIT, PS_K_INT, PS_C_LIVE, PS_U_NONE,
      -1, 20, 1, NULL, 0, 0, NULL, jg_speed, js_speed, NULL),
-ITEM("cpu_clock_multiplier", "Clock multiplier", PS_TAB_JIT, PS_K_INT,
-     PS_C_LIVE, PS_U_NONE, 1, 8, 1, NULL, 0, 0, NULL, jg_mult, js_mult, NULL),
+ITEM("cpu_clock_multiplier", "CPU slowdown", PS_TAB_JIT, PS_K_INT,
+     PS_C_DEFER, PS_U_NONE, 0, 8, 1, NULL, 0, 0, NULL, jg_mult, js_mult, NULL),
 ITEM("jit_cache", "Translation cache", PS_TAB_JIT, PS_K_ENUM, PS_C_DEFER,
      PS_U_NONE, 0, 4, 1, L_cache, 5, PS_F_NEWLINE, NULL, jg_cache, js_cache, NULL),
 ITEM("comp_constjump", "Follow constant jumps", PS_TAB_JIT, PS_K_BOOL,
@@ -665,12 +677,6 @@ ITEM("compfpu", "Translate FPU", PS_TAB_JIT, PS_K_BOOL, PS_C_DEFER,
      PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, NULL, jg_compfpu, js_compfpu, NULL),
 ITEM("jit_flush", "Flush cache now", PS_TAB_JIT, PS_K_ACTION, PS_C_DEFER,
      PS_U_NONE, 0, 0, 0, NULL, 0, PS_F_NEWLINE, NULL, jg_zero, js_flush, NULL),
-RO_INT("jit_hitrate", "JIT hit rate", PS_TAB_JIT, PS_U_PCT10, ig_hit),
-RO_INT("jit_idle", "Guest idle", PS_TAB_JIT, PS_U_PCT10, ig_idle),
-RO_INT("jit_cache_used", "Cache used", PS_TAB_JIT, PS_U_KB, ig_used),
-RO_INT("jit_cache_total", "Cache total", PS_TAB_JIT, PS_U_KB, ig_total),
-RO_INT("jit_flushes", "Hard flushes", PS_TAB_JIT, PS_U_NONE, ig_flush),
-RO_INT("jit_smc", "SMC invalidations", PS_TAB_JIT, PS_U_NONE, ig_smc),
 
 /* --------------------------------------------------------- CPU/RAM --- */
 ITEM("machine", "Machine", PS_TAB_CPU, PS_K_ENUM, PS_C_BOOT, PS_U_NONE,
@@ -905,6 +911,13 @@ void psctrl_apply_pending(void)
     } else if (!strcmp(nm, "compfpu")) {
       changed_prefs.compfpu = v ? true : false;
       check_prefs_changed_comp(false);
+    } else if (!strcmp(nm, "cpu_clock_multiplier")) {
+      /* changed_prefs already holds it; config_changed is what makes
+       * check_prefs_changed_cpu() look, and the mode change is where
+       * update_68k_cycles() re-derives cpucycleunit */
+      changed_prefs.cpu_clock_multiplier = v;
+      config_changed = 1;
+      check_prefs_changed_cpu();
     } else if (!strcmp(nm, "jit_flush")) {
       psctrl_jit_flush_now();
     }
