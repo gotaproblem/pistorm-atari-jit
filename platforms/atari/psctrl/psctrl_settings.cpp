@@ -55,6 +55,8 @@ extern "C" void psctrl_guest_read(uint32_t addr, char *dst, uint32_t n);
 
 /* jit_glue.cpp */
 extern "C" void jit_request_cpu_exit(void);
+/* emulator.c: orderly teardown then _exit(restart ? 42 : 0) */
+extern "C" void pistorm_request_exit(int restart);
 /* compemu_support_arm.cpp, added alongside the psctrl_jit_* readers */
 extern "C" void psctrl_jit_flush_now(void);
 /* newcpu.cpp */
@@ -1163,6 +1165,20 @@ uint32_t psctrl_settings_call(uint32_t subop, uint32_t p0, uint32_t p1,
   switch (subop) {
     case PSCTRL_SETAPI:
       return PSCTRL_SET_API_VERSION;
+
+    /*
+     * Restart and shutdown, from the taskbar. Both leave through the
+     * emulator's ordinary orderly-exit path (tty restored, JIT stats
+     * dumped): restart exits 42 so the launcher relaunches it, which
+     * re-reads the .cfg the user just saved and cold-boots; shutdown
+     * exits 0 so the launcher stops and drops back to the console.
+     * The guest asks only after its own confirmation dialog. */
+    case PSCTRL_RESTART:
+      pistorm_request_exit(1);
+      return PS_R_OK;		/* not reached */
+    case PSCTRL_SHUTDOWN:
+      pistorm_request_exit(0);
+      return PS_R_OK;		/* not reached */
 
     case PSCTRL_COUNT:
       return (uint32_t)NITEMS;

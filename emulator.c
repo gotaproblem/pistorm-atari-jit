@@ -1191,7 +1191,12 @@ void *foldchk_thread(void *arg)
   return NULL;
 }
 
-void sigint_handler(int sig_num)
+/*
+ * The orderly teardown, without the _exit - shared by the Ctrl-C / SIGTERM
+ * handler and the PSCTRL restart/shutdown actions, so all three quit the
+ * same proven way: stop the CPU, dump JIT stats, restore the tty.
+ */
+static void orderly_teardown(void)
 {
   cpu_emulation_running = 0;
 
@@ -1200,18 +1205,37 @@ void sigint_handler(int sig_num)
   /* JIT statistics (PROFILE_UNTRANSLATED_INSNS: top-50 interpreted opcodes) */
   compiler_dump_stats();
 
-  /* display ATARI logo on exit (HDMI) */
-  // if ( RTG_enabled )
-  //   logo ();
-
   usleep(100000);
 
   /* reset stdio tty properties */
   oldt.c_lflag |= ECHO;
   tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
   fcntl(STDIN_FILENO, F_SETFL, oldf);
+}
 
+void sigint_handler(int sig_num)
+{
+  (void) sig_num;
+  orderly_teardown();
   _exit(0);
+}
+
+/*
+ * Restart / shutdown from the PSCTRL taskbar. Runs on the CPU thread from
+ * inside the NatFeat handler; _exit() ends the process there and then.
+ *
+ * restart != 0 exits 42, the code the launcher relaunches on (the same
+ * code the crash handler uses), so the emulator comes straight back up and
+ * re-reads the .cfg the user just saved - a genuine cold boot with the new
+ * settings. restart == 0 exits 0, which the launcher treats as a clean
+ * stop, dropping back to the console. Launch through run-pistorm.sh (or
+ * any while-loop that relaunches on 42) for restart to relaunch rather
+ * than fall through to the shell.
+ */
+extern "C" void pistorm_request_exit(int restart)
+{
+  orderly_teardown();
+  _exit(restart ? 42 : 0);
 }
 
 

@@ -43,7 +43,10 @@ enum psctrl_set_subop {
   PSCTRL_ACTION   = 9,   /* p0 idx, p1 arg          -> PS_R_* or a value  */
   PSCTRL_LIST     = 10,  /* p0 which, p1 i, p2 buf, p3 len -> len; i<0 =
                           * rescan and return the count                   */
-  PSCTRL_SETAPI   = 11   /*                         -> settings API version */
+  PSCTRL_SETAPI   = 11,  /*                         -> settings API version */
+  PSCTRL_RESTART  = 12,  /* re-read the .cfg and cold-boot: orderly exit
+                          * with code 42 so the launcher relaunches       */
+  PSCTRL_SHUTDOWN = 13   /* orderly exit with code 0: stop, back to console */
 };
 
 /* PS_SETINT / PS_SETSTR / PS_ACTION results */

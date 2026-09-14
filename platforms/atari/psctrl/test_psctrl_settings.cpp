@@ -53,6 +53,7 @@ void check_prefs_changed_cpu(void)
 
 extern "C" void jit_request_cpu_exit(void) { }
 extern "C" void psctrl_jit_flush_now(void) { }
+extern "C" void pistorm_request_exit(int restart) { (void) restart; }
 bool check_prefs_changed_comp(bool checkonly)
 {
   if (!checkonly)
