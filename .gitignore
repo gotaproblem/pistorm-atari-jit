@@ -34,3 +34,6 @@ emulator
 ataritest
 *.o
 *.d
+
+# session notes dropped beside the tree; the Drive folder is their home
+Claude outputs/

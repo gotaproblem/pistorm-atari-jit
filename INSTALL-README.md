@@ -96,6 +96,12 @@ libavformat-dev  libavcodec-dev  libavutil-dev
 libswscale-dev   libswresample-dev
                  host video decode — the VIDPLAY NatFeat. The Makefile
                  refuses to build without these
+libpoppler-glib-dev  libcairo2-dev
+                 host PDF rendering — the PSPDF NatFeat (PDFGEM). The
+                 Makefile refuses to build without these
+poppler-data     CJK and other encoding tables for Poppler (runtime)
+fonts-urw-base35 the standard 14 PDF fonts, for documents that do not
+                 embed theirs (runtime; without it they render in DejaVu)
 libdrm-dev       KMS/DRM display and the video overlay plane
 libjpeg-dev      MJPEG frames in avrecord.c (screen capture)
 zlib1g-dev       PNG screendumps, written in-process

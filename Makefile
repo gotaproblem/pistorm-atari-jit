@@ -92,6 +92,7 @@ PISTORM_CPP = emulator.c \
               platforms/atari/psctrl/psctrl.cpp \
               platforms/atari/psctrl/psctrl_settings.cpp \
               platforms/atari/psimg/psimg.cpp \
+              platforms/atari/pdf/pspdf.cpp \
               jit_glue.cpp \
               pistorm_natmem.cpp \
               pistorm_stubs.cpp
@@ -143,6 +144,11 @@ CXX = g++
 
 # SDL3 (audio backend, dmasnd_hdmi.c only). pkg-config sdl3 ships with libsdl3-dev.
 # The display no longer uses SDL (DRM/fbdev + no-op SDL2 shim), so no SDL2 here.
+# Poppler + cairo for host-side PDF rendering (platforms/atari/pdf/pspdf.cpp).
+PDF_PKGS   = poppler-glib cairo
+PDF_CFLAGS = $(shell pkg-config $(PDF_PKGS) --cflags)
+PDF_LIBS   = $(shell pkg-config $(PDF_PKGS) --libs)
+
 SDL3_CFLAGS = $(shell pkg-config sdl3 --cflags)
 SDL3_LIBS   = $(shell pkg-config sdl3 --libs)
 # FFmpeg libraries for host video playback (platforms/atari/video/vidplay.c).
@@ -230,6 +236,12 @@ MISSING_DEPS += zlib1g-dev
 endif
 ifeq ($(shell pkg-config --exists libjpeg && echo ok),)
 MISSING_DEPS += libjpeg-dev
+endif
+ifeq ($(shell pkg-config --exists poppler-glib && echo ok),)
+MISSING_DEPS += libpoppler-glib-dev
+endif
+ifeq ($(shell pkg-config --exists cairo && echo ok),)
+MISSING_DEPS += libcairo2-dev
 endif
 ifeq ($(shell $(AV_PKGCONFIG) --exists libavformat && echo ok),)
 MISSING_DEPS += libavformat-dev
@@ -361,7 +373,7 @@ $(AV_STAMP): FORCE
 	   echo "NOTE: FFmpeg choice changed - the emulator will be relinked"; }
 
 $(TARGET): $(COBJS) $(CPPOBJS) $(AV_STAMP)
-	$(CXX) -o $@ $(COBJS) $(CPPOBJS) $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SLIRP_LIBS) -lz $(SDL3_LIBS) -lmpg123 -ljpeg $(AV_LIBS)
+	$(CXX) -o $@ $(COBJS) $(CPPOBJS) $(CXXFLAGS) -lpthread -lm -ldl -l:libdrm.a $(SLIRP_LIBS) -lz $(SDL3_LIBS) -lmpg123 -ljpeg $(PDF_LIBS) $(AV_LIBS)
 	@ldd $@ 2>/dev/null | grep -qE '/usr/lib.*libavcodec' && { \
 	   echo; \
 	   echo "WARNING: this build resolves libavcodec from /usr/lib - the DISTRO"; \
@@ -395,6 +407,10 @@ platforms/atari/video/vidplay.o: platforms/atari/video/vidplay.c
 # The sandbox PSG binds a stream to the same SDL3 device as ym2149.c.
 platforms/atari/stbox/stbox_psg.o: platforms/atari/stbox/stbox_psg.c
 	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
+
+# Host PDF rendering: poppler-glib + cairo headers for this unit only.
+platforms/atari/pdf/pspdf.o: platforms/atari/pdf/pspdf.cpp
+	$(CXX) $(CXXFLAGS) $(PDF_CFLAGS) -MMD -MP -c -o $@ $<
 
 # The video overlay plane only needs libdrm (already on the include path).
 platforms/atari/video/vidplane.o: platforms/atari/video/vidplane.c

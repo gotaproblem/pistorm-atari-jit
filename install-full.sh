@@ -229,6 +229,7 @@ sudo apt-get install -y \
   libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev \
   libavformat-dev libavcodec-dev libavutil-dev \
   libswscale-dev libswresample-dev \
+  libpoppler-glib-dev libcairo2-dev poppler-data fonts-urw-base35 \
   libasound2-dev ffmpeg cifs-utils
 
 # ---- SDL3 -----------------------------------------------------------------

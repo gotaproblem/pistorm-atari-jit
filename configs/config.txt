@@ -58,7 +58,10 @@ temp_limit=80
 # This ensures the Pi allocates exactly 32-bits per pixel
 #framebuffer_depth=32
 #framebuffer_ignore_alpha=1
-#disable_overscan=1
+# The firmware adds margin_*=48 to the HDMI mode on the kernel command line
+# unless this is set, and vc4 then squeezes the 1920x1080 frame into 1824x984
+# - every pixel resampled, soft text. Off = 1:1 with the panel.
+disable_overscan=1
 
 # --- CRITICAL: Driver Compatibility ---
 # PiSTorm JIT needs this

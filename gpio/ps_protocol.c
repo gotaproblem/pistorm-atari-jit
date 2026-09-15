@@ -93,8 +93,7 @@ static inline void ps_wait_idle(void)
 }
 
 
-static 
-void create_dev_mem_mapping () 
+static void create_dev_mem_mapping () 
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
   
@@ -153,8 +152,7 @@ gpio + 34 = GPAFEN  GPIO Pin Asysnchronous Falling Edge Detect Enable 0
 #define PLLD 6 /* CORE CLOCK - gpu_freq this should be used for a stable 200 MHz PI_CLK as it is NOT affected by overclocking CPU */
 #define PLL_TO_USE PLLD
 
-static 
-void setup_gpclk ( void ) 
+static void setup_gpclk ( void ) 
 {
   int cpuf, coref;
   FILE *fp;
@@ -242,13 +240,13 @@ void ps_setup_protocol ( void )
 typedef struct {
   uint32_t addr;
   uint16_t data;
-  uint8_t  fc;
   uint16_t io_type; // 
                     // WRITE BYTE = 0x01
                     // WRITE WORD = 0x00
                     // READ BYTE  = 0x03
                     // READ WORD  = 0x02
   uint8_t  berr;    // io related berr = 1
+  uint8_t  fc;
 } ps_io_t;
 
 
@@ -262,7 +260,7 @@ typedef struct {
  * spin loops' "memory"-clobbering yield (and any barrier) otherwise
  * forces the three GLOBAL pointers to be reloaded around every access.
  * Same wire sequence as txn_go(), just through the cached pointers. */
-static inline void txn_pulse (volatile uint32_t *const set,
+__attribute__((always_inline)) static inline void txn_pulse (volatile uint32_t *const set,
                               volatile uint32_t *const clr)
 {
   *set = PIN_WR; *set = PIN_WR;
@@ -286,7 +284,7 @@ void ps_write ( ps_io_t *ps_io );
  * their own - the second back-to-back dmb the old bodies carried was
  * pure overhead. */
 
-static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
+__attribute__((always_inline))  static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
 {
   volatile uint32_t *const set = ioset;
   volatile uint32_t *const clr = ioclr;
@@ -326,14 +324,12 @@ static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
   return status;
 }
 
-inline
-void ps_write ( ps_io_t *ps_io )
+__attribute__((always_inline)) inline void ps_write ( ps_io_t *ps_io )
 {
   ps_lock_bus ();
   ps_write_txn (ps_io);
   ps_unlock_bus();
 }
-
 
 inline void ps_write_8 (uint32_t addr, uint16_t data) 
 {
@@ -371,29 +367,31 @@ inline void ps_write_16 (uint32_t addr, uint16_t data)
 
 inline void ps_write_32 (uint32_t addr, uint32_t data) 
 {
-  ps_io_t hi, lo;
+  ps_io_t txn;//hi, lo;
 
-  hi.data = (uint16_t)(data >> 16);
-  hi.addr = addr;
-  hi.fc = fc;
-  hi.io_type = WRITE_WORD;
+  txn.data = (uint16_t)(data >> 16);
+  txn.addr = addr;
+  txn.fc = fc;
+  txn.io_type = WRITE_WORD;
 
-  lo.data = (uint16_t)data;
-  lo.addr = addr + 2;
-  lo.fc = fc;
-  lo.io_type = WRITE_WORD;
+  ps_lock_bus ();
+  ps_write_txn (&txn);
+
+  txn.data = (uint16_t)data;
+  txn.addr = addr + 2;
+  //txn.fc = fc;
+  //txn.io_type = WRITE_WORD;
 
   /* one lock + one barrier pair for the whole longword */
-  ps_lock_bus ();
-  ps_write_txn (&hi);
-  ps_write_txn (&lo);
+  
+  ps_write_txn (&txn);
   ps_unlock_bus ();
 
-  if (hi.berr) {
-    g_buserr = 1;
-    g_buserr_addr = addr;
-  }
-  if (lo.berr) {
+  //if (hi.berr) {
+  //  g_buserr = 1;
+  //  g_buserr_addr = addr;
+  //}
+  if (txn.berr) {
     g_buserr = 1;
     g_buserr_addr = addr + 2;
   }
@@ -401,7 +399,7 @@ inline void ps_write_32 (uint32_t addr, uint32_t data)
 
 
 
-static inline uint32_t ps_read_txn (ps_io_t *ps_io)
+__attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_io)
 {
   volatile uint32_t *const set = ioset;
   volatile uint32_t *const clr = ioclr;
@@ -438,6 +436,7 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
    *
    * Each extra GPLEV read adds ~50-100ns of settle after the TXN edge.
    * Sweep result: 1 was not enough, 4 is clean. PISTORM_RD_SETTLE tunes. */
+#if (0)
   {
     static int rd_settle = -1;
 
@@ -451,7 +450,7 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
     for (int i = 0; i < rd_settle; i++)
       status = *lev;
   }
-
+#endif
   *clr = TXN_END;
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
@@ -484,8 +483,7 @@ static inline uint32_t ps_read_txn (ps_io_t *ps_io)
   return status;
 }
 
-inline
-void ps_read (ps_io_t *ps_io)
+__attribute__((always_inline)) inline void ps_read (ps_io_t *ps_io)
 {
   ps_lock_bus ();
   ps_read_txn (ps_io);
@@ -595,34 +593,39 @@ inline uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 
 inline uint32_t ps_read_32 (uint32_t addr) 
 {
-  ps_io_t hi, lo;
+  ps_io_t txn;//hi, lo;
+  uint16_t hi_data;
 
-  hi.data = 0;
-  hi.addr = addr;
-  hi.fc = fc;
-  hi.io_type = READ_WORD;
+  txn.data = 0;
+  txn.addr = addr;
+  txn.fc = fc;
+  txn.io_type = READ_WORD;
 
-  lo.data = 0;
-  lo.addr = addr + 2;
-  lo.fc = fc;
-  lo.io_type = READ_WORD;
+  ps_lock_bus ();
+  ps_read_txn (&txn);
+
+  hi_data = txn.data;
+  //txn.data = 0;
+  txn.addr = addr + 2;
+  //txn.fc = fc;
+  //txn.io_type = READ_WORD;
 
   /* one lock + one barrier pair for the whole longword */
-  ps_lock_bus ();
-  ps_read_txn (&hi);
-  ps_read_txn (&lo);
+  //ps_lock_bus ();
+ // ps_read_txn (&txn);
+  ps_read_txn (&txn);
   ps_unlock_bus ();
 
-  if (hi.berr) {
-    g_buserr = 1;
-    g_buserr_addr = addr;
-  }
-  if (lo.berr) {
+  //if (hi.berr) {
+ //  g_buserr = 1;
+  //  g_buserr_addr = addr;
+  //}
+  if (txn.berr) {
     g_buserr = 1;
     g_buserr_addr = addr + 2;
   }
 
-  return ((uint32_t)hi.data << 16) | lo.data;
+  return ((uint32_t)hi_data << 16) | txn.data;
 }
 
 

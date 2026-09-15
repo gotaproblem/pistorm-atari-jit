@@ -39,7 +39,7 @@ Before starting the process in earnest, make sure your O/S is current.
 sudo apt upgrade
 
 As is always the case, you must install a bunch of packages and libraries to build the binaries.
->sudo apt install build-essential g++ make pkg-config cmake git libsdl3-dev libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libasound2-dev ffmpeg cifs-utils
+>sudo apt install build-essential g++ make pkg-config cmake git libsdl3-dev libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libpoppler-glib-dev libcairo2-dev poppler-data fonts-urw-base35 libasound2-dev ffmpeg cifs-utils
 
 *(**install-full.sh** installs exactly this list for you. **libzstd-dev** and **libcurl4-openssl-dev** used to be listed here and are not used by anything - dropped. **cifs-utils** is for mounting a media share from a NAS or PC; see INSTALL-README.md.)*
 
