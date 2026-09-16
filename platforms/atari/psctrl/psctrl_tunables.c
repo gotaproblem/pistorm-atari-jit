@@ -37,6 +37,10 @@ volatile uint64_t pst_ipl_confirm_ticks = 0;
 volatile uint64_t pst_vbl_refract_ticks = 0;
 volatile uint64_t psctrl_cntfrq         = 0;
 
+volatile int pst_verbose         = 0;
+volatile int pst_comp_constjump  = -1;
+volatile int pst_compnf          = -1;
+volatile int pst_compfpu         = -1;
 volatile int pst_dbg_ipl_stats   = 0;
 volatile int pst_dbg_irq_stats   = 0;
 volatile int pst_dbg_mfp         = 0;
@@ -149,6 +153,7 @@ void psctrl_tunables_init(void)
   pst_vbl_refract_ns = env_int ("PISTORM_VBL_REFRACT_NS",  pst_vbl_refract_ns, 0, 200000000);
   psctrl_tunables_ipl_recalc();
 
+  pst_verbose        = env_bool("PISTORM_VERBOSE",         pst_verbose);
   pst_dbg_ipl_stats  = env_bool("PISTORM_IPL_STATS",       pst_dbg_ipl_stats);
   pst_dbg_irq_stats  = env_bool("PISTORM_IRQ_STATS",       pst_dbg_irq_stats);
   pst_dbg_mfp        = env_bool("PISTORM_MFP_DEBUG",       pst_dbg_mfp);

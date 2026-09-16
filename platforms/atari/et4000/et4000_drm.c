@@ -260,7 +260,7 @@ static void plane_set_nearest(int fd, uint32_t plane_id)
             if (found &&
                 drmModeObjectSetProperty(fd, plane_id, DRM_MODE_OBJECT_PLANE,
                                          p->prop_id, val) == 0)
-                fprintf(stderr, "[DRM] plane scaling filter = Nearest Neighbor\n");
+                PS_INFO("[DRM] plane scaling filter = Nearest Neighbor\n");
             else
                 fprintf(stderr, "[DRM] SCALING_FILTER present but set failed: %s\n",
                         strerror(errno));

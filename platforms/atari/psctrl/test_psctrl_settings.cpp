@@ -56,8 +56,13 @@ extern "C" void psctrl_jit_flush_now(void) { }
 extern "C" void pistorm_request_exit(int restart) { (void) restart; }
 bool check_prefs_changed_comp(bool checkonly)
 {
-  if (!checkonly)
+  if (!checkonly) {
     currprefs.cachesize = changed_prefs.cachesize;
+    currprefs.compnf = changed_prefs.compnf;
+    currprefs.comp_constjump = changed_prefs.comp_constjump;
+    currprefs.compfpu = changed_prefs.compfpu;
+    currprefs.cpu_clock_multiplier = changed_prefs.cpu_clock_multiplier;
+  }
   return true;
 }
 
@@ -483,6 +488,135 @@ int main(void)
         fail("no .bak was left behind");
       else
         fclose(f);
+      remove(bak);
+    }
+
+    /* --- a LIVE value that is also a boot key is saved as set -------
+     *
+     * `fps` is both: the render loop reads pst_fps, but the writer
+     * renders boot keys from the boot shadow. Field report: change the
+     * frame rate, Save, and the file still said the old fps - so the
+     * change was lost on the next boot, and a second save left the file
+     * byte for byte the same as its .bak. */
+    {
+      int fps_idx = -1, fps_lines = 0, fps_new = 0;
+      char bak[600];
+
+      for (i = 0; i < n; i++)
+        if (parse(i, &r) && !strcmp(r.name, "fps"))
+          fps_idx = i;
+      if (fps_idx < 0)
+        fail("no fps item");
+      else {
+        f = fopen(g_cfgpath, "w");
+        fprintf(f, "cpu 68000\nfps 60\n");
+        fclose(f);
+        if ((int)psctrl_settings_call(PSCTRL_SETINT, fps_idx, 30, 0, 0) != PS_R_OK)
+          fail("fps 30 was refused");
+        if ((int)psctrl_settings_call(PSCTRL_SAVE, 0, 0, 0, 0) != PS_R_OK)
+          fail("SAVE failed");
+        f = fopen(g_cfgpath, "r");
+        while (f && fgets(line, sizeof(line), f)) {
+          if (!strncmp(line, "fps ", 4)) fps_lines++;
+          if (!strcmp(line, "fps 30\n")) fps_new++;
+        }
+        if (f) fclose(f);
+        if (fps_lines != 1) fail("fps appears %d times after a save", fps_lines);
+        if (!fps_new)       fail("fps was changed to 30 and saved, but the file does not say so");
+        snprintf(bak, sizeof(bak), "%s.bak", g_cfgpath);
+        remove(bak);
+      }
+    }
+
+    /* --- one line per managed key, whatever the file had -----------
+     *
+     * A doubled key is not a setting, it is a question of which copy
+     * the parser saw last. The writer keeps the first and drops the
+     * rest; keys it does not manage (hdd, hostfs) may repeat by design
+     * and are left alone. And a boot item that lives in a tunable
+     * (audio_frames) must be written at all - it was not. */
+    {
+      int nstram = 0, nfps = 0, nhdd = 0, nframes = 0, frames_idx = -1;
+      char bak[600];
+
+      for (i = 0; i < n; i++)
+        if (parse(i, &r) && !strcmp(r.name, "audio_frames"))
+          frames_idx = i;
+      f = fopen(g_cfgpath, "w");
+      fprintf(f, "stram_size 4M\nfps 60\nhdd a.img\nhdd b.img\nstram_size 1M\nfps 50\n");
+      fclose(f);
+      if (frames_idx < 0)
+        fail("no audio_frames item");
+      else if ((int)psctrl_settings_call(PSCTRL_SETINT, frames_idx, 3, 0, 0) != PS_R_RESTART)
+        fail("audio_frames 3 was refused");
+      if ((int)psctrl_settings_call(PSCTRL_SAVE, 0, 0, 0, 0) != PS_R_OK)
+        fail("SAVE failed");
+      f = fopen(g_cfgpath, "r");
+      while (f && fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, "stram_size ", 11)) nstram++;
+        if (!strncmp(line, "fps ", 4))         nfps++;
+        if (!strncmp(line, "hdd ", 4))         nhdd++;
+        if (!strcmp(line, "audio_frames 4096\n")) nframes++;
+      }
+      if (f) fclose(f);
+      if (nstram != 1) fail("stram_size appears %d times after a save", nstram);
+      if (nfps != 1)   fail("fps appears %d times after a save", nfps);
+      if (nhdd != 2)   fail("hdd lines: %d, expected both kept", nhdd);
+      if (!nframes)    fail("audio_frames 4096 was set and saved, but the file does not say so");
+      snprintf(bak, sizeof(bak), "%s.bak", g_cfgpath);
+      remove(bak);
+    }
+
+    /* --- EVERY accepted change is saved --------------------------------
+     *
+     * The rule the field asked for: change a thing in the dialog, Save,
+     * and the file says so - whatever class the thing is, wherever its
+     * value happens to live (boot shadow, currprefs, a tunable). Each
+     * settable item is moved to a different valid value and the file
+     * must change; jit_cache, fps and the three JIT switches were all
+     * silently not saved before this check existed.
+     *
+     * Not config, by design: the floppy write-protect toggles (media).
+     * hostfs_debug 'off' and 'follow cfg' both render as absent. */
+    for (i = 0; i < n; i++) {
+      long v, rc, sz0, sz1;
+      unsigned long h0 = 0, h1 = 0;
+      int c;
+
+      if (!parse(i, &r))
+        continue;
+      if (r.kind == PS_K_STR || r.kind == PS_K_INFO || r.kind == PS_K_ACTION)
+        continue;
+      if (!strcmp(r.name, "floppy_a_wp") || !strcmp(r.name, "floppy_b_wp") ||
+          !strcmp(r.name, "hostfs_debug"))
+        continue;
+      if (r.kind == PS_K_BOOL)      v = !r.value;
+      else if (r.kind == PS_K_ENUM) v = (r.value + 1) % r.nenum;
+      else                          v = (r.value == r.max) ? r.min : r.max;
+
+      psctrl_settings_call(PSCTRL_SAVE, 0, 0, 0, 0);
+      f = fopen(g_cfgpath, "r"); sz0 = 0; h0 = 5381;
+      while (f && (c = fgetc(f)) != EOF) { h0 = (h0 * 33) ^ (unsigned)c; sz0++; }
+      if (f) fclose(f);
+
+      rc = (long)psctrl_settings_call(PSCTRL_SETINT, i, (uint32_t)v, 0, 0);
+      if (rc != PS_R_OK && rc != PS_R_RESTART && rc != PS_R_DEFER) {
+        fail("%s: %ld -> %ld refused (%ld)", r.name, r.value, v, rc);
+        continue;
+      }
+      if (rc == PS_R_DEFER)
+        psctrl_apply_pending();
+
+      psctrl_settings_call(PSCTRL_SAVE, 0, 0, 0, 0);
+      f = fopen(g_cfgpath, "r"); sz1 = 0; h1 = 5381;
+      while (f && (c = fgetc(f)) != EOF) { h1 = (h1 * 33) ^ (unsigned)c; sz1++; }
+      if (f) fclose(f);
+      if (sz0 == sz1 && h0 == h1)
+        fail("%s: changed %ld -> %ld and saved, but the .cfg did not change", r.name, r.value, v);
+    }
+    {
+      char bak[600];
+      snprintf(bak, sizeof(bak), "%s.bak", g_cfgpath);
       remove(bak);
     }
     remove(g_cfgpath);

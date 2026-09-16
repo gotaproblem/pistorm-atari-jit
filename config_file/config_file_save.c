@@ -25,6 +25,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define MAXLINE 1024
 
@@ -209,6 +211,49 @@ static int line_key(const char *line, char *out, unsigned long n)
   return i > 0;
 }
 
+/* The emulator runs as root under pistorm.service, so the file it writes
+ * would come out root:root 0644 and the user could no longer edit their
+ * own config. The new file gets the owner of the directory it lands in
+ * (the user's tree), not of the .cfg it replaces - an earlier save may
+ * already have left that one root-owned - and mode 0664 on top of
+ * whatever the old file had. Run by hand as that user this is a no-op. */
+static void take_ownership(FILE *out, const char *path)
+{
+  struct stat st, dst;
+  char dir[1100];
+  size_t n;
+  const char *slash;
+  int fd = fileno(out);
+  int have_file, have_dir, rc;
+  mode_t mode = 0664;
+
+  have_file = stat(path, &st) == 0;
+  if (have_file)
+    mode |= st.st_mode & 07777;
+
+  slash = strrchr(path, '/');
+  n = slash ? (size_t)(slash - path) : 0;
+  if (!slash)
+    strcpy(dir, ".");
+  else if (n == 0)
+    strcpy(dir, "/");
+  else if (n < sizeof(dir)) {
+    memcpy(dir, path, n);
+    dir[n] = '\0';
+  } else
+    dir[0] = '\0';
+  have_dir = dir[0] && stat(dir, &dst) == 0;
+
+  if (have_dir && dst.st_uid != 0)
+    rc = fchown(fd, dst.st_uid, dst.st_gid);
+  else if (have_file)
+    rc = fchown(fd, st.st_uid, st.st_gid);
+  else
+    rc = 0;
+  rc |= fchmod(fd, mode);
+  (void)rc;
+}
+
 int config_file_save(const char *path, const struct emulator_config *cfg)
 {
   char tmp[1100], bak[1100];
@@ -234,6 +279,7 @@ int config_file_save(const char *path, const struct emulator_config *cfg)
     free(seen);
     return -1;
   }
+  take_ownership(out, path);
 
   in = fopen(path, "r");
   if (in) {
@@ -243,10 +289,20 @@ int config_file_save(const char *path, const struct emulator_config *cfg)
         continue;
       }
       if (render_key(key, cfg, rendered, sizeof(rendered))) {
-        fprintf(out, "%s\n", rendered);
+        int dup = 0;
+
+        /* one line per managed key: the first occurrence takes the
+         * value, any later copy of the same key is dropped rather than
+         * carried along - a second `stram_size` is not a setting, it is
+         * a question of which one the parser saw last */
         for (i = 0; i < nkeys; i++)
-          if (!strcmp(psctrl_settings_key_at(i), key))
+          if (!strcmp(psctrl_settings_key_at(i), key)) {
+            if (seen[i])
+              dup = 1;
             seen[i] = 1;
+          }
+        if (!dup)
+          fprintf(out, "%s\n", rendered);
         continue;
       }
       fputs(line, out);                         /* not ours: verbatim */

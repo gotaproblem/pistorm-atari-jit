@@ -148,7 +148,7 @@ int dmasnd_init(const char *device)
     }
     SDL_ResumeAudioDevice(g_dev);
     SDL_SetAudioPostmixCallback(g_dev, dmasnd_postmix, NULL);
-    fprintf(stderr, "[dmasnd] SDL3 audio ready\n");
+    PS_INFO("[dmasnd] SDL3 audio ready\n");
     return 0;
 }
 

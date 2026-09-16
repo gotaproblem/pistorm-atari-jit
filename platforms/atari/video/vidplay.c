@@ -57,6 +57,7 @@
 #include <libswscale/swscale.h>
 
 #include "vidplay.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO: informational lines only with `debug verbose` */
 #include "vidplane.h"
 #include "../et4000/et4000_drm.h"
 #include "../audio/dmasnd.h"
@@ -421,7 +422,7 @@ static void thread_demote(const char *what)
         if (CPU_ISSET(i, &set) && n < (int)sizeof(cpus) - 4)
             n += snprintf(cpus + n, sizeof(cpus) - n, "%s%d", n ? "," : "", i);
 
-    fprintf(stderr, "[VID] %s thread running: policy=%s cpus=%s\n", what,
+    PS_INFO("[VID] %s thread running: policy=%s cpus=%s\n", what,
             sched_getscheduler(0) == SCHED_OTHER ? "SCHED_OTHER" : "INHERITED",
             cpus);
 }
@@ -803,7 +804,7 @@ static void attach_v4l2request(AVCodecContext *c, enum AVCodecID id)
     }
     c->hw_device_ctx = dev;              /* context takes ownership */
     c->get_format    = vp_get_format;
-    fprintf(stderr, "[VID] v4l2request hwaccel attached for HEVC\n");
+    PS_INFO("[VID] v4l2request hwaccel attached for HEVC\n");
 }
 
 static int open_video(int allow_hw)
@@ -862,7 +863,7 @@ static int open_video(int allow_hw)
 
     g_vctx = c;
     g_hw   = is_hw;
-    fprintf(stderr, "[VID] video decoder: %s (%s)\n", dec->name,
+    PS_INFO("[VID] video decoder: %s (%s)\n", dec->name,
             is_hw ? "hardware" : "software");
     return 0;
 
@@ -946,7 +947,7 @@ static int open_audio(void)
 
     g_actx  = c;
     g_a_bps = (double)rate * 2.0 * 2.0;     /* stereo S16 */
-    fprintf(stderr, "[VID] audio decoder: %s, %d Hz -> SDL mix\n",
+    PS_INFO("[VID] audio decoder: %s, %d Hz -> SDL mix\n",
             dec->name, rate);
     return 0;
 }
@@ -1007,7 +1008,7 @@ static int configure_plane(AVFrame *f)
         vidplane_set_colorimetry(g_vh <= 576 ? 0 : 1,
                                  f->color_range == AVCOL_RANGE_JPEG);
         resolve_rect();
-        fprintf(stderr, "[VID] %dx%d hardware frames (dmabuf, zero copy) -> "
+        PS_INFO("[VID] %dx%d hardware frames (dmabuf, zero copy) -> "
                         "dst %dx%d @%d,%d\n",
                 g_vw, g_vh, g_dw, g_dh, g_dx, g_dy);
         return 0;
@@ -1074,7 +1075,7 @@ static int configure_plane(AVFrame *f)
     vidplane_set_colorimetry(enc, range);
 
     resolve_rect();
-    fprintf(stderr, "[VID] %dx%d %s -> %s plane, dst %dx%d @%d,%d%s\n",
+    PS_INFO("[VID] %dx%d %s -> %s plane, dst %dx%d @%d,%d%s\n",
             g_vw, g_vh, av_get_pix_fmt_name(pf),
             g_fourcc == DRM_FORMAT_NV12 ? "NV12" : "YUV420",
             g_dw, g_dh, g_dx, g_dy, g_convert ? " (swscale)" : " (direct)");
@@ -1441,7 +1442,7 @@ static void *decode_thread(void *arg)
                 fprintf(stderr, "[VID] video packet queue overflow\n");
             if (!announced_pkt) {
                 announced_pkt = 1;
-                fprintf(stderr, "[VID] first video packet: stream %d, %d bytes, "
+                PS_INFO("[VID] first video packet: stream %d, %d bytes, "
                                 "pts %lld\n", pkt->stream_index, pkt->size,
                         (long long)pkt->pts);
             }
@@ -2330,11 +2331,11 @@ int vidplay_play(const char *host_path)
     }
     g_have_pre = 1;
 
-    fprintf(stderr, "[VID] playing %s (%lds, %.2f fps)\n", host_path, g_len_s,
+    PS_INFO("[VID] playing %s (%lds, %.2f fps)\n", host_path, g_len_s,
             g_fps);
     for (unsigned si = 0; si < g_fmt->nb_streams; si++) {
         AVCodecParameters *cp = g_fmt->streams[si]->codecpar;
-        fprintf(stderr, "[VID]   stream %u: %s %s %dx%d%s%s\n", si,
+        PS_INFO("[VID]   stream %u: %s %s %dx%d%s%s\n", si,
                 av_get_media_type_string(cp->codec_type)
                     ? av_get_media_type_string(cp->codec_type) : "?",
                 avcodec_get_name(cp->codec_id), cp->width, cp->height,

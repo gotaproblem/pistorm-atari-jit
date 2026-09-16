@@ -1852,10 +1852,10 @@ int et4000_init (ET4000State *s, const char *fb_device)
     if (emulator_config_et4k_enabled()) {
         et4000_engine_init (); /* PCem ET4000 + 1MB VRAM */
         vram_ptr = et4000_engine_vram_ptr ();
-        printf ("[ET4000] init complete (PCem engine), fb=%ux%u\n", s->fb_width, s->fb_height);
+        PS_INFO ("[ET4000] init complete (PCem engine), fb=%ux%u\n", s->fb_width, s->fb_height);
     } else {
         vram_ptr = NULL;
-        printf ("[DISPLAY] init complete (no ET4000 engine), fb=%ux%u\n", s->fb_width, s->fb_height);
+        PS_INFO ("[DISPLAY] init complete (no ET4000 engine), fb=%ux%u\n", s->fb_width, s->fb_height);
     }
     return 0;
 }
@@ -2218,7 +2218,7 @@ static void logo_try_load(const char *path)
         g_logo_px = px;
         g_logo_w = (uint32_t)w;
         g_logo_h = ah;
-        fprintf(stderr, "[DISPLAY] splash logo loaded: %s (%ux%u)\n", path, g_logo_w, g_logo_h);
+        PS_INFO("[DISPLAY] splash logo loaded: %s (%ux%u)\n", path, g_logo_w, g_logo_h);
     }
 out:
     fclose(f);

@@ -3,6 +3,7 @@
  */
 
 #include "platform_atari_fdd.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,7 @@ void platform_fdd_init(char *image)
     if (fdd_insert_disk (0, image, wp) != 0)
         fprintf(stderr, "[FDD] Drive A: failed to mount %s\n", image);
     else
-        fprintf(stderr, "[FDD] Drive A: %s%s\n", image, wp ? " (WP)" : " RW");
+        PS_INFO("[FDD] Drive A: %s%s\n", image, wp ? " (WP)" : " RW");   /* the mount line above says it */
 }
 
 #ifdef __cplusplus

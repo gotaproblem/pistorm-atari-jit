@@ -78,7 +78,7 @@ So the affected options split into two classes:
 recompiling anything:
 
 - `pissoff_value` — the compiled-chain budget (`jit_glue.cpp:219-224`, currently
-  fixed at startup from `PISTORM_PISSOFF`). This is genuinely the most
+  fixed at startup from the cfg `jit_power` switch). This is genuinely the most
   interesting live knob you have: it trades compiled-run length against
   fallback interrupt latency, it's the thing you actually want to A/B against a
   running game, and changing it costs nothing. Your own note says the failure

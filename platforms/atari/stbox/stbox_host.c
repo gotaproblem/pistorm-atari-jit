@@ -59,6 +59,7 @@ static int g_started;
 static volatile int g_rx, g_ry, g_rw = -1, g_rh = -1;
 static volatile int g_cx, g_cy, g_cw = -1, g_ch = -1;
 static volatile int g_focus;
+static volatile int g_route = 1;        /* kbd_usb.c ESC toggle, for logs */
 
 /* DRM */
 static int g_fd = -1;
@@ -311,65 +312,144 @@ static int commit(uint32_t fb, uint32_t sx, uint32_t sy, uint32_t sw,
 /* ------------------------------------------------------------------ */
 static const uint8_t lvl[8] = { 0, 36, 73, 109, 146, 182, 219, 255 };
 
+/* Frame conversion, frame tier: one palette/resolution/base for the whole
+ * frame (mid-frame changes smear rather than raster). The plain-ST path is
+ * the original, untouched, so an ST box is bit-identical to before STE
+ * existed; STE adds 4-bit palette, linewidth and hscroll. Line addresses
+ * wrap within the (power-of-two) RAM size, so a base near the top of RAM
+ * or a transiently wrong one can never read outside the buffer (field
+ * report: SIGSEGV loading Xenon 2). */
 static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
 {
-    uint32_t vb = stbox_shared.video_base & (stbox_shared.ram_size - 1);
-    /* The conversion reads up to 32000 bytes from vb. A game parking its
-     * screen near the top of RAM - or this thread racing the guest's
-     * byte-by-byte video-base update and catching a transient value -
-     * must not walk off the end of the buffer (field report: SIGSEGV
-     * loading Xenon 2). Clamp the window; a transiently-wrong base draws
-     * one garbage frame, which the next frame corrects. */
-    if (stbox_shared.ram_size >= 32000 &&
-        vb > stbox_shared.ram_size - 32000)
-        vb = stbox_shared.ram_size - 32000;
-    const uint8_t *src = stbox_shared.ram + vb;
-    int res = stbox_shared.shift_res;
+    if (!stbox_shared.ste) {
+        uint32_t vb = stbox_shared.video_base & (stbox_shared.ram_size - 1);
+        if (stbox_shared.ram_size >= 32000 &&
+            vb > stbox_shared.ram_size - 32000)
+            vb = stbox_shared.ram_size - 32000;
+        const uint8_t *src = stbox_shared.ram + vb;
+        int res = stbox_shared.shift_res;
+        uint32_t pal[16];
+        for (int i = 0; i < 16; i++) {
+            uint16_t p = stbox_shared.palette[i];
+            pal[i] = 0xFF000000u | ((uint32_t)lvl[(p >> 8) & 7] << 16) |
+                     ((uint32_t)lvl[(p >> 4) & 7] << 8) | lvl[p & 7];
+        }
+        if (res == 0) {
+            for (int y = 0; y < 200; y++) {
+                uint32_t *d = (uint32_t *)(dst + y * pitch);
+                const uint8_t *s = src + y * 160;
+                for (int g = 0; g < 20; g++, s += 8) {
+                    uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
+                    uint16_t p2 = (s[4] << 8) | s[5], p3 = (s[6] << 8) | s[7];
+                    for (int b = 15; b >= 0; b--)
+                        *d++ = pal[((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) |
+                                   (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3)];
+                }
+            }
+            *out_w = 320; *out_h = 200;
+        } else if (res == 1) {
+            for (int y = 0; y < 200; y++) {
+                uint32_t *d = (uint32_t *)(dst + y * pitch);
+                const uint8_t *s = src + y * 160;
+                for (int g = 0; g < 40; g++, s += 4) {
+                    uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
+                    for (int b = 15; b >= 0; b--)
+                        *d++ = pal[((p0 >> b) & 1) | (((p1 >> b) & 1) << 1)];
+                }
+            }
+            *out_w = 640; *out_h = 200;
+        } else {
+            uint32_t fg = 0xFF000000u, bg = 0xFFFFFFFFu;
+            if (!(stbox_shared.palette[0] & 1)) { fg = bg; bg = 0xFF000000u; }
+            for (int y = 0; y < 400; y++) {
+                uint32_t *d = (uint32_t *)(dst + y * pitch);
+                const uint8_t *s = src + y * 80;
+                for (int g = 0; g < 40; g++, s += 2) {
+                    uint16_t p0 = (s[0] << 8) | s[1];
+                    for (int b = 15; b >= 0; b--)
+                        *d++ = ((p0 >> b) & 1) ? fg : bg;
+                }
+            }
+            *out_w = 640; *out_h = 400;
+        }
+        return;
+    }
+
+    /* STE path */
+    const uint8_t *ram = stbox_shared.ram;
+    const uint32_t rmask = stbox_shared.ram_size - 1;
+    const int res = stbox_shared.shift_res;
+    const int hs  = stbox_shared.hscroll & 15;
+    const int lw  = stbox_shared.linewidth * 2;
+    uint32_t vb = stbox_shared.video_base & rmask;
     uint32_t pal[16];
     for (int i = 0; i < 16; i++) {
         uint16_t p = stbox_shared.palette[i];
-        pal[i] = 0xFF000000u | ((uint32_t)lvl[(p >> 8) & 7] << 16) |
-                 ((uint32_t)lvl[(p >> 4) & 7] << 8) | lvl[p & 7];
+        #define STE_LVL(n) ((uint8_t)(((((n) & 7) << 1) | (((n) >> 3) & 1)) * 17))
+        pal[i] = 0xFF000000u | ((uint32_t)STE_LVL(p >> 8) << 16) |
+                 ((uint32_t)STE_LVL(p >> 4) << 8) | STE_LVL(p);
+        #undef STE_LVL
     }
-
-    if (res == 0) {                    /* ST low: 320x200x16, 4 planes  */
+    #define RD(o) ram[((o)) & rmask]
+    if (res == 0) {
+        const int groups = 20 + (hs ? 1 : 0);
+        const uint32_t stride = (uint32_t)groups * 8 + (uint32_t)lw;
+        uint8_t px[336];
         for (int y = 0; y < 200; y++) {
-            uint32_t *d = (uint32_t *)(dst + y * pitch);
-            const uint8_t *s = src + y * 160;
-            for (int g = 0; g < 20; g++, s += 8) {
-                uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
-                uint16_t p2 = (s[4] << 8) | s[5], p3 = (s[6] << 8) | s[7];
+            uint32_t la = vb + (uint32_t)y * stride;
+            uint8_t *o = px;
+            for (int g = 0; g < groups; g++, la += 8) {
+                uint16_t p0 = (RD(la)     << 8) | RD(la + 1);
+                uint16_t p1 = (RD(la + 2) << 8) | RD(la + 3);
+                uint16_t p2 = (RD(la + 4) << 8) | RD(la + 5);
+                uint16_t p3 = (RD(la + 6) << 8) | RD(la + 7);
                 for (int b = 15; b >= 0; b--)
-                    *d++ = pal[((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) |
-                               (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3)];
+                    *o++ = (uint8_t)(((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) |
+                                     (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3));
             }
+            uint32_t *d = (uint32_t *)(dst + y * pitch);
+            const uint8_t *s = px + hs;
+            for (int x = 0; x < 320; x++) *d++ = pal[s[x]];
         }
         *out_w = 320; *out_h = 200;
-    } else if (res == 1) {             /* ST med: 640x200x4, 2 planes   */
+    } else if (res == 1) {
+        const int groups = 40 + (hs ? 1 : 0);
+        const uint32_t stride = (uint32_t)groups * 4 + (uint32_t)lw;
+        uint8_t px[656];
         for (int y = 0; y < 200; y++) {
-            uint32_t *d = (uint32_t *)(dst + y * pitch);
-            const uint8_t *s = src + y * 160;
-            for (int g = 0; g < 40; g++, s += 4) {
-                uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
+            uint32_t la = vb + (uint32_t)y * stride;
+            uint8_t *o = px;
+            for (int g = 0; g < groups; g++, la += 4) {
+                uint16_t p0 = (RD(la)     << 8) | RD(la + 1);
+                uint16_t p1 = (RD(la + 2) << 8) | RD(la + 3);
                 for (int b = 15; b >= 0; b--)
-                    *d++ = pal[((p0 >> b) & 1) | (((p1 >> b) & 1) << 1)];
+                    *o++ = (uint8_t)(((p0 >> b) & 1) | (((p1 >> b) & 1) << 1));
             }
+            uint32_t *d = (uint32_t *)(dst + y * pitch);
+            const uint8_t *s = px + hs;
+            for (int x = 0; x < 640; x++) *d++ = pal[s[x]];
         }
         *out_w = 640; *out_h = 200;
-    } else {                           /* ST high: 640x400x2, 1 plane   */
+    } else {
         uint32_t fg = 0xFF000000u, bg = 0xFFFFFFFFu;
         if (!(stbox_shared.palette[0] & 1)) { fg = bg; bg = 0xFF000000u; }
+        const int groups = 40 + (hs ? 1 : 0);
+        const uint32_t stride = (uint32_t)groups * 2 + (uint32_t)lw;
+        uint8_t px[656];
         for (int y = 0; y < 400; y++) {
-            uint32_t *d = (uint32_t *)(dst + y * pitch);
-            const uint8_t *s = src + y * 80;
-            for (int g = 0; g < 40; g++, s += 2) {
-                uint16_t p0 = (s[0] << 8) | s[1];
-                for (int b = 15; b >= 0; b--)
-                    *d++ = ((p0 >> b) & 1) ? fg : bg;
+            uint32_t la = vb + (uint32_t)y * stride;
+            uint8_t *o = px;
+            for (int g = 0; g < groups; g++, la += 2) {
+                uint16_t p0 = (RD(la) << 8) | RD(la + 1);
+                for (int b = 15; b >= 0; b--) *o++ = (uint8_t)((p0 >> b) & 1);
             }
+            uint32_t *d = (uint32_t *)(dst + y * pitch);
+            const uint8_t *s = px + hs;
+            for (int x = 0; x < 640; x++) *d++ = s[x] ? fg : bg;
         }
         *out_w = 640; *out_h = 400;
     }
+    #undef RD
 }
 
 /* ------------------------------------------------------------------ */
@@ -393,13 +473,111 @@ static void *render_main(void *arg)
     (void)arg;
 
     uint32_t last_frame = (uint32_t)-1;
-    time_t health_at = time(NULL) + 5; /* one-shot health line after 5 s */
+    /* health line every 5 s while running: pace, plus the input state -
+     * focus/routing and what actually reached the sandbox IKBD - so a
+     * "mouse does nothing" report can be read off the log. */
+    time_t health_at = time(NULL) + 5;
+    uint32_t last_frame_h = stbox_shared.frame;
     while (g_run) {
-        if (health_at && time(NULL) >= health_at) {
-            health_at = 0;
-            fprintf(stderr, "[STBOX] health: %u frames, %u cps "
-                    "(expect ~250 frames, ~8021248 cps)\n",
-                    stbox_shared.frame, stbox_core_cps());
+        if (time(NULL) >= health_at) {
+            health_at += 5;
+            uint32_t in[6];
+            stbox_input_stats(in);
+            uint32_t sc[5];
+            stbox_core_sched_stats(sc);
+            fprintf(stderr, "[STBOX] health: %u frames/5s, %u cps "
+                    "(expect ~250, ~8021248) focus=%d route=%d "
+                    "in: key=%u mouse=%u joy=%u raw=%u drop=%u acia_rx=%u\n"
+                    "[STBOX]   sched: calls/s=%u slices/s=%u stop:cap=%u debt=%u "
+                    "burst~%u ns\n",
+                    stbox_shared.frame - last_frame_h, stbox_core_cps(),
+                    g_focus, g_route,
+                    in[0], in[1], in[2], in[3], in[4], in[5],
+                    sc[0], sc[1], sc[2], sc[3], sc[4]);
+            {
+                static unsigned last_tr;
+                unsigned tr = stbox_trace_count;
+                if (tr != last_tr) {
+                    fprintf(stderr, "[STBOX]   trace: %u exceptions (+%u/5s); first at ppc=%06X "
+                            "-> handler %06X (pc=%06X sr=%04X a0=%08X sp=%08X)\n", tr, tr - last_tr,
+                            stbox_trace_first_ppc, stbox_trace_vec, stbox_trace_first_pc,
+                            stbox_trace_first_sr, stbox_trace_first_a0, stbox_trace_first_sp);
+                    if (last_tr == 0) {
+                        fprintf(stderr, "[STBOX]   trace frame+stack: %08X %08X %08X %08X %08X %08X\n",
+                                stbox_trace_first_stack[0], stbox_trace_first_stack[1],
+                                stbox_trace_first_stack[2], stbox_trace_first_stack[3],
+                                stbox_trace_first_stack[4], stbox_trace_first_stack[5]);
+                        uint32_t p = stbox_trace_first_ppc >= 16 ? stbox_trace_first_ppc - 16 : 0;
+                        fprintf(stderr, "[STBOX]   around the traced instruction:\n");
+                        for (int k = 0; k < 10; k++) {
+                            char buf[96]; buf[0] = 0;
+                            int len = m68k_disassemble(buf, p, M68K_CPU_TYPE_68000);
+                            fprintf(stderr, "[STBOX]   %s%06X  %s\n",
+                                    p == stbox_trace_first_ppc ? ">" : " ", p, buf);
+                            p += (len > 0) ? (uint32_t)len : 2u;
+                        }
+                        p = stbox_trace_vec;
+                        fprintf(stderr, "[STBOX]   trace handler:\n");
+                        for (int k = 0; k < 24 && p; k++) {
+                            char buf[96]; buf[0] = 0;
+                            int len = m68k_disassemble(buf, p, M68K_CPU_TYPE_68000);
+                            fprintf(stderr, "[STBOX]    %06X  %s\n", p, buf);
+                            p += (len > 0) ? (uint32_t)len : 2u;
+                        }
+                    }
+                    last_tr = tr;
+                }
+            }
+            static int dbg = -1;
+            if (dbg < 0) { const char *e = getenv("PISTORM_STBOX_DBG"); dbg = (e && *e == '1'); }
+            if (dbg) {
+                uint32_t pc = stbox_dbg_pc;
+                char dis[80]; dis[0] = 0;
+                m68k_disassemble(dis, pc, M68K_CPU_TYPE_68000);
+                fprintf(stderr, "[STBOX]   pc=%06X [%s] pc-window=%06X..%06X "
+                        "lastHWread=%06X @pc %06X\n",
+                        pc, dis, stbox_dbg_pc_lo, stbox_dbg_pc_hi,
+                        stbox_dbg_last_hwr, stbox_dbg_last_hwr_pc);
+                stbox_dbg_pc_lo = 0xFFFFFFFFu; stbox_dbg_pc_hi = 0;
+            }
+            last_frame_h = stbox_shared.frame;
+        }
+        {
+            static unsigned seen;
+            unsigned n = stbox_exc_count;
+            if (n != seen) {
+                __atomic_thread_fence(__ATOMIC_ACQUIRE);
+                unsigned from = (n - seen > STBOX_EXC_RING) ? n - STBOX_EXC_RING : seen;
+                for (unsigned i = from; i != n; i++) {
+                    stbox_exc_info_t e = stbox_exc_ring[i & (STBOX_EXC_RING - 1)];
+                    char d1[80]; d1[0] = 0;
+                    m68k_disassemble(d1, e.ppc, M68K_CPU_TYPE_68000);
+                    fprintf(stderr, "[STBOX] EXCEPTION #%u vec %u (%s) at guest cycle %llu:"
+                            " ppc=%06X [%s] sr=%04X sp=%08X d0=%08X a0=%08X a1=%08X a6=%08X\n",
+                            i + 1, e.vector,
+                            e.vector == 2 ? "bus error" : e.vector == 3 ? "ADDRESS ERROR" :
+                            e.vector == 4 ? "illegal" : "privilege",
+                            (unsigned long long)e.cycles,
+                            e.ppc, d1, e.sr, e.sp, e.d0, e.a0, e.a1, e.a6);
+                    fprintf(stderr, "[STBOX]   stack: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                            e.stack[0], e.stack[1], e.stack[2], e.stack[3],
+                            e.stack[4], e.stack[5], e.stack[6], e.stack[7]);
+                    if (e.vector == 3 || e.vector == 4) {
+                        /* the road to the fault: disassemble from a little
+                         * before ppc (may start mid-instruction; resyncs) */
+                        uint32_t p = e.ppc >= 32 ? e.ppc - 32 : 0;
+                        fprintf(stderr, "[STBOX]   code before the fault:\n");
+                        for (int k = 0; k < 14 && p <= e.ppc + 8; k++) {
+                            char buf[96]; buf[0] = 0;
+                            int len = m68k_disassemble(buf, p, M68K_CPU_TYPE_68000);
+                            fprintf(stderr, "[STBOX]   %s%06X  %s\n",
+                                    p == e.ppc ? ">" : " ", p, buf);
+                            p += (len > 0) ? (uint32_t)len : 2u;
+                        }
+                    }
+                }
+                seen = n;
+            }
         }
         if (stbox_core_take_halt_report()) {
             fprintf(stderr, "[STBOX] DOUBLE BUS FAULT - box halted. "
@@ -700,6 +878,7 @@ int stbox_start(const stbox_cfg_t *cfg)
     g_ram = calloc(1, ram_size + 32768);
     if (!g_ram) return -1;
 
+    stbox_core_set_machine(g_cfg.machine_ste);   /* before the first reset */
     if (stbox_core_setup(g_ram, ram_size, rom, (uint32_t)rsz)) {
         fprintf(stderr, "[STBOX] core setup failed (rom %zu bytes)\n", rsz);
         free(g_ram); g_ram = NULL;
@@ -754,6 +933,8 @@ int stbox_start(const stbox_cfg_t *cfg)
     stbox_cpu_kick = jit_request_cpu_exit;
     g_started = 1;
     stbox_psg_start();
+    if (g_cfg.machine_ste)
+        stbox_dmasnd_start();
     if (g_cfg.floppy_a[0])
         stbox_disk_insert_path(g_cfg.floppy_a);
     fprintf(stderr, "[STBOX] running: %s, %u KB, %s (build %s %s)\n",
@@ -773,6 +954,7 @@ void stbox_stop(void)
     free(g_ram); g_ram = NULL;
     free(g_disk_cur); g_disk_cur = NULL;
     stbox_psg_stop();
+    stbox_dmasnd_stop();
     g_started = 0;
     fprintf(stderr, "[STBOX] stopped\n");
 }
@@ -787,7 +969,14 @@ void stbox_set_rect(int x, int y, int w, int h)
 void stbox_set_clip(int x, int y, int w, int h)
 { g_cx = x; g_cy = y; g_cw = w; g_ch = h; }
 
-void stbox_set_focus(int focused) { g_focus = focused; }
+void stbox_set_focus(int focused)
+{
+    if (g_focus != focused)
+        fprintf(stderr, "[STBOX] focus %d -> %d (routing %s)\n",
+                g_focus, focused, g_route ? "on" : "off");
+    g_focus = focused;
+}
+void stbox_note_route(int on)     { g_route = on; }
 int  stbox_get_focus(void)        { return g_focus; }
 
 void stbox_get_stats(uint32_t out[4])

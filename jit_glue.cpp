@@ -249,7 +249,8 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
      * interpretive fpuop_arithmetic() call even in "hardware" mode - the
      * measured 3-vs-6 score gap was just softfloat-vs-double inside the
      * same interpreter. */
-    currprefs.compfpu = changed_prefs.compfpu = !disable_jit && !disable_fpu;
+    currprefs.compfpu = changed_prefs.compfpu = !disable_jit && !disable_fpu
+                                              && pst_compfpu != 0;   /* cfg `compfpu 0` */
 #else
     currprefs.fpu_mode = changed_prefs.fpu_mode = 1;  // deafult 1 softfloat, 0 hardware fpu for double the performance
     currprefs.compfpu = changed_prefs.compfpu = !disable_jit && !disable_fpu; // default true Pi must emulate the FPU, false if using hw fpu
@@ -332,7 +333,7 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
         m68k_speed = 0;
     }
 
-    fprintf(stderr, "[JITGLUE] %s cachesize=%d fpu_model=%d compfpu=%d clockmul=%d m68k_speed=%d cfg_jit=%d cfg_fpu=%d cfg_ttram=%d cfg_addr32=%d addr24=%d jit_n_addr_unsafe=%d jit_env=%s jit_file=%d fpu_off=%d\n",
+    PS_INFO("[JITGLUE] %s cachesize=%d fpu_model=%d compfpu=%d clockmul=%d m68k_speed=%d cfg_jit=%d cfg_fpu=%d cfg_ttram=%d cfg_addr32=%d addr24=%d jit_n_addr_unsafe=%d jit_env=%s jit_file=%d fpu_off=%d\n",
             mode, currprefs.cachesize, currprefs.fpu_model,
             currprefs.compfpu ? 1 : 0,
             cpu_clock_multiplier,
@@ -364,8 +365,10 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     /* cryptodad optimisations */
     currprefs.turbo_emulation = changed_prefs.turbo_emulation = 0;
     currprefs.m68k_speed = changed_prefs.m68k_speed = m68k_speed;
-    currprefs.compnf = changed_prefs.compnf = 1;//!disable_jit;                 // compile without condition-code flag tracking where safe
-    currprefs.comp_constjump = changed_prefs.comp_constjump = 1;//!disable_jit; // follow constant branches during translation
+    /* build default 1 for both; the .cfg (compnf / comp_constjump, via
+     * PSCTRL's tunables) can turn either off */
+    currprefs.compnf = changed_prefs.compnf = pst_compnf >= 0 ? pst_compnf : 1;
+    currprefs.comp_constjump = changed_prefs.comp_constjump = pst_comp_constjump >= 0 ? pst_comp_constjump : 1;
 
     init_m68k(); // prefs_changed_cpu(), init_table68k()
     // NOTE: build_cpufunctbl() is static inside newcpu.cpp and is invoked by

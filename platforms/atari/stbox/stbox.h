@@ -35,7 +35,8 @@ typedef struct {
     uint32_t ram_kb;          /* 512, 1024, 2048, 4096                  */
     char     tos_path[256];   /* host path to TOS ROM image             */
     char     floppy_a[256];   /* .ST/.MSA image, empty = no disk        */
-    uint8_t  machine_ste;     /* 0 = plain ST (v1 supports 0 only)      */
+    uint8_t  machine_ste;     /* 0 = plain ST, 1 = STE (blitter, DMA
+                                 sound, STE shifter, joypad ports)      */
     uint8_t  accuracy;        /* 0 = frame tier (v1), 1 = scanline      */
 } stbox_cfg_t;
 
@@ -141,6 +142,12 @@ void stbox_key_event(uint8_t st_scancode, int down);
 void stbox_ikbd_byte(uint8_t b);
 void stbox_mouse_rel(int dx, int dy, int buttons);   /* buttons: bit1 L, bit0 R */
 void stbox_joy_event(int joy, uint8_t state);        /* ST joystick bits       */
+/* kbd_usb.c tells the host when its ESC toggle changes routing, so the
+ * health line can show it (the host never sees the flag otherwise). */
+void stbox_note_route(int on);
+/* pushes by type (key, mouse, joy, raw), ring-full drops, ACIA bytes
+ * delivered to the guest - for the health line */
+void stbox_input_stats(uint32_t out[6]);
 
 /* ------------------------------------------------------------------ */
 /* core-3 slice entry (ipl_task housekeeping slot ONLY)               */
@@ -157,6 +164,32 @@ extern volatile int stbox_core_armed_flag;
 /* ------------------------------------------------------------------ */
 int  stbox_core_setup(uint8_t *ram, uint32_t ram_size,
                       const uint8_t *rom, uint32_t rom_size);
+void stbox_core_set_machine(int ste);     /* before setup/reset             */
+
+/* ---- STE tier ---------------------------------------------------- */
+/* BLiTTER (stbox_blit.c): a resumable copy of st_blitter.c's engine,
+ * stepped from stbox_slice() a bounded number of bus accesses at a time.
+ * All core 3. Memory hooks below are implemented in stbox.c. */
+uint32_t stbox_blit_reg_read(uint32_t addr, int size);
+void     stbox_blit_reg_write(uint32_t addr, uint32_t val, int size);
+int      stbox_blit_busy(void);
+int      stbox_blit_hog(void);
+int      stbox_blit_step(int max_accesses);    /* -> accesses made       */
+void     stbox_blit_reset(void);
+uint16_t stbox_blit_mem_r16(uint32_t a);
+void     stbox_blit_mem_w16(uint32_t a, uint16_t v);
+
+/* DMA sound: core 3 pushes S16 stereo frames at 50066 Hz into the ring;
+ * stbox_dmasnd.c (normal core, SDL) drains it. LMC1992 volume indexes
+ * are published raw; the host turns them into gains. */
+#define STBOX_DMA_RING 32768                    /* stereo frames (~650 ms) */
+extern volatile int16_t  stbox_dma_ring[STBOX_DMA_RING * 2];
+extern volatile unsigned stbox_dma_head, stbox_dma_tail;
+extern volatile unsigned stbox_dma_playing;
+extern volatile int stbox_dma_lmc_master, stbox_dma_lmc_left, stbox_dma_lmc_right;
+int  stbox_dmasnd_start(void);
+void stbox_dmasnd_stop(void);
+
 void stbox_core_arm(uint64_t now, uint64_t cntfrq);
 void stbox_core_disarm(void);
 void stbox_request_reset(void);           /* cold reset on next slice       */
@@ -170,15 +203,36 @@ typedef struct {
     uint32_t pc, ppc, sr, sp;
 } stbox_halt_info_t;
 extern stbox_halt_info_t stbox_halt_info;
+/* last group-0/illegal/privilege exception taken (2/3 bombs etc.) */
+typedef struct {
+    uint32_t vector, ppc, pc, sr, sp, a0, a1, a6, d0;
+    uint64_t cycles;
+    uint32_t stack[8];               /* longs from sp at the fault    */
+} stbox_exc_info_t;
+#define STBOX_EXC_RING 8
+extern stbox_exc_info_t stbox_exc_ring[STBOX_EXC_RING];
+extern volatile unsigned stbox_exc_count;      /* total taken; ring index */
+extern volatile unsigned stbox_trace_count;
+extern volatile uint32_t stbox_trace_first_ppc, stbox_trace_first_pc, stbox_trace_vec;
+extern volatile uint32_t stbox_trace_first_sp, stbox_trace_first_a0, stbox_trace_first_sr;
+extern volatile uint32_t stbox_trace_first_stack[6];
 #define STBOX_PC_RING 65536
 extern uint32_t stbox_pc_ring[STBOX_PC_RING];
 typedef struct { uint32_t addr, val, pc; } stbox_watch_ev;
-#define STBOX_WATCH_RING 256
+#ifndef STBOX_WATCH_RING
+#define STBOX_WATCH_RING 256          /* harness builds override */
+#endif
 extern uint32_t stbox_watch_lo, stbox_watch_hi;   /* hi=0: off */
 extern stbox_watch_ev stbox_watch_ring[STBOX_WATCH_RING];
 extern volatile unsigned stbox_watch_idx;
 extern volatile unsigned stbox_pc_ring_idx;
 uint32_t stbox_core_overruns(void);
+void stbox_core_sched_stats(uint32_t out[5]); /* calls/s slices/s capstops debtstops mean_ns */
+/* debug: guest PC telemetry (written by core 3, read by the host) */
+extern volatile uint32_t stbox_dbg_pc;
+extern volatile uint32_t stbox_dbg_pc_lo, stbox_dbg_pc_hi;
+extern volatile uint32_t stbox_dbg_last_hwr, stbox_dbg_last_hwr_pc;
+unsigned int stbox_dasm_r16(unsigned int a);   /* for the host disassembler */
 
 /* ------------------------------------------------------------------ */
 /* shared state the renderer reads (racy by design, frame tier)       */
@@ -187,7 +241,11 @@ typedef struct {
     volatile uint32_t frame;         /* VBL counter                     */
     volatile uint32_t video_base;    /* guest phys addr of screen       */
     volatile uint8_t  shift_res;     /* 0 low, 1 med, 2 high            */
-    volatile uint16_t palette[16];   /* raw ST palette words            */
+    volatile uint16_t palette[16];   /* raw palette words (ST 3-bit or
+                                        STE 4-bit per gun, see ste)      */
+    volatile uint8_t  ste;           /* 1: STE palette/linewidth/hscroll */
+    volatile uint8_t  linewidth;     /* $FF820F words added per line    */
+    volatile uint8_t  hscroll;       /* $FF8265 0-15                    */
     uint8_t          *ram;           /* sandbox ST-RAM (stable pointer) */
     uint32_t          ram_size;
 } stbox_shared_t;

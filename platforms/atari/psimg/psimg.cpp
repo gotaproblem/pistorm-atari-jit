@@ -3,6 +3,7 @@
 // PSIMG host-side implementation. See psimg.h.
 
 #include "platforms/atari/psimg/psimg.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -129,7 +130,9 @@ int psimg_load_scaled(const char *host_path, int dw, int dh, int bpp,
 
   src = stbi_load(host_path, &sw, &sh, &comp, 3);
   if (!src) {
-    printf("[PSIMG] cannot decode %s: %s\n", host_path, stbi_failure_reason());
+    /* the guest probes candidate names (a .P before the .PNG), so a miss
+     * is normal traffic - the caller gets the error code either way */
+    PS_INFO("[PSIMG] cannot decode %s: %s\n", host_path, stbi_failure_reason());
     return -1;
   }
   return psimg_finish(src, sw, sh, dw, dh, bpp, mode, out, out_len);

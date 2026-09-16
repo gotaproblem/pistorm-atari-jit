@@ -9,7 +9,7 @@
 #   - optionally creates a Samba share for dropping games/images onto the Pi
 #
 # Safe to run more than once. Non-interactive use:
-#   BUILD=1 SERVICE=1 SAMBA=0 ./install-full.sh
+#   BUILD=1 SERVICE=1 SAMBA=0 WEB=1 MACFIX=1 ./install-full.sh
 #
 # cryptodad / hardened rewrite — 2026
 #
@@ -442,6 +442,205 @@ if ask CADGUARD "Disable Ctrl+Alt+Del console reboot (it is the ST reset combo)?
 fi
 
 # --------------------------------------------------------------------------
+# 5c. Optional: the web browser engine. psweb (psweb/) drives WPE WebKit on
+#     the Pi and hands frames to the PSWEB NatFeat; WEBGEM.PRG on the Atari
+#     is the browser. Socket-activated: nothing runs until the guest opens
+#     the browser, and psweb exits again after ten idle minutes, so the
+#     memory (250-480 MB per page) is only spent while browsing.
+#     Non-interactive: WEB=1 ./install-full.sh
+# --------------------------------------------------------------------------
+if ask WEB "Install the web browser engine (psweb + WPE WebKit, ~200 MB of packages)?" n; then
+  say "Installing WPE WebKit and the psweb build dependencies"
+  sudo apt-get install -y \
+    libwpewebkit-2.0-dev libwpe-1.0-dev libwpebackend-fdo-1.0-dev \
+    libwayland-dev libglib2.0-dev bubblewrap xdg-dbus-proxy \
+    fonts-liberation fonts-dejavu-core
+
+  say "Building psweb"
+  make -C "$HERE/psweb" || die "psweb did not build - see psweb/Makefile"
+  sudo install -m 755 "$HERE/psweb/psweb" /usr/local/bin/psweb
+
+  # an unprivileged user of its own: a page that escapes WebKit's sandbox
+  # lands in an account that owns nothing but its cache
+  if ! id psweb >/dev/null 2>&1; then
+    sudo useradd --system --home-dir /var/lib/psweb --shell /usr/sbin/nologin \
+                 --groups render,video psweb
+  fi
+  sudo mkdir -p /var/lib/psweb /etc/psweb
+  sudo chown psweb:psweb /var/lib/psweb
+
+  # content blocker: EasyList + EasyPrivacy in WebKit's rule format
+  # (psweb/mkblocker.py regenerates it; adblock-lite.json is the hosts-only
+  # list for a 1 GB Pi - point PSWEB_FILTER at it in psweb.service). Kept if
+  # the user edited it. The compile into WebKit's DFA takes a minute on a
+  # Pi 4, so it is done here, once, on core 1, rather than at the first
+  # browser start.
+  if [ ! -e /etc/psweb/adblock.json ]; then
+    sudo install -m 644 "$HERE/psweb/adblock.json" /etc/psweb/adblock.json
+  fi
+  sudo install -m 644 "$HERE/psweb/adblock-lite.json" /etc/psweb/adblock-lite.json
+  say "Compiling the content blocker (about a minute)"
+  sudo -u psweb env HOME=/var/lib/psweb XDG_CACHE_HOME=/var/lib/psweb/cache \
+       PSWEB_FILTER=/etc/psweb/adblock.json \
+       taskset -c 1 /usr/local/bin/psweb --compile-filter \
+    || warn "blocker compile failed - psweb will retry at its first start"
+
+  # downloads land where the Atari can see them: S:\DOWNLOADS on the HOSTFS
+  # drive that points at atari-share
+  mkdir -p "$ROOT/atari-share/Downloads"
+  sudo chgrp psweb "$ROOT/atari-share/Downloads" 2>/dev/null || true
+  chmod 2775 "$ROOT/atari-share/Downloads" 2>/dev/null || true
+
+  # memory: the web process polices itself (PSWEB_MEM_MB, default 40% of
+  # RAM, killed at 1.5x) because on a Pi booted with cgroup_disable=memory
+  # the kernel limits below are silently ignored; they are still written
+  # for a Pi without that boot argument.
+  MEM_KB=$(awk '/MemTotal/ { print $2 }' /proc/meminfo)
+  MEM_HIGH=$(( MEM_KB * 45 / 100 / 1024 ))M
+  MEM_MAX=$(( MEM_KB * 55 / 100 / 1024 ))M
+  if grep -q cgroup_disable=memory /boot/firmware/cmdline.txt 2>/dev/null; then
+    warn "cgroup_disable=memory is in cmdline.txt: MemoryHigh/MemoryMax will not apply; psweb's own limit does"
+  fi
+
+  say "Installing psweb.socket / psweb.service"
+  sudo tee /etc/systemd/system/psweb.socket >/dev/null <<UNIT
+[Unit]
+Description=PiSTorm web engine socket
+
+[Socket]
+ListenStream=/run/psweb/psweb.sock
+SocketUser=psweb
+SocketGroup=psweb
+SocketMode=0666
+RuntimeDirectory=psweb
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=sockets.target
+UNIT
+  sudo tee /etc/systemd/system/psweb.service >/dev/null <<UNIT
+[Unit]
+Description=PiSTorm web engine (WPE WebKit)
+Requires=psweb.socket
+After=psweb.socket
+
+[Service]
+Type=simple
+User=psweb
+Group=psweb
+SupplementaryGroups=render video
+ExecStart=/usr/local/bin/psweb
+# its own runtime dir: /run/psweb belongs to the socket unit and comes up
+# root-owned, and WebKit/WPE need a writable XDG_RUNTIME_DIR
+RuntimeDirectory=psweb-rt
+Environment=HOME=/var/lib/psweb
+Environment=XDG_RUNTIME_DIR=/run/psweb-rt
+Environment=XDG_CACHE_HOME=/var/lib/psweb/cache
+Environment=PSWEB_FILTER=/etc/psweb/adblock.json
+Environment=PSWEB_CPUS=2
+Environment=PSWEB_IDLE_S=600
+Environment=PSWEB_DOWNLOADS=$ROOT/atari-share/Downloads
+Environment=WEBKIT_SKIA_CPU_PAINTING_THREADS=1
+CPUAffinity=1
+Nice=10
+CPUWeight=20
+MemoryHigh=$MEM_HIGH
+MemoryMax=$MEM_MAX
+OOMScoreAdjust=800
+Restart=on-failure
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl stop psweb.service 2>/dev/null || true
+  sudo systemctl enable --now psweb.socket
+  sudo systemctl restart psweb.socket
+  say "psweb.socket is listening; the emulator connects to /run/psweb/psweb.sock when WEBGEM starts"
+  warn "Watch it:  journalctl -fu psweb   -   memory limit $(( MEM_KB * 40 / 100 / 1024 )) MB, killed at 1.5x"
+fi
+
+# --------------------------------------------------------------------------
+# 5d. Mac litter. A Mac copying onto the share leaves ._* AppleDouble
+#     sidecars, .DS_Store, and .smbdeleteXXXX leftovers, which then turn up
+#     on the Atari's HOSTFS drive and in git trees. Three things, all
+#     idempotent: tools/atariclean (cleans directories, .st/.msa floppies
+#     and AHDI hard-disk images) goes to /usr/local/bin; a nightly timer
+#     runs it over $ROOT; and if Samba is installed, its [global] section
+#     gets the Apple settings that keep Finder metadata in xattrs instead
+#     of ._ files and refuse .DS_Store outright. Non-interactive: MACFIX=1.
+#     On the Mac itself, once:
+#       defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
+# --------------------------------------------------------------------------
+if ask MACFIX "Install atariclean + nightly cleanup, and tune Samba for Mac clients?" y; then
+  sudo install -m 755 "$HERE/tools/atariclean/atariclean.py" /usr/local/bin/atariclean
+  say "atariclean installed:  atariclean [-d] <dir | image.st | image.msa | disk.img>"
+
+  sudo tee /etc/systemd/system/atariclean.service >/dev/null <<UNIT
+[Unit]
+Description=Remove macOS/SMB litter from the PiSTorm files
+
+[Service]
+Type=oneshot
+Nice=15
+ExecStart=/usr/local/bin/atariclean -d $ROOT
+UNIT
+  sudo tee /etc/systemd/system/atariclean.timer >/dev/null <<UNIT
+[Unit]
+Description=Nightly macOS/SMB litter removal
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now atariclean.timer
+  say "atariclean.timer: $ROOT is cleaned nightly at 04:15 (journalctl -u atariclean)"
+
+  if [ -e /etc/samba/smb.conf ] && command -v testparm >/dev/null 2>&1; then
+    if grep -q '^# pistorm-macfix' /etc/samba/smb.conf; then
+      say "smb.conf already carries the Mac settings"
+    else
+      sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.pre-macfix
+      # into [global], right after its header
+      sudo awk '
+        { print }
+        /^[[:space:]]*\[global\][[:space:]]*$/ && !done {
+          print "# pistorm-macfix: Finder metadata as xattrs, not ._ files; no .DS_Store"
+          print "   vfs objects = catia fruit streams_xattr"
+          print "   fruit:metadata = stream"
+          print "   fruit:resource = xattr"
+          print "   fruit:model = MacSamba"
+          print "   fruit:veto_appledouble = yes"
+          print "   fruit:nfs_aces = no"
+          print "   fruit:wipe_intentionally_left_blank_rfork = yes"
+          print "   fruit:delete_empty_adfiles = yes"
+          print "   fruit:posix_rename = yes"
+          print "   veto files = /.DS_Store/"
+          print "   delete veto files = yes"
+          done = 1
+        }' /etc/samba/smb.conf.pre-macfix | sudo tee /etc/samba/smb.conf >/dev/null
+      if testparm -s /etc/samba/smb.conf >/dev/null 2>&1; then
+        sudo systemctl restart smbd
+        say "Samba: vfs_fruit on, .DS_Store refused (backup: /etc/samba/smb.conf.pre-macfix)"
+        warn "Reconnect the share on the Mac for the new behaviour to take effect"
+      else
+        sudo cp /etc/samba/smb.conf.pre-macfix /etc/samba/smb.conf
+        warn "testparm rejected the edited smb.conf - restored the original, nothing changed"
+      fi
+    fi
+  else
+    say "Samba not installed here - only the cleaner and its timer were set up"
+  fi
+fi
+
+# --------------------------------------------------------------------------
 # 6. Optional: Samba share (drop games/images onto the Pi from another machine)
 # --------------------------------------------------------------------------
 if ask SAMBA "Create a Samba share for the PiSTorm files?" n; then
@@ -489,6 +688,10 @@ echo "      game images (.st/.msa) -> $ROOT/atari-share/games/"
 echo "      then run STBOX.PRG from the HOSTFS drive and pick a game."
 echo "      Running without the service? export PISTORM_STBOX_TOS yourself."
 echo
+if [ -e /etc/systemd/system/psweb.socket ]; then
+  echo "  Web browser  : psweb.socket enabled; run WEBGEM.PRG from the HOSTFS drive"
+  echo
+fi
 echo "  Media on another PC or NAS? cifs-utils is installed. Mount the share"
 echo "  as a subdirectory of atari-share and it appears on the HOSTFS drive:"
 echo "      mkdir -p $ROOT/atari-share/media"

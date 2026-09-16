@@ -5,3 +5,4 @@ not here - m68kconf.h is upstream-default and edited in place (INT_ACK, ADDRESS_
 m68kops.c: local fix - m68k_op_move16_32 guarded with CPU_TYPE_IS_040_PLUS
 (upstream installs it for all CPU types unguarded; breaks TOS line-F on 68000).
 m68kconf.h: 010-040 generations compiled out - the STBOX is a plain 68000.
+m68kconf.h: TRACE -> ON (STBOX block). Upstream default OFF ignores the T bit; ST launchers/protections use it.

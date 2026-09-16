@@ -22,6 +22,7 @@
 #include <drm_fourcc.h>
 
 #include "vidplane.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO: informational lines only with `debug verbose` */
 #include "../et4000/et4000_drm.h"
 
 #define ALIGN_UP(v, a) (((v) + ((a) - 1)) & ~((a) - 1))
@@ -214,7 +215,7 @@ int vidplane_open(void)
     uint32_t want = force && *force ? (uint32_t)strtoul(force, NULL, 0) : 0;
 
     uint32_t chosen = 0;
-    fprintf(stderr, "[VID] planes on CRTC %u (guest uses plane %u):\n",
+    PS_INFO("[VID] planes on CRTC %u (guest uses plane %u):\n",
             g_crtc_id, guest_plane);
     for (uint32_t i = 0; i < pr->count_planes; i++) {
         drmModePlane *pl = drmModeGetPlane(g_fd, pr->planes[i]);
@@ -224,7 +225,7 @@ int vidplane_open(void)
         int type = plane_type_of(pl->plane_id);
         int nv12 = has_fmt(pl, DRM_FORMAT_NV12);
         int yuv  = has_fmt(pl, DRM_FORMAT_YUV420);
-        fprintf(stderr, "[VID]   plane %u type=%s zpos=%ld crtc=%s NV12=%s "
+        PS_INFO("[VID]   plane %u type=%s zpos=%ld crtc=%s NV12=%s "
                         "YUV420=%s%s\n",
                 pl->plane_id,
                 type == DRM_PLANE_TYPE_PRIMARY ? "PRIMARY" :
@@ -292,7 +293,7 @@ int vidplane_open(void)
                                          DRM_MODE_OBJECT_PLANE, gzp, glo);
             theirs = plane_zpos(guest_plane);
         }
-        fprintf(stderr, "[VID] zpos: video plane %u = %ld, guest plane %u = %ld"
+        PS_INFO("[VID] zpos: video plane %u = %ld, guest plane %u = %ld"
                         " (range %llu..%llu, %s)\n",
                 g_plane_id, mine, guest_plane, theirs,
                 (unsigned long long)lo, (unsigned long long)hi,
@@ -320,7 +321,7 @@ int vidplane_open(void)
             want_z >= (long)lo && want_z <= (long)hi &&
             drmModeObjectSetProperty(g_fd, g_bd_plane, DRM_MODE_OBJECT_PLANE,
                                      zp, (uint64_t)want_z) == 0) {
-            fprintf(stderr, "[VID] letterbox backdrop on plane %u at zpos %ld "
+            PS_INFO("[VID] letterbox backdrop on plane %u at zpos %ld "
                             "(between guest %ld and video %ld)\n",
                     g_bd_plane, want_z, theirs, mine);
         } else {
@@ -339,7 +340,7 @@ int vidplane_open(void)
     set_enum_prop(g_plane_id, "SCALING_FILTER", "Default");
     atomic_setup();
 
-    fprintf(stderr, "[VID] video overlay plane %u on CRTC %u, display %ux%u\n",
+    PS_INFO("[VID] video overlay plane %u on CRTC %u, display %ux%u\n",
             g_plane_id, g_crtc_id, g_mode_w, g_mode_h);
     return 0;
 }
@@ -487,7 +488,7 @@ int vidplane_alloc(uint32_t fourcc, uint32_t w, uint32_t h, int nbuf)
     g_w = w;
     g_h = h;
     g_fourcc = fourcc;
-    fprintf(stderr, "[VID] %d scanout buffers %ux%u (%s), luma pitch %u\n",
+    PS_INFO("[VID] %d scanout buffers %ux%u (%s), luma pitch %u\n",
             g_nbuf, w, h,
             fourcc == DRM_FORMAT_NV12 ? "NV12" : "YUV420", g_buf[0].pitch[0]);
     return 0;
@@ -675,7 +676,7 @@ static void atomic_setup(void)
     pr_sh   = plane_prop(g_plane_id, "SRC_H");
     g_atomic = pr_fb && pr_crtc && pr_cx && pr_cy && pr_cw && pr_chh &&
                pr_sx && pr_sy && pr_sw && pr_sh;
-    fprintf(stderr, "[VID] present: %s\n", g_atomic
+    PS_INFO("[VID] present: %s\n", g_atomic
             ? "non-blocking atomic (no vblank wait)"
             : "blocking SetPlane (atomic properties unavailable)");
 }
@@ -844,7 +845,7 @@ int vidplane_import(const struct vidplane_dmabuf *d, uint32_t *fb_out)
         static int announced = 0;
         if (!announced) {
             announced = 1;
-            fprintf(stderr, "[VID] zero-copy: imported a %ux%u dmabuf "
+            PS_INFO("[VID] zero-copy: imported a %ux%u dmabuf "
                             "(fourcc 0x%08x, modifier 0x%016llx) - no frame "
                             "copies at all from here on\n",
                     d->width, d->height, d->format,
@@ -911,7 +912,7 @@ int vidplane_show(int idx, uint32_t sx, uint32_t sy, uint32_t sw, uint32_t sh,
     }
     if (!announced) {
         announced = 1;
-        fprintf(stderr, "[VID] first frame on plane %u: src %ux%u -> dst %dx%d "
+        PS_INFO("[VID] first frame on plane %u: src %ux%u -> dst %dx%d "
                         "@%d,%d (SetPlane OK)\n",
                 g_plane_id, g_w, g_h, dw, dh, dx, dy);
     }

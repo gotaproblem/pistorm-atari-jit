@@ -187,7 +187,13 @@ BOOT_BOOL(native_hdmi)
 BOOT_BOOL(vga_render)
 BOOT_BOOL(ym2149)
 BOOT_BOOL(dma_sound)
-BOOT_BOOL(shifter_ste)
+/* shifter: the writer only renders it when the cfg set it explicitly, so
+ * a change from the dialog has to count as explicit */
+static int bg_shifter_ste(const struct ps_item *it)
+{ (void)it; boot_seed(); return g_boot.shifter_ste ? 1 : 0; }
+static int bs_shifter_ste(const struct ps_item *it, int v)
+{ (void)it; boot_seed(); g_boot.shifter_ste = v ? true : false;
+  g_boot.shifter_set = true; g_boot_dirty = 1; return PS_R_RESTART; }
 BOOT_BOOL(network_enabled)
 BOOT_BOOL(ide)
 BOOT_INT(monitor_force)
@@ -380,6 +386,9 @@ static int js_speed(const struct ps_item *it, int v)
   if (v < it->min || v > it->max)
     return PS_R_REJECT;
   currprefs.m68k_speed = changed_prefs.m68k_speed = v;
+  boot_seed();                     /* the .cfg writer renders m68k_speed from here */
+  g_boot.m68k_speed = v;
+  g_boot.m68k_speed_set = true;
   return PS_R_OK;
 }
 
@@ -407,6 +416,9 @@ static int js_mult(const struct ps_item *it, int v)
 {
   if (v < it->min || v > it->max)
     return PS_R_REJECT;
+  boot_seed();                     /* the .cfg writer renders it from here */
+  g_boot.cpu_clock_multiplier = v;
+  g_boot.cpu_clock_multiplier_set = true;
   return defer(item_index("cpu_clock_multiplier"), v);
 }
 
@@ -427,6 +439,9 @@ static int js_cache(const struct ps_item *it, int v)
 {
   if (v < it->min || v > it->max)
     return PS_R_REJECT;
+  boot_seed();                     /* the .cfg writer renders jit_cache from here */
+  g_boot.jit_cache = cache_kb[v];
+  g_boot.jit_cache_set = true;
   return defer(item_index("jit_cache"), v);
 }
 
@@ -434,9 +449,29 @@ static int jg_constjump(const struct ps_item *it) { (void)it; return currprefs.c
 static int jg_compnf(const struct ps_item *it)    { (void)it; return currprefs.compnf ? 1 : 0; }
 static int jg_compfpu(const struct ps_item *it)   { (void)it; return currprefs.compfpu ? 1 : 0; }
 
-static int js_constjump(const struct ps_item *it, int v) { (void)it; return defer(item_index("comp_constjump"), !!v); }
-static int js_compnf(const struct ps_item *it, int v)    { (void)it; return defer(item_index("compnf"), !!v); }
-static int js_compfpu(const struct ps_item *it, int v)   { (void)it; return defer(item_index("compfpu"), !!v); }
+/* The tunable is what the .cfg reads and writes; currprefs is what runs.
+ * While the .cfg is being loaded there is no CPU to defer to - jit_glue
+ * seeds currprefs from the tunable when it starts. */
+static int g_cfg_loading = 0;
+
+static int js_constjump(const struct ps_item *it, int v)
+{
+  (void)it;
+  pst_comp_constjump = !!v;
+  return g_cfg_loading ? PS_R_OK : defer(item_index("comp_constjump"), !!v);
+}
+static int js_compnf(const struct ps_item *it, int v)
+{
+  (void)it;
+  pst_compnf = !!v;
+  return g_cfg_loading ? PS_R_OK : defer(item_index("compnf"), !!v);
+}
+static int js_compfpu(const struct ps_item *it, int v)
+{
+  (void)it;
+  pst_compfpu = !!v;
+  return g_cfg_loading ? PS_R_OK : defer(item_index("compfpu"), !!v);
+}
 
 static int jg_zero(const struct ps_item *it) { (void)it; return 0; }
 static int js_flush(const struct ps_item *it, int v)
@@ -634,6 +669,13 @@ static int fs_fps(const struct ps_item *it, int v)
   if (v < it->min || v > it->max)
     return PS_R_REJECT;
   pst_fps = v;                     /* the render loop re-reads it */
+  /* `fps` is also a boot key, and the .cfg writer renders boot keys from
+   * the boot shadow - so the live value has to land there too, or a save
+   * writes the fps the machine STARTED with and the change is lost on
+   * the next boot. */
+  boot_seed();
+  g_boot.fps = v;
+  g_boot_dirty = 1;
   return PS_R_OK;
 }
 
@@ -671,12 +713,13 @@ ITEM("cpu_clock_multiplier", "CPU slowdown", PS_TAB_JIT, PS_K_INT,
      PS_C_DEFER, PS_U_NONE, 0, 8, 1, NULL, 0, 0, NULL, jg_mult, js_mult, NULL),
 ITEM("jit_cache", "Translation cache", PS_TAB_JIT, PS_K_ENUM, PS_C_DEFER,
      PS_U_NONE, 0, 4, 1, L_cache, 5, PS_F_NEWLINE, NULL, jg_cache, js_cache, NULL),
+/* tgt makes these .cfg keys (`compnf 0`); the value shown is currprefs */
 ITEM("comp_constjump", "Follow constant jumps", PS_TAB_JIT, PS_K_BOOL,
-     PS_C_DEFER, PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, NULL, jg_constjump, js_constjump, NULL),
+     PS_C_DEFER, PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_comp_constjump, jg_constjump, js_constjump, NULL),
 ITEM("compnf", "Skip dead flags", PS_TAB_JIT, PS_K_BOOL, PS_C_DEFER,
-     PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, NULL, jg_compnf, js_compnf, NULL),
+     PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_compnf, jg_compnf, js_compnf, NULL),
 ITEM("compfpu", "Translate FPU", PS_TAB_JIT, PS_K_BOOL, PS_C_DEFER,
-     PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, NULL, jg_compfpu, js_compfpu, NULL),
+     PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_compfpu, jg_compfpu, js_compfpu, NULL),
 ITEM("jit_flush", "Flush cache now", PS_TAB_JIT, PS_K_ACTION, PS_C_DEFER,
      PS_U_NONE, 0, 0, 0, NULL, 0, PS_F_NEWLINE, NULL, jg_zero, js_flush, NULL),
 
@@ -740,8 +783,10 @@ LIVE_INT("ym_gain", "YM gain", PS_TAB_AUDIO, PS_U_X100, 0, 400, 5,
 LIVE_INT("ym_lag_ms", "YM lag", PS_TAB_AUDIO, PS_U_MS, 5, 200, 5,
          &pst_ym_lag_ms, apply_ym),
 LIVE_BOOL("lmc", "LMC1992 shadow", PS_TAB_AUDIO, &pst_lmc, NULL),
+/* tgt is what makes the writer treat this as a .cfg key (`audio_frames
+ * 2048`, through the labels); the dialog value still goes via ag/as */
 ITEM("audio_frames", "SDL buffer", PS_TAB_AUDIO, PS_K_ENUM, PS_C_BOOT,
-     PS_U_NONE, 0, 4, 1, L_frames, 5, 0, NULL, ag_frames, as_frames, NULL),
+     PS_U_NONE, 0, 4, 1, L_frames, 5, 0, &pst_audio_frames, ag_frames, as_frames, NULL),
 
 /* ----------------------------------------------------------- Input --- */
 ITEM("kbd", "Keyboard source", PS_TAB_INPUT, PS_K_ENUM, PS_C_BOOT, PS_U_NONE,
@@ -792,6 +837,7 @@ LIVE_BOOL("network_debug", "Network trace", PS_TAB_NET, &pst_dbg_net, NULL),
 /* ----------------------------------------------------------- Debug --- */
 LIVE_INT("ipl_confirm_ns", "IPL confirm window", PS_TAB_DEBUG, PS_U_NS,
          0, 10000, 100, &pst_ipl_confirm_ns, apply_ipl),
+LIVE_BOOL("verbose", "Verbose console", PS_TAB_DEBUG, &pst_verbose, NULL),
 LIVE_BOOL("ipl_stats", "IPL statistics", PS_TAB_DEBUG, &pst_dbg_ipl_stats, NULL),
 LIVE_BOOL("irq_stats", "IRQ statistics", PS_TAB_DEBUG, &pst_dbg_irq_stats, NULL),
 LIVE_BOOL("mfp_debug", "MFP trace", PS_TAB_DEBUG, &pst_dbg_mfp, NULL),
@@ -1284,6 +1330,7 @@ static const char *const g_bootkeys[] = {
 
 /* the debug flags, in the order they appear on a `debug` line */
 static const struct { const char *tag; volatile int *tgt; } g_dbg[] = {
+  { "verbose", &pst_verbose },
   { "ipl",    &pst_dbg_ipl_stats },
   { "irq",    &pst_dbg_irq_stats },
   { "mfp",    &pst_dbg_mfp },
@@ -1438,13 +1485,19 @@ extern "C" int psctrl_settings_config_key(const char *key, const char *value)
 
       for (k = 0; k < it->nenum && *p; k++, p += strlen(p) + 1)
         if (!strcasecmp(p, value)) {
-          if (it->set)
+          if (it->set) {
+            g_cfg_loading = 1;
             it->set(it, k);
+            g_cfg_loading = 0;
+          }
           return 1;
         }
     }
-    if (value && it->set)
+    if (value && it->set) {
+      g_cfg_loading = 1;
       it->set(it, (int)strtol(value, NULL, 0));
+      g_cfg_loading = 0;
+    }
     return 1;
   }
   return 0;

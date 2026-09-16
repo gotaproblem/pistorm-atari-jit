@@ -127,6 +127,8 @@ static inline void* vm_acquire_code(uae_u32 size, int options = VM_MAP_DEFAULT)
 
 #define jit_log(format, ...) \
   write_log("JIT: " format "\n", ##__VA_ARGS__);
+#define jit_info(format, ...) \
+  write_info("JIT: " format "\n", ##__VA_ARGS__);
 #define jit_log2(format, ...)
 
 #if defined(CPU_AARCH64)
@@ -2639,7 +2641,7 @@ static int pistorm_jit_guard_mode(void)
         else if (e[0] == '0') v = 0;
         else if (e[0] == '2') v = 2;
         else                 v = 1;
-        fprintf(stderr, "[JIT] memory-guard mode = %d (env PISTORM_JIT_GUARD=%s)"
+        write_info("[JIT] memory-guard mode = %d (env PISTORM_JIT_GUARD=%s)"
                         "  [0=always-getter 1=spill 2=no-spill]\n",
                 v, e ? e : "(unset)");
     }
@@ -2859,7 +2861,7 @@ static inline uint8 *alloc_code(uint32 size)
 	if (ptr && (uintptr)ptr + size > (uintptr)0xffffffff) {
 		static bool arm64_high_jit_logged = false;
 		if (!arm64_high_jit_logged) {
-			jit_log("ARM64: JIT code allocated above 32-bit boundary at %p (size %u)", ptr, size);
+			jit_info("ARM64: JIT code allocated above 32-bit boundary at %p (size %u)", ptr, size);
 			arm64_high_jit_logged = true;
 		}
 	}
@@ -3003,14 +3005,14 @@ void alloc_cache(void)
 #if defined(__APPLE__)
 			jit_log("ARM64 macOS JIT mode: MAP_JIT + write/execute switching");
 #elif defined(__ANDROID__)
-			jit_log("ARM64 Android JIT mode: RWX anonymous mapping");
+			jit_info("ARM64 Android JIT mode: RWX anonymous mapping");
 #else
-			jit_log("ARM64 JIT mode: RWX anonymous mapping");
+			jit_info("ARM64 JIT mode: RWX anonymous mapping");
 #endif
 			arm64_jit_mode_logged = true;
 		}
 #endif
-        jit_log("<JIT compiler> : actual translation cache size : %d KB at %p-%p\n", cache_size, compiled_code, compiled_code + cache_size * 1024);
+        jit_info("<JIT compiler> : actual translation cache size : %d KB at %p-%p\n", cache_size, compiled_code, compiled_code + cache_size * 1024);
 #ifdef USE_DATA_BUFFER
         max_compile_start = compiled_code + cache_size * 1024 - BYTES_PER_INST - DATA_BUFFER_SIZE;
 #else
@@ -3209,7 +3211,7 @@ STATIC_INLINE void create_popalls(void)
 {
     int i, r;
 
-    fprintf(stderr, "[PROBE] create_popalls ENTER cachesize=%d popallspace=%p\n",
+    write_info("[PROBE] create_popalls ENTER cachesize=%d popallspace=%p\n",
         currprefs.cachesize, popallspace);
 
     if (popallspace == NULL) {
@@ -3222,7 +3224,7 @@ STATIC_INLINE void create_popalls(void)
 	        const size_t page_size = arm64_jit_page_size();
 	        const size_t stub_bytes = ((size_t)POPALLSPACE_SIZE + page_size - 1) & ~(page_size - 1);
 	        const size_t combined_size = stub_bytes + cache_bytes;
-	        jit_log("ARM64: allocating popallspace+cache (cache=%u KB, total=%zu bytes)",
+	        jit_info("ARM64: allocating popallspace+cache (cache=%u KB, total=%zu bytes)",
 	            cache_kb, combined_size);
 	        popallspace = alloc_code(combined_size);
 	        if (popallspace) {
@@ -3230,7 +3232,7 @@ STATIC_INLINE void create_popalls(void)
 	            popall_combined_cache_start = popallspace + stub_bytes;
 	            popall_combined_cache_kb = cache_kb;
 	            popall_combined_stub_bytes = stub_bytes;
-	            jit_log("ARM64: combined popallspace+cache allocation at %p, cache starts %p (%u KB cache)",
+	            jit_info("ARM64: combined popallspace+cache allocation at %p, cache starts %p (%u KB cache)",
 	                popallspace, popall_combined_cache_start, cache_kb);
 	        } else {
 	            /* Fall back to popallspace-only allocation */
@@ -3300,7 +3302,7 @@ STATIC_INLINE void create_popalls(void)
     current_compile_p = get_target();
     pushall_call_handler = get_target();
 
-    fprintf(stderr, "[PROBE] create_popalls SET pushall=%p popallspace=%p\n",
+    write_info("[PROBE] create_popalls SET pushall=%p popallspace=%p\n",
         pushall_call_handler, popallspace);
 
         
@@ -3441,7 +3443,7 @@ void build_comp(void)
     regs.mem_banks = (uintptr)mem_banks;
     regs.cache_tags = (uintptr)cache_tags;
 
-    jit_log("<JIT compiler> : building compiler function tables");
+    jit_info("<JIT compiler> : building compiler function tables");
 
     for (opcode = 0; opcode < 65536; opcode++) {
         reset_compop(opcode);
@@ -3601,7 +3603,7 @@ void build_comp(void)
         if (compfunctbl[cft_map(opcode)])
             count++;
     }
-    jit_log("<JIT compiler> : supposedly %d compileable opcodes!", count);
+    jit_info("<JIT compiler> : supposedly %d compileable opcodes!", count);
 
 	/* Initialise state */
 	create_popalls();

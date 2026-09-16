@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "pistorm_net_backend.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO */
 
 #include <errno.h>
 #include <pthread.h>
@@ -178,7 +179,7 @@ int pistorm_net_tap_open(const char *ifname,
 
   strncpy(tap->ifname, ifr.ifr_name, sizeof(tap->ifname) - 1);
   if (pnet_tap_set_up(tap->ifname) == 0)
-    fprintf(stderr, "[NET] TAP interface up: %s\n", tap->ifname);
+    PS_INFO("[NET] TAP interface up: %s\n", tap->ifname);
   tap->rx_cb = rx_cb;
   tap->rx_opaque = rx_opaque;
   tap->running = 1;
@@ -196,7 +197,7 @@ int pistorm_net_tap_open(const char *ifname,
   backend->send = pnet_tap_send;
   backend->poll = pnet_tap_poll;
 
-  fprintf(stderr, "[NET] TAP opened: %s\n", tap->ifname);
+  PS_INFO("[NET] TAP opened: %s\n", tap->ifname);
   return 0;
 #endif
 }

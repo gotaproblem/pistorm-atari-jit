@@ -455,7 +455,7 @@ static void stram_alias_recfg(uint8_t memcfg)
     stram_fold_hook_update();
     stram_alias_layout();
     stram_alias_apply_banks();
-    fprintf(stderr, "[STRAM] memcfg $%02X: banks configured %uK+%uK "
+    PS_INFO("[STRAM] memcfg $%02X: banks configured %uK+%uK "
             "(installed %uK+%uK)\n", memcfg,
             g_stram_cfgb[0] >> 10, g_stram_cfgb[1] >> 10,
             g_stram_act[0] >> 10, g_stram_act[1] >> 10);
@@ -568,7 +568,7 @@ static void stram_alias_init(void)
     uint32_t phys1 = stram_probe_bank(0x200000u);
     fc = old_fc;
     g_buserr = 0;                              /* no latched surprise */
-    fprintf(stderr, "[STRAM] physical DRAM probed: bank0 %uK, bank1 %uK "
+    PS_INFO("[STRAM] physical DRAM probed: bank0 %uK, bank1 %uK "
             "(cfg requests %uK)\n", phys0 >> 10, phys1 >> 10, want >> 10);
     if (!phys0) {
         fprintf(stderr, "[STRAM] bank 0 not detected - probe unreliable, "
@@ -604,7 +604,7 @@ static void stram_alias_init(void)
         return;
     }
     if (eff0 + eff1 != want)
-        fprintf(stderr, "[STRAM] configuring %uK (largest real ST config "
+        PS_INFO("[STRAM] configuring %uK (largest real ST config "
                 "fitting request and board)\n", (eff0 + eff1) >> 10);
     if (eff0 + eff1 >= ST_RAM_SIZE) {
         fprintf(stderr, "[STRAM] full 4MB realizable - flat model\n");
@@ -1128,7 +1128,7 @@ static void ttsmc_init(void)
     sa.sa_sigaction = ttsmc_sigsegv;
     sa.sa_flags = SA_SIGINFO | SA_NODEFER;
     sigaction(SIGSEGV, &sa, &ttsmc_prev_sa);
-    fprintf(stderr, "[TTSMC] TT-RAM code pages write-protected on the host; guest stores to them flush the JIT\n");
+    PS_INFO("[TTSMC] TT-RAM code pages write-protected on the host; guest stores to them flush the JIT\n");
 }
 
 extern "C" void pistorm_ttsmc_stats(unsigned *prot, unsigned *faults, unsigned *gaveup)
@@ -2691,8 +2691,9 @@ static inline uae_u8 kbd_acia_data_read(void)
 {
     if (KBD_USB_enabled)
         return kbd_usb_acia_data_shim();
-    /* Native mouse threshold with USB injection off: read the byte once -
-     * reading $FFFC02 clears RDRF - and hand it to the filter. */
+    /* Native mouse threshold / STBOX divert with USB injection off: read
+     * the byte once - reading $FFFC02 clears RDRF - and hand it to the
+     * filter, which routes it into the sandbox while that is focused. */
     return kbd_native_rx_filter(ps_read_8(KBD_ACIA_DATA));
 }
 
@@ -2707,7 +2708,8 @@ static inline int kbd_acia_shadowed(uaecptr a)
         return 0;
     if (KBD_USB_enabled)
         return 1;
-    return a == KBD_ACIA_DATA && kbd_native_mouse_enabled();
+    return a == KBD_ACIA_DATA &&
+           (kbd_native_mouse_enabled() || kbd_ikbd_divert_active());
 }
 
 /* MFP register-access trace, PISTORM_MFP_DEBUG=1. Defined here, ABOVE
@@ -2928,7 +2930,8 @@ static uae_u32 hw_lget(uaecptr a)
         case HW_PAGE_ACIA:
         {
             if (a == KBD_ACIA_CTRL &&
-                (KBD_USB_enabled || kbd_native_mouse_enabled()))
+                (KBD_USB_enabled || kbd_native_mouse_enabled() ||
+                 kbd_ikbd_divert_active()))
             {
                 /* long read spans status ($FFFC00) and data ($FFFC02):
                  * evaluate in bus order - status first, then data pop.

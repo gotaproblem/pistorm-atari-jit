@@ -12,10 +12,12 @@ overlay plane positioned over a GEM window, controlled through NatFeats.
 |---|---|
 | Musashi 4.10 core | `third_party/musashi/` (see VENDOR-NOTES; bus interface renamed to `stbox_bus_*` in `m68kconf.h` so it can never link against the REAL bus accessors in emulator.c) |
 | Machine model + slice engine | `platforms/atari/stbox/stbox.c` |
+| STE blitter (resumable) | `platforms/atari/stbox/stbox_blit.c` — st_blitter.c's engine, stepped 16 bus accesses per slice |
+| STE DMA sound output | `platforms/atari/stbox/stbox_dmasnd.c` — ring from core 3 → SDL stream, stbox_psg.c's pattern |
 | Host side: ROM load, DRM plane, render thread | `platforms/atari/stbox/stbox_host.c` |
 | Core-3 hook | `emulator.c`, ipl_task housekeeping slot: `stbox_slice()` |
 | Control plane | `NF_FEATURE_STBOX` in `platforms/atari/network/atari_natfeat.cpp` |
-| Input routing | `platforms/atari/kbd_usb.c`: `send_key()` / `mouse_flush()` divert to the box while its window is focused; **F11 toggles routing** (the mouse is captured, so F11 is how you get the desktop pointer back) |
+| Input routing | `platforms/atari/kbd_usb.c`: USB `send_key()` / `mouse_flush()` and the real-IKBD byte stream (`stbox_divert_real_byte()`, reached from the USB ACIA shims and from the native `kbd_native_rx_filter()` path alike) divert to the box while its window is focused; **ESC toggles routing** (the mouse is captured, so ESC is how you get the desktop pointer back). The health line (every 5 s) shows `focus= route=` and per-type input counters. |
 | GEM front-end | STBOX.PRG, prebuilt at `configs/gem-binaries/STBOX.PRG` (source kept out of the repo with the rest of cdev/; builds with m68k-atari-mint-gcc + gemlib) |
 
 ## Execution model
@@ -57,6 +59,24 @@ tracked at 2 457 600 Hz via fixed point. IKBD bytes paced at 7812.5 baud.
    one instruction; unsigned debt wraps, the clamp gifts a frame, and the
    box runs 2.56× fast.
 
+## STE tier
+
+Selected per box: cfg `stbox_machine st|ste` (default `st`), overridden per
+launch by `STBOX.PRG ... st` / `ste` (START flags bit1 = explicit, bit0 =
+STE). In ST mode nothing below is decoded, so an ST box is the plain
+machine and TOS 2.06's `$FF820D` probe still reads 0.
+
+| Piece | Where it runs | Cost rule |
+|---|---|---|
+| Shifter: 12-bit palette, `$FF820D` base-low, `$FF820F` linewidth, `$FF8264/65` hscroll (line fetches one extra word group when scrolled). Writing `$FF8201/03` clears the low byte, as on the chip. | registers on core 3, pixels in the render thread's `convert()` | a few stores per write; conversion is per frame on a normal core |
+| BLiTTER `$FF8A00-3F`: same HOP/OP/skew/endmask/FXSR/NFSR/smudge engine as the main machine's `st_blitter.c` (differentially tested against it: 20 000 random blits, identical memory and end-state registers), but resumable | `stbox_slice()` runs **16 bus accesses per slice** while BUSY; HOG halts the CPU for the slice, shared mode interleaves a CPU slice | 4 guest cycles per access = the real chip's throughput, so a 32 KB screen blit takes the real ~24 ms; host work per pass stays one bounded unit |
+| DMA sound `$FF8900-25`: play/repeat, frame start/end/counter, mono/stereo, 6258-50066 Hz, microwire master/L/R volume. Frame end pulses Timer A (event mode) and GPIP7. | core 3 fetches the bytes owed per slice (a handful) into an S16 stereo ring at 50066 Hz; `stbox_dmasnd.c` drains it into SDL | memory-only on core 3; SDL resamples/mixes off-core |
+| Joypad/paddle ports `$FF9200-3F` | decoded, idle (no input) | none |
+
+Not modelled: LMC1992 bass/treble/mixer (PSG always mixed), video-counter
+writes (`$FF8205/07/09`, sink), scanline-granular shifter effects (frame
+tier). Host routing of a game controller into `$FF9200` is the next step.
+
 ## Video out
 
 Sandbox Shifter → planar-to-XRGB8888 conversion (all three ST modes) into
@@ -93,7 +113,9 @@ Type I/II/III commands, DMA, side select, index pulse, READ TRACK
 synthesized from sector data with real CRCs); GEM file selector in
 STBOX.PRG (run with no arguments) browsing HOSTFS for images - the
 sandbox's answer to the Gotek's OLED menu; PSG audio into the SDL mixer;
-USB keyboard+mouse via focus routing (ESC toggles capture); MMU bank
+USB keyboard+mouse and the real IKBD keyboard/mouse/joystick via focus
+routing (ESC toggles capture; real-IKBD packets are framed so a packet
+goes whole to whoever owned its header); MMU bank
 aliasing so 512K/1M/2M/4M all size correctly; double-bus-fault = halt
 with a full crash report (vault decode, 64K PC trace, disassembly of the
 scene, write watchpoints with FDC attribution).
@@ -103,7 +125,11 @@ Real-Gotek bridge (stbox_realfdc.c) is EXPERIMENTAL, off by default
 flock test-and-set against the main guest's ACSI, PSG select latch
 save/restore. Field status: not yet booting; park until wanted.
 
-Not yet: GEMDOS HD, STE tier, scanline palette (frame tier - mid-frame
-rasters smear), disk write-back (writes stay in memory), joystick host
-routing (NatFeat path exists), real-IKBD routing into the box (USB only;
-the ACIA-shim divert is not the path the native-mouse natmem hook takes).
+Not yet: GEMDOS HD, scanline palette (frame tier - mid-frame
+rasters smear), disk write-back (writes stay in memory), STE joypad host
+routing (`$FF9200` reads idle), joystick host
+routing from USB (NatFeat path exists), sandbox IKBD commands reaching the
+REAL IKBD (the box's TOS/game configures only the sandbox IKBD model, so a
+real joystick reports through whatever event mode the MAIN guest left the
+real IKBD in - a game that sends $14 to enable joystick events will not
+switch the real controller on).

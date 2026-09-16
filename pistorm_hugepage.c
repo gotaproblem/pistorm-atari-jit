@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include "pistorm_hugepage.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO */
 
 #ifndef MAP_HUGETLB
 #define MAP_HUGETLB 0x40000
@@ -74,7 +75,7 @@ static void note(const char *tag, void *base, size_t size, const char *how)
         g_regions[g_nregions].how = how;
         g_nregions++;
     }
-    fprintf(stderr, "[HUGEPAGE] %-10s %8zu KB at %p - %s\n",
+    PS_INFO("[HUGEPAGE] %-10s %8zu KB at %p - %s\n",
             tag, size >> 10, base, how);
 }
 
@@ -195,13 +196,13 @@ void pistorm_hugepage_report(void)
     for (int i = 0; i < g_nregions; i++) {
         size_t sz_kb = g_regions[i].size >> 10;
         int pct = rss_kb[i] ? (int)(huge_kb[i] * 100 / rss_kb[i]) : 0;
-        fprintf(stderr, "[HUGEPAGE] %-10s %8zu KB mapped, %8zu KB resident, "
+        PS_INFO("[HUGEPAGE] %-10s %8zu KB mapped, %8zu KB resident, "
                 "%8zu KB on 2M pages (%d%% of resident)%s\n",
                 g_regions[i].tag, sz_kb, rss_kb[i], huge_kb[i], pct,
                 (strstr(g_regions[i].how, "hugetlb") ? " [hugetlb: not counted "
                  "in AnonHugePages, always 2M]" : ""));
     }
-    fprintf(stderr, "[HUGEPAGE] tip: if the 2M column is ~0, check "
+    PS_INFO("[HUGEPAGE] tip: if the 2M column is ~0, check "
             "/sys/kernel/mm/transparent_hugepage/enabled is 'madvise' or "
             "'always', and .../defrag is not 'never'\n");
 }

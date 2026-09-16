@@ -16,6 +16,7 @@ gcc $CF -c $R/third_party/musashi/m68kcpu.c -o $O/m68kcpu.o
 gcc $CF -c $R/third_party/musashi/m68kops.c -o $O/m68kops.o
 gcc $CF -c $R/third_party/musashi/m68kdasm.c -o $O/m68kdasm.o
 gcc $CF -I$R/third_party/musashi/softfloat -c $R/third_party/musashi/softfloat/softfloat.c -o $O/softfloat.o
+gcc $CF -c $R/platforms/atari/psctrl/psctrl_tunables.c -o $O/psctrl_tunables.o   # the box reads pst_stbox_slice_cyc
 gcc $CF -c $H/harness.c -o $O/harness.o
 gcc -o $H/harness-$NAME $O/*.o -lm
 echo built $H/harness-$NAME

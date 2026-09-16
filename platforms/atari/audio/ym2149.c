@@ -339,7 +339,7 @@ int ym2149_init(void)
     }
 
     atomic_store(&g_on, 1);
-    fprintf(stderr, "[ym2149] emulated PSG -> HDMI ready (emu2149, %u Hz core, slew clock v2)\n",
+    PS_INFO("[ym2149] emulated PSG -> HDMI ready (emu2149, %u Hz core, slew clock v2)\n",
             YM_RATE);
     return 0;
 }

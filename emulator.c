@@ -1321,7 +1321,7 @@ int main (int argc, char *argv[])
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGABRT, &sa, NULL);
-    fprintf(stderr, "[DBG] crash handler installed\n"); /* sanity check */
+    PS_INFO("[DBG] crash handler installed\n");
   }
 
   /* assign signal handlers
@@ -1607,36 +1607,36 @@ int main (int argc, char *argv[])
       printf ("[CFG] dma_sound line IGNORED - STE hardware needs "
               "`machine ste` (default machine is a plain ST)\n");
     else if (want_dmasnd)
-      printf ("[CFG] machine STE-class: DMA sound ON\n");
+      PS_INFO ("[CFG] machine STE-class: DMA sound ON\n");
   }
   if (want_dmasnd || config->ym2149) {
     if (dmasnd_init (NULL) == 0) {
       if (want_dmasnd) {
         if (dmasnd_capture_start() == 0) {
           DMA_Sound_enabled = true;
-          printf ("[INIT] DMA Sound enabled\n");
+          PS_INFO ("[INIT] DMA Sound enabled\n");
         } else {
           DMA_Sound_enabled = false;
           fprintf(stderr, "[INIT] DMA Sound failed to start\n");
         }
       } else {
-        printf ("[INIT] DMA Sound disabled (machine is not STE-class)\n");
+        PS_INFO ("[INIT] DMA Sound disabled (machine is not STE-class)\n");
       }
       if (config->ym2149) {
         if (ym2149_init () == 0)
-          printf ("[INIT] YM2149 emulation enabled\n");
+          PS_INFO ("[INIT] YM2149 emulation enabled\n");
         else
           fprintf(stderr, "[INIT] YM2149 emulation failed to start\n");
       } else {
-        printf ("[INIT] YM2149 emulation disabled\n");
+        PS_INFO ("[INIT] YM2149 emulation disabled\n");
       }
     } else {
       DMA_Sound_enabled = false;
       fprintf(stderr, "[INIT] audio device failed; DMA Sound / YM2149 unavailable\n");
     }
   } else {
-    printf ("[INIT] DMA Sound disabled\n");
-    printf ("[INIT] YM2149 emulation disabled\n");
+    PS_INFO ("[INIT] DMA Sound disabled\n");
+    PS_INFO ("[INIT] YM2149 emulation disabled\n");
   }
 
   /* start threads */
@@ -1648,7 +1648,7 @@ int main (int argc, char *argv[])
   else
   {
     pthread_setname_np(cpu_tid, "pistorm: cpu");
-    printf("[MAIN] CPU thread created successfully\n");
+    PS_INFO("[MAIN] CPU thread created successfully\n");
   }
 #if !PISTORM_SERIAL_IRQ
   err = pthread_create(&ipl_tid, NULL, &ipl_task, NULL);
@@ -1659,7 +1659,7 @@ int main (int argc, char *argv[])
   else
   {
     pthread_setname_np(ipl_tid, "pistorm: ipl");
-    printf("[MAIN] IPL thread created successfully\n");
+    PS_INFO("[MAIN] IPL thread created successfully\n");
   }
 
   /* One line per second of interrupt rates. Runs in its own thread so
@@ -1696,7 +1696,7 @@ int main (int argc, char *argv[])
     else
     {
       pthread_setname_np (e4k_tid, "pistorm: display");
-      printf("[MAIN] Display thread created successfully\n");
+      PS_INFO("[MAIN] Display thread created successfully\n");
 
       while (et4000_thread_ready == 0)
         usleep(1000);
@@ -1722,12 +1722,12 @@ int main (int argc, char *argv[])
     else
     {
       pthread_setname_np ( vbl_id, "pistorm: vbl" );
-      printf ( "[MAIN] VBL thread created successfully\n" );
+      PS_INFO ( "[MAIN] VBL thread created successfully\n" );
     }
 #else
     /* The 50 Hz FDD tick rides the IPL poll loop on core 3 (see ipl_task);
      * the dedicated VBL thread is gone. */
-    printf ( "[MAIN] FDD VBL tick folded into IPL task (no VBL thread)\n" );
+    PS_INFO ( "[MAIN] FDD VBL tick folded into IPL task (no VBL thread)\n" );
 #endif
   }
 //FDD_enabled = false;
@@ -1772,7 +1772,7 @@ int main (int argc, char *argv[])
   }
 
   /* Initialise JIT CPU core */
-  fprintf(stderr, "[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
+  PS_INFO("[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
   jit_cpu_set_compatible(config->cpu_compatible ? 1 : 0);
   jit_cpu_set_mmu(config->mmu ? 1 : 0);
@@ -1797,7 +1797,7 @@ int main (int argc, char *argv[])
                 tt_ram_available ? 1 : 0,  /* not config->ttram: may be vetoed for 68000/010 */
                 config->addr32 ? 1 : 0,
                 config->jit ? 1 : 0); /* cpu_type: 0=68000 1=010 2=020 3=030 4=040 */
-  fprintf(stderr, "[MAIN] jit_cpu_init returned\n");
+  PS_INFO("[MAIN] jit_cpu_init returned\n");
   fflush(stderr);
 
   /* Start Emulation */
@@ -2304,7 +2304,8 @@ extern "C"
     /* Native mouse threshold without USB injection. Only the ACIA data
      * register is touched, and exactly once - reading it clears RDRF, so
      * the filter is handed the byte rather than reading it again. */
-    else if (kbd_native_mouse_enabled () && address == 0x00FFFC02) {
+    else if (address == 0x00FFFC02 &&
+             (kbd_native_mouse_enabled () || kbd_ikbd_divert_active ())) {
       cpu_data_fc();
       return kbd_native_rx_filter (ps_read_8 (address));
     }
@@ -2411,6 +2412,11 @@ extern "C"
         cpu_data_fc();
         return (uint16_t)((kbd_usb_acia_data_shim () << 8) | 0xFF);
       }
+    }
+    else if (address == 0x00FFFC02 &&
+             (kbd_native_mouse_enabled () || kbd_ikbd_divert_active ())) {
+      cpu_data_fc();
+      return (uint16_t)((kbd_native_rx_filter (ps_read_8 (address)) << 8) | 0xFF);
     }
 
 	    cpu_data_fc();

@@ -29,6 +29,7 @@
 #define PSCTRL_TUNABLES_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,13 @@ extern "C" {
 /* Compiled-chain budget as a multiple of CYCLE_UNIT. jit_glue.cpp turns
  * this into pissoff_value; the dialog's "jit_power" 1..6 is 256 << (n-1). */
 extern volatile int pst_pissoff_mult;
+/* The three JIT translation switches, so a .cfg can set them and PSCTRL
+ * can save them. -1 = not set anywhere: jit_glue keeps its build default.
+ * The dialog reads currprefs (the live truth) and applies through the
+ * deferred queue; these hold what the .cfg said / what was last asked. */
+extern volatile int pst_comp_constjump;
+extern volatile int pst_compnf;
+extern volatile int pst_compfpu;
 
 /* --- video -------------------------------------------------------- */
 extern volatile int pst_fps;              /* 10..60, host present pace   */
@@ -79,6 +87,19 @@ extern volatile uint64_t psctrl_cntfrq;   /* published by ipl_task        */
  * handler after either ns value changes, and by ipl_task once it knows
  * cntfrq. Safe to call from any thread: it only stores. */
 void psctrl_tunables_ipl_recalc(void);
+
+/* --- console ------------------------------------------------------- */
+/* 0: the console carries what a user needs - the config as loaded, the
+ * devices found, warnings and errors. 1: every informational line the
+ * emulator has always printed as well (thread start-up, JIT internals,
+ * hugepage accounting, per-subsystem "ready" lines). cfg: `debug verbose`,
+ * env PISTORM_VERBOSE, PSCTRL Debug tab "Verbose console" - live. */
+extern volatile int pst_verbose;
+
+/* An informational line: printed only when pst_verbose is set. Errors and
+ * warnings do not go through this - they are printed unconditionally. */
+#define PS_INFO(...) \
+  do { if (pst_verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 
 /* --- debug / trace flags ------------------------------------------- */
 extern volatile int pst_dbg_ipl_stats;

@@ -14,12 +14,20 @@
 #include "options.h"
 
 #include "platforms/atari/psctrl/psctrl.h"
+#include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "platforms/atari/psctrl/psctrl_settings.h"
 #include "config_file/config_file.h"
 
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
+#include <dirent.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include "platforms/atari/kbd_usb.h"
+#include "platforms/atari/web/psweb_client.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -63,6 +71,12 @@ struct psctrl_snapshot {
   volatile uint32_t smc_inv;
   volatile uint32_t pi_model;     /* static after init */
   volatile uint32_t pi_ram_mb;    /* static after init */
+  volatile uint32_t net;          /* PS_HOST_NET */
+  volatile uint32_t ipv4;         /* PS_HOST_IPV4 */
+  volatile uint32_t web_state;    /* PS_WEB_* */
+  volatile uint32_t web_fps_x10;
+  volatile uint32_t web_kbps;
+  volatile uint32_t web_rss_mb;
 };
 
 static struct psctrl_snapshot g_snap;
@@ -202,6 +216,101 @@ static int read_file_number(const char *path, double *out)
 
   *out = v;
   return 1;
+}
+
+/* The network word for the taskbar: the first interface that is up and
+ * has an IPv4 address (loopback excluded), and whether it is wireless -
+ * /sys/class/net/<if>/wireless exists - with the link quality from
+ * /proc/net/wireless (0-70 on a Pi's brcmfmac, scaled to 0-100). */
+static void sample_net(void)
+{
+  uint32_t word = 0, ip = 0;
+  struct ifaddrs *ifa0 = NULL;
+
+  if (getifaddrs(&ifa0) == 0) {
+    for (struct ifaddrs *ifa = ifa0; ifa; ifa = ifa->ifa_next) {
+      if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+        continue;
+      if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING) ||
+          (ifa->ifa_flags & IFF_LOOPBACK))
+        continue;
+      struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+      ip = ntohl(sin->sin_addr.s_addr);
+      word = 1;
+
+      char path[128];
+      snprintf(path, sizeof path, "/sys/class/net/%s/wireless", ifa->ifa_name);
+      if (access(path, F_OK) == 0) {
+        word |= 2;
+        FILE *f = fopen("/proc/net/wireless", "r");
+        if (f) {
+          char line[256];
+          while (fgets(line, sizeof line, f)) {
+            char *p = line;
+            while (*p == ' ')
+              p++;
+            size_t n = strlen(ifa->ifa_name);
+            if (strncmp(p, ifa->ifa_name, n) == 0 && p[n] == ':') {
+              double status, link = 0;
+              if (sscanf(p + n + 1, "%lf %lf", &status, &link) == 2) {
+                long q = (long)(link * 100.0 / 70.0 + 0.5);
+                if (q < 0) q = 0;
+                if (q > 100) q = 100;
+                word |= (uint32_t)q << 8;
+              }
+              break;
+            }
+          }
+          fclose(f);
+        }
+      }
+      break;                        /* the first usable interface wins */
+    }
+    freeifaddrs(ifa0);
+  }
+  g_snap.net = word;
+  g_snap.ipv4 = ip;
+}
+
+/* Resident memory of the browser engine: psweb plus WebKit's helper
+ * processes, whose names are unique to WPE. A /proc walk every 2 s. */
+static uint32_t sample_web_rss_mb(void)
+{
+  DIR *d = opendir("/proc");
+  unsigned long long kb = 0;
+
+  if (!d)
+    return 0;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (e->d_name[0] < '0' || e->d_name[0] > '9')
+      continue;
+    char path[64], line[256];
+    snprintf(path, sizeof path, "/proc/%s/status", e->d_name);
+    FILE *f = fopen(path, "r");
+    if (!f)
+      continue;
+    int ours = 0;
+    unsigned long rss = 0;
+    while (fgets(line, sizeof line, f)) {
+      if (strncmp(line, "Name:", 5) == 0) {
+        char *n = line + 5;
+        while (*n == ' ' || *n == '\t')
+          n++;
+        ours = strncmp(n, "psweb", 5) == 0 || strncmp(n, "WPE", 3) == 0;
+        if (!ours)
+          break;
+      } else if (strncmp(line, "VmRSS:", 6) == 0) {
+        rss = strtoul(line + 6, NULL, 10);
+        break;
+      }
+    }
+    fclose(f);
+    if (ours)
+      kb += rss;
+  }
+  closedir(d);
+  return (uint32_t)(kb / 1024);
 }
 
 static void psctrl_sample_once(void)
@@ -379,6 +488,35 @@ static void psctrl_sample_once(void)
     prev_ts = ts;
   }
 
+  /* the taskbar icons and PSMON's browser row: every fourth window (2 s) */
+  {
+    static int slow;
+    static uint32_t prev_frames, prev_bytes;
+    static struct timespec prev_web_ts;
+    uint32_t st, frames, bytes;
+    struct timespec ts;
+
+    psweb_stats(&st, &frames, &bytes);
+    g_snap.web_state = st;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    if (prev_web_ts.tv_sec != 0) {
+      double dt = (double)(ts.tv_sec - prev_web_ts.tv_sec) +
+                  (double)(ts.tv_nsec - prev_web_ts.tv_nsec) / 1e9;
+      if (dt > 0.05) {
+        g_snap.web_fps_x10 = (uint32_t)((double)(frames - prev_frames) / dt * 10.0 + 0.5);
+        g_snap.web_kbps = (uint32_t)((double)(bytes - prev_bytes) / dt / 1024.0 + 0.5);
+      }
+    }
+    prev_frames = frames;
+    prev_bytes = bytes;
+    prev_web_ts = ts;
+
+    if ((slow++ & 3) == 0) {
+      sample_net();
+      g_snap.web_rss_mb = st ? sample_web_rss_mb() : 0;
+    }
+  }
+
   /* bump last so a reader that keys on the epoch sees finished values */
   g_snap.epoch = g_snap.epoch + 1;
 }
@@ -448,7 +586,7 @@ static void psctrl_sampler_start_once(void)
   if (rc == 0) {
     pthread_setname_np(t, "psctrl-sampler");
     pthread_detach(t);
-    printf("[PSCTRL] sampler started (500 ms tick)\n");
+    PS_INFO("[PSCTRL] sampler started (500 ms tick)\n");
   } else {
     printf("[PSCTRL] WARNING: sampler thread failed to start; "
            "values will be stale\n");
@@ -527,6 +665,20 @@ uint32_t psctrl_getint(uint32_t index)
       return g_snap.flushes_total;
     case PS_STAT_SMC_INV:
       return g_snap.smc_inv;
+    case PS_HOST_NET:
+      return g_snap.net;
+    case PS_HOST_IPV4:
+      return g_snap.ipv4;
+    case PS_HOST_INPUT:
+      return kbd_usb_input_word();
+    case PS_WEB_STATE:
+      return g_snap.web_state;
+    case PS_WEB_FPS_X10:
+      return g_snap.web_fps_x10;
+    case PS_WEB_KBPS:
+      return g_snap.web_kbps;
+    case PS_WEB_RSS_MB:
+      return g_snap.web_rss_mb;
 
     /* Pi wall clock, computed on demand (the Pi is NTP-synced; the
      * Atari has no battery RTC, so the guest can set its GEMDOS clock

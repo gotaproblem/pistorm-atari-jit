@@ -31,6 +31,7 @@
  * Logging
  * ========================================================================= */
 #define FDD_LOG(fmt, ...)  fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
+#define FDD_INFO(fmt, ...) PS_INFO("[FDD] " fmt "\n", ##__VA_ARGS__)   /* only with `debug verbose` */
 #define FDD_DBG(fmt, ...)  //fprintf(stderr, "[FDD] " fmt "\n", ##__VA_ARGS__)
 
 /* PISTORM_ACSI_DEBUG=1: trace the first accesses to the DMA-port window
@@ -208,7 +209,7 @@ void fdd_init(void)
         motor_ticks[i]              = 0;
     }
 
-    FDD_LOG("Initialised");
+    FDD_INFO("Initialised");
 }
 
 void fdd_shutdown(void)
@@ -388,7 +389,7 @@ int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
                 }
             }
 
-            FDD_LOG("Drive %c: BPB geometry: %d tracks %d spt %d sides",
+            FDD_INFO("Drive %c: BPB geometry: %d tracks %d spt %d sides",
                     'A' + drive, drv->num_tracks, spt, sides);
         }
     }

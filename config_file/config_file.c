@@ -61,6 +61,7 @@ typedef enum {
   CONFITEM_NETWORK_DEBUG,
   CONFITEM_HOSTFS,
   CONFITEM_STBOX_TOS,
+  CONFITEM_STBOX_MACHINE,
   CONFITEM_STBOX_PLANE,
   CONFITEM_STRAM_SIZE,
 } config_item;
@@ -125,6 +126,7 @@ static const config_switch_def config_switches[] = {
   { "network_debug", CONFITEM_NETWORK_DEBUG },
   { "hostfs", CONFITEM_HOSTFS },
   { "stbox_tos", CONFITEM_STBOX_TOS },
+  { "stbox_machine", CONFITEM_STBOX_MACHINE },
   { "stbox_plane", CONFITEM_STBOX_PLANE },
   { "stram_size", CONFITEM_STRAM_SIZE },
 };
@@ -256,6 +258,11 @@ const char *emulator_config_stbox_tos(void)
 int emulator_config_stbox_plane(void)
 {
   return current_config ? current_config->stbox_plane : 0;
+}
+
+int emulator_config_stbox_ste(void)
+{
+  return (current_config && current_config->stbox_ste) ? 1 : 0;
 }
 
 uint32_t emulator_config_stram_size(void)
@@ -1140,6 +1147,28 @@ struct emulator_config *load_config_file(char *filename) {
       case CONFITEM_STBOX_PLANE:
         cfg->stbox_plane = get_int(parse_line + str_pos);
         printf ("[CFG] STBOX forced overlay plane %d\n", cfg->stbox_plane);
+        break;
+
+      case CONFITEM_STBOX_MACHINE:
+        {
+          /* Default machine for the sandbox: 'st' (plain ST, the default)
+           * or 'ste' (blitter, DMA sound, STE shifter, joypad ports).
+           * STBOX.PRG's 'st' / 'ste' argument overrides per launch. */
+          char arg[16];
+          int p = 0;
+          memset(arg, 0, sizeof(arg));
+          get_next_string(parse_line + str_pos, arg, &p, ' ');
+          for (int i = 0; arg[i]; i++)
+            arg[i] = (char)tolower((unsigned char)arg[i]);
+          if (!strcmp(arg, "ste"))
+            cfg->stbox_ste = true;
+          else if (!strcmp(arg, "st") || !arg[0])
+            cfg->stbox_ste = false;
+          else
+            printf ("[CFG] stbox_machine: unknown value '%s' - expected st/ste; "
+                    "keeping %s\n", arg, cfg->stbox_ste ? "ste" : "st");
+          printf ("[CFG] STBOX machine %s\n", cfg->stbox_ste ? "STE" : "ST");
+        }
         break;
 
       case CONFITEM_NONE:

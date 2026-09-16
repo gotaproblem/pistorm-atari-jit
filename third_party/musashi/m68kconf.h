@@ -320,6 +320,18 @@
 #undef  M68K_EMULATE_EC040
 #define M68K_EMULATE_EC040          M68K_OPT_OFF
 
+/* Trace exceptions. Upstream default is OFF, which silently ignores the
+ * T bit: 'ori #$A700,SR / jmp' launchers that rely on the trace exception
+ * after the jump to enter the real program simply fall through into
+ * whatever is at the jump target (field case: Xenon 2, three bombs at
+ * $10A2 with SR=$A708 and the trace bit never honoured). Trace-based
+ * protections and debuggers need it too. Costs one flag test per
+ * instruction. */
+#ifndef STBOX_NO_TRACE                 /* harness A/B switch */
+#undef  M68K_EMULATE_TRACE
+#define M68K_EMULATE_TRACE          M68K_OPT_ON
+#endif
+
 /* instruction hook: PC history ring for the STBOX halt report. At a
  * throttled 8 MHz the cost is noise; the forensics are not. */
 #ifdef __cplusplus

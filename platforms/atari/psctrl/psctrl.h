@@ -86,8 +86,30 @@ enum psctrl_stat_index {
   PS_PI_RAM_MB          = 75,   /* board RAM, MB (256 << rev bits
                                  * 20-22)                              */
   PS_STAT_FLUSHES_TOTAL = 76,   /* hard cache flushes since boot       */
-  PS_STAT_SMC_INV       = 77    /* blocks invalidated (self-modifying
+  PS_STAT_SMC_INV       = 77,   /* blocks invalidated (self-modifying
                                  * code / checksum fail), last window  */
+
+  /* Taskbar status icons (TeraDesk dock, left of the clock) and PSMON's
+   * browser row. Sampled every 2 s; all cheap reads of /sys and /proc. */
+  PS_HOST_NET           = 78,   /* bit0 a link is up with an IPv4
+                                 * address, bit1 it is wireless, bits
+                                 * 8-15 Wi-Fi link quality 0-100 (0 on
+                                 * a wired link)                        */
+  PS_HOST_IPV4          = 79,   /* that address, network order as a
+                                 * u32 (a.b.c.d = bytes high to low); 0
+                                 * when there is none                   */
+  PS_HOST_INPUT         = 80,   /* kbd_usb_input_word(): bit0 the USB /
+                                 * Bluetooth input bridge is on, bit1 a
+                                 * keyboard is attached, bit2 a mouse,
+                                 * bit3 the real IKBD is present, bits
+                                 * 8-15 seconds since the last
+                                 * forwarded event (255 = never)        */
+  PS_WEB_STATE          = 81,   /* psweb: 0 none, 1 socket, 2
+                                 * connected, 3 a view is live          */
+  PS_WEB_FPS_X10        = 82,   /* frames fetched per second, tenths    */
+  PS_WEB_KBPS           = 83,   /* KB/s copied into TT-RAM by FETCH     */
+  PS_WEB_RSS_MB         = 84    /* resident memory of psweb and its
+                                 * WebKit processes, MB                 */
 };
 
 /* Idempotent; spawns the sampler thread on first use (called lazily from

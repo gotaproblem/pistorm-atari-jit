@@ -2406,7 +2406,7 @@ static void build_cpufunctbl()
 	}
 #endif
 
-	write_log(_T("Building CPU, %d opcodes (%d %d %d)\n"),
+	write_info(_T("Building CPU, %d opcodes (%d %d %d)\n"),
 			  opcnt, lvl,
 			  currprefs.cpu_cycle_exact ? -2 : currprefs.cpu_memory_cycle_exact ? -1
 										   : currprefs.cpu_compatible			? 1
@@ -2415,13 +2415,13 @@ static void build_cpufunctbl()
 #ifdef JIT
 	if (currprefs.cachesize)
 	{
-		write_log(_T("JIT: &countdown =  %p\n"), &countdown);
-		write_log(_T("JIT: &build_comp = %p\n"), &build_comp);
+		write_info(_T("JIT: &countdown =  %p\n"), &countdown);
+		write_info(_T("JIT: &build_comp = %p\n"), &build_comp);
 		build_comp();
 	}
 #endif
 
-	write_log(_T("CPU=%d, FPU=%d%s, MMU=%d, JIT%s=%d."),
+	write_info(_T("CPU=%d, FPU=%d%s, MMU=%d, JIT%s=%d."),
 			  currprefs.cpu_model,
 			  currprefs.fpu_model, currprefs.fpu_model ? (currprefs.fpu_mode > 0 ? _T(" (softfloat)") : (currprefs.fpu_mode < 0 ? _T(" (host 80b)") : _T(" (host 64b)"))) : _T(""),
 			  currprefs.mmu_model,
@@ -2454,41 +2454,41 @@ static void build_cpufunctbl()
 	if (currprefs.cpu_cycle_exact)
 	{
 		if (currprefs.cpu_model == 68000)
-			write_log(_T(" prefetch and cycle-exact"));
+			write_info(_T(" prefetch and cycle-exact"));
 		else
-			write_log(_T(" ~cycle-exact"));
+			write_info(_T(" ~cycle-exact"));
 	}
 	else if (currprefs.cpu_memory_cycle_exact)
 	{
-		write_log(_T(" ~memory-cycle-exact"));
+		write_info(_T(" ~memory-cycle-exact"));
 	}
 	else if (currprefs.cpu_compatible)
 	{
 		if (currprefs.cpu_model <= 68020)
 		{
-			write_log(_T(" prefetch"));
+			write_info(_T(" prefetch"));
 		}
 		else
 		{
-			write_log(_T(" fake prefetch"));
+			write_info(_T(" fake prefetch"));
 		}
 	}
 	if (currprefs.m68k_speed < 0)
-		write_log(_T(" fast"));
+		write_info(_T(" fast"));
 	if (currprefs.int_no_unimplemented && currprefs.cpu_model == 68060)
 	{
-		write_log(_T(" no unimplemented integer instructions"));
+		write_info(_T(" no unimplemented integer instructions"));
 	}
 	if (currprefs.fpu_no_unimplemented && currprefs.fpu_model)
 	{
-		write_log(_T(" no unimplemented floating point instructions"));
+		write_info(_T(" no unimplemented floating point instructions"));
 	}
 	if (currprefs.address_space_24)
 	{
 		regs.address_space_mask = 0x00ffffff;
-		write_log(_T(" 24-bit"));
+		write_info(_T(" 24-bit"));
 	}
-	write_log(_T("\n"));
+	write_info(_T("\n"));
 
 	cpuipldelay2 = 2 * cpucycleunit;
 	cpuipldelay4 = 4 * cpucycleunit;
@@ -2613,7 +2613,7 @@ static void update_68k_cycles()
 		cpucycleunit = 1;
 
 	// cpucycleunit = 512;
-	write_log(_T("CPU cycleunit: %d (%.3f)\n"), cpucycleunit, static_cast<float>(cpucycleunit) / CYCLE_UNIT);
+	write_info(_T("CPU cycleunit: %d (%.3f)\n"), cpucycleunit, static_cast<float>(cpucycleunit) / CYCLE_UNIT);
 	set_config_changed();
 }
 
@@ -2751,7 +2751,7 @@ void init_m68k()
 
 	init_table68k();
 
-	write_log(_T("%d CPU functions\n"), nr_cpuop_funcs);
+	write_info(_T("%d CPU functions\n"), nr_cpuop_funcs);
 }
 
 struct regstruct regs, mmu_backup_regs;
@@ -4593,7 +4593,7 @@ extern "C" uae_u32 pistorm_guest_pc(void)
 
 extern "C" void pistorm_reset_state_dump(void)
 {
-	fprintf(stderr, "[RESET] soft CPU RST at pc=%08X sr=%04X (%s) "
+	write_info("[RESET] soft CPU RST at pc=%08X sr=%04X (%s) "
 			"usp=%08X isp=%08X\n",
 			m68k_getpc(), regs.sr, regs.s ? "SUP" : "usr",
 			regs.usp, regs.isp);
@@ -5766,7 +5766,7 @@ static void m68k_reset2(bool hardreset)
 
 	m68k_setpc_normal(v);
 
-	fprintf(stderr, "[PROBE] reset2: PC=0x%08x SSP=0x%08x natmem=%p\n",
+	write_info("[PROBE] reset2: PC=0x%08x SSP=0x%08x natmem=%p\n",
 			(unsigned)v, (unsigned)m68k_areg(regs, 7), natmem_offset);
 
 	regs.m = 0;
@@ -5845,7 +5845,7 @@ static void m68k_reset2(bool hardreset)
 
 	fill_prefetch();
 
-	fprintf(stderr, "[PROBE] reset2 DONE\n");
+	write_info("[PROBE] reset2 DONE\n");
 }
 
 void m68k_reset()
@@ -10079,7 +10079,7 @@ void m68k_go(int may_quit)
 			if (cpu_hardreset)
 			{
 				memory_clear();
-				write_log(_T("hardreset, memory cleared\n"));
+				write_info(_T("hardreset, memory cleared\n"));
 			}
 #ifdef DEBUGGER
 			if (debug_dma)
@@ -10188,7 +10188,7 @@ void m68k_go(int may_quit)
 			uaerandomizeseed();
 			uae_u32 s = uaerandgetseed();
 			uaesetrandseed(s);
-			write_log("rndseed = %08x (%u)\n", s, s);
+			write_info("rndseed = %08x (%u)\n", s, s);
 			// add random delay before CPU starts
 			int t = uaerand() & 0x7fff;
 			while (t > 255)
@@ -11641,7 +11641,7 @@ bool cpureset(void)
 	ab = &get_mem_bank(pc);
 	if (ab->check(pc, 2))
 	{
-		write_log(_T("CPU reset PC=%x (%s)..\n"), pc - 2, ab->name);
+		write_info(_T("CPU reset PC=%x (%s)..\n"), pc - 2, ab->name);
 #if CPU_PC_RING
 		if (pistorm_cpu_diag())
 		{

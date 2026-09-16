@@ -268,5 +268,12 @@ int main(int argc, char **argv)
            verdict, disk ? disk : "(no disk)", ran, host_s,
            exc_by_vec[2], exc_by_vec[3], exc_by_vec[4], exc_by_vec[8], stbox_trace_count,
            last_change_sec, fatal, stbox_shared.video_base, stbox_shared.shift_res);
+    {   /* did the pokes reach the guest? acia_rx counts bytes the guest
+         * actually read from $FFFC02 - the keyboard path end to end */
+        uint32_t in[6];
+        stbox_input_stats(in);
+        printf("INPUT key=%u mouse=%u joy=%u raw=%u drop=%u acia_rx=%u\n",
+               in[0], in[1], in[2], in[3], in[4], in[5]);
+    }
     return 0;
 }

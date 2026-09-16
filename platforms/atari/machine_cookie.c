@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "platforms/atari/psctrl/psctrl_tunables.h"   /* PS_INFO */
 
 extern unsigned char *natmem_offset;
 
@@ -97,7 +98,7 @@ void machine_cookie_tick(void)
                 wl(a + 4, want);
                 if (!g_logged) {
                     g_logged = 1;
-                    fprintf(stderr, "[MCH] _MCH cookie forced to 0x%08X "
+                    PS_INFO("[MCH] _MCH cookie forced to 0x%08X "
                             "(replaced, jar @0x%06X)\n", want, jar);
                 }
             }
@@ -115,7 +116,7 @@ void machine_cookie_tick(void)
             wl(a + 4, want);
             if (!g_logged) {
                 g_logged = 1;
-                fprintf(stderr, "[MCH] _MCH cookie forced to 0x%08X "
+                PS_INFO("[MCH] _MCH cookie forced to 0x%08X "
                         "(appended, jar @0x%06X)\n", want, jar);
             }
         } else if (!g_logged) {

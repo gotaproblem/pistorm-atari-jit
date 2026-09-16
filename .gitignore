@@ -37,3 +37,9 @@ ataritest
 
 # session notes dropped beside the tree; the Drive folder is their home
 Claude outputs/
+._*
+.smbdelete*
+__pycache__/
+tools/atariclean/tests/out/
+Claude outputs/
+psweb-phase0-out/

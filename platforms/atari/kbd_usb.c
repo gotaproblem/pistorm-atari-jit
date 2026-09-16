@@ -45,6 +45,10 @@
 #include "kbd_usb.h"
 #include "fdd/atari_fdd.h"                 /* fdd_toggle_disk (F11) */
 
+/* real-IKBD -> STBOX divert, defined with the routing block further down */
+static int stbox_divert_real_byte(uint8_t v);
+static int stbox_divert_next(void);
+
 /* Per-second [KBD] state line: off unless explicitly built in. */
 #ifndef KBD_USB_DIAG
 #define KBD_USB_DIAG 0
@@ -555,9 +559,22 @@ void kbd_native_tx_snoop(uint8_t v)
     }
 }
 
-/* IKBD -> guest. One byte, already read from the ACIA by the caller. */
+/* IKBD -> guest. One byte, already read from the ACIA by the caller.
+ * First call: the STBOX divert - while the sandbox window is focused the
+ * real IKBD's output (keys, mouse and joystick packets, raw) is its. The
+ * main guest already saw RDRF in the status register, so it must be
+ * handed SOMETHING: a release code for scancode 0, which no TOS or MiNT
+ * keyboard handler acts on (a key-up of a key that does not exist). Not
+ * $FF: that is the joystick-1 event header and would eat the next real
+ * byte as joystick state when routing hands the stream back. */
+#define IKBD_DIVERTED_BYTE 0x80
 uint8_t kbd_native_rx_filter(uint8_t v)
 {
+    if (stbox_divert_real_byte(v))
+    {
+        mouse_pkt_left = 0;            /* scaler restarts at the next header */
+        return IKBD_DIVERTED_BYTE;
+    }
     if (mouse_thresh <= 0)
         return v;
     if (thresh_tx_left > 0)
@@ -875,6 +892,85 @@ static int stbox_wants_input(void)
     return stbox_route_enabled && stbox_running() && stbox_get_focus();
 }
 
+/* --- real IKBD -> sandbox -------------------------------------------
+ * The real keyboard/mouse/joystick arrive as IKBD protocol bytes through
+ * the ACIA. Every byte the guest pops from the real receiver comes
+ * through stbox_divert_real_byte() on ALL paths (USB shims and the
+ * native, no-"kbd usb" path) so that one place decides who gets it:
+ *
+ *  - IKBD packets are framed here (F6 status 7, F7 abs mouse 5, F8-FB
+ *    rel mouse 2, FC clock 6, FD joysticks 2, FE/FF joystick event 1;
+ *    anything else is a single key byte) and a packet goes WHOLE to
+ *    whoever owned its header, so neither side sees half a mouse packet
+ *    when focus changes.
+ *  - ESC make ($01) at a packet boundary with the box focused toggles
+ *    routing, same as the USB keyboard: with the real mouse captured
+ *    there is no other way to click outside the window. Its break code
+ *    follows the stream wherever routing then points (a stray release
+ *    is harmless to both sides).
+ * Called from the CPU thread only (ACIA data reads), so plain statics. */
+static int stbox_raw_left;      /* data bytes still owed to the packet  */
+static int stbox_raw_to_box;    /* owner of the current packet          */
+
+static int stbox_raw_pkt_len(uint8_t h)
+{
+    switch (h) {
+        case 0xF6: return 7;                                /* status   */
+        case 0xF7: return 5;                                /* abs mouse*/
+        case 0xF8: case 0xF9: case 0xFA: case 0xFB: return 2; /* rel mouse*/
+        case 0xFC: return 6;                                /* clock    */
+        case 0xFD: return 2;                                /* joysticks*/
+        case 0xFE: case 0xFF: return 1;                     /* joy event*/
+        default:   return 0;                                /* key      */
+    }
+}
+
+/* Will the NEXT real byte be taken (so a status shim may pop it early)? */
+static int stbox_divert_next(void)
+{
+    if (!stbox_running())
+        return 0;
+    return stbox_raw_left ? stbox_raw_to_box : stbox_wants_input();
+}
+
+/* One byte just popped from the real ACIA. 1 = taken by the sandbox (or
+ * swallowed as the ESC toggle), 0 = belongs to the main guest. */
+static int stbox_divert_real_byte(uint8_t v)
+{
+    if (!stbox_running())
+    {
+        stbox_raw_left = 0;            /* re-sync framing on the next start */
+        return 0;
+    }
+    if (stbox_raw_left == 0)
+    {
+        if (v == 0x01 && stbox_get_focus())
+        {
+            stbox_route_enabled = !stbox_route_enabled;
+            stbox_note_route(stbox_route_enabled);
+            fprintf(stderr, "[STBOX] input routing %s (real IKBD ESC)\n",
+                    stbox_route_enabled ? "ON (ESC releases)" : "OFF");
+            return 1;
+        }
+        stbox_raw_left   = stbox_raw_pkt_len(v);
+        stbox_raw_to_box = stbox_wants_input();
+    }
+    else
+        stbox_raw_left--;
+
+    if (!stbox_raw_to_box)
+        return 0;
+    stbox_ikbd_byte(v);
+    return 1;
+}
+
+/* natmem / emulator.c: shadow the ACIA data register for the divert even
+ * when neither USB injection nor the native mouse threshold is on. */
+int kbd_ikbd_divert_active(void)
+{
+    return stbox_running();
+}
+
 static void real_drain(uint8_t rs)
 {
     if (!(rs & (ACIA_RDRF | ACIA_ERRS)))
@@ -898,12 +994,12 @@ uint8_t kbd_usb_acia_status_shim(uint8_t real)
      * from overrunning) and hide the real receiver from the main guest.
      * Raw bytes: the box's TOS does its own mouse handling, so the main
      * screen's threshold/scale tuning must not touch them. */
-    if (stbox_wants_input() && (real & ACIA_RDRF))
+    if ((real & ACIA_RDRF) && stbox_divert_next())
     {
         uint8_t v = ps_read_8(KBD_ACIA_DATA_ADDR);
         real_byte_consumed(real);
         kbd_usb_note_real_rx();
-        stbox_ikbd_byte(v);
+        (void)stbox_divert_real_byte(v);     /* always taken: see _next */
         real &= (uint8_t)~(ACIA_RDRF | ACIA_ERRS | ACIA_IRQ);
     }
 
@@ -957,12 +1053,11 @@ uint8_t kbd_usb_acia_data_shim(void)
         atomic_fetch_add(&real_rx_passed, 1);
         real_byte_consumed(rs);
         kbd_usb_note_real_rx();
-        if (stbox_wants_input())
+        if (stbox_divert_real_byte(v))  /* raw, for the sandbox */
         {
-            stbox_ikbd_byte(v);          /* raw, for the sandbox */
             if (kbd_usb_rx_ready())
                 return kbd_usb_rx_read();
-            return 0xFF;                 /* idle line for the main guest */
+            return IKBD_DIVERTED_BYTE;   /* nothing for the main guest */
         }
         return mouse_scale_byte(v);     /* native mouse only */
     }
@@ -1108,8 +1203,15 @@ static const uint8_t st_scan[KEY_MAX + 1] = {
 typedef struct {
     int  fd;
     int  is_mouse;
+    int  is_kbd;
     char node[64];
 } in_dev;
+
+/* For the taskbar's USB icon (PSCTRL PS_HOST_INPUT): device counts kept
+ * by the evdev thread as it opens and closes nodes, and the time of the
+ * last event it forwarded. Plain atomics, read from the sampler thread. */
+static _Atomic int  g_n_kbd, g_n_mouse;
+static _Atomic uint64_t g_last_event_us;
 
 static struct {
     pthread_t tid;
@@ -1191,7 +1293,10 @@ static void dev_try_open(const char *name)
     in_dev *d = &in_state.dev[in_state.ndev++];
     d->fd = fd;
     d->is_mouse = is_mouse;
+    d->is_kbd = is_kbd;
     snprintf(d->node, sizeof d->node, "%s", path);
+    if (is_kbd)   atomic_fetch_add(&g_n_kbd, 1);
+    if (is_mouse) atomic_fetch_add(&g_n_mouse, 1);
 
     char dname[64] = "?";
     ioctl(fd, EVIOCGNAME(sizeof dname), dname);
@@ -1214,7 +1319,33 @@ static void dev_close(int idx)
 {
     printf("[KBD] lost %s\n", in_state.dev[idx].node);
     close(in_state.dev[idx].fd);
+    if (in_state.dev[idx].is_kbd)   atomic_fetch_sub(&g_n_kbd, 1);
+    if (in_state.dev[idx].is_mouse) atomic_fetch_sub(&g_n_mouse, 1);
     in_state.dev[idx] = in_state.dev[--in_state.ndev];
+}
+
+/* The taskbar's USB input word (PSCTRL PS_HOST_INPUT):
+ *   bit 0  the bridge is running ('kbd usb' in the config)
+ *   bit 1  a USB/Bluetooth keyboard is attached
+ *   bit 2  a USB/Bluetooth mouse is attached
+ *   bit 3  the real IKBD is present and trusted (merge mode)
+ *   bits 8-15  seconds since the last forwarded key or motion, 255 = never
+ * Callable from any thread. */
+uint32_t kbd_usb_input_word(void)
+{
+    uint32_t w = 0;
+    if (atomic_load(&in_state.running)) {
+        w |= 1;
+        if (atomic_load(&g_n_kbd) > 0)   w |= 2;
+        if (atomic_load(&g_n_mouse) > 0) w |= 4;
+        uint64_t last = atomic_load(&g_last_event_us);
+        uint64_t age = last ? (now_us() - last) / 1000000ull : 255;
+        if (age > 255) age = 255;
+        w |= (uint32_t)age << 8;
+    }
+    if (kbd_usb_real_ikbd_present())
+        w |= 8;
+    return w;
 }
 
 static void grab_set(int on)
@@ -1237,6 +1368,7 @@ static void send_key(uint8_t scan, int pressed)
         if (pressed)
         {
             stbox_route_enabled = !stbox_route_enabled;
+            stbox_note_route(stbox_route_enabled);
             fprintf(stderr, "[STBOX] input routing %s\n",
                     stbox_route_enabled ? "ON (ESC releases)" : "OFF");
         }
@@ -1456,6 +1588,8 @@ static void *input_thread(void *arg)
                 ssize_t r = read(in_state.dev[i].fd, &ev, sizeof ev);
                 if (r == (ssize_t)sizeof ev)
                 {
+                    if (ev.type == EV_KEY || ev.type == EV_REL)
+                        atomic_store(&g_last_event_us, now_us());
                     handle_event(&ev, in_state.dev[i].is_mouse);
                 }
                 else if (r < 0 && errno == EAGAIN)

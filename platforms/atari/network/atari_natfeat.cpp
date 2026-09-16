@@ -10,6 +10,8 @@
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "platforms/atari/psimg/psimg.h"
 #include "platforms/atari/pdf/pspdf.h"
+#include "platforms/atari/web/psweb_proto.h"
+#include "platforms/atari/web/psweb_client.h"
 
 #include "options.h"
 #include "memory.h"
@@ -103,6 +105,7 @@ enum nf_feature_index {
   NF_FEATURE_PSIMG,
   NF_FEATURE_STBOX,
   NF_FEATURE_PSPDF,
+  NF_FEATURE_PSWEB,
   NF_FEATURE_COUNT
 };
 
@@ -113,7 +116,8 @@ enum nf_feature_index {
  * stall the guest for their duration, same trade VIDPLAY.PLAY accepted. */
 enum nf_stbox_ops {
   NF_STBOX_START = 0,  /* p0 = ptr TOS path (GEMDOS or /host), p1 = ram_kb,
-                          p2 = flags (bit0 = STE) -> 0 ok                  */
+                          p2 = flags (bit0 = STE, bit1 = bit0 is explicit;
+                          bit1 clear = cfg stbox_machine) -> 0 ok         */
   NF_STBOX_STOP,       /* park the box, release the plane                  */
   NF_STBOX_RESET,      /* guest cold reset                                 */
   NF_STBOX_STATUS,     /* -> 1 running, 0 stopped                          */
@@ -276,7 +280,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "PSCTRL",
   "PSIMG",
   "STBOX",
-  "PSPDF"
+  "PSPDF",
+  "PSWEB"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -1125,6 +1130,16 @@ static bool hostfs_debug_enabled(void)
       fprintf(stderr, __VA_ARGS__); \
   } while (0)
 
+/* the ETHERNET NatFeat's call trace: on with `debug net` (or the cfg's
+ * own network debug flag), silent otherwise - the boot-time GET_ID /
+ * GET_VERSION / GET_MAC exchange is eight lines nobody needs twice */
+static bool nfeth_debug_enabled(void);
+#define NFETH_LOG(...) \
+  do { \
+    if (nfeth_debug_enabled()) \
+      fprintf(stderr, __VA_ARGS__); \
+  } while (0)
+
 static uae_u32 nf_get_id(uaecptr stack)
 {
   char name[80];
@@ -1143,7 +1158,7 @@ static uae_u32 nf_get_id(uaecptr stack)
         return 0;
       }
       if (i == NF_FEATURE_ETHERNET)
-        fprintf(stderr, "[NF] GET_ID(\"%s\") -> 0x%08X\n", name, NF_ID(i));
+        NFETH_LOG("[NF] GET_ID(\"%s\") -> 0x%08X\n", name, NF_ID(i));
       if (i == NF_FEATURE_HOSTFS)
         HOSTFS_LOG("[NF] GET_ID(\"%s\") -> 0x%08X drive_bits=0x%08X\n",
                    name, NF_ID(i), hostfs_drive_bits());
@@ -1256,13 +1271,13 @@ static uae_u32 nf_call_ethernet(uae_u32 subid, uaecptr params)
 {
   switch (subid) {
     case NFETH_GET_VERSION:
-      fprintf(stderr, "[NF] ETHERNET.GET_VERSION -> %u\n", NFETH_NFAPI_VERSION);
+      NFETH_LOG("[NF] ETHERNET.GET_VERSION -> %u\n", NFETH_NFAPI_VERSION);
       return NFETH_NFAPI_VERSION;
 
     case NFETH_XIF_INTLEVEL:
     {
       uae_u32 level = nfeth_interrupt_level();
-      fprintf(stderr, "[NF] ETHERNET.XIF_INTLEVEL -> %u\n", level);
+      NFETH_LOG("[NF] ETHERNET.XIF_INTLEVEL -> %u\n", level);
       return level;
     }
 
@@ -1280,19 +1295,19 @@ static uae_u32 nf_call_ethernet(uae_u32 subid, uaecptr params)
     }
 
     case NFETH_XIF_START:
-      fprintf(stderr, "[NF] ETHERNET.XIF_START eth%u -> %d\n",
+      NFETH_LOG("[NF] ETHERNET.XIF_START eth%u -> %d\n",
               nf_get_param(params, 0), pistorm_net_link_up() ? 0 : -15);
       return pistorm_net_link_up() ? 0 : (uae_u32)-15; /* TOS_EUNDEV */
 
     case NFETH_XIF_STOP:
-      fprintf(stderr, "[NF] ETHERNET.XIF_STOP eth%u -> 0\n", nf_get_param(params, 0));
+      NFETH_LOG("[NF] ETHERNET.XIF_STOP eth%u -> 0\n", nf_get_param(params, 0));
       return 0;
 
     case NFETH_XIF_READLENGTH:
     {
       uae_u32 len = pistorm_net_rx_length();
       if (nfeth_debug_enabled() && len)
-        fprintf(stderr, "[NF] ETHERNET.XIF_READLENGTH eth%u -> %u\n",
+        NFETH_LOG("[NF] ETHERNET.XIF_READLENGTH eth%u -> %u\n",
                 nf_get_param(params, 0), len);
       return len;
     }
@@ -1319,7 +1334,7 @@ static uae_u32 nf_call_ethernet(uae_u32 subid, uaecptr params)
         frame[i] = nf_read_byte(nf_get_param(params, 1) + i);
       int rc = pistorm_net_write_frame(frame, len);
       if (nfeth_debug_enabled() || rc != 0)
-        fprintf(stderr, "[NF] ETHERNET.XIF_WRITEBLOCK eth%u len=%u -> %d\n",
+        NFETH_LOG("[NF] ETHERNET.XIF_WRITEBLOCK eth%u len=%u -> %d\n",
                 nf_get_param(params, 0), len, rc);
       return rc == 0 ? 0 : (uae_u32)-1;
     }
@@ -1329,13 +1344,13 @@ static uae_u32 nf_call_ethernet(uae_u32 subid, uaecptr params)
       uae_u8 mac[6];
       uae_u32 len = nf_get_param(params, 2);
       if (!pistorm_net_is_enabled() || nf_get_param(params, 0) != 0 || len == 0) {
-        fprintf(stderr, "[NF] ETHERNET.GET_MAC eth%u len=%u -> 0\n",
+        NFETH_LOG("[NF] ETHERNET.GET_MAC eth%u len=%u -> 0\n",
                 nf_get_param(params, 0), len);
         return 0;
       }
       pistorm_net_get_mac(mac);
       nf_write_buffer(nf_get_param(params, 1), mac, len < sizeof(mac) ? len : sizeof(mac));
-      fprintf(stderr, "[NF] ETHERNET.GET_MAC eth%u len=%u -> %02X:%02X:%02X:%02X:%02X:%02X\n",
+      NFETH_LOG("[NF] ETHERNET.GET_MAC eth%u len=%u -> %02X:%02X:%02X:%02X:%02X:%02X\n",
               nf_get_param(params, 0), len, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
       return 1;
     }
@@ -4959,6 +4974,7 @@ static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
 }
 
 #include "../stbox/stbox.h"
+extern "C" int emulator_config_stbox_ste(void);   /* cfg 'stbox_machine ste' */
 
 /* STBOX's mapper: the shared GEMDOS->host translation (which handles the
  * U:\ unified-drive rewrite), plus a literal-host-path passthrough, and a
@@ -4988,7 +5004,12 @@ static uae_u32 nf_call_stbox(uae_u32 subid, uaecptr params)
       stbox_cfg_t cfg;
       memset(&cfg, 0, sizeof cfg);
       cfg.ram_kb = nf_get_param(params, 1);
-      cfg.machine_ste = nf_get_param(params, 2) & 1;
+      /* flags: bit1 set = STBOX.PRG said 'st'/'ste' explicitly (bit0),
+       * else the cfg's stbox_machine line decides */
+      {
+        uae_u32 fl = nf_get_param(params, 2);
+        cfg.machine_ste = (fl & 2) ? (fl & 1) : (emulator_config_stbox_ste() ? 1 : 0);
+      }
       if (pathp) {
         nf_read_string(pathp, gem, sizeof(gem));
         if (gem[0] && stbox_map_path(gem, host, sizeof(host)))
@@ -5241,8 +5262,7 @@ static uae_u32 nf_call_psimg(uae_u32 subid, uaecptr params)
       nf_write_buffer(dest, buf, (uae_u32)len);
       psimg_free(buf);
 
-      printf("[PSIMG] loaded %s as %dx%d@%dbpp\n", host, w, h, bpp);
-      fflush(stdout);
+      PS_INFO("[PSIMG] loaded %s as %dx%d@%dbpp\n", host, w, h, bpp);
       return 0;
     }
 
@@ -5519,6 +5539,189 @@ static uae_u32 nf_call_pspdf(uae_u32 subid, uaecptr params)
   return (uae_u32)PSPDF_ERR;
 }
 
+/* PSWEB: the web browser's engine link (platforms/atari/web/psweb_client.c).
+ * The engine is a separate process; every call here pushes a record into a
+ * ring, reads a few words the connector thread keeps current, or copies
+ * pixels out of shared memory. Nothing waits. Safe under the JIT invariant. */
+/* A GEMDOS path handed to LOAD (TeraDesk opening an .HTM with WEBGEM, or
+ * one typed into the address field) can only be read by the Pi when it is
+ * on a HOSTFS drive: map it with the shared GEMDOS->host translation and
+ * hand WebKit a file:// URL. Anything else answers PSWEB_ERR and WEBGEM
+ * says so. */
+static bool psweb_gemdos_to_file_url(const char *gem, char *out, size_t outsz)
+{
+  char host[512];
+  static const char hex[] = "0123456789ABCDEF";
+  size_t n = 0;
+
+  if (!mp3_gemdos_to_host(gem, host, sizeof host))
+    return false;
+  if (outsz < 8)
+    return false;
+  memcpy(out, "file://", 7);
+  n = 7;
+  for (const unsigned char *p = (const unsigned char *)host; *p && n + 4 < outsz; p++) {
+    if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+        (*p >= '0' && *p <= '9') || strchr("/-._~", *p)) {
+      out[n++] = (char)*p;
+    } else {
+      out[n++] = '%';
+      out[n++] = hex[*p >> 4];
+      out[n++] = hex[*p & 15];
+    }
+  }
+  out[n] = 0;
+  return true;
+}
+
+static uae_u32 nf_call_psweb(uae_u32 subid, uaecptr params)
+{
+  char str[PSWEB_STR_MAX];
+
+  switch (subid) {
+    case PSWEB_VERSION:
+      return PSWEB_API_VERSION;
+
+    case PSWEB_STATUS:
+      return (uae_u32)psweb_status();
+
+    case PSWEB_VIEW_NEW:
+      return (uae_u32)(psweb_cmd(PSWEB_CMD_VIEW_NEW,
+                                 (int32_t)nf_get_param(params, 0),
+                                 (int32_t)nf_get_param(params, 1),
+                                 (int32_t)nf_get_param(params, 2),
+                                 (int32_t)nf_get_param(params, 3), 0, 0, NULL) == PSWEB_OK ? 1 : PSWEB_NOTCONN);
+
+    case PSWEB_VIEW_FREE:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_VIEW_FREE, 0, 0, 0, 0, 0, 0, NULL);
+
+    case PSWEB_VIEW_SIZE:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_VIEW_SIZE,
+                                (int32_t)nf_get_param(params, 1),
+                                (int32_t)nf_get_param(params, 2), 0, 0, 0, 0, NULL);
+
+    case PSWEB_VIEW_STATE:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_VIEW_STATE,
+                                (int32_t)nf_get_param(params, 1), 0, 0, 0, 0, 0, NULL);
+
+    case PSWEB_LOAD:
+      nf_read_string(nf_get_param(params, 1), str, sizeof(str));
+      if (((str[0] >= 'A' && str[0] <= 'Z') || (str[0] >= 'a' && str[0] <= 'z')) &&
+          str[1] == ':' && (str[2] == '\\' || str[2] == '/')) {
+        char url[PSWEB_STR_MAX];
+        if (!psweb_gemdos_to_file_url(str, url, sizeof url))
+          return (uae_u32)PSWEB_ERR;          /* not on a HOSTFS drive */
+        return (uae_u32)psweb_cmd(PSWEB_CMD_LOAD, 0, 0, 0, 0, 0, 0, url);
+      }
+      return (uae_u32)psweb_cmd(PSWEB_CMD_LOAD, 0, 0, 0, 0, 0, 0, str);
+
+    case PSWEB_NAV:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_NAV,
+                                (int32_t)nf_get_param(params, 1), 0, 0, 0, 0, 0, NULL);
+
+    case PSWEB_POLL: {
+      uaecptr out = nf_get_param(params, 1);
+      struct psweb_pollstate st;
+      int rc = psweb_poll(&st);
+      if (out) {
+        nf_write_long(out + 0,  st.frame_serial);
+        nf_write_long(out + 4,  st.n_damage);
+        nf_write_long(out + 8,  st.progress);
+        nf_write_long(out + 12, st.flags);
+        nf_write_long(out + 16, st.cursor);
+        nf_write_long(out + 20, st.title_serial);
+        nf_write_long(out + 24, st.uri_serial);
+        nf_write_long(out + 28, st.dialog);
+      }
+      return (uae_u32)rc;
+    }
+
+    case PSWEB_FETCH: {
+      uaecptr dest = nf_get_param(params, 1);
+      uae_u32 stride = nf_get_param(params, 2);
+      uae_u32 rows = nf_get_param(params, 3);
+      uaecptr rectp = nf_get_param(params, 4);
+      int max = (int)nf_get_param(params, 5);
+      uae_u8 *p;
+      int32_t rects[PSWEB_DAMAGE_MAX * 4];
+
+      if (!dest || !stride || !rows)
+        return (uae_u32)PSWEB_ERR;
+      if (!nf_host_ram_ptr(dest, stride * rows, &p)) {
+        printf("[PSWEB] fetch buffer at %08x is not host RAM "
+               "(use Mxalloc(size, 1) for TT-RAM)\n", (unsigned)dest);
+        return (uae_u32)PSWEB_ERR;
+      }
+      if (max > PSWEB_DAMAGE_MAX) max = PSWEB_DAMAGE_MAX;
+      int n = psweb_fetch(p, stride, rows, rects, max);
+      if (n > 0 && rectp) {
+        int lim = n < max ? n : max;
+        for (int i = 0; i < lim * 4; i++)
+          nf_write_long(rectp + (uaecptr)i * 4, (uae_u32)rects[i]);
+      }
+      return (uae_u32)n;
+    }
+
+    case PSWEB_POINTER:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_POINTER,
+                                (int32_t)nf_get_param(params, 1),
+                                (int32_t)nf_get_param(params, 2),
+                                (int32_t)nf_get_param(params, 3),
+                                (int32_t)nf_get_param(params, 4),
+                                (int32_t)nf_get_param(params, 5), 0, NULL);
+
+    case PSWEB_SCROLL:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_SCROLL,
+                                (int32_t)nf_get_param(params, 1),
+                                (int32_t)nf_get_param(params, 2),
+                                (int32_t)nf_get_param(params, 3),
+                                (int32_t)nf_get_param(params, 4),
+                                (int32_t)nf_get_param(params, 5), 0, NULL);
+
+    case PSWEB_KEY:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_KEY,
+                                (int32_t)nf_get_param(params, 1),
+                                (int32_t)nf_get_param(params, 2),
+                                (int32_t)nf_get_param(params, 3), 0, 0, 0, NULL);
+
+    case PSWEB_TEXT:
+      nf_read_string(nf_get_param(params, 1), str, sizeof(str));
+      return (uae_u32)psweb_cmd(PSWEB_CMD_TEXT, 0, 0, 0, 0, 0, 0, str);
+
+    case PSWEB_GETSTR: {
+      int which = (int)nf_get_param(params, 1);
+      uaecptr buf = nf_get_param(params, 2);
+      int len = (int)nf_get_param(params, 3);
+      if (!buf || len <= 0)
+        return (uae_u32)PSWEB_ERR;
+      if (len > (int)sizeof(str)) len = (int)sizeof(str);
+      int n = psweb_getstr(which, str, len);
+      if (n < 0)
+        return (uae_u32)n;
+      nf_write_string(buf, (uae_u32)len, str);
+      return (uae_u32)n;
+    }
+
+    case PSWEB_ZOOM:
+      return (uae_u32)psweb_cmd(PSWEB_CMD_ZOOM,
+                                (int32_t)nf_get_param(params, 1), 0, 0, 0, 0, 0, NULL);
+
+    case PSWEB_SETTING: {
+      uaecptr sp = nf_get_param(params, 3);
+      str[0] = 0;
+      if (sp)
+        nf_read_string(sp, str, sizeof(str));
+      return (uae_u32)psweb_cmd(PSWEB_CMD_SETTING,
+                                (int32_t)nf_get_param(params, 1),
+                                (int32_t)nf_get_param(params, 2), 0, 0, 0, 0,
+                                str[0] ? str : NULL);
+    }
+
+    default:
+      return (uae_u32)PSWEB_ERR;
+  }
+}
+
 static uae_u32 nf_call(uaecptr stack)
 {
   uae_u32 id = nf_read_long(stack + 4);
@@ -5554,6 +5757,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_stbox(subid, params);
     case NF_FEATURE_PSPDF:
       return nf_call_pspdf(subid, params);
+    case NF_FEATURE_PSWEB:
+      return nf_call_psweb(subid, params);
   }
 
   return 0;

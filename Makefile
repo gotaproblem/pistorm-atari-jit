@@ -49,6 +49,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/video/vidplane.c \
          platforms/atari/video/vidplay.c \
          platforms/atari/kbd_usb.c \
+         platforms/atari/web/psweb_client.c \
          platforms/atari/mfp_hub.c
 
 # -----------------------------------------------------------------
@@ -70,7 +71,9 @@ CFILES += platforms/atari/psctrl/psctrl_tunables.c \
           platforms/atari/stbox/stbox.c \
           platforms/atari/stbox/stbox_host.c \
           platforms/atari/stbox/stbox_psg.c \
-          platforms/atari/stbox/stbox_realfdc.c
+          platforms/atari/stbox/stbox_realfdc.c \
+          platforms/atari/stbox/stbox_blit.c \
+          platforms/atari/stbox/stbox_dmasnd.c
 
 # -----------------------------------------------------------------
 # C++ source.
@@ -406,6 +409,10 @@ platforms/atari/video/vidplay.o: platforms/atari/video/vidplay.c
 
 # The sandbox PSG binds a stream to the same SDL3 device as ym2149.c.
 platforms/atari/stbox/stbox_psg.o: platforms/atari/stbox/stbox_psg.c
+	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
+
+# The sandbox STE DMA sound: same device, same pattern.
+platforms/atari/stbox/stbox_dmasnd.o: platforms/atari/stbox/stbox_dmasnd.c
 	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
 
 # Host PDF rendering: poppler-glib + cairo headers for this unit only.

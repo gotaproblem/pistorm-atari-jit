@@ -43,6 +43,10 @@ extern int kbd_usb_force_mode;
 /* True while the real IKBD is trusted and being merged. */
 int kbd_usb_real_ikbd_present(void);
 
+/* the taskbar's USB icon: bit0 bridge on, bit1 keyboard, bit2 mouse, bit3
+ * real IKBD trusted, bits 8-15 seconds since the last event (255 = never) */
+uint32_t kbd_usb_input_word(void);
+
 /* ---- lifecycle ------------------------------------------------------- */
 /* grab != 0: EVIOCGRAB input devices so keystrokes stop reaching the Pi
  * console. F12 toggles the grab at runtime (F11/F12 don't exist on an ST). */
@@ -116,6 +120,9 @@ extern volatile uint32_t kbd_usb_stat_dropped_bytes;
 /* the link fails.                                                     */
 /* ------------------------------------------------------------------ */
 int     kbd_native_mouse_enabled(void);   /* threshold configured?     */
+int     kbd_ikbd_divert_active(void);     /* STBOX running: shadow $FFFC02
+                                             so real IKBD bytes can be
+                                             routed into the sandbox     */
 void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
 uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */
 

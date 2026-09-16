@@ -123,6 +123,18 @@ typedef uintptr_t uae_uintptr;
  * ------------------------------------------------------------------ */
 static inline void write_log(const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); }
+/* write_info: an informational line, printed only when the PSCTRL
+ * "verbose" flag is on (cfg `debug verbose`, env PISTORM_VERBOSE).
+ * Warnings and errors stay on write_log. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern volatile int pst_verbose;
+#ifdef __cplusplus
+}
+#endif
+static inline void write_info(const char *fmt, ...)
+{ va_list ap; if (!pst_verbose) return; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); }
 static inline void console_out(const char *fmt, ...)
 { va_list ap; va_start(ap, fmt); vfprintf(stdout, fmt, ap); va_end(ap); }
 #define console_out_f console_out

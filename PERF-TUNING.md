@@ -4,13 +4,13 @@ Companion to the bare-metal feasibility report. That report's conclusion was
 that most of what Emu68 gets from having no operating system is reachable
 from Linux; this file is the list, cheapest first, with what each one is
 expected to do to the 68000-mode CoreMark baseline of **734** (Pi 4, 1.5 GHz,
-PISSOFF 1024). Measure after each step; the projections are +-15%.
+`jit_power 3`, i.e. a 1024 chain budget). Measure after each step; the projections are +-15%.
 
 | Step | What | Expected | Measured (7 Sep 2026, jit-perf-hbl-fixes) | Cost |
 |---|---|---|---|---|
 | 1 | 2 MB pages for natmem, JIT cache, fVDI FB (in code, on by default) | +3-6% | **0 - see below** | none |
 | 2 | `jit_cache 16384` (apj-os.cfg) | 0-3% on GEM/MiNT, 0 on CoreMark | not separately measured | 8 MB RAM |
-| 3 | `PISTORM_PISSOFF=2048` / `4096` | +1-2% | 783 -> 803 (2048) -> 817 (4096) | wider fallback IRQ window |
+| 3 | `jit_power 4` / `5` (2048 / 4096) | +1-2% | 783 -> 803 (2048) -> 817 (4096) | wider fallback IRQ window |
 | 4 | `arm_freq=2100` + `over_voltage=6` | +35-40% | not yet run | heat; needs a heatsink/fan |
 | 5 | hugetlbfs instead of THP (`PISTORM_HUGETLB=1`) | same as 1 | **moot, see below** | 160 MB pinned at boot |
 
@@ -105,12 +105,13 @@ session; CoreMark itself fits in 8 MB and will not move.
 
 ## 3. Compiled-chain budget
 
-`PISTORM_PISSOFF=2048` in the emulator's environment (add
-`Environment=PISTORM_PISSOFF=2048` to the `[Service]` block of
-`/etc/systemd/system/pistorm.service`). The default of 1024 keeps 98% of the
-gain with twice the interrupt-fallback margin; 2048 is the measured plateau.
-If the keyboard starts beeping under MiNT or the mouse gets erratic, a chain
-break was late: go back to 1024.
+`jit_power N` in the cfg (replaces both the old `jit enabled/disabled`
+switch and the `PISTORM_PISSOFF` environment variable). `0` disables the JIT;
+`1`..`6` enable it with a compiled-chain budget of 256 << (N-1) cycle-units:
+1=256 (default), 2=512, 3=1024, 4=2048, 5=4096, 6=8192.
+1024 keeps 98% of the measured gain with twice the interrupt-fallback margin
+of 2048, which is the measured plateau. If the keyboard starts beeping under
+MiNT or the mouse gets erratic, a chain break was late: step `jit_power` down.
 
 ## 4. Clock
 
