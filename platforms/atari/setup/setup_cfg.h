@@ -79,6 +79,11 @@ int sc_keys(const struct sc_cfg *c, const char *sec,
  * when the file was made from the default. */
 int sc_locate(char *out, unsigned long n, int *created);
 
+/* Same, with the home directory given rather than looked up. sc_locate()
+ * is this with the invoking user's home; the harness passes a scratch
+ * one so the test cannot be swayed by a real ~/configs/psctrl.cfg. */
+int sc_locate_at(const char *home, char *out, unsigned long n, int *created);
+
 /* Convenience for [psctrl]: integer with a default. */
 int sc_get_int(const struct sc_cfg *c, const char *sec, const char *key, int dflt);
 

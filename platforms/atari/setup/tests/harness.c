@@ -333,11 +333,14 @@ static void run_cfg(void)
 }
 
 /* sc_locate: the file must be found without $HOME, which is /root under
- * sudo. Everything happens inside a scratch tree, and ".." is inside it
- * too, so a stray write cannot land anywhere real. */
+ * sudo. Everything happens inside a scratch tree - including the home
+ * directory, passed explicitly through sc_locate_at(), so a real
+ * ~/configs/psctrl.cfg on the machine running the test cannot change the
+ * result, and ".." is inside the tree too, so a stray write cannot land
+ * anywhere real. */
 static void run_locate(void)
 {
-    char root[256], work[320], cwd[512], path[512];
+    char root[256], work[320], home[320], cwd[512], path[512];
     int created = 0;
 
     printf("psctrl.cfg lookup:\n");
@@ -345,23 +348,35 @@ static void run_locate(void)
     snprintf(root, sizeof root, "%s/sc_loc_%d",
              getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
     snprintf(work, sizeof work, "%s/work", root);
-    char cmd[900];
-    snprintf(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s/configs %s/configs",
-             root, root, work);
+    snprintf(home, sizeof home, "%s/home", root);
+    char cmd[1200];
+    snprintf(cmd, sizeof cmd,
+             "rm -rf %s && mkdir -p %s/configs %s/configs %s/configs",
+             root, root, work, home);
     CHECK(system(cmd) == 0, "could not make the scratch tree");
     CHECK(chdir(work) == 0, "could not enter the scratch tree");
 
     /* 1. an existing repo-local config wins over nothing else existing */
     FILE *f = fopen("configs/psctrl.cfg", "w");
     if (f) { fputs("[psctrl]\nboot gem\n", f); fclose(f); }
-    CHECK(sc_locate(path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(sc_locate_at(home, path, sizeof path, &created) == 0, "lookup failed");
     CHECK(!strcmp(path, "configs/psctrl.cfg"), "found \"%s\"", path);
     CHECK(!created, "reported creating a file that was already there");
+
+    /* the home candidate is used only when neither tree path exists */
+    char hcfg[400];
+    snprintf(hcfg, sizeof hcfg, "%s/configs/psctrl.cfg", home);
+    FILE *hf = fopen(hcfg, "w");
+    if (hf) { fputs("[psctrl]\nboot gem\n", hf); fclose(hf); }
+    CHECK(sc_locate_at(home, path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(!strcmp(path, "configs/psctrl.cfg"),
+          "the tree copy should win over the home one, found \"%s\"", path);
+    CHECK(unlink(hcfg) == 0, "cleanup failed");
 
     /* 2. the runtime tree beside the repo wins over the repo-local one */
     f = fopen("../configs/psctrl.cfg", "w");
     if (f) { fputs("[psctrl]\nboot apj-os\n", f); fclose(f); }
-    CHECK(sc_locate(path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(sc_locate_at(home, path, sizeof path, &created) == 0, "lookup failed");
     CHECK(!strcmp(path, "../configs/psctrl.cfg"), "found \"%s\"", path);
 
     /* 3. nothing there, but the tree has a default: it gets copied */
@@ -369,7 +384,7 @@ static void run_locate(void)
     CHECK(unlink("configs/psctrl.cfg") == 0, "cleanup failed");
     f = fopen("configs/psctrl.cfg.default", "w");
     if (f) { fputs("[psctrl]\ncountdown 5\nboot gem\n", f); fclose(f); }
-    CHECK(sc_locate(path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(sc_locate_at(home, path, sizeof path, &created) == 0, "lookup failed");
     CHECK(created, "did not report creating the file");
     CHECK(access(path, R_OK) == 0, "the created file is not readable");
     static struct sc_cfg c;

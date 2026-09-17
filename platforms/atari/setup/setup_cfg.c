@@ -309,25 +309,18 @@ static int copy_file(const char *from, const char *to)
     return ok ? 0 : -1;
 }
 
-int sc_locate(char *out, unsigned long n, int *created)
+int sc_locate_at(const char *home, char *out, unsigned long n, int *created)
 {
     if (created)
         *created = 0;
 
     const char *cand[3];
-    char home[512] = "";
+    char homecfg[512] = "";
     cand[0] = "../configs/psctrl.cfg";
     cand[1] = "configs/psctrl.cfg";
-
-    /* the invoking user, not $HOME: under sudo and under pistorm.service
-     * $HOME is /root, which is not where the configs live */
-    const char *user = getenv("SUDO_USER");
-    const struct passwd *pw = user && *user ? getpwnam(user) : NULL;
-    if (!pw)
-        pw = getpwuid(getuid());
-    if (pw && pw->pw_dir && *pw->pw_dir)
-        snprintf(home, sizeof home, "%s/configs/psctrl.cfg", pw->pw_dir);
-    cand[2] = home[0] ? home : NULL;
+    if (home && *home)
+        snprintf(homecfg, sizeof homecfg, "%s/configs/psctrl.cfg", home);
+    cand[2] = homecfg[0] ? homecfg : NULL;
 
     for (int i = 0; i < 3; i++)
         if (cand[i] && access(cand[i], R_OK) == 0) {
@@ -354,6 +347,17 @@ int sc_locate(char *out, unsigned long n, int *created)
     /* could not write anywhere: run from the default, read-only */
     snprintf(out, n, "%s", dflt);
     return 0;
+}
+
+int sc_locate(char *out, unsigned long n, int *created)
+{
+    /* the invoking user, not $HOME: under sudo and under pistorm.service
+     * $HOME is /root, which is not where the configs live */
+    const char *user = getenv("SUDO_USER");
+    const struct passwd *pw = user && *user ? getpwnam(user) : NULL;
+    if (!pw)
+        pw = getpwuid(getuid());
+    return sc_locate_at(pw && pw->pw_dir ? pw->pw_dir : NULL, out, n, created);
 }
 
 int sc_sections(const struct sc_cfg *c, char out[][SC_SEC_LEN], int max)
