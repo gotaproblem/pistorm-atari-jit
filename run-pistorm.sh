@@ -15,13 +15,19 @@
 #
 # Launch through this loop from the console instead of running ./emulator
 # directly. Extra arguments after the script name are forwarded.
-cd "$(dirname "$0")" || exit 1
+# Absolute path to this script BEFORE the cd, so the sudo re-exec below
+# does not depend on PATH (sudo does not look in the current directory)
+# or on the script being marked executable.
+self_dir=$(cd "$(dirname "$0")" && pwd) || exit 1
+self="$self_dir/$(basename "$0")"
+
+cd "$self_dir" || exit 1
 
 # The emulator needs /dev/mem for the GPIO, so it has to run as root. Ask
 # for that here rather than letting it exit with "Unable to open /dev/mem".
 if [ "$(id -u)" -ne 0 ]; then
 	echo "[run-pistorm] needs root for /dev/mem - re-running under sudo"
-	exec sudo -- "$0" "$@"
+	exec sudo -- /bin/sh "$self" "$@"
 fi
 while :; do
 	./emulator --config ../configs/psctrl.cfg "$@"
