@@ -20,6 +20,7 @@ extern "C" {
  * on) or one of the boolean words config_file.c understands. They show
  * and are written as enabled / disabled. Exposed for the harness. */
 int         sp_is_switch(const char *val);
+int         sp_row_is_switch(const char *key, const char *val);
 const char *sp_switch_text(const char *val);
 
 /* How a .cfg key and value are presented, and what a typed value is

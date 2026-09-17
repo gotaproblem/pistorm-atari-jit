@@ -155,11 +155,55 @@ static const char *false_words[] = { "0", "off", "no", "false", "disabled",
 static const char *true_words[]  = { "1", "on", "yes", "true", "enabled",
                                      "enable" };
 
-static int word_in(const char *v, const char **list, int n)
+static int word_n_in(const char *v, unsigned long len, const char **list, int n)
 {
     for (int i = 0; i < n; i++)
-        if (!strcasecmp(v, list[i]))
+        if (strlen(list[i]) == len && !strncasecmp(v, list[i], len))
             return 1;
+    return 0;
+}
+
+/* Values like `kbd usb nograb`, `kbd disabled`, `usb gamepad off` carry
+ * the device in the first word and the state (and any options) after it.
+ * These read the first word only: `disabled nograb` is false, `nograb`
+ * on its own is not a boolean at all. */
+static const char *rest_after_word(const char *val, unsigned long n)
+{
+    const char *rest = val + n;
+    while (*rest == ' ' || *rest == '\t')
+        rest++;
+    return rest;
+}
+
+static int word_in_false_first(const char *v)
+{
+    return word_n_in(v, strcspn(v, " \t"), false_words, 6);
+}
+
+static int first_word_is_bool(const char *v)
+{
+    unsigned long len = strcspn(v, " \t");
+    return word_n_in(v, len, false_words, 6) || word_n_in(v, len, true_words, 6);
+}
+
+/* 1 = the value names the device (kbd usb..., usb gamepad...), 2 = kbd
+ * with a plain boolean word, 0 = an ordinary key. */
+static int device_key(const char *key, const char *val, const char **rest)
+{
+    if (!val)
+        return 0;
+    if (!strcasecmp(key, "kbd")) {
+        if (!strncasecmp(val, "usb", 3)) {
+            *rest = rest_after_word(val, 3);
+            return 1;
+        }
+        *rest = val;
+        return 2;
+    }
+    if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
+        *rest = rest_after_word(val, 7);
+        return 1;
+    }
     return 0;
 }
 
@@ -169,28 +213,39 @@ int sp_is_switch(const char *val)
         return 0;
     if (!*val)
         return 1;                            /* a bare key is "on" */
-    if (!strncasecmp(val, "gamepad", 7)) {   /* usb gamepad [on|off] */
-        const char *rest = val + 7;
-        while (*rest == ' ' || *rest == '\t')
-            rest++;
-        return !*rest || word_in(rest, false_words, 6) ||
-               word_in(rest, true_words, 6);
-    }
-    return word_in(val, false_words, 6) || word_in(val, true_words, 6);
+    return first_word_is_bool(val);
 }
 
 static int switch_on(const char *val)
 {
     if (!val || !*val)
         return 1;
-    if (!strncasecmp(val, "gamepad", 7)) {
-        const char *rest = val + 7;
-        while (*rest == ' ' || *rest == '\t')
-            rest++;
-        return !*rest || !word_in(rest, false_words, 6);
-    }
-    return !word_in(val, false_words, 6);
+    return !word_in_false_first(val);
 }
+
+/* Is this ROW a switch? The device keys are, whatever their value looks
+ * like (`kbd usb nograb` is on, `kbd disabled nograb` is off), and so is
+ * any key whose value is a boolean word or empty. */
+int sp_row_is_switch(const char *key, const char *val)
+{
+    const char *rest;
+    if (device_key(key, val, &rest))
+        return 1;
+    return sp_is_switch(val);
+}
+
+/* and is it on? */
+static int row_on(const char *key, const char *val)
+{
+    const char *rest;
+    int dev = device_key(key, val, &rest);
+    if (dev == 1)
+        return !*rest || !word_in_false_first(rest);
+    if (dev == 2)
+        return !word_in_false_first(rest);
+    return switch_on(val);
+}
+
 
 /*
  * A few .cfg keys read badly as key + value, because the key names the
@@ -213,6 +268,7 @@ const char *sp_row_label(const char *key, const char *val)
     return key;
 }
 
+
 /* hostfs drive letters read as a drive: "S /path" -> "S: /path" */
 static int hostfs_drive(const char *val)
 {
@@ -223,13 +279,19 @@ static int hostfs_drive(const char *val)
 const char *sp_row_value(const char *key, const char *val, char *buf,
                          unsigned long n)
 {
+    const char *rest;
     if (!val)
         return "";
-    if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
-        const char *rest = val + 7;
-        while (*rest == ' ' || *rest == '\t')
-            rest++;
-        return *rest ? sp_switch_text(rest) : "enabled";
+    int dev = device_key(key, val, &rest);
+    if (dev) {
+        int on = row_on(key, val);
+        const char *opts = first_word_is_bool(rest) ?
+                           rest_after_word(rest, strcspn(rest, " \t")) : rest;
+        if (*opts)
+            snprintf(buf, n, "%s (%s)", on ? "enabled" : "disabled", opts);
+        else
+            snprintf(buf, n, "%s", on ? "enabled" : "disabled");
+        return buf;
     }
     if (!strcasecmp(key, "hostfs") && hostfs_drive(val)) {
         const char *rest = val + 1;
@@ -301,7 +363,7 @@ static void draw(struct ss_screen *ss, const struct state *st)
     {
         const char *help = st->editing ?
             "type a value   Enter accept   Esc cancel" :
-            "Up/Down move   Left/Right pick or toggle   Enter edit   Esc/X leave";
+            "Up/Down move   Left/Right pick   Enter toggle or edit   Esc/X leave";
         int at = (SS_COLS - (int)strlen(help)) / 2;
         ss_puts(ss, at < 0 ? 0 : at, ROW_HELP, help, ink, paper);
     }
@@ -375,12 +437,27 @@ static int toggle_switch(struct state *st)
 {
     const char *key = st->row[st->sel].text;
     const char *val = sc_get(&st->cfg, st->sec, key);
-    if (!sp_is_switch(val))
+    if (!sp_row_is_switch(key, val))
         return 0;
-    const char *now = switch_on(val) ? "disabled" : "enabled";
+    int on = row_on(key, val);
+    const char *now = on ? "disabled" : "enabled";
     char with[SC_LINE_LEN];
-    if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
-        snprintf(with, sizeof with, "gamepad %s", now);   /* usb gamepad off */
+
+    /* keep the device word and the options: `kbd usb nograb` turns into
+     * `kbd disabled nograb` (config_file.c reads the first word as the
+     * boolean and leaves the rest), and back again. */
+    if (!strcasecmp(key, "kbd")) {
+        const char *rest = !strncasecmp(val, "usb", 3) ?
+                           rest_after_word(val, 3) :
+                           rest_after_word(val, strcspn(val, " \t"));
+        snprintf(with, sizeof with, "%s%s%s", on ? "disabled" : "usb",
+                 *rest ? " " : "", rest);
+        sc_set(&st->cfg, st->sec, key, with);
+    } else if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
+        const char *rest = rest_after_word(val, 7);
+        if (first_word_is_bool(rest))
+            rest = rest_after_word(rest, strcspn(rest, " \t"));
+        snprintf(with, sizeof with, "gamepad %s%s%s", now, *rest ? " " : "", rest);
         sc_set(&st->cfg, st->sec, key, with);
     } else {
         sc_set(&st->cfg, st->sec, key, now);
@@ -467,8 +544,6 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                 if (st.row[st.sel].kind == ROW_PICK)
                     snprintf(st.sec, sizeof st.sec, "%.*s", SC_SEC_LEN - 1,
                              st.row[st.sel].text);
-                else if (st.row[st.sel].kind == ROW_KEY)
-                    toggle_switch(&st);
                 break;
             case SI_ENTER:
                 switch (st.row[st.sel].kind) {

@@ -429,11 +429,21 @@ static void run_labels(void)
     CHECK(!strcmp(sp_row_label("hostfs", "S /x"), "hostfs"),
           "hostfs was relabelled");
 
-    /* kbd keeps its value: usb, usb nograb, usb merge ... */
-    CHECK(!strcmp(sp_row_value("kbd", "usb", buf, sizeof buf), "usb"),
-          "kbd value changed");
+    /* kbd is a switch: enabled / disabled, with any options in brackets */
+    CHECK(!strcmp(sp_row_value("kbd", "usb", buf, sizeof buf), "enabled"),
+          "kbd usb reads \"%s\"", sp_row_value("kbd", "usb", buf, sizeof buf));
+    CHECK(!strcmp(sp_row_value("kbd", "disabled", buf, sizeof buf), "disabled"),
+          "kbd disabled reads \"%s\"",
+          sp_row_value("kbd", "disabled", buf, sizeof buf));
     CHECK(!strcmp(sp_row_value("kbd", "usb nograb merge", buf, sizeof buf),
-                  "usb nograb merge"), "kbd options were cut");
+                  "enabled (nograb merge)"), "kbd options were lost: \"%s\"",
+          sp_row_value("kbd", "usb nograb merge", buf, sizeof buf));
+    CHECK(!strcmp(sp_row_value("kbd", "disabled nograb", buf, sizeof buf),
+                  "disabled (nograb)"), "kbd off with options reads \"%s\"",
+          sp_row_value("kbd", "disabled nograb", buf, sizeof buf));
+    CHECK(sp_row_is_switch("kbd", "usb") && sp_row_is_switch("kbd", "usb nograb"),
+          "kbd is not a switch row");
+    CHECK(!sp_is_switch("usb"), "\"usb\" alone should not be a boolean word");
 
     /* usb gamepad is a switch, whichever way it is written */
     CHECK(!strcmp(sp_row_value("usb", "gamepad", buf, sizeof buf), "enabled"),
@@ -441,8 +451,12 @@ static void run_labels(void)
     CHECK(!strcmp(sp_row_value("usb", "gamepad off", buf, sizeof buf), "disabled"),
           "usb gamepad off reads \"%s\"",
           sp_row_value("usb", "gamepad off", buf, sizeof buf));
-    CHECK(sp_is_switch("gamepad") && sp_is_switch("gamepad disabled"),
+    CHECK(sp_row_is_switch("usb", "gamepad") &&
+          sp_row_is_switch("usb", "gamepad disabled"),
           "usb gamepad is not a switch row");
+    CHECK(!strcmp(sp_row_value("usb", "gamepad off nograb", buf, sizeof buf),
+                  "disabled (nograb)"), "usb gamepad options reads \"%s\"",
+          sp_row_value("usb", "gamepad off nograb", buf, sizeof buf));
 
     /* hostfs shows a drive letter as a drive, and writes back the
      * emulator's own spelling whichever way it is typed */
