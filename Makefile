@@ -349,7 +349,7 @@ HEAVY_OBJS = $(CPU_CPP:.cpp=.o) $(JIT_CPP:.cpp=.o)
 $(HEAVY_OBJS): OPT := $(HEAVY_OPT)
 
 DELETEFILES = $(COBJS) $(CPPOBJS) $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d) \
-              $(TARGET) ataritest .ffmpeg-choice
+              $(TARGET) ataritest setupvtest .ffmpeg-choice
 
 # -----------------------------------------------------------------
 # Rules
@@ -426,6 +426,12 @@ platforms/atari/video/vidplane.o: platforms/atari/video/vidplane.c
 
 ataritest: ataritest.c gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS)
+
+# Pre-boot setup page, step 1: drive the real shifter with the 68k halted.
+# Not part of `all`: stop the emulator first, then run ./setupvtest.
+SETUP_SRC = platforms/atari/setup/shifter_setup.c
+setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
+	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup
 
 %.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
