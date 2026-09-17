@@ -26,6 +26,16 @@ static const char *cache[]   = { "2048", "4096", "8192", "16384" };
 static const char *ttram[]   = { "disabled", "32M", "64M", "128M" };
 /* CONFITEM_STBOX_MACHINE */
 static const char *stbox[]   = { "st", "ste" };
+/* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
+ * log2 ladder, 256 << (n-1), so 3 is the 1024 default (psctrl_settings.cpp) */
+static const char *jitpow[]  = { "0", "1", "2", "3", "4", "5", "6" };
+static const char *jitpow_l[]= { "0 - JIT disabled", "1 - 256", "2 - 512",
+                                 "3 - 1024 (default)", "4 - 2048",
+                                 "5 - 4096", "6 - 8192" };
+/* stram_size: the real ST bank combinations stram_alias_init() can make
+ * (2M/512K/128K chips), so never 0 and never an impossible size */
+static const char *stram[]   = { "128K", "512K", "1M", "2M", "2560K", "4M" };
+static const char *stram_l[] = { "128K", "512K", "1M", "2M", "2.5M", "4M" };
 
 /* The words the parser accepts for the same choice. A bare key counts as
  * the empty string: `blitter` alone means enabled, `ttram` alone means
@@ -66,15 +76,54 @@ static const struct alias aliases[] = {
     { "machine", "mst",         "megast"   },
 };
 
-struct table { const char *key; const char **list; int n; };
+struct table { const char *key; const char **list; const char **labels; int n; };
 
-#define T(k, a) { k, a, (int)(sizeof(a) / sizeof(a[0])) }
+#define T(k, a)      { k, a, NULL, (int)(sizeof(a) / sizeof(a[0])) }
+#define TL(k, a, l)  { k, a, l,    (int)(sizeof(a) / sizeof(a[0])) }
 static const struct table tables[] = {
     T("cpu", cpu), T("machine", machine), T("shifter", shifter),
     T("blitter", blitter), T("monitor", monitor), T("vga", vga),
     T("jit_cache", cache), T("ttram", ttram), T("stbox_machine", stbox),
+    TL("jit_power", jitpow, jitpow_l),
+    TL("stram_size", stram, stram_l),
 };
 #undef T
+#undef TL
+
+/*
+ * Keys the page offers even when the section does not have them: a
+ * machine with no `network` line could not be given one, because the
+ * page could only edit what was already in the file. A row for one of
+ * these shows its default until it is set, and setting it writes the key.
+ */
+static const struct { const char *key, *dflt; } known[] = {
+    { "network",     "disabled" },
+    { "jit_power",   "3"        },
+    { "jit_cache",   "16384"    },
+    { "stram_size",  "4M"       },
+    { "blitter",     "enabled"  },
+    { "dma_sound",   "disabled" },
+    { "rtc",         "disabled" },
+    { "acsi",        "disabled" },
+    { "monitor",     "auto"     },
+    { "shifter",     "st"       },
+    { "stbox_tos",   ""         },
+};
+
+const char *se_known(int i)
+{
+    if (i < 0 || i >= (int)(sizeof known / sizeof known[0]))
+        return NULL;
+    return known[i].key;
+}
+
+const char *se_known_default(const char *key)
+{
+    for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
+        if (!strcasecmp(key, known[i].key))
+            return known[i].dflt;
+    return NULL;
+}
 
 /*
  * Where a setting belongs. Only the exceptions are listed: anything not
@@ -146,6 +195,14 @@ const char *se_choice(const char *key, int i)
     if (!t || i < 0 || i >= t->n)
         return NULL;
     return t->list[i];
+}
+
+const char *se_label(const char *key, int i)
+{
+    const struct table *t = find(key);
+    if (!t || i < 0 || i >= t->n)
+        return NULL;
+    return t->labels ? t->labels[i] : t->list[i];
 }
 
 int se_index(const char *key, const char *val)

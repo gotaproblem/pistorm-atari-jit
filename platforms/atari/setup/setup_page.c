@@ -28,6 +28,7 @@ struct row {
     char text[SC_KEY_LEN];       /* section or key name */
     int  offtopic;               /* not this environment's, or switched off
                                   * by the key it depends on              */
+    int  unset;                  /* offered, but not in the .cfg yet      */
 };
 
 struct state {
@@ -106,10 +107,37 @@ static void build_rows(struct state *st)
         }
         st->row[st->nrow].kind = ROW_KEY;
         st->row[st->nrow].offtopic = off;
+        st->row[st->nrow].unset = 0;
         snprintf(st->row[st->nrow].text, SC_KEY_LEN, "%.*s",
                  SC_KEY_LEN - 1, keys[i]);
         st->nrow++;
     }
+    /* keys this machine could have but the file does not mention: shown
+     * with their default so they can be set, and only written when they
+     * are (se_known in setup_enums.c) */
+    for (int i = 0; se_known(i) && st->nrow < MAX_ROWS - 2; i++) {
+        const char *k = se_known(i);
+        if (sc_get(&st->cfg, st->sec, k))
+            continue;                       /* already listed above */
+        if (!(se_env(k) & env)) {
+            st->hidden++;
+            continue;
+        }
+        const char *needs = se_needs(k);
+        if (needs) {
+            const char *v = sc_get(&st->cfg, st->sec, needs);
+            if (!v || !sp_row_on(needs, v)) {
+                st->hidden++;
+                continue;
+            }
+        }
+        st->row[st->nrow].kind = ROW_KEY;
+        st->row[st->nrow].offtopic = 0;
+        st->row[st->nrow].unset = 1;
+        snprintf(st->row[st->nrow].text, SC_KEY_LEN, "%.*s", SC_KEY_LEN - 1, k);
+        st->nrow++;
+    }
+
     st->row[st->nrow].kind = ROW_SAVE;
     snprintf(st->row[st->nrow].text, SC_KEY_LEN, "Save");
     st->nrow++;
@@ -419,11 +447,14 @@ static void draw(struct ss_screen *ss, const struct state *st)
         if (k < nk) {
             const char *key = st->row[fk + k].text;
             const char *val = sc_get(&st->cfg, st->sec, key);
+            int unset = st->row[fk + k].unset;
+            if (unset && !val)
+                val = se_known_default(key);
             int on = st->sel == fk + k;
             int off = st->row[fk + k].offtopic;
             char vbuf[SC_LINE_LEN];
             if (on && st->choosing) {
-                const char *c = se_choice(key, st->choice);
+                const char *c = se_label(key, st->choice);
                 snprintf(line, sizeof line, "%-20.20s %d/%d  %-40.40s",
                          sp_row_label(key, val), st->choice + 1,
                          se_count(key), c ? c : "");
@@ -431,9 +462,10 @@ static void draw(struct ss_screen *ss, const struct state *st)
                 snprintf(line, sizeof line, "%-20.20s %-48.48s",
                          sp_row_label(key, val), st->edit);
             else
-                snprintf(line, sizeof line, "%-20.20s %-48.48s",
+                snprintf(line, sizeof line, "%-20.20s %-38.38s%s",
                          sp_row_label(key, val),
-                         sp_row_value(key, val, vbuf, sizeof vbuf));
+                         sp_row_value(key, val, vbuf, sizeof vbuf),
+                         unset ? "(not set)" : "");
             ss_puts(ss, 4, row, line,
                     on ? paper : (off ? hi : ink), on ? hi : paper);
         }
@@ -484,6 +516,8 @@ static int toggle_switch(struct state *st)
 {
     const char *key = st->row[st->sel].text;
     const char *val = sc_get(&st->cfg, st->sec, key);
+    if (!val)
+        val = se_known_default(key);      /* offered but not in the file */
     if (!sp_row_is_switch(key, val))
         return 0;
     int on = sp_row_on(key, val);
@@ -630,6 +664,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     }
                     if (se_count(kk)) {     /* a known set of values */
                         const char *v = sc_get(&st.cfg, st.sec, kk);
+                        if (!v)
+                            v = se_known_default(kk);
                         int at = se_index(kk, v ? v : "");
                         st.choice = at < 0 ? 0 : at;
                         st.choosing = 1;
@@ -640,6 +676,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                         break;              /* a switch flips, not types */
                     const char *k = st.row[st.sel].text;
                     const char *v = sc_get(&st.cfg, st.sec, k);
+                    if (!v)
+                        v = se_known_default(k);
                     char vbuf[SC_LINE_LEN];
                     snprintf(st.edit, sizeof st.edit, "%s",
                              v ? sp_row_value(k, v, vbuf, sizeof vbuf) : "");

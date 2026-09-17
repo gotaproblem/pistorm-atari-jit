@@ -32,11 +32,22 @@ extern "C" {
 int         se_env(const char *key);          /* SE_* mask; BOTH if unlisted */
 const char *se_needs(const char *key);        /* key that must be on, or NULL */
 
+/* Keys worth offering even when the .cfg does not have them, so a
+ * machine can be given a setting it is missing rather than only edited.
+ * Walk them with se_known(i); se_known_default() is the value a row gets
+ * when it is added. */
+const char *se_known(int i);
+const char *se_known_default(const char *key);
+
 /* How many choices `key` has, 0 if it is not one of these keys. */
 int         se_count(const char *key);
 
-/* Choice i, or NULL. */
+/* Choice i - the value written to the .cfg - or NULL. */
 const char *se_choice(const char *key, int i);
+
+/* What choice i reads as on screen; the value itself when no separate
+ * label exists ("3 - 1024 blocks (default)" for jit_power 3). */
+const char *se_label(const char *key, int i);
 
 /* Where `val` sits in the list, or -1 (an unknown value, e.g. hand-edited). */
 int         se_index(const char *key, const char *val);

@@ -606,6 +606,42 @@ static void run_relevance(void)
           "network_tap does not hang off network");
     CHECK(se_needs("network") == NULL, "network itself must not hang off itself");
     CHECK(se_needs("cpu") == NULL, "cpu should not depend on anything");
+
+    /* keys offered even when the .cfg has none of them */
+    int seen_network = 0, seen_stram = 0, seen_jitpow = 0;
+    for (int i = 0; se_known(i); i++) {
+        const char *k = se_known(i);
+        CHECK(se_known_default(k) != NULL, "%s is offered with no default", k);
+        if (se_count(k))
+            CHECK(se_index(k, se_known_default(k)) >= 0,
+                  "%s defaults to \"%s\", which is not in its own list",
+                  k, se_known_default(k));
+        seen_network |= !strcmp(k, "network");
+        seen_stram   |= !strcmp(k, "stram_size");
+        seen_jitpow  |= !strcmp(k, "jit_power");
+    }
+    CHECK(seen_network, "network cannot be added to a section that lacks it");
+    CHECK(seen_stram, "stram_size is not offered");
+    CHECK(seen_jitpow, "jit_power is not offered");
+
+    /* jit_power: 0 disabled through 6, with readable labels */
+    CHECK(se_count("jit_power") == 7, "jit_power has %d choices, wanted 7",
+          se_count("jit_power"));
+    CHECK(!strcmp(se_choice("jit_power", 0), "0"), "jit_power 0 is not first");
+    CHECK(strstr(se_label("jit_power", 0), "disabled") != NULL,
+          "jit_power 0 does not say disabled: \"%s\"", se_label("jit_power", 0));
+    CHECK(strstr(se_label("jit_power", 3), "1024") != NULL,
+          "jit_power 3 should name the 1024 default");
+    CHECK(!strcmp(se_choice("jit_power", 6), "6"), "jit_power stops short of 6");
+
+    /* stram_size: the real bank combinations, never 0K */
+    CHECK(se_count("stram_size") == 6, "stram_size has %d choices",
+          se_count("stram_size"));
+    for (int i = 0; i < se_count("stram_size"); i++) {
+        const char *v = se_choice("stram_size", i);
+        CHECK(strcmp(v, "0") && strcmp(v, "0K"), "stram_size offers %s", v);
+    }
+    CHECK(se_index("stram_size", "4M") == 5, "stram_size 4M not last");
 }
 
 int main(void)
