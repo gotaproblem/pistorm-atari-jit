@@ -16,6 +16,7 @@
 #include "setup_page.h"
 #include "setup_input.h"
 #include "setup_cfg.h"
+#include "setup_enums.h"
 
 #define MAX_ROWS   96
 
@@ -35,6 +36,8 @@ struct state {
     char sec[SC_SEC_LEN];        /* section being edited / booted */
     int  secs;                   /* countdown, -1 once stopped */
     int  editing;
+    int  choosing;               /* picking from a list of known values */
+    int  choice;
     char edit[SC_LINE_LEN];
     char msg[64];
 };
@@ -361,9 +364,11 @@ static void draw(struct ss_screen *ss, const struct state *st)
 
     /* the help, centred, directly under the title bar */
     {
-        const char *help = st->editing ?
-            "type a value   Enter accept   Esc cancel" :
-            "Up/Down move   Left/Right pick   Enter toggle or edit   Esc/X leave";
+        const char *help =
+            st->choosing ? "Up/Down choose   Enter accept   Esc cancel" :
+            st->editing  ? "type a value   Enter accept   Esc cancel" :
+            "Up/Down move   Left/Right pick   Enter toggle, choose or edit"
+            "   Esc/X leave";
         int at = (SS_COLS - (int)strlen(help)) / 2;
         ss_puts(ss, at < 0 ? 0 : at, ROW_HELP, help, ink, paper);
     }
@@ -390,7 +395,12 @@ static void draw(struct ss_screen *ss, const struct state *st)
             const char *val = sc_get(&st->cfg, st->sec, key);
             int on = st->sel == fk + k;
             char vbuf[SC_LINE_LEN];
-            if (on && st->editing)
+            if (on && st->choosing) {
+                const char *c = se_choice(key, st->choice);
+                snprintf(line, sizeof line, "%-20.20s %d/%d  %-40.40s",
+                         sp_row_label(key, val), st->choice + 1,
+                         se_count(key), c ? c : "");
+            } else if (on && st->editing)
                 snprintf(line, sizeof line, "%-20.20s %-48.48s",
                          sp_row_label(key, val), st->edit);
             else
@@ -513,7 +523,28 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
         if (e.key != SI_NONE && st.secs > 0)
             st.secs = -1;                      /* any key stops the countdown */
 
-        if (st.editing) {
+        if (st.choosing) {
+            const char *key = st.row[st.sel].text;
+            int n = se_count(key);
+            switch (e.key) {
+            case SI_UP:    st.choice = (st.choice + n - 1) % n; break;
+            case SI_DOWN:  st.choice = (st.choice + 1) % n;     break;
+            case SI_ENTER: {
+                const char *c = se_choice(key, st.choice);
+                if (c && sc_set(&st.cfg, st.sec, key, c) == 0)
+                    snprintf(st.msg, sizeof st.msg, "%.20s = %.35s",
+                             sp_row_label(key, c), c);
+                st.choosing = 0;
+                break;
+            }
+            case SI_ESC:   st.choosing = 0; st.msg[0] = '\0'; break;
+            case SI_F10:
+                st.choosing = 0;
+                snprintf(chosen, chosen_len, "%s", st.sec);
+                return SP_QUIT;
+            default: break;
+            }
+        } else if (st.editing) {
             unsigned long n = strlen(st.edit);
             switch (e.key) {
             case SI_CHAR:
@@ -553,6 +584,15 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     st.msg[0] = '\0';
                     break;
                 case ROW_KEY: {
+                    const char *kk = st.row[st.sel].text;
+                    if (se_count(kk)) {     /* a known set of values */
+                        const char *v = sc_get(&st.cfg, st.sec, kk);
+                        int at = se_index(kk, v ? v : "");
+                        st.choice = at < 0 ? 0 : at;
+                        st.choosing = 1;
+                        st.msg[0] = '\0';
+                        break;
+                    }
                     if (toggle_switch(&st))
                         break;              /* a switch flips, not types */
                     const char *k = st.row[st.sel].text;

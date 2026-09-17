@@ -14,6 +14,7 @@
 #include "setup_input.h"
 #include "setup_cfg.h"
 #include "setup_page.h"
+#include "setup_enums.h"
 #include <linux/input.h>
 
 uint8_t fc;
@@ -475,6 +476,71 @@ static void run_labels(void)
                   "/home/pistorm"), "a bare hostfs path was mangled");
 }
 
+/* the keys with a known set of values: every choice must be one the
+ * emulator's own parser accepts, and the current value must be found */
+static void run_enums(void)
+{
+    printf("value lists:\n");
+    CHECK(se_count("cpu") == 6, "cpu has %d choices", se_count("cpu"));
+    CHECK(se_index("cpu", "68040") == 4, "68040 not found in the cpu list");
+    CHECK(se_index("cpu", "68030") == 3, "68030 not found in the cpu list");
+    CHECK(se_index("cpu", "68070") == -1, "an invented cpu was accepted");
+    CHECK(!strcmp(se_choice("cpu", 0), "68000"), "the cpu list starts wrong");
+    CHECK(se_choice("cpu", 6) == NULL, "the cpu list runs past its end");
+    CHECK(se_choice("cpu", -1) == NULL, "a negative index returned a value");
+
+    CHECK(se_index("machine", "ste") == 1, "machine ste not found");
+    CHECK(se_index("shifter", "ST") == 0, "shifter should ignore case");
+    CHECK(se_index("blitter", "real") == 2, "blitter real not found");
+    CHECK(se_index("monitor", "auto") == 0, "monitor auto not found");
+    CHECK(se_index("vga", "ET4000AX FVDI") == 0, "the vga pair was not found");
+    CHECK(se_index("jit_cache", "16384") == 3, "jit_cache 16384 not found");
+    CHECK(se_index("ttram", "128M") == 3, "ttram 128M not found");
+
+    /* spellings the parser accepts for the same choice, including a bare
+     * key: `blitter` alone is enabled, `ttram` alone is 128M */
+    CHECK(se_index("blitter", "") == se_index("blitter", "enabled"),
+          "a bare blitter is not read as enabled");
+    CHECK(se_index("blitter", "off") == se_index("blitter", "disabled"),
+          "blitter off is not read as disabled");
+    CHECK(se_index("ttram", "") == se_index("ttram", "128M"),
+          "a bare ttram is not read as 128M");
+    CHECK(se_index("ttram", "enabled") == se_index("ttram", "128M"),
+          "ttram enabled is not read as 128M");
+    CHECK(se_index("monitor", "color") == se_index("monitor", "colour"),
+          "monitor color/colour disagree");
+    CHECK(se_index("monitor", "sm124") == se_index("monitor", "mono"),
+          "monitor sm124 is not mono");
+    CHECK(se_index("machine", "mst") == se_index("machine", "megast"),
+          "machine mst is not megast");
+
+    CHECK(se_count("hostfs") == 0, "hostfs should be free text");
+    CHECK(se_count("rom") == 0, "rom should be free text");
+    CHECK(se_count("fps") == 0, "fps should be a typed number");
+
+    /* every value in the default config must be in its list, or the page
+     * would open the chooser on choice 1 and silently offer to change it */
+    static struct sc_cfg c;
+    if (sc_load(&c, "configs/psctrl.cfg.default") == 0 ||
+        sc_load(&c, "../configs/psctrl.cfg.default") == 0) {
+        static const char *secs[2] = { "gem", "apj-os" };
+        for (int s2 = 0; s2 < 2; s2++) {
+            char keys[64][SC_KEY_LEN];
+            int nk = sc_keys(&c, secs[s2], keys, 64);
+            for (int i = 0; i < nk; i++) {
+                if (!se_count(keys[i]))
+                    continue;
+                const char *v = sc_get(&c, secs[s2], keys[i]);
+                CHECK(se_index(keys[i], v) >= 0,
+                      "[%s] %s = \"%s\" is not in its own list",
+                      secs[s2], keys[i], v ? v : "(null)");
+            }
+        }
+    } else {
+        printf("  (psctrl.cfg.default not found from here - skipped)\n");
+    }
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -489,6 +555,7 @@ int main(void)
     run_locate();
     run_switches();
     run_labels();
+    run_enums();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;

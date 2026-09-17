@@ -12,6 +12,6 @@ out=${TMPDIR:-/tmp}/setup_harness
 [ "$SAN" = 1 ] && san="-fsanitize=address,undefined" || san=""
 # shellcheck disable=SC2086
 ${CC:-cc} -std=gnu11 -Wall -Wextra -O1 $san \
-    -I"$here/.." -I"$here/../../../.." "$here/harness.c" "$here/../shifter_setup.c" "$here/../setup_input.c" "$here/../setup_cfg.c" "$here/../setup_page.c" \
+    -I"$here/.." -I"$here/../../../.." "$here/harness.c" "$here/../shifter_setup.c" "$here/../setup_input.c" "$here/../setup_cfg.c" "$here/../setup_enums.c" "$here/../setup_page.c" \
     -o "$out"
 "$out"

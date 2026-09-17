@@ -432,6 +432,7 @@ ataritest: ataritest.c gpio/ps_protocol.c gpio/bus_lock.c
 SETUP_SRC = platforms/atari/setup/shifter_setup.c \
             platforms/atari/setup/setup_input.c \
             platforms/atari/setup/setup_cfg.c \
+            platforms/atari/setup/setup_enums.c \
             platforms/atari/setup/setup_page.c
 setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup
