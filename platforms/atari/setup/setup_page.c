@@ -17,7 +17,6 @@
 #include "setup_cfg.h"
 
 #define MAX_ROWS   96
-#define LIST_ROWS  12            /* visible settings rows */
 
 enum row_kind { ROW_PICK, ROW_KEY, ROW_SAVE, ROW_BOOT };
 
@@ -28,6 +27,7 @@ struct row {
 
 struct state {
     struct sc_cfg cfg;
+    int  list_rows;              /* settings rows that fit, see layout() */
     struct row    row[MAX_ROWS];
     int  nrow, nsec;
     int  sel, top;               /* selection, first visible settings row */
@@ -94,6 +94,35 @@ static void build_rows(struct state *st)
         st->sel = st->nrow - 1;
 }
 
+/*
+ * Layout, 25 rows:
+ *   0  title bar: name, the .cfg path, and the clock
+ *   1  the movement/action help, centred
+ *   2  blank
+ *   3  "Boot:"  then one row per section
+ *      blank
+ *      "[section] settings:"  with "n-m of k" on the right
+ *      the settings list - whatever is left
+ *      blank
+ *      Save / Boot now
+ *  24  message, or the countdown
+ */
+#define ROW_HELP      1
+#define ROW_BOOT_HDR  3
+#define FOOTER_ROWS   3          /* blank, actions, message */
+
+static int list_top_row(const struct state *st)
+{
+    return ROW_BOOT_HDR + 1 + st->nsec + 1 + 1;
+}
+
+static void layout(struct state *st)
+{
+    st->list_rows = SS_ROWS - list_top_row(st) - FOOTER_ROWS;
+    if (st->list_rows < 1)
+        st->list_rows = 1;
+}
+
 /* first and last settings row, for scrolling */
 static int first_key_row(const struct state *st) { return st->nsec; }
 static int n_key_rows(const struct state *st)    { return st->nrow - st->nsec - 2; }
@@ -107,9 +136,9 @@ static void scroll_to_sel(struct state *st)
     }
     if (i < st->top)
         st->top = i;
-    if (i >= st->top + LIST_ROWS)
-        st->top = i - LIST_ROWS + 1;
-    int max = n_key_rows(st) - LIST_ROWS;
+    if (i >= st->top + st->list_rows)
+        st->top = i - st->list_rows + 1;
+    int max = n_key_rows(st) - st->list_rows;
     if (max < 0) max = 0;
     if (st->top > max) st->top = max;
 }
@@ -129,7 +158,32 @@ static void draw(struct ss_screen *ss, const struct state *st)
     stamp_now(stamp, sizeof stamp);
     ss_puts(ss, SS_COLS - 2 - (int)strlen(stamp), 0, stamp, paper, ink);
 
-    row = 2;
+    /* the file being edited, between the name and the clock; a long path
+     * keeps its tail, which is the part that identifies it */
+    {
+        int at = 2 + 20 + 2;
+        int room = SS_COLS - 2 - (int)strlen(stamp) - 1 - at;
+        const char *p = st->cfg.path;
+        int len = (int)strlen(p);
+        if (room > 4) {
+            if (len > room)
+                snprintf(line, sizeof line, "...%s", p + len - (room - 3));
+            else
+                snprintf(line, sizeof line, "%s", p);
+            ss_puts(ss, at, 0, line, paper, ink);
+        }
+    }
+
+    /* the help, centred, directly under the title bar */
+    {
+        const char *help = st->editing ?
+            "type a value   Enter accept   Esc cancel" :
+            "Up/Down move   Left/Right pick   Enter pick or edit   Esc/X leave";
+        int at = (SS_COLS - (int)strlen(help)) / 2;
+        ss_puts(ss, at < 0 ? 0 : at, ROW_HELP, help, ink, paper);
+    }
+
+    row = ROW_BOOT_HDR;
     ss_puts(ss, 2, row++, "Boot:", ink, paper);
     for (int i = 0; i < st->nsec; i++) {
         int on = st->sel == i;
@@ -143,7 +197,7 @@ static void draw(struct ss_screen *ss, const struct state *st)
     ss_puts(ss, 2, row++, line, ink, paper);
 
     int fk = first_key_row(st), nk = n_key_rows(st);
-    for (int i = 0; i < LIST_ROWS; i++) {
+    for (int i = 0; i < st->list_rows; i++) {
         int k = st->top + i;
         ss_clear_row(ss, row, paper);
         if (k < nk) {
@@ -159,14 +213,14 @@ static void draw(struct ss_screen *ss, const struct state *st)
         }
         row++;
     }
-    if (nk > LIST_ROWS) {
+    if (nk > st->list_rows) {
         snprintf(line, sizeof line, "%d-%d of %d", st->top + 1,
-                 st->top + LIST_ROWS > nk ? nk : st->top + LIST_ROWS, nk);
-        ss_puts(ss, SS_COLS - 2 - (int)strlen(line), row - LIST_ROWS - 1,
+                 st->top + st->list_rows > nk ? nk : st->top + st->list_rows, nk);
+        ss_puts(ss, SS_COLS - 2 - (int)strlen(line), list_top_row(st) - 1,
                 line, ink, paper);
     }
 
-    row++;
+    row = SS_ROWS - 2;
     for (int i = st->nrow - 2; i < st->nrow; i++) {
         int on = st->sel == i;
         snprintf(line, sizeof line, " %-14s",
@@ -176,22 +230,16 @@ static void draw(struct ss_screen *ss, const struct state *st)
                 on ? paper : ink, on ? hi : paper);
     }
 
-    snprintf(line, sizeof line, "%.50s%s", st->cfg.path,
-             st->cfg.dirty ? "   (unsaved changes)" : "");
-    ss_puts(ss, 2, SS_ROWS - 4, line, ink, paper);
-    ss_puts(ss, 2, SS_ROWS - 3, st->editing ?
-            "type a value   Enter accept   Esc cancel" :
-            "Up/Down move  Enter pick or edit  Esc/X leave", ink, paper);
-
-    ss_clear_row(ss, SS_ROWS - 2, paper);
+    ss_clear_row(ss, SS_ROWS - 1, paper);
     if (st->msg[0])
-        ss_puts(ss, 2, SS_ROWS - 2, st->msg, ink, paper);
-    else if (st->secs > 0) {
-        snprintf(line, sizeof line, "Booting %s in %d...", st->sec, st->secs);
-        ss_puts(ss, 2, SS_ROWS - 2, line, ink, paper);
-    }
+        snprintf(line, sizeof line, "%.48s", st->msg);
+    else if (st->secs > 0)
+        snprintf(line, sizeof line, "Booting %.15s in %d...", st->sec, st->secs);
     else
-        ss_puts(ss, 2, SS_ROWS - 2, "countdown stopped", ink, paper);
+        snprintf(line, sizeof line, "countdown stopped");
+    ss_puts(ss, 2, SS_ROWS - 1, line, ink, paper);
+    if (st->cfg.dirty)
+        ss_puts(ss, SS_COLS - 17, SS_ROWS - 1, "unsaved changes", hi, paper);
 }
 
 /* ------------------------------------------------------------------ */
@@ -223,6 +271,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
     st.secs = sc_get_int(&st.cfg, "psctrl", "countdown", 5);
 
     build_rows(&st);
+    layout(&st);
     for (int i = 0; i < st.nsec; i++)          /* start on the boot choice */
         if (!strcmp(st.row[i].text, st.sec))
             st.sel = i;
@@ -230,6 +279,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
     double tick = now_ms();
     for (;;) {
         build_rows(&st);
+        layout(&st);
         scroll_to_sel(&st);
         draw(ss, &st);
         ss_flush(ss);
