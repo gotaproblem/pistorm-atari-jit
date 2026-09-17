@@ -155,6 +155,14 @@ extern "C" {
 #endif
 
 struct emulator_config *load_config_file(char *filename);
+
+/* psctrl.cfg holds one section per machine ([gem], [apj-os], ...) plus
+ * the setup page's own [psctrl] block. This loads ONE of them: lines in
+ * any other section are skipped, and so are the section headers.
+ * `section` NULL behaves exactly as load_config_file() always has, for a
+ * flat .cfg with no headers. */
+struct emulator_config *load_config_file_section(char *filename,
+                                                 const char *section);
 void free_config_file(struct emulator_config *cfg);
 
 void emulator_config_set_current(const struct emulator_config *cfg);

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <sys/mman.h>
 #include "config_file.h"
@@ -568,7 +569,27 @@ void get_next_string(char *str, char *str_out, int *strpos, char separator) {
 }
 
 
+/* "[gem]" -> "gem" in `out`, else 0. Leading blanks allowed. */
+static int config_section_header(const char *line, char *out, size_t n)
+{
+  while (*line == ' ' || *line == '\t')
+    line++;
+  if (*line != '[')
+    return 0;
+  line++;
+  size_t i = 0;
+  while (*line && *line != ']' && i + 1 < n)
+    out[i++] = (char)tolower((unsigned char)*line++);
+  out[i] = '\0';
+  return *line == ']' && i > 0;
+}
+
 struct emulator_config *load_config_file(char *filename) {
+  return load_config_file_section(filename, NULL);
+}
+
+struct emulator_config *load_config_file_section(char *filename,
+                                                 const char *want_section) {
   FILE *in = fopen(filename, "rb");
 
   snprintf(g_cfg_path, sizeof(g_cfg_path), "%s", filename ? filename : "");
@@ -603,6 +624,9 @@ struct emulator_config *load_config_file(char *filename) {
   cfg->native_hdmi = false;   /* default off: shifter is the game display;
                                  HDMI shows the splash unless enabled */
   
+  char cur_section[32];
+  memset(cur_section, 0, sizeof cur_section);
+
   while (!feof(in)) 
   {
     int str_pos = 0;
@@ -611,6 +635,19 @@ struct emulator_config *load_config_file(char *filename) {
 
     if (strlen(parse_line) <= 2 || parse_line[0] == '#' || parse_line[0] == '/')
       goto skip_line;
+
+    /* psctrl.cfg sections: remember which one we are in, and skip every
+     * line outside the one asked for (the [psctrl] block included). */
+    {
+      char sec_name[32];
+      if (config_section_header(parse_line, sec_name, sizeof sec_name)) {
+        memset(cur_section, 0, sizeof cur_section);
+        strncpy(cur_section, sec_name, sizeof cur_section - 1);
+        goto skip_line;
+      }
+      if (want_section && strcasecmp(cur_section, want_section) != 0)
+        goto skip_line;
+    }
 
     trim_whitespace(parse_line);
 

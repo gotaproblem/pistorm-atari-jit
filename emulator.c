@@ -22,6 +22,9 @@
 #include "platforms/atari/et4000/et4000.h"
 // #include "platforms/atari/et4000/native_vga.h"
 #include "config_file/config_file.h"
+#include "platforms/atari/setup/setup_cfg.h"
+#include "platforms/atari/setup/setup_page.h"
+#include "platforms/atari/setup/setup_input.h"
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
@@ -1292,6 +1295,7 @@ int main (int argc, char *argv[])
   pthread_t rtg_tid, e4k_tid, cpu_tid, flush_tid, ipl_tid, vbl_id;
   time_t t;
   char config_file[256];
+  int  no_setup = 0;              /* --no-setup: never show the setup page */
 
   /* Claim the bus before anything touches the GPIO (gpio/bus_lock.c).
    * Two processes driving the same pins mid-cycle is not a cosmetic
@@ -1384,10 +1388,31 @@ int main (int argc, char *argv[])
    * read command line arguments to determine config file to load
    */
 
-  strcpy (config_file, "../configs/atari.cfg"); // default file
+  /* psctrl.cfg is found the way INSTALL-README section 2 lays the tree
+   * out (see sc_locate), not through $HOME - under pistorm.service and
+   * under sudo that is /root. An explicit --config still wins, and a
+   * flat .cfg with no [sections] loads exactly as it always did. */
+  {
+    char located[512];
+    int made = 0;
+    if (sc_locate(located, sizeof located, &made) == 0) {
+      memset(config_file, 0, sizeof(config_file));
+      strncpy(config_file, located, sizeof(config_file) - 1);
+      if (made)
+        printf("[CFG] created %s from the shipped default\n", config_file);
+    } else {
+      strcpy (config_file, "../configs/atari.cfg"); // pre-psctrl.cfg tree
+    }
+  }
 
   for (g = 1; g < argc; g++)
   {
+    if (strcmp(argv[g], "--no-setup") == 0)
+    {
+      no_setup = 1;
+      continue;
+    }
+
     if (strcmp(argv[g], "--config") == 0)
     {
       if (g + 1 >= argc)
@@ -1417,11 +1442,64 @@ int main (int argc, char *argv[])
     }
   }
 
+  /*
+   * The pre-boot setup page. The board is reset and the 68k is halted at
+   * this point and no .cfg has been read yet, which is exactly what the
+   * page needs: it drives the real shifter itself and edits the file.
+   *
+   * It runs when psctrl.cfg has sections. The section it returns is the
+   * one loaded below. --no-setup (or [psctrl] countdown 0) skips the page
+   * and boots [psctrl] boot straight away; a flat .cfg has no sections
+   * and no page at all.
+   */
+  char boot_section[32];
+  int  have_sections = 0;
+  memset(boot_section, 0, sizeof boot_section);
+  {
+    static struct sc_cfg probe;
+    char secs[8][SC_SEC_LEN];
+    if (sc_load(&probe, config_file) == 0 &&
+        sc_sections(&probe, secs, 8) > 0) {
+      const char *last = sc_get(&probe, "psctrl", "boot");
+      int countdown = sc_get_int(&probe, "psctrl", "countdown", 5);
+      have_sections = 1;
+      for (int i = 0; i < 8 && !boot_section[0]; i++)
+        if (strcasecmp(secs[i], "psctrl"))
+          strncpy(boot_section, secs[i], sizeof boot_section - 1);
+      /* [psctrl] is the page's own block, never a machine: booting it
+       * would feed countdown/boot to the .cfg parser and nothing else. */
+      if (last && *last && strcasecmp(last, "psctrl"))
+        strncpy(boot_section, last, sizeof boot_section - 1);
+
+      if (!no_setup && countdown > 0) {
+        static struct ss_screen scr;
+        if (ss_bringup(&scr, SS_MODE_AUTO, 1) == 0) {
+          char chosen[SC_SEC_LEN] = "";
+          si_open(1, 1);
+          enum sp_result r = sp_run(&scr, config_file, chosen, sizeof chosen);
+          si_close();
+          if (r == SP_BOOT && chosen[0])
+            strncpy(boot_section, chosen, sizeof boot_section - 1);
+          /* the page left its own memcfg, screen base and resolution in
+           * the chips; TOS re-initialises all of it, but reset first so
+           * the machine boots from a clean state either way */
+          ps_reset_state_machine();
+          ps_pulse_reset();
+          usleep(250000);
+        } else {
+          printf("[SETUP] no ST-RAM detected - skipping the setup page\n");
+        }
+      }
+      printf("[CFG] booting section [%s]\n", boot_section);
+    }
+  }
+
   /* 
    * load the config 
    */
   printf("[CFG] Loading from %s\n", config_file);
-  config = load_config_file(config_file);
+  config = have_sections ? load_config_file_section(config_file, boot_section)
+                         : load_config_file(config_file);
   if (!config)
   {
     fprintf(stderr, "[CFG] Failed to load config %s\n", config_file);

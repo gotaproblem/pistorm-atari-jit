@@ -265,6 +265,11 @@ mkdir -p "$ROOT"/roms "$ROOT"/configs "$ROOT"/atari-share \
          "$ROOT"/dkimages/fdd "$ROOT"/screendumps
 
 say "Installing default configs / EmuTOS / blank floppy (existing files kept)"
+# psctrl.cfg is the one config the emulator and the pre-boot setup page
+# both use ([psctrl] / [gem] / [apj-os]). copy_once, so your own file is
+# never overwritten. atari.cfg / master.cfg stay for now; they are only
+# read when a tree has no psctrl.cfg.
+copy_once "$HERE/configs/psctrl.cfg.default" "$ROOT/configs/psctrl.cfg"
 copy_once "$HERE/configs/atari.cfg"         "$ROOT/configs/atari.cfg"
 copy_once "$HERE/configs/master.cfg"        "$ROOT/configs/master.cfg"
 copy_once "$HERE/configs/emutos-aranym.rom" "$ROOT/roms/emutos-aranym.rom"

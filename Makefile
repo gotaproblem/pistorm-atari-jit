@@ -51,7 +51,12 @@ CFILES = config_file/config_file.c \
          platforms/atari/kbd_usb.c \
          platforms/atari/joy_usb.c \
          platforms/atari/web/psweb_client.c \
-         platforms/atari/mfp_hub.c
+         platforms/atari/mfp_hub.c \
+         platforms/atari/setup/shifter_setup.c \
+         platforms/atari/setup/setup_input.c \
+         platforms/atari/setup/setup_cfg.c \
+         platforms/atari/setup/setup_enums.c \
+         platforms/atari/setup/setup_page.c
 
 # -----------------------------------------------------------------
 # Musashi 68000 core for the STBOX game sandbox (third_party/musashi).
@@ -313,7 +318,7 @@ endif
 # lives at ./threaddep/thread.h and -I. + -Ithreaddep cover both spellings).
 # ./include resolves uae/*, newcpu.h, memory.h, options.h; . resolves cputbl.h
 # and machdep/maccess.h; -Isoftfloat for the FPU sub-library headers.
-INCLUDES = -I. -Igpio -Ithreaddep -Iinclude -Isoftfloat -Ijit -I/usr/include/libdrm -Ipcem $(SLIRP_CFLAGS)
+INCLUDES = -I. -Igpio -Ithreaddep -Iinclude -Isoftfloat -Ijit -Iplatforms/atari/setup -I/usr/include/libdrm -Ipcem $(SLIRP_CFLAGS)
 
 # Optimization is a separate variable so the big generated files can be built
 # lean. -O level affects only emulation speed, not correctness or the aarch64

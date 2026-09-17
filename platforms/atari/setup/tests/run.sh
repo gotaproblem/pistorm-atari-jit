@@ -14,4 +14,12 @@ out=${TMPDIR:-/tmp}/setup_harness
 ${CC:-cc} -std=gnu11 -Wall -Wextra -O1 $san \
     -I"$here/.." -I"$here/../../../.." "$here/harness.c" "$here/../shifter_setup.c" "$here/../setup_input.c" "$here/../setup_cfg.c" "$here/../setup_enums.c" "$here/../setup_page.c" \
     -o "$out"
+
+# the section-aware .cfg loader has its own harness (it builds the real
+# config_file.c against stubs)
+sh "$here/cfg_section_run.sh"
 "$out"
+
+# the section-aware .cfg loader has its own harness (it builds the real
+# config_file.c against stubs)
+sh "$here/cfg_section_run.sh"
