@@ -7,9 +7,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include "shifter_setup.h"
 #include "psfont8x8.h"
 #include "setup_input.h"
+#include "setup_cfg.h"
 #include <linux/input.h>
 
 uint8_t fc;
@@ -236,6 +239,97 @@ static void run_keymaps(void)
           "key name reads \"%s\"", buf);
 }
 
+/* psctrl.cfg: sections, values, and the promise that a save changes only
+ * the lines it owns. */
+static const char cfg_text[] =
+    "# a comment at the top\n"
+    "\n"
+    "[psctrl]\n"
+    "countdown 5\n"
+    "boot apj-os\n"
+    "\n"
+    "[gem]\n"
+    "cpu 68030\n"
+    "fpu\n"
+    "# keep me exactly as I am\n"
+    "rom ../roms/emutos-aranym.rom\n"
+    "\n"
+    "[apj-os]\n"
+    "cpu 68040\n"
+    "vga ET4000AX FVDI\n"
+    "hostfs S /home/pistorm/atari-share\n";
+
+static void run_cfg(void)
+{
+    static struct sc_cfg c;
+    printf("psctrl.cfg:\n");
+    CHECK(sc_load_text(&c, cfg_text) == 0, "could not parse the file");
+
+    char secs[8][SC_SEC_LEN];
+    int ns = sc_sections(&c, secs, 8);
+    CHECK(ns == 3, "found %d sections, wanted 3", ns);
+    CHECK(ns == 3 && !strcmp(secs[0], "psctrl") && !strcmp(secs[1], "gem") &&
+          !strcmp(secs[2], "apj-os"), "sections came back in the wrong order");
+
+    CHECK(sc_get_int(&c, "psctrl", "countdown", -1) == 5, "countdown wrong");
+    const char *v = sc_get(&c, "apj-os", "cpu");
+    CHECK(v && !strcmp(v, "68040"), "apj-os cpu reads \"%s\"", v ? v : "(null)");
+    v = sc_get(&c, "gem", "cpu");
+    CHECK(v && !strcmp(v, "68030"), "the two sections' cpu keys are confused");
+    v = sc_get(&c, "apj-os", "hostfs");
+    CHECK(v && !strcmp(v, "S /home/pistorm/atari-share"),
+          "a value with spaces was cut: \"%s\"", v ? v : "(null)");
+    v = sc_get(&c, "gem", "fpu");
+    CHECK(v && !*v, "a bare key should read as present and empty");
+    CHECK(sc_get(&c, "gem", "vga") == NULL, "found a key the section lacks");
+    CHECK(sc_get(&c, "nosuch", "cpu") == NULL, "found a key in no section");
+    CHECK(!c.dirty, "a fresh file is already dirty");
+
+    /* edit, add, remove */
+    CHECK(sc_set(&c, "gem", "cpu", "68000") == 0, "set failed");
+    CHECK(!strcmp(sc_get(&c, "gem", "cpu"), "68000"), "set did not take");
+    CHECK(c.dirty, "an edit did not mark the file dirty");
+    CHECK(!strcmp(sc_get(&c, "apj-os", "cpu"), "68040"),
+          "editing [gem] changed [apj-os]");
+    CHECK(sc_set(&c, "gem", "fps", "50") == 0, "add failed");
+    CHECK(!strcmp(sc_get(&c, "gem", "fps"), "50"), "added key not readable");
+    CHECK(sc_set(&c, "gem", "fpu", NULL) == 0, "remove failed");
+    CHECK(sc_get(&c, "gem", "fpu") == NULL, "removed key still there");
+    CHECK(sc_set(&c, "stbox", "stbox_tos", "../roms/tos104.img") == 0,
+          "new section failed");
+    CHECK(!strcmp(sc_get(&c, "stbox", "stbox_tos"), "../roms/tos104.img"),
+          "key in a new section not readable");
+
+    /* save, reload, and diff against the original */
+    char path[256];
+    snprintf(path, sizeof path, "%s/sc_harness_%d.cfg",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+    CHECK(sc_save(&c, path) == 0, "save failed");
+    CHECK(!c.dirty, "still dirty after a save");
+
+    static struct sc_cfg r;
+    CHECK(sc_load(&r, path) == 0, "could not read the file back");
+    CHECK(!strcmp(sc_get(&r, "gem", "cpu"), "68000"), "edit did not survive");
+    CHECK(!strcmp(sc_get(&r, "gem", "fps"), "50"), "addition did not survive");
+    CHECK(sc_get(&r, "gem", "fpu") == NULL, "removal did not survive");
+    CHECK(!strcmp(sc_get(&r, "apj-os", "hostfs"), "S /home/pistorm/atari-share"),
+          "an untouched value changed");
+
+    int comment = 0, top = 0;
+    for (int i = 0; i < r.n; i++) {
+        if (!strcmp(r.line[i].text, "# keep me exactly as I am")) comment++;
+        if (!strcmp(r.line[i].text, "# a comment at the top")) top++;
+    }
+    CHECK(comment == 1 && top == 1, "comments were lost or duplicated");
+
+    char bak[300];
+    snprintf(bak, sizeof bak, "%s.bak", path);
+    /* first save had no previous file, so no .bak yet; a second one makes it */
+    CHECK(sc_save(&c, path) == 0, "second save failed");
+    CHECK(access(bak, F_OK) == 0, "no .bak after overwriting a file");
+    unlink(path); unlink(bak);
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -246,6 +340,7 @@ int main(void)
     CHECK(s.mode == SS_MODE_COLOUR, "colour monitor detected as mono");
     run_mode(SS_MODE_MONO, "forced mono");
     run_keymaps();
+    run_cfg();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;

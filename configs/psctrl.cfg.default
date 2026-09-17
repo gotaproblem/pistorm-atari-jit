@@ -1,0 +1,69 @@
+# psctrl.cfg - the one PiSTorm configuration file.
+#
+# Three sections. The pre-boot setup page reads and writes this file, and
+# so does PSCTRL.ACC inside APJ-OS; see pistorm-setup-page-design.md.
+#
+#   [psctrl]   the setup page's own keys
+#   [gem]      the plain GEM machine (TOS/EmuTOS desktop, ST video)
+#   [apj-os]   the APJ-OS machine (FreeMiNT + XaAES + fVDI, ET4000 on HDMI)
+#
+# The emulator loads ONE section, whichever the setup page picked. Each
+# section is complete on its own: nothing is inherited from another.
+#
+# This file in the source tree is the DEFAULT. install-full.sh copies it
+# to ~/configs/psctrl.cfg if there is not one there already, and never
+# overwrites yours. Comments and ordering survive a save: the writer edits
+# the lines it owns and copies everything else through byte for byte.
+#
+# Replaces the old atari.cfg / apj-os.cfg / master.cfg / autoboot.cfg.
+
+[psctrl]
+# Seconds the setup page waits before booting the last choice. 0 boots
+# straight away and the page only opens on the key sequence.
+countdown 5
+# The section booted last, and the one the countdown will boot.
+boot apj-os
+
+[gem]
+cpu 68030
+fpu
+ym2149
+blitter
+ttram 128M
+rom ../roms/emutos-aranym.rom
+ide
+hdd ../dkimages/dk0.img
+network disabled
+network_backend tap
+network_tap tap0
+network_base 0x00F10000
+network_irq 4
+network_host_ip 192.168.50.1
+network_atari_ip 192.168.50.2
+network_netmask 255.255.255.0
+
+[apj-os]
+cpu 68040
+fpu
+vga ET4000AX FVDI
+fps 60
+native_hdmi enabled
+kbd usb
+usb gamepad
+machine ste
+ym2149
+ttram 128M
+jit_cache 16384
+hostfs S /home/pistorm/atari-share
+rom ../roms/emutos-aranym.rom
+ide
+hdd ../dkimages/apj-os.img
+fdd ../dkimages/fdd/720K.st
+network disabled
+network_backend tap
+network_tap tap0
+network_base 0x00F10000
+network_irq 4
+network_host_ip 192.168.50.1
+network_atari_ip 192.168.50.2
+network_netmask 255.255.255.0

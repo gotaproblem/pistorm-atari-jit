@@ -6,6 +6,11 @@
  *   sudo systemctl stop pistorm     (the emulator must not own the bus)
  *   ./setupvtest [--mono|--colour] [--60hz] [--hold SECONDS] [--pattern]
  *                [--no-st-kbd] [--input-debug] [--input-only]
+ *                [--cfg PATH] [--timings]
+ *
+ * By default it brings the screen up and runs the real setup page against
+ * ~/configs/psctrl.cfg (or --cfg). --timings runs the bus measurements and
+ * the layout mock-up instead, --pattern leaves the step 1 test card up.
  *
  * Output is a short report on the console; the pattern stays on the ST
  * monitor until the hold ends (default: until Enter).
@@ -21,6 +26,7 @@
 #include "gpio/bus_lock.h"
 #include "shifter_setup.h"
 #include "setup_input.h"
+#include "setup_page.h"
 
 static struct ss_screen scr;
 
@@ -159,7 +165,8 @@ int main(int argc, char **argv)
 {
     enum ss_mode force = SS_MODE_AUTO;
     int hz50 = 1, hold = -1, pattern_only = 0, no_st_kbd = 0;
-    int input_debug = 0, input_only = 0;
+    int input_debug = 0, input_only = 0, timings = 0;
+    const char *cfg = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mono"))        force = SS_MODE_MONO;
@@ -170,6 +177,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-st-kbd")) no_st_kbd = 1;
         else if (!strcmp(argv[i], "--input-debug")) input_debug = 1;
         else if (!strcmp(argv[i], "--input-only")) input_only = input_debug = 1;
+        else if (!strcmp(argv[i], "--timings")) timings = 1;
+        else if (!strcmp(argv[i], "--cfg") && i + 1 < argc) cfg = argv[++i];
         else {
             fprintf(stderr, "usage: %s [--mono|--colour] [--60hz] [--hold SECONDS]"
                             " [--pattern] [--no-st-kbd]\n"
@@ -223,6 +232,35 @@ int main(int argc, char **argv)
     printf("monitor  GPIP7=%d -> %s%s, %s\n", scr.gpip7,
            scr.mode == SS_MODE_MONO ? "mono 640x400" : "colour 640x200",
            force ? " (forced)" : "", hz50 ? "50 Hz" : "60 Hz");
+
+    if (!timings && !pattern_only) {
+        char path[512], chosen[32] = "";
+        if (!cfg) {
+            const char *home = getenv("HOME");
+            snprintf(path, sizeof path, "%s/configs/psctrl.cfg",
+                     home ? home : "/home/pistorm");
+            cfg = path;
+        }
+        int n = si_open(!no_st_kbd, 1);
+        printf("input: %d source(s) - ST keyboard %s, %d USB keyboard(s), "
+               "%d gamepad(s)\n", n, si_have_st() ? "yes" : "no",
+               si_usb_keyboards(), si_gamepads());
+        printf("config: %s\n", cfg);
+
+        enum sp_result r = sp_run(&scr, cfg, chosen, sizeof chosen);
+        si_close();
+        switch (r) {
+        case SP_BOOT:
+            printf("boot: [%s]\n", chosen);
+            return 0;
+        case SP_QUIT:
+            printf("left without booting (section was [%s])\n", chosen);
+            return 0;
+        default:
+            printf("could not read %s\n", cfg);
+            return 1;
+        }
+    }
 
     static const struct { enum ss_width w; const char *name; } widths[] = {
         { SS_W8, "8-bit " }, { SS_W16, "16-bit" }, { SS_W32, "32-bit" },
