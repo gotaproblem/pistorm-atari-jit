@@ -14,6 +14,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/select.h>
 
 #include "gpio/ps_protocol.h"
 #include "gpio/bus_lock.h"
@@ -58,6 +59,19 @@ static void pattern(struct ss_screen *ss, int phase)
                 ss_fill(ss, x, y, 16, cell, ink);
 }
 
+/* Day, date and time from the Pi, right-aligned in the title bar. */
+static void ss_clock(struct ss_screen *ss)
+{
+    char stamp[32];
+    time_t now = time(NULL);
+    struct tm tm;
+
+    localtime_r(&now, &tm);
+    strftime(stamp, sizeof stamp, "%a %d %b %Y  %H:%M:%S", &tm);
+    ss_puts(ss, SS_COLS - 2 - (int)strlen(stamp), 0, stamp, 0,
+            ss->planes == 1 ? 1 : 3);
+}
+
 /* A mock-up of the setup page, to check the 80x25 grid and the font. */
 static void text_page(struct ss_screen *ss, int secs)
 {
@@ -66,9 +80,7 @@ static void text_page(struct ss_screen *ss, int secs)
 
     ss_clear(ss, paper);
     ss_clear_row(ss, 0, ink);
-    ss_puts(ss, 2, 0, "PiSTorm setup", paper, ink);
-    ss_puts(ss, SS_COLS - 22, 0, ss->planes == 1 ? "640x400 mono  "
-                                                 : "640x200 colour", paper, ink);
+    ss_puts(ss, 2, 0, "PSCTRL PiSTorm Setup", paper, ink);
 
     for (int c = 0; c < SS_COLS; c++)
         line[c] = (char)('0' + c % 10);
@@ -87,10 +99,15 @@ static void text_page(struct ss_screen *ss, int secs)
     ss_puts(ss, 4, 12, "TT-RAM              128 M    boot", ink, paper);
     ss_puts(ss, 4, 13, "Blitter bus cost    instant  (GEM only)", hi, paper);
 
+    snprintf(line, sizeof line, "%s, %s", ss->planes == 1 ? "640x400 mono"
+                                                          : "640x200 colour",
+             ss->hz50 ? "50 Hz" : "60 Hz");
+    ss_puts(ss, 2, SS_ROWS - 4, line, ink, paper);
     ss_puts(ss, 2, SS_ROWS - 3, "Up/Down select   Enter edit   B boot", ink, paper);
     snprintf(line, sizeof line, "Booting GEM in %d...", secs);
     ss_clear_row(ss, SS_ROWS - 2, paper);
     ss_puts(ss, 2, SS_ROWS - 2, line, ink, paper);
+    ss_clock(ss);
 }
 
 static void countdown_block(struct ss_screen *ss, int n)
@@ -192,11 +209,18 @@ int main(int argc, char **argv)
     printf("  verify: %u bad bytes\n", ss_verify(&scr));
 
 hold_it:
-    if (hold < 0) {
-        printf("\npattern is on the ST monitor - press Enter to finish\n");
-        getchar();
-    } else {
-        sleep((unsigned)hold);
+    printf("\nthe page is on the ST monitor, clock ticking - press Enter to finish\n");
+    for (double t_end = now_ms() + (hold < 0 ? 1e12 : hold * 1000.0);
+         now_ms() < t_end; ) {
+        struct timeval tv = { 0, 250000 };
+        fd_set r;
+        FD_ZERO(&r); FD_SET(0, &r);
+        if (select(1, &r, NULL, NULL, &tv) > 0)
+            break;
+        if (!pattern_only) {
+            ss_clock(&scr);
+            ss_flush(&scr);
+        }
     }
     return 0;
 }

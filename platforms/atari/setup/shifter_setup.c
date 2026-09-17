@@ -88,6 +88,7 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     /* base: ST has high + mid bytes only; low byte is always 0 */
     ps_write_8(REG_VBASE_HI, (SS_SCREEN_BASE >> 16) & 0xFF);
     ps_write_8(REG_VBASE_MI, (SS_SCREEN_BASE >> 8) & 0xFF);
+    ss->hz50 = hz50 ? 1 : 0;
     ps_write_8(REG_SYNC, hz50 ? 0x02 : 0x00);   /* bit 1: 1 = 50 Hz */
 
     /* TOS convention: colour 0 = paper $777. Mono reads bit 0 of it. */

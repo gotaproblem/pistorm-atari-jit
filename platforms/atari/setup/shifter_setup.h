@@ -30,6 +30,7 @@ struct ss_screen {
     int          width, height; /* 640x400 or 640x200                     */
     int          planes;        /* 1 or 2                                 */
     int          gpip7;         /* raw MFP GPIP bit 7 (0 = mono monitor)  */
+    int          hz50;          /* 1 = 50 Hz, 0 = 60 Hz (colour only)     */
     uint32_t     bank0, bank1;  /* probed bytes (0 = absent)              */
     uint8_t      memcfg;        /* value written to $FF8001               */
     uint8_t      shadow[SS_SCREEN_BYTES]; /* what the page wants          */
