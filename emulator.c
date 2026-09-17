@@ -25,6 +25,7 @@
 #include "platforms/atari/setup/setup_cfg.h"
 #include "platforms/atari/setup/setup_page.h"
 #include "platforms/atari/setup/setup_input.h"
+#include "platforms/atari/setup/setup_hdmi.h"
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "gpio/ps_protocol.h"
 #include "platforms/atari/audio/dmasnd.h"
@@ -1488,11 +1489,22 @@ int main (int argc, char *argv[])
 
       if (!no_setup && countdown > 0) {
         static struct ss_screen scr;
-        if (ss_bringup(&scr, SS_MODE_AUTO, 1) == 0) {
+        ss_bringup(&scr, SS_MODE_AUTO, 1);
+        /* The page goes to both outputs: the real shifter, and HDMI for a
+         * machine with no ST monitor on it (or no ST-RAM answering). If
+         * neither is there, there is nobody to show it to. */
+        int hdmi = sh_open() == 0;
+        if (scr.shifter || hdmi) {
           char chosen[SC_SEC_LEN] = "";
+          printf("[SETUP] page on %s%s%s\n",
+                 scr.shifter ? "the ST monitor" : "",
+                 (scr.shifter && hdmi) ? " and " : "",
+                 hdmi ? "HDMI" : "");
           si_open(1, 1);
           enum sp_result r = sp_run(&scr, config_file, chosen, sizeof chosen);
           si_close();
+          if (hdmi)
+            sh_close();       /* give DRM back before the emulator takes it */
           if (r == SP_BOOT && chosen[0])
             strncpy(boot_section, chosen, sizeof boot_section - 1);
           /* the page left its own memcfg, screen base and resolution in
@@ -1502,7 +1514,7 @@ int main (int argc, char *argv[])
           ps_pulse_reset();
           usleep(250000);
         } else {
-          printf("[SETUP] no ST-RAM detected - skipping the setup page\n");
+          printf("[SETUP] no ST-RAM and no HDMI - skipping the setup page\n");
         }
       }
       printf("[CFG] booting section [%s]\n", boot_section);

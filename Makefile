@@ -56,6 +56,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/setup/setup_input.c \
          platforms/atari/setup/setup_cfg.c \
          platforms/atari/setup/setup_enums.c \
+         platforms/atari/setup/setup_hdmi.c \
          platforms/atari/setup/setup_page.c
 
 # -----------------------------------------------------------------
@@ -438,9 +439,10 @@ SETUP_SRC = platforms/atari/setup/shifter_setup.c \
             platforms/atari/setup/setup_input.c \
             platforms/atari/setup/setup_cfg.c \
             platforms/atari/setup/setup_enums.c \
+            platforms/atari/setup/setup_hdmi.c \
             platforms/atari/setup/setup_page.c
 setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
-	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup
+	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -ldrm
 
 %.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<

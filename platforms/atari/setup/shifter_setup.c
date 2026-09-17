@@ -68,12 +68,14 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     ps_write_8(REG_MEMCFG, 0x0A);          /* 2M|2M while probing */
     ss->bank0 = probe_bank(0x000000u);
     ss->bank1 = probe_bank(0x200000u);
-    if (!ss->bank0)
-        return -1;
-    ss->memcfg = (uint8_t)((bank_bits(ss->bank0) << 2) | bank_bits(ss->bank1));
-    ps_write_8(REG_MEMCFG, ss->memcfg);
+    ss->shifter = ss->bank0 != 0;
+    if (ss->shifter) {
+        ss->memcfg = (uint8_t)((bank_bits(ss->bank0) << 2) |
+                               bank_bits(ss->bank1));
+        ps_write_8(REG_MEMCFG, ss->memcfg);
+    }
 
-    ss->gpip7 = (ps_read_8(REG_GPIP) >> 7) & 1;
+    ss->gpip7 = ss->shifter ? (ps_read_8(REG_GPIP) >> 7) & 1 : 1;
     if (force == SS_MODE_AUTO)
         ss->mode = ss->gpip7 ? SS_MODE_COLOUR : SS_MODE_MONO;
     else
@@ -83,6 +85,13 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
         ss->width = 640; ss->height = 400; ss->planes = 1;
     } else {
         ss->width = 640; ss->height = 200; ss->planes = 2;
+    }
+
+    if (!ss->shifter) {
+        /* no ST-RAM answered: the page is HDMI-only, so touch nothing
+         * else on the bus and leave the chips as the reset left them */
+        memset(ss->shown, 0xA5, sizeof ss->shown);
+        return 0;
     }
 
     /* base: ST has high + mid bytes only; low byte is always 0 */
@@ -103,6 +112,10 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
 
 void ss_write_full(struct ss_screen *ss, enum ss_width w)
 {
+    if (!ss->shifter) {
+        memcpy(ss->shown, ss->shadow, SS_SCREEN_BYTES);
+        return;
+    }
     uint32_t a = SS_SCREEN_BASE;
     const uint8_t *p = ss->shadow;
     const uint8_t *end = p + SS_SCREEN_BYTES;
@@ -128,6 +141,10 @@ void ss_write_full(struct ss_screen *ss, enum ss_width w)
 uint32_t ss_flush(struct ss_screen *ss)
 {
     uint32_t sent = 0;
+    if (!ss->shifter) {
+        memcpy(ss->shown, ss->shadow, SS_SCREEN_BYTES);
+        return 0;
+    }
     for (uint32_t i = 0; i < SS_SCREEN_BYTES; i += 4) {
         if (memcmp(ss->shadow + i, ss->shown + i, 4) == 0)
             continue;
@@ -144,6 +161,8 @@ uint32_t ss_flush(struct ss_screen *ss)
 uint32_t ss_verify(const struct ss_screen *ss)
 {
     uint32_t bad = 0;
+    if (!ss->shifter)
+        return 0;
     for (uint32_t i = 0; i < SS_SCREEN_BYTES; i += 4) {
         uint32_t v = ps_read_32(SS_SCREEN_BASE + i);
         const uint8_t *p = ss->shown + i;

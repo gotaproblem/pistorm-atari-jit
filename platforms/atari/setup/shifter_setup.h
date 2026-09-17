@@ -30,6 +30,7 @@ struct ss_screen {
     int          width, height; /* 640x400 or 640x200                     */
     int          planes;        /* 1 or 2                                 */
     int          gpip7;         /* raw MFP GPIP bit 7 (0 = mono monitor)  */
+    int          shifter;       /* 0 = no ST-RAM found: draw to HDMI only */
     int          hz50;          /* 1 = 50 Hz, 0 = 60 Hz (colour only)     */
     uint32_t     bank0, bank1;  /* probed bytes (0 = absent)              */
     uint8_t      memcfg;        /* value written to $FF8001               */
@@ -39,7 +40,12 @@ struct ss_screen {
 
 /* Probe RAM, program $FF8001, detect the monitor (or use `force`),
  * program base / sync / resolution / palette. Board must already be
- * reset with the protocol up. Returns 0, or -1 if bank 0 is not found. */
+ * reset with the protocol up.
+ *
+ * Always returns 0: if bank 0 is not found (no board, or a machine wired
+ * to HDMI only) the geometry is still set up and the page still draws
+ * into the shadow, with ss->shifter = 0 so nothing is written to the
+ * bus. The HDMI mirror (setup_hdmi.c) is then the only output. */
 int  ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50);
 
 /* 4 colours, ST 0x0RGB (3 bits a gun). Mono uses bit 0 of colour 0. */

@@ -17,6 +17,7 @@
 #include "setup_input.h"
 #include "setup_cfg.h"
 #include "setup_enums.h"
+#include "setup_hdmi.h"
 
 #define MAX_ROWS   96
 
@@ -521,6 +522,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
         scroll_to_sel(&st);
         draw(ss, &st);
         ss_flush(ss);
+        sh_present(ss);        /* no-op unless HDMI was opened */
 
         struct si_event e = si_poll(100);
         if (e.key != SI_NONE && st.secs > 0)

@@ -28,6 +28,7 @@
 #include "setup_input.h"
 #include "setup_page.h"
 #include "setup_cfg.h"
+#include "setup_hdmi.h"
 
 static struct ss_screen scr;
 
@@ -166,7 +167,7 @@ int main(int argc, char **argv)
 {
     enum ss_mode force = SS_MODE_AUTO;
     int hz50 = 1, hold = -1, pattern_only = 0, no_st_kbd = 0;
-    int input_debug = 0, input_only = 0, timings = 0;
+    int input_debug = 0, input_only = 0, timings = 0, no_hdmi = 0;
     const char *cfg = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -179,6 +180,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--input-debug")) input_debug = 1;
         else if (!strcmp(argv[i], "--input-only")) input_only = input_debug = 1;
         else if (!strcmp(argv[i], "--timings")) timings = 1;
+        else if (!strcmp(argv[i], "--no-hdmi")) no_hdmi = 1;
         else if (!strcmp(argv[i], "--cfg") && i + 1 < argc) cfg = argv[++i];
         else {
             fprintf(stderr, "usage: %s [--mono|--colour] [--60hz] [--hold SECONDS]"
@@ -224,10 +226,10 @@ int main(int argc, char **argv)
     ps_pulse_reset();
     usleep(250000);                          /* let GLUE/MFP settle */
 
-    if (ss_bringup(&scr, force, hz50) != 0) {
-        fprintf(stderr, "bank 0 not detected - check the board\n");
-        return 1;
-    }
+    ss_bringup(&scr, force, hz50);
+    if (!scr.shifter)
+        printf("no ST-RAM answered: the shifter is not driven "
+               "(HDMI mirror only)\n");
     printf("RAM      bank0 %uK  bank1 %uK  memcfg $%02X\n",
            scr.bank0 >> 10, scr.bank1 >> 10, scr.memcfg);
     printf("monitor  GPIP7=%d -> %s%s, %s\n", scr.gpip7,
@@ -244,6 +246,9 @@ int main(int argc, char **argv)
             }
             cfg = path;
         }
+        int hdmi = no_hdmi ? 0 : sh_open() == 0;
+        if (!scr.shifter && !hdmi)
+            printf("no ST-RAM and no HDMI: the page will run, unseen\n");
         int n = si_open(!no_st_kbd, 1);
         printf("input: %d source(s) - ST keyboard %s, %d USB keyboard(s), "
                "%d gamepad(s)\n", n, si_have_st() ? "yes" : "no",
@@ -252,6 +257,8 @@ int main(int argc, char **argv)
 
         enum sp_result r = sp_run(&scr, cfg, chosen, sizeof chosen);
         si_close();
+        if (hdmi)
+            sh_close();
         switch (r) {
         case SP_BOOT:
             printf("boot: [%s]\n", chosen);

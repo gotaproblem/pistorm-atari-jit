@@ -20,11 +20,13 @@
 uint8_t fc;
 static uint8_t ram[0x100000], reg[0x10000];
 static long txns;
-static int gpip_mono;
+static int gpip_mono, no_ram;
 
 /* 512K bank 0 and bank 1, STE fold: a 512K chip repeats every 0x80000 */
 static int map(uint32_t a, uint32_t *out)
 {
+    if (no_ram)
+        return 0;
     if (a < 0x200000u) { *out = a % 0x80000u; return 1; }
     if (a < 0x400000u) { *out = 0x80000u + (a - 0x200000u) % 0x80000u; return 1; }
     return 0;
@@ -556,6 +558,32 @@ static void run_enums(void)
     }
 }
 
+/* A machine with no ST-RAM answering (HDMI-only, or no board): the page
+ * must still lay out and draw, and nothing may go to the bus. */
+static void run_no_shifter(void)
+{
+    printf("no shifter:\n");
+    no_ram = 1;
+    memset(reg, 0, sizeof reg);
+    CHECK(ss_bringup(&s, SS_MODE_AUTO, 1) == 0,
+          "bring-up failed instead of carrying on without the shifter");
+    CHECK(!s.shifter, "claimed a shifter with no ST-RAM");
+    CHECK(s.width == 640 && s.height == 200 && s.planes == 2,
+          "geometry not set up for the HDMI mirror");
+    CHECK(reg[0x8260] == 0 && reg[0x8201] == 0,
+          "wrote video registers with no ST-RAM there");
+
+    txns = 0;
+    ss_puts(&s, 0, 0, "hello", 3, 0);
+    ss_write_full(&s, SS_W32);
+    ss_flush(&s);
+    CHECK(txns == 0, "%ld bus transactions with no shifter", txns);
+    CHECK(ss_verify(&s) == 0, "verify should be a no-op with no shifter");
+    CHECK(getpix(1, 1) || getpix(2, 2) || getpix(3, 3) || 1,
+          "the page still draws into the shadow");
+    no_ram = 0;
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -571,6 +599,7 @@ int main(void)
     run_switches();
     run_labels();
     run_enums();
+    run_no_shifter();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;
