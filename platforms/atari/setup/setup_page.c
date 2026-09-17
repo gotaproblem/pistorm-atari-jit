@@ -354,10 +354,13 @@ static void draw(struct ss_screen *ss, const struct state *st)
         const char *p = st->cfg.path;
         int len = (int)strlen(p);
         if (room > 4) {
+            if (room > (int)sizeof line - 1)
+                room = (int)sizeof line - 1;
             if (len > room)
-                snprintf(line, sizeof line, "...%s", p + len - (room - 3));
+                snprintf(line, sizeof line, "...%.*s", room - 3,
+                         p + len - (room - 3));
             else
-                snprintf(line, sizeof line, "%s", p);
+                snprintf(line, sizeof line, "%.*s", room, p);
             ss_puts(ss, at, 0, line, paper, ink);
         }
     }

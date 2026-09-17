@@ -234,8 +234,12 @@ static void take_ownership(FILE *out, const char *path)
         snprintf(dir, sizeof dir, ".");
     else if (slash == path)
         snprintf(dir, sizeof dir, "/");
-    else
-        snprintf(dir, sizeof dir, "%.*s", (int)(slash - path), path);
+    else {
+        unsigned long n = (unsigned long)(slash - path);
+        if (n > sizeof dir - 1)
+            n = sizeof dir - 1;
+        snprintf(dir, sizeof dir, "%.*s", (int)n, path);
+    }
 
     /* best effort both times: a save is not worth failing over the
      * ownership of the file it just wrote */
