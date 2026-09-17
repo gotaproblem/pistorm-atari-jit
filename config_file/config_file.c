@@ -39,6 +39,7 @@ typedef enum {
   CONFITEM_DMA_SOUND,
   CONFITEM_YM2149,
   CONFITEM_KBD,
+  CONFITEM_USB,
   CONFITEM_BLITTER,
   CONFITEM_SHIFTER,
   CONFITEM_MACHINE,
@@ -104,6 +105,7 @@ static const config_switch_def config_switches[] = {
   { "dma_sound", CONFITEM_DMA_SOUND },
   { "ym2149", CONFITEM_YM2149 },
   { "kbd", CONFITEM_KBD },
+  { "usb", CONFITEM_USB },
   { "blitter", CONFITEM_BLITTER },
   { "shifter", CONFITEM_SHIFTER },
   { "machine", CONFITEM_MACHINE },
@@ -913,6 +915,30 @@ struct emulator_config *load_config_file(char *filename) {
                     cfg->kbd_mode == 2 ? " (standalone: real IKBD ignored)" :
                     cfg->kbd_mode == 1 ? " (merge: real IKBD always trusted)" :
                                          " (auto-detect real IKBD)");
+        }
+        break;
+
+      case CONFITEM_USB:
+        {
+          /* "usb gamepad" [off] - USB/Bluetooth game controllers on the Pi
+           * become the ST's joysticks (pad 0 = joystick 1 / STE pad A,
+           * pad 1 = joystick 0 / STE pad B), on the main machine and in
+           * STBOX. Joystick only: never the GEM pointer. Independent of
+           * "kbd usb" - either line alone starts the IKBD injection. */
+          char *arg = parse_line + str_pos;
+          while (*arg == ' ' || *arg == '\t')
+            arg++;
+          if (strncasecmp(arg, "gamepad", 7) == 0)
+          {
+            arg += 7;
+            while (*arg == ' ' || *arg == '\t')
+              arg++;
+            cfg->usb_gamepad = (*arg == '\0') ? true : get_bool_default_true(arg);
+            printf ("[CFG] USB/Bluetooth gamepads as ST joysticks %s\n",
+                    cfg->usb_gamepad ? "enabled" : "disabled");
+          }
+          else
+            printf ("[CFG] usb: unknown device class '%s' (know: gamepad)\n", arg);
         }
         break;
 

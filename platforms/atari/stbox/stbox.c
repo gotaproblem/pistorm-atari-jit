@@ -318,7 +318,30 @@ static struct {
                                  behind (field case: click -> jump to
                                  $D200D8 -> two bombs).                 */
     uint8_t joy_event;        /* $14 joystick event reporting on        */
+    /* Real-IKBD fidelity (Hatari ikbd.c): joystick events are ON at
+     * power-up and after $80 $01; $14 turns the mouse OFF unless it
+     * lands inside the ~63 ms reset window after a $08/$12 (Barbarian,
+     * Hammerfist keep both); while the mouse is on, joystick 1's fire is
+     * the RIGHT mouse button and joystick 0 (the mouse port) is silent. */
+    uint64_t reset_cyc;       /* g_total_cyc at the last $80 $01        */
+    uint8_t mouse_touched;    /* $08 or $12 inside the window           */
+    uint8_t both;             /* mouse + joystick reporting together    */
+    uint8_t mouse_off_cmd, joy_off_cmd;
+    /* host pads, as last delivered by input_drain: [0] = joystick 0
+     * (mouse port), [1] = joystick 1 (game port). joy = STJOY bits,
+     * pad = STE joypad extras (STPAD bits: A B C OPTION PAUSE). */
+    uint8_t joy[2], pad[2];
+    uint8_t joy_sent[2];      /* last state put on the wire per port    */
+    uint8_t joy_rbutton;      /* joystick 1 fire riding as RMB          */
+    uint16_t pad_select;      /* STE $FF9202 column select shadow       */
 } acia;
+#define IKBD_RESET_WINDOW_CYC 502000u   /* 8 MHz cycles (Hatari)     */
+#define STJOY_FIRE 0x80
+#define STPAD_A 0x01
+#define STPAD_B 0x02
+#define STPAD_C 0x04
+#define STPAD_OPTION 0x08
+#define STPAD_PAUSE 0x10
 static uint64_t g_total_cyc;       /* free-running guest cycle counter  */
 
 /* host input rings (SPSC: producer = input thread, consumer = core 3) */
@@ -327,7 +350,8 @@ static volatile uint32_t g_in_ring[INRING];
 static volatile uint32_t g_in_head, g_in_tail;
 /* encoding: type<<24 | a<<16 | b<<8 | c
  * type 0 = key (a=scancode|0x80 if break), 1 = mouse (a=dx s8, b=dy s8,
- * c=buttons), 2 = joystick (a=joy, b=state), 3 = raw IKBD byte (a) */
+ * c=buttons), 2 = joystick (a=joy, b=state, c=STE pad extras),
+ * 3 = raw IKBD byte (a) */
 /* Diagnostic counters, reported in the host's periodic health line:
  * pushes per type (key/mouse/joy/raw), ring-full drops, and bytes the
  * ACIA actually presented to the guest. Each counter has one writer
@@ -767,25 +791,62 @@ static uint8_t ikbd_cmd_len(uint8_t c)
     }
 }
 
+static void joy_resend(void);
+
 static void ikbd_command(void)      /* complete command in acia.cmd */
 {
 #ifdef STBOX_IKBD_DEBUG
     fprintf(stderr, "[ikbd] cmd %02x len %u mode=%u\n",
             acia.cmd[0], acia.cmdneed, acia.mouse_mode);
 #endif
+    const int in_win = (g_total_cyc - acia.reset_cyc) < IKBD_RESET_WINDOW_CYC;
     switch (acia.cmd[0]) {
-        case 0x08: acia.mouse_mode = 0; break;   /* relative on    */
+        case 0x08:                       /* relative mouse on */
+            acia.mouse_mode = 0;
+            if (in_win) acia.mouse_touched = 1;
+            joy_resend();
+            break;
         case 0x09: acia.mouse_mode = 1; break;   /* absolute       */
         case 0x0A: acia.mouse_mode = 2; break;   /* keycode        */
-        case 0x12: acia.mouse_mode = 3; break;   /* mouse off      */
-        case 0x14: acia.joy_event = 1; break;    /* joy events on  */
-        case 0x15: case 0x1A: acia.joy_event = 0; break;
+        case 0x12:                       /* mouse off */
+            acia.mouse_mode = 3;
+            acia.mouse_off_cmd = 1;
+            if (in_win) {
+                acia.mouse_touched = 1;
+                if (acia.joy_off_cmd) {  /* $1A then $12: both back on */
+                    acia.mouse_mode = 0; acia.joy_event = 1; acia.both = 1;
+                }
+            }
+            joy_resend();
+            break;
+        case 0x14:                       /* joystick event reporting */
+            acia.joy_event = 1;
+            if (in_win && acia.mouse_touched) {
+                acia.mouse_mode = 0; acia.both = 1;
+            } else
+                acia.mouse_mode = 3;     /* a real IKBD silences the mouse */
+            /* the IKBD forgets previous joystick state and reports now */
+            acia.joy_sent[0] = acia.joy_sent[1] = 0;
+            joy_resend();
+            break;
+        case 0x15: acia.joy_event = 0; break;
+        case 0x1A:
+            acia.joy_event = 0;
+            acia.joy_off_cmd = 1;
+            if (in_win && acia.mouse_off_cmd) {  /* $12 then $1A */
+                acia.mouse_mode = 0; acia.joy_event = 1; acia.both = 1;
+            }
+            break;
         case 0x80:                       /* RESET ($80 $01) */
             if (acia.cmd[1] == 0x01) {
                 acia.fh = acia.ft = 0;
                 acia.mouse_buttons = 0;
                 acia.mouse_mode = 0;
-                acia.joy_event = 0;
+                acia.joy_event = 1;      /* real IKBD: both on after reset */
+                acia.reset_cyc = g_total_cyc;
+                acia.mouse_touched = acia.both = 0;
+                acia.mouse_off_cmd = acia.joy_off_cmd = 0;
+                acia.joy_sent[0] = acia.joy_sent[1] = 0;
                 ikbd_tx(0xF1);           /* version/self-test OK. TODO:
                                             verify $F0 vs $F1 against a
                                             real IKBD before games rely
@@ -797,7 +858,7 @@ static void ikbd_command(void)      /* complete command in acia.cmd */
             break;
         }
         case 0x16:                       /* joystick interrogate */
-            ikbd_tx(0xFD); ikbd_tx(0); ikbd_tx(0);
+            ikbd_tx(0xFD); ikbd_tx(acia.joy[0]); ikbd_tx(acia.joy[1]);
             break;
         case 0x1C:                       /* read clock: BCD zeros */
             ikbd_tx(0xFC);
@@ -818,6 +879,38 @@ static void ikbd_rx(uint8_t b)      /* guest -> IKBD, one byte */
     if (acia.cmdlen >= acia.cmdneed) { ikbd_command(); acia.cmdlen = 0; }
 }
 
+/* Put a port's joystick state on the wire if the IKBD mode allows and
+ * it changed. Joystick 1's fire becomes the right mouse button while
+ * the mouse is on (a real IKBD wires them together): it is stripped
+ * from the $FF packet and an F8 packet with the button carries it. */
+static void joy_emit(int port)
+{
+    uint8_t st = acia.joy[port];
+    const int mouse_on = acia.mouse_mode != 3;
+    if (port == 1) {
+        const uint8_t rb = mouse_on && (st & STJOY_FIRE) ? 1 : 0;
+        if (rb != acia.joy_rbutton) {
+            acia.joy_rbutton = rb;
+            if (acia.mouse_mode == 0) {
+                ikbd_tx(0xF8 | (acia.mouse_buttons & 3) | rb);
+                ikbd_tx(0); ikbd_tx(0);
+            }
+        }
+        if (mouse_on) st &= (uint8_t)~STJOY_FIRE;
+    }
+    if (!acia.joy_event) return;
+    if (port == 0 && mouse_on && !acia.both) return;  /* mouse owns port 0 */
+    if (st == acia.joy_sent[port]) return;      /* only changes go out */
+    acia.joy_sent[port] = st;
+    ikbd_tx(0xFE + port); ikbd_tx(st);
+}
+
+static void joy_resend(void)
+{
+    joy_emit(1);
+    joy_emit(0);
+}
+
 /* drain host input ring into the IKBD fifo (core 3 only) */
 static void input_drain(void)
 {
@@ -832,13 +925,13 @@ static void input_drain(void)
             acia.mouse_buttons = c & 3;
             if (acia.mouse_mode == 0) {           /* only when the game
                                                      wants packets      */
-                ikbd_tx(0xF8 | (c & 3));
+                ikbd_tx(0xF8 | (c & 3) | acia.joy_rbutton);
                 ikbd_tx(a); ikbd_tx(b);
             }
-        } else if (type == 2) {                   /* joystick event mode */
-            if (acia.joy_event) {
-                ikbd_tx(0xFE + (a & 1)); ikbd_tx(b);
-            }
+        } else if (type == 2) {                   /* joystick state */
+            acia.joy[a & 1] = b;
+            acia.pad[a & 1] = c;
+            joy_emit(a & 1);
         } else if (type == 3) {                   /* raw real-IKBD byte  */
             ikbd_tx(a);
         }
@@ -1145,10 +1238,37 @@ static uint32_t hw_read(uint32_t a, int size)
         if (!ste_noblit() && a >= 0xFF8A00 && a <= 0xFF8A3F)
             return stbox_blit_reg_read(a, size);
 
-        /* enhanced joystick / paddle / lightpen ports: present, idle.
-         * $FF9200 fire buttons, $FF9202 directions - all lines high = no
-         * input (host routing of a pad into here is a later step). */
-        if (a >= 0xFF9200 && a <= 0xFF9203) return size == 2 ? 0xFFFF : 0xFF;
+        /* enhanced joystick ports, host pads merged in (active low).
+         * $FF9200: low byte = fire buttons of the selected column (bit 1
+         * pad A, bit 0 pad A PAUSE; bits 3/2 pad B), high byte = DIP
+         * switches (none: $FF). $FF9202: high byte = directions of the
+         * selected column (low nibble pad A, high nibble pad B), low
+         * byte $FF. Column select = low byte last written to $FF9202,
+         * bits 0-3 pad A, 4-7 pad B, bit 0/4 = stick + A + PAUSE,
+         * 1/5 = B, 2/6 = C, 3/7 = OPTION (Jaguar pad, as Hatari joy.c). */
+        if (a >= 0xFF9200 && a <= 0xFF9203) {
+            uint32_t w = 0xFFFFFFFFu;             /* 9200.w : 9202.w */
+            for (int p = 0; p < 2; p++) {         /* p: 0 = pad A (joy 1) */
+                const int sel = (acia.pad_select >> (p * 4)) & 0x0F;
+                const uint8_t jb = acia.pad[p ? 0 : 1], js = acia.joy[p ? 0 : 1];
+                uint8_t btn = 0x03, dirs = 0x0F;
+                if (sel != 0x0F) {
+                    if (!(sel & 1)) {
+                        dirs = (uint8_t)(~js & 0x0F);
+                        if (jb & STPAD_A)     btn &= (uint8_t)~0x02;
+                        if (jb & STPAD_PAUSE) btn &= (uint8_t)~0x01;
+                    } else if (!(sel & 2)) { if (jb & STPAD_B)      btn &= (uint8_t)~0x02; }
+                    else if (!(sel & 4))   { if (jb & STPAD_C)      btn &= (uint8_t)~0x02; }
+                    else if (!(sel & 8))   { if (jb & STPAD_OPTION) btn &= (uint8_t)~0x02; }
+                }
+                w &= ~(uint32_t)(((0x03 ^ btn) << (16 + p * 2)) |
+                                 ((0x0F ^ dirs) << (8 + p * 4)));
+            }
+            const int off = a & 3;
+            if (size == 4) return w;
+            if (size == 2) return (w >> (16 - off * 8)) & 0xFFFF;
+            return (w >> (24 - off * 8)) & 0xFF;
+        }
         if (a >= 0xFF9204 && a <= 0xFF923F) return 0;
     }
 
@@ -1295,8 +1415,17 @@ static void hw_write(uint32_t a, uint32_t v, int size)
         /* BLiTTER */
         if (!ste_noblit() && a >= 0xFF8A00 && a <= 0xFF8A3F) { stbox_blit_reg_write(a, v, size); return; }
 
-        /* joypad select lines / paddle: sink */
-        if (a >= 0xFF9200 && a <= 0xFF923F) return;
+        /* joypad column select ($FF9202, low byte of the word) */
+        if (a >= 0xFF9200 && a <= 0xFF9203) {
+            const int off = a & 3;
+            if (size == 4)      acia.pad_select = (uint16_t)v;
+            else if (size == 2) { if (off == 2) acia.pad_select = (uint16_t)v; }
+            else if (off == 2)  acia.pad_select = (uint16_t)((acia.pad_select & 0xFF) | (v << 8));
+            else if (off == 3)  acia.pad_select = (uint16_t)((acia.pad_select & 0xFF00) | (v & 0xFF));
+            return;
+        }
+        /* paddles / lightpen: sink */
+        if (a >= 0xFF9204 && a <= 0xFF923F) return;
     }
 
     /* DMA/FDC */
@@ -1528,6 +1657,10 @@ void stbox_mouse_rel(int dx, int dy, int buttons)
 void stbox_joy_event(int joy, uint8_t state)
 { in_push((2u << 24) | ((uint32_t)(joy & 1) << 16) | ((uint32_t)state << 8)); }
 
+void stbox_joypad_event(int joy, uint8_t state, uint8_t pad_buttons)
+{ in_push((2u << 24) | ((uint32_t)(joy & 1) << 16) | ((uint32_t)state << 8) |
+          pad_buttons); }
+
 void stbox_ikbd_byte(uint8_t b)
 { in_push((3u << 24) | ((uint32_t)b << 16)); }
 
@@ -1634,6 +1767,7 @@ static void machine_cold_reset(void)
                                          bit6 low; see mfp_read for GPIP7  */
     memset(&acia, 0, sizeof(acia));
     acia.sr = 0x02;                   /* TDRE */
+    acia.joy_event = 1;               /* real IKBD: on at power-up */
     memset(&fdc, 0, sizeof(fdc));
     fdc.status = diska.present ? 0x80 : 0x00;   /* media survives reset */
     g_psg_sel = 0; memset(g_psg_reg, 0, sizeof(g_psg_reg));

@@ -38,6 +38,7 @@
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
 #include "platforms/atari/kbd_usb.h"
+#include "platforms/atari/joy_usb.h"
 
 extern "C"
 {
@@ -2319,6 +2320,7 @@ static addrbank pistorm_fdd_bank = {
 #define HW_PAGE_DMASND      0x00FF8900u
 #define HW_PAGE_BLITTER_LO  0x00FF8A00u
 #define HW_PAGE_BLITTER_HI  0x00FF8B00u
+#define HW_PAGE_JOYPAD      0x00FF9200u   /* STE enhanced joystick ports */
 #define HW_PAGE_MFP         0x00FFFA00u
 #define HW_PAGE_ACIA        0x00FFFC00u
 
@@ -2382,6 +2384,25 @@ static inline uae_u32 hw_bus_bget(uaecptr a)
 {
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
+    return v;
+}
+
+/* STE enhanced joypad ports ($FF9200-$FF9203, "usb gamepad"): the real
+ * chips answer on an STE/Mega STE and the pads are merged into what came
+ * back (active low, so only ever clearing bits - a real pad on the real
+ * socket still works). On a plain ST the read bus-errors, g_buserr is
+ * set, nothing is merged and the guest gets its bus error exactly as
+ * without us: no machine-type switch needed. The rest of the page
+ * ($FF9204+, paddles/lightpen) is untouched. */
+static inline uae_u32 hw_joypad_get(uaecptr a, int size)
+{
+    uae_u32 v;
+    if (size == 4)      v = ps_bus_lget(a);
+    else if (size == 2) v = ps_read_16(a);
+    else                v = ps_read_8(a);
+    if (JOY_USB_enabled && !g_buserr && joy_usb_ste_addr(a))
+        v = joy_usb_ste_read(a, size, v);
+    pistorm_buserr(a, 0, true, size == 4 ? sz_long : size == 2 ? sz_word : sz_byte);
     return v;
 }
 
@@ -2927,6 +2948,8 @@ static uae_u32 hw_lget(uaecptr a)
             if (DMA_Sound_enabled && dmasnd_owns(a))
                 return dmasnd_reg_read32(a);
             return hw_bus_lget(a);
+        case HW_PAGE_JOYPAD:
+            return hw_joypad_get(a, 4);
         case HW_PAGE_ACIA:
         {
             if (a == KBD_ACIA_CTRL &&
@@ -2987,6 +3010,8 @@ static uae_u32 hw_wget(uaecptr a)
             if (DMA_Sound_enabled && dmasnd_owns(a))
                 return dmasnd_reg_read16(a);
             return hw_bus_wget(a);
+        case HW_PAGE_JOYPAD:
+            return hw_joypad_get(a, 2);
         case HW_PAGE_ACIA:
         {
             if (kbd_acia_shadowed(a))
@@ -3047,6 +3072,8 @@ static uae_u32 hw_bget(uaecptr a)
             if (DMA_Sound_enabled && dmasnd_owns(a))
                 return dmasnd_reg_read8(a);
             return hw_bus_bget(a);
+        case HW_PAGE_JOYPAD:
+            return hw_joypad_get(a, 1);
         case HW_PAGE_ACIA:
         {
             if (kbd_acia_shadowed(a))
@@ -3121,6 +3148,11 @@ static void hw_lput(uaecptr a, uae_u32 v)
             else
                 hw_bus_lput(a, v);
             break;
+        case HW_PAGE_JOYPAD:
+            if (JOY_USB_enabled && joy_usb_ste_addr(a))
+                joy_usb_ste_write(a, 4, v);   /* column select shadow */
+            hw_bus_lput(a, v);
+            break;
         case HW_PAGE_ACIA:
             if (KBD_USB_enabled && a == KBD_ACIA_CTRL)
             {
@@ -3189,6 +3221,11 @@ static void hw_wput(uaecptr a, uae_u32 v)
                 hw_mfp_wput(a, v);
             else
                 hw_bus_wput(a, v);
+            break;
+        case HW_PAGE_JOYPAD:
+            if (JOY_USB_enabled && joy_usb_ste_addr(a))
+                joy_usb_ste_write(a, 2, v);   /* column select shadow */
+            hw_bus_wput(a, v);
             break;
         case HW_PAGE_ACIA:
             if (KBD_USB_enabled)
@@ -3263,6 +3300,11 @@ static void hw_bput(uaecptr a, uae_u32 v)
                 hw_mfp_bput(a, v);
             else
                 hw_bus_bput(a, v);
+            break;
+        case HW_PAGE_JOYPAD:
+            if (JOY_USB_enabled && joy_usb_ste_addr(a))
+                joy_usb_ste_write(a, 1, v);   /* column select shadow */
+            hw_bus_bput(a, v);
             break;
         case HW_PAGE_ACIA:
             if (KBD_USB_enabled)

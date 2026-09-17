@@ -70,6 +70,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/fdd/platform_atari_fdd.h"
 #include "platforms/atari/network/platform_atari_network.h"
 #include "platforms/atari/kbd_usb.h"
+#include "platforms/atari/joy_usb.h"
 #include "gpio/bus_lock.h"
 #include "pistorm_hugepage.h"
 
@@ -1567,13 +1568,19 @@ int main (int argc, char *argv[])
     printf ("[INIT] Emulated ACSI target(s) active, floppy passthrough\n");
   }
 
-  if (config->kbd_usb)
+  if (config->kbd_usb || config->usb_gamepad)
   {
+    /* "kbd usb" and/or "usb gamepad": both ride on the same ACIA/IKBD
+     * injection layer (real-IKBD detection included), the mask only
+     * says which evdev devices feed it. */
+    const int devs = (config->kbd_usb     ? KBD_USB_DEV_KBDMOUSE : 0) |
+                     (config->usb_gamepad ? KBD_USB_DEV_GAMEPAD  : 0);
     KBD_USB_enabled = true;
+    JOY_USB_enabled = config->usb_gamepad;
     kbd_usb_force_mode = config->kbd_mode;
     kbd_usb_mouse_div  = config->kbd_mouse_div > 0 ? config->kbd_mouse_div : 1;
-    if (kbd_usb_init (config->kbd_grab ? 1 : 0) != 0)
-      KBD_USB_enabled = false;
+    if (kbd_usb_init (config->kbd_grab || !config->kbd_usb ? 1 : 0, devs) != 0)
+      KBD_USB_enabled = JOY_USB_enabled = false;
   }
 
   if (platform_network_init_from_config(config) != 0)
@@ -2310,6 +2317,16 @@ extern "C"
       return kbd_native_rx_filter (ps_read_8 (address));
     }
 
+    /* STE enhanced joypad ports ("usb gamepad"): merge the pads into what
+     * the real chip returned; a plain ST bus-errors first, nothing merged */
+    if (JOY_USB_enabled && joy_usb_ste_addr(address)) {
+      cpu_data_fc();
+      unsigned int jv = ps_read_8(address);
+      if (!g_buserr)
+        jv = joy_usb_ste_read(address, 1, jv);
+      return jv;
+    }
+
 	    cpu_data_fc();
 	    return ps_read_8(address);
   }
@@ -2419,6 +2436,16 @@ extern "C"
       return (uint16_t)((kbd_native_rx_filter (ps_read_8 (address)) << 8) | 0xFF);
     }
 
+    /* STE enhanced joypad ports ("usb gamepad"): merge the pads into what
+     * the real chip returned; a plain ST bus-errors first, nothing merged */
+    if (JOY_USB_enabled && joy_usb_ste_addr(address)) {
+      cpu_data_fc();
+      unsigned int jv = ps_read_16(address);
+      if (!g_buserr)
+        jv = joy_usb_ste_read(address, 2, jv);
+      return jv;
+    }
+
 	    cpu_data_fc();
 	    return ps_read_16(address);
   }
@@ -2499,6 +2526,16 @@ extern "C"
     {
       if (fdd_route_address (address))
           return fdd_io_read (address, 4);
+    }
+
+    /* STE enhanced joypad ports ("usb gamepad"): merge the pads into what
+     * the real chip returned; a plain ST bus-errors first, nothing merged */
+    if (JOY_USB_enabled && joy_usb_ste_addr(address)) {
+      cpu_data_fc();
+      unsigned int jv = ps_read_32(address);
+      if (!g_buserr)
+        jv = joy_usb_ste_read(address, 4, jv);
+      return jv;
     }
 
     cpu_data_fc();
@@ -2623,6 +2660,8 @@ extern "C"
     }
     else if (address == 0x00FFFC02 && kbd_native_mouse_enabled ())
       kbd_native_tx_snoop ((uint8_t)value);
+    if (JOY_USB_enabled && joy_usb_ste_addr(address))
+      joy_usb_ste_write(address, 1, value);   /* STE joypad column select */
     ps_write_8 (address, (uint8_t)value);
   }
 
@@ -2757,6 +2796,8 @@ extern "C"
       else if (address == 0x00FFFC02)
         kbd_usb_tx_snoop ((uint8_t)(value >> 8));
     }
+    if (JOY_USB_enabled && joy_usb_ste_addr(address))
+      joy_usb_ste_write(address, 2, value);   /* STE joypad column select */
     ps_write_16 (address, (uint16_t)value);
   }
 
@@ -2861,6 +2902,8 @@ extern "C"
       }
     }
 
+    if (JOY_USB_enabled && joy_usb_ste_addr(address))
+      joy_usb_ste_write(address, 4, value);   /* STE joypad column select */
     cpu_data_fc();
     ps_write_32 (address, value);
   }

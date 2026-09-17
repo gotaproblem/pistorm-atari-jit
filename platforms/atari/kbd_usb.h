@@ -49,8 +49,13 @@ uint32_t kbd_usb_input_word(void);
 
 /* ---- lifecycle ------------------------------------------------------- */
 /* grab != 0: EVIOCGRAB input devices so keystrokes stop reaching the Pi
- * console. F12 toggles the grab at runtime (F11/F12 don't exist on an ST). */
-int  kbd_usb_init(int grab);
+ * console. F12 toggles the grab at runtime (F11/F12 don't exist on an ST).
+ * devices: which evdev classes to open - "kbd usb" gives KBDMOUSE, "usb
+ * gamepad" gives GAMEPAD (see joy_usb.h); either alone brings the whole
+ * ACIA injection layer up. */
+#define KBD_USB_DEV_KBDMOUSE 1
+#define KBD_USB_DEV_GAMEPAD  2
+int  kbd_usb_init(int grab, int devices);
 void kbd_usb_shutdown(void);
 
 /* ---- CPU-thread ACIA shadow ------------------------------------------ */

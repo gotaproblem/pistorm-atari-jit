@@ -111,6 +111,7 @@ struct emulator_config {
   bool kbd_grab;       /* grab evdev devices away from the Pi console     */
   int  kbd_mode;       /* 0 = auto-detect real IKBD, 1 = merge, 2 = standalone */
   int  kbd_mouse_div;  /* host mouse count divisor (1 = raw)              */
+  bool usb_gamepad;    /* "usb gamepad": pads on the Pi = ST joysticks    */
   bool blitter;
   bool blitter_set;    /* cfg had an explicit blitter line (override) */
   bool machine_set;    /* cfg 'machine ...' present */

@@ -142,6 +142,10 @@ void stbox_key_event(uint8_t st_scancode, int down);
 void stbox_ikbd_byte(uint8_t b);
 void stbox_mouse_rel(int dx, int dy, int buttons);   /* buttons: bit1 L, bit0 R */
 void stbox_joy_event(int joy, uint8_t state);        /* ST joystick bits       */
+/* joy: 0 = mouse port, 1 = game port; state = ST joystick byte (bits 0-3
+ * directions, bit 7 fire); pad_buttons = STE joypad extras (bit 0 A,
+ * 1 B, 2 C, 3 OPTION, 4 PAUSE) for the STE tier's $FF9200/$FF9202. */
+void stbox_joypad_event(int joy, uint8_t state, uint8_t pad_buttons);
 /* kbd_usb.c tells the host when its ESC toggle changes routing, so the
  * health line can show it (the host never sees the flag otherwise). */
 void stbox_note_route(int on);

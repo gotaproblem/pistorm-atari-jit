@@ -43,6 +43,7 @@
 #include <linux/input.h>
 
 #include "kbd_usb.h"
+#include "joy_usb.h"
 #include "fdd/atari_fdd.h"                 /* fdd_toggle_disk (F11) */
 
 /* real-IKBD -> STBOX divert, defined with the routing block further down */
@@ -259,6 +260,17 @@ static struct {
     int  y0_top;             /* 1: y increases downward (TOS default)    */
     int  paused;
     int  joy_event;          /* joystick event reporting on              */
+    /* Real-IKBD reset quirk (Hatari ikbd.c): for ~63 ms after $80 $01
+     * the controller is still booting, and a $14 (joystick events on,
+     * which normally silences the mouse) arriving inside that window
+     * after a $08 or $12 leaves BOTH mouse and joystick reporting on -
+     * Barbarian and Hammerfist depend on it. Likewise $12 + $1A inside
+     * the window turn both back on rather than off. */
+    uint64_t reset_us;       /* when the last $80 $01 was seen           */
+    int  mouse_touched;      /* $08 or $12 seen inside the window        */
+    int  both;               /* mouse + joystick reporting together      */
+    int  mouse_off_cmd;      /* $12 seen (for the $12 + $1A quirk)       */
+    int  joy_off_cmd;        /* $1A seen                                 */
     /* command parameter consumption */
     int  pending_cmd;
     int  pending_params;     /* params still to swallow                  */
@@ -267,6 +279,21 @@ static struct {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .mouse_mode = MOUSE_REL, .y0_top = 1, .paused = 0, .joy_event = 1,
 };
+
+#define IKBD_RESET_WINDOW_US 63000     /* 502000 cycles at 8 MHz (Hatari) */
+
+static int ikbd_in_reset_window(void)
+{
+    return now_us() - ikbd.reset_us < IKBD_RESET_WINDOW_US;
+}
+
+/* Joystick interrogation ($16) answer when nothing real will answer it:
+ * a live IKBD replies $FD j0 j1. Queued from the CPU thread (the ring's
+ * push lock covers that). Declared here, defined with the other CPU-side
+ * helpers further down. */
+static int quarantined(void);
+static void ring_push_packet(const uint8_t *bytes, int n);
+static _Atomic int joy_last_pkt[2];
 
 /* total parameter bytes following each IKBD command opcode */
 static int ikbd_param_len(uint8_t cmd)
@@ -294,16 +321,70 @@ static void ikbd_apply(uint8_t cmd)
 {
     switch (cmd)
     {
-        case 0x08: ikbd.mouse_mode = MOUSE_REL;              break;
+        case 0x08:
+            ikbd.mouse_mode = MOUSE_REL;
+            if (ikbd_in_reset_window())
+                ikbd.mouse_touched = 1;
+            joy_usb_resend();               /* fire moves to the mouse */
+            break;
         case 0x09: ikbd.mouse_mode = MOUSE_ABS;              break;
         case 0x0A: ikbd.mouse_mode = MOUSE_KEYCODE;          break;
-        case 0x12: ikbd.mouse_mode = MOUSE_OFF;              break;
+        case 0x12:
+            ikbd.mouse_mode = MOUSE_OFF;
+            ikbd.mouse_off_cmd = 1;
+            if (ikbd_in_reset_window())
+            {
+                ikbd.mouse_touched = 1;
+                if (ikbd.joy_off_cmd)           /* $1A then $12: both on */
+                {
+                    ikbd.mouse_mode = MOUSE_REL;
+                    ikbd.joy_event  = 1;
+                    ikbd.both       = 1;
+                }
+            }
+            joy_usb_resend();               /* fire moves to the stick */
+            break;
         case 0x0F: ikbd.y0_top = 0;                          break;
         case 0x10: ikbd.y0_top = 1;                          break;
-        case 0x11: ikbd.paused = 0;                          break;
+        case 0x11: ikbd.paused = 0; joy_usb_resend();        break;
         case 0x13: ikbd.paused = 1;                          break;
-        case 0x14: ikbd.joy_event = 1;                       break;
-        case 0x15: case 0x1A: ikbd.joy_event = 0;            break;
+        case 0x14:
+            /* joystick event reporting: on a real IKBD this also turns
+             * the mouse OFF, unless the reset quirk above applies */
+            ikbd.joy_event = 1;
+            if (ikbd_in_reset_window() && ikbd.mouse_touched)
+            {
+                ikbd.mouse_mode = MOUSE_REL;
+                ikbd.both = 1;
+            }
+            else
+                ikbd.mouse_mode = MOUSE_OFF;
+            /* the IKBD forgets its previous joystick state here and
+             * reports the current one straight away */
+            atomic_store(&joy_last_pkt[0], -1);
+            atomic_store(&joy_last_pkt[1], -1);
+            joy_usb_resend();
+            break;
+        case 0x15: ikbd.joy_event = 0;                       break;
+        case 0x16:
+            /* interrogation: the real IKBD answers when present; when it
+             * is quarantined nobody would, so answer with our pads */
+            if (quarantined())
+            {
+                uint8_t r[3] = { 0xFD, joy_usb_state(0), joy_usb_state(1) };
+                ring_push_packet(r, 3);
+            }
+            break;
+        case 0x1A:
+            ikbd.joy_event = 0;
+            ikbd.joy_off_cmd = 1;
+            if (ikbd_in_reset_window() && ikbd.mouse_off_cmd)
+            {                                   /* $12 then $1A: both on */
+                ikbd.mouse_mode = MOUSE_REL;
+                ikbd.joy_event  = 1;
+                ikbd.both       = 1;
+            }
+            break;
         default: break;
     }
 }
@@ -588,6 +669,9 @@ static void ikbd_reset_state(void)
     ikbd.y0_top = 1;
     ikbd.paused = 0;
     ikbd.joy_event = 1;
+    ikbd.reset_us = now_us();
+    ikbd.mouse_touched = ikbd.both = 0;
+    ikbd.mouse_off_cmd = ikbd.joy_off_cmd = 0;
     ikbd.pending_cmd = 0;
     ikbd.pending_params = 0;
     ikbd.memload_left = 0;
@@ -1059,11 +1143,11 @@ uint8_t kbd_usb_acia_data_shim(void)
                 return kbd_usb_rx_read();
             return IKBD_DIVERTED_BYTE;   /* nothing for the main guest */
         }
-        return mouse_scale_byte(v);     /* native mouse only */
+        return joy_usb_real_rx_filter(mouse_scale_byte(v));
     }
     if (kbd_usb_rx_ready())
         return kbd_usb_rx_read();
-    return ps_read_8(KBD_ACIA_DATA_ADDR);
+    return joy_usb_real_rx_filter(ps_read_8(KBD_ACIA_DATA_ADDR));
 }
 
 uint8_t kbd_usb_gpip_shim(uint8_t real)
@@ -1204,8 +1288,14 @@ typedef struct {
     int  fd;
     int  is_mouse;
     int  is_kbd;
+    int  pad;                   /* joy_usb pad index, -1 = not a gamepad */
     char node[64];
 } in_dev;
+
+/* Which device classes the thread opens: KBD_USB_DEV_KBDMOUSE for
+ * "kbd usb", KBD_USB_DEV_GAMEPAD for "usb gamepad". Either alone turns
+ * the ACIA injection machinery on; the mask only decides what feeds it. */
+static int dev_mask;
 
 /* For the taskbar's USB icon (PSCTRL PS_HOST_INPUT): device counts kept
  * by the evdev thread as it opens and closes nodes, and the time of the
@@ -1254,15 +1344,54 @@ static void dev_try_open(const char *name)
     unsigned long evbits[(EV_MAX / (8 * sizeof(long))) + 1];
     unsigned long keybits[(KEY_MAX / (8 * sizeof(long))) + 1];
     unsigned long relbits[(REL_MAX / (8 * sizeof(long))) + 1];
+    unsigned long absbits[(ABS_MAX / (8 * sizeof(long))) + 1];
     memset(evbits, 0, sizeof evbits);
     memset(keybits, 0, sizeof keybits);
     memset(relbits, 0, sizeof relbits);
+    memset(absbits, 0, sizeof absbits);
     ioctl(fd, EVIOCGBIT(0, sizeof evbits), evbits);
 
-    int is_kbd = 0, is_mouse = 0;
+    int is_kbd = 0, is_mouse = 0, pad = -1;
+    if (has_bit(evbits, EV_KEY))
+        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keybits), keybits);
+    if (has_bit(evbits, EV_ABS))
+        ioctl(fd, EVIOCGBIT(EV_ABS, sizeof absbits), absbits);
+
+    /* Gamepads first: an Xbox pad has neither KEY_A..KEY_Z nor BTN_LEFT
+     * so it would otherwise be dropped; a pad that DID advertise them
+     * must still not be taken for a keyboard. */
+    if (joy_usb_is_gamepad(evbits, keybits, absbits))
+    {
+        if (!(dev_mask & KBD_USB_DEV_GAMEPAD))
+        {
+            close(fd);
+            return;
+        }
+        char dname[64] = "?";
+        ioctl(fd, EVIOCGNAME(sizeof dname), dname);
+        pad = joy_usb_dev_open(fd, dname);
+        if (pad < 0)
+        {
+            close(fd);
+            return;
+        }
+        if (in_state.grab_wanted && atomic_load(&in_state.grab_active))
+            ioctl(fd, EVIOCGRAB, (void *)1);
+        in_dev *d = &in_state.dev[in_state.ndev++];
+        d->fd = fd;
+        d->is_mouse = d->is_kbd = 0;
+        d->pad = pad;
+        snprintf(d->node, sizeof d->node, "%s", path);
+        return;
+    }
+    if (!(dev_mask & KBD_USB_DEV_KBDMOUSE))
+    {
+        close(fd);
+        return;
+    }
+
     if (has_bit(evbits, EV_KEY))
     {
-        ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keybits), keybits);
         if (has_bit(keybits, KEY_A) && has_bit(keybits, KEY_Z))
             is_kbd = 1;
         if (has_bit(keybits, BTN_LEFT))
@@ -1294,6 +1423,7 @@ static void dev_try_open(const char *name)
     d->fd = fd;
     d->is_mouse = is_mouse;
     d->is_kbd = is_kbd;
+    d->pad = -1;
     snprintf(d->node, sizeof d->node, "%s", path);
     if (is_kbd)   atomic_fetch_add(&g_n_kbd, 1);
     if (is_mouse) atomic_fetch_add(&g_n_mouse, 1);
@@ -1318,6 +1448,8 @@ static void dev_scan_all(void)
 static void dev_close(int idx)
 {
     printf("[KBD] lost %s\n", in_state.dev[idx].node);
+    if (in_state.dev[idx].pad >= 0)
+        joy_usb_dev_close(in_state.dev[idx].pad);
     close(in_state.dev[idx].fd);
     if (in_state.dev[idx].is_kbd)   atomic_fetch_sub(&g_n_kbd, 1);
     if (in_state.dev[idx].is_mouse) atomic_fetch_sub(&g_n_mouse, 1);
@@ -1329,6 +1461,7 @@ static void dev_close(int idx)
  *   bit 1  a USB/Bluetooth keyboard is attached
  *   bit 2  a USB/Bluetooth mouse is attached
  *   bit 3  the real IKBD is present and trusted (merge mode)
+ *   bit 4  a USB/Bluetooth gamepad is attached ('usb gamepad')
  *   bits 8-15  seconds since the last forwarded key or motion, 255 = never
  * Callable from any thread. */
 uint32_t kbd_usb_input_word(void)
@@ -1338,6 +1471,7 @@ uint32_t kbd_usb_input_word(void)
         w |= 1;
         if (atomic_load(&g_n_kbd) > 0)   w |= 2;
         if (atomic_load(&g_n_mouse) > 0) w |= 4;
+        if (joy_usb_count() > 0)         w |= 16;
         uint64_t last = atomic_load(&g_last_event_us);
         uint64_t age = last ? (now_us() - last) / 1000000ull : 255;
         if (age > 255) age = 255;
@@ -1388,6 +1522,56 @@ static void send_key(uint8_t scan, int pressed)
     ring_push_packet(&b, 1);
 }
 
+/* ---- gamepad -> IKBD (joy_usb.c emit hooks) ------------------------
+ * All IKBD-mode gating lives here, next to the keyboard/mouse rules, so
+ * joy_usb.c never has to know what mode the guest put the IKBD in.
+ *   - box focused: the sandbox's own IKBD model decides;
+ *   - joystick events off ($15/$1A) or output paused ($13): dropped, and
+ *     re-sent by joy_usb_resend() when the mode comes back;
+ *   - mouse on: joystick 0 is the mouse port and is not reported at all
+ *     (unless the reset quirk enabled both); joystick 1's fire is the
+ *     right mouse button and travels in the F8 header (mouse_flush). */
+static _Atomic int joy_rbutton;            /* pad 0 fire while mouse on */
+static _Atomic int joy_last_pkt[2] = { -1, -1 };   /* declared above     */
+
+static int joy_send(int st_port, uint8_t state, uint8_t pad_buttons)
+{
+    if (stbox_wants_input())
+    {
+        stbox_joypad_event(st_port, state, pad_buttons);
+        return 1;
+    }
+    pthread_mutex_lock(&ikbd.lock);
+    const int ev       = ikbd.joy_event;
+    const int paused   = ikbd.paused;
+    const int mouse_on = ikbd.mouse_mode != MOUSE_OFF;
+    const int both     = ikbd.both;
+    pthread_mutex_unlock(&ikbd.lock);
+
+    if (!ev || paused)
+        return 1;                          /* not reported in this mode */
+    if (st_port == 0 && mouse_on && !both)
+        return 1;                          /* port 0 belongs to the mouse */
+    if (st_port == 1 && mouse_on)
+        state &= (uint8_t)~STJOY_FIRE;     /* fire = right mouse button */
+
+    if (atomic_exchange(&joy_last_pkt[st_port], state) == state)
+        return 1;                          /* nothing new on the wire   */
+    uint8_t pkt[2] = { (uint8_t)(0xFE | (st_port & 1)), state };
+    ring_push_packet(pkt, 2);
+    return 1;
+}
+
+static void joy_set_rbutton(int down)
+{
+    atomic_store_explicit(&joy_rbutton, down, memory_order_relaxed);
+}
+
+static void joy_send_key(uint8_t st_scan, int pressed)
+{
+    send_key(st_scan, pressed);
+}
+
 static void mouse_flush(void)
 {
     if (stbox_wants_input())
@@ -1413,12 +1597,19 @@ static void mouse_flush(void)
     int paused = ikbd.paused;
     pthread_mutex_unlock(&ikbd.lock);
 
+    /* While the IKBD mouse is on, joystick 1's fire button IS the right
+     * mouse button (the IKBD wires them together - Hatari
+     * IKBD_DuplicateMouseFireButtons), so pad 0's fire rides in the F8
+     * header here and is stripped from its $FF packets in joy_send(). */
+    const int buttons = in_state.buttons |
+                        (atomic_load_explicit(&joy_rbutton, memory_order_relaxed) ? 0x01 : 0);
+
     if (paused || mode != MOUSE_REL)
     {
         /* not injectable in abs/keycode/off modes - drop deltas so they
          * don't burst out when relative mode returns */
         in_state.dx = in_state.dy = 0;
-        in_state.last_sent_buttons = in_state.buttons;
+        in_state.last_sent_buttons = buttons;
         return;
     }
 
@@ -1436,7 +1627,7 @@ static void mouse_flush(void)
     if (in_state.dy < -MOUSE_CARRY_CLAMP) in_state.dy = -MOUSE_CARRY_CLAMP;
 
     while (in_state.dx / div || in_state.dy / div ||
-           in_state.buttons != in_state.last_sent_buttons)
+           buttons != in_state.last_sent_buttons)
     {
         /* Bounded queue. The old test let the ring fill to ~1016 bytes -
          * 1.3 SECONDS of backlogged motion at the IKBD byte rate, which
@@ -1453,13 +1644,13 @@ static void mouse_flush(void)
         if (sy < -128) sy = -128;
         in_state.dx -= sx * div;      /* keep the sub-division remainder */
         in_state.dy -= sy * div;
-        in_state.last_sent_buttons = in_state.buttons;
+        in_state.last_sent_buttons = buttons;
 
         if (!y0top)
             sy = -sy;
 
         uint8_t pkt[3];
-        pkt[0] = (uint8_t)(0xF8 | (in_state.buttons & 0x03));
+        pkt[0] = (uint8_t)(0xF8 | (buttons & 0x03));
         pkt[1] = (uint8_t)(int8_t)sx;
         pkt[2] = (uint8_t)(int8_t)sy;
         ring_push_packet(pkt, 3);
@@ -1588,9 +1779,13 @@ static void *input_thread(void *arg)
                 ssize_t r = read(in_state.dev[i].fd, &ev, sizeof ev);
                 if (r == (ssize_t)sizeof ev)
                 {
-                    if (ev.type == EV_KEY || ev.type == EV_REL)
+                    if (ev.type == EV_KEY || ev.type == EV_REL ||
+                        ev.type == EV_ABS)
                         atomic_store(&g_last_event_us, now_us());
-                    handle_event(&ev, in_state.dev[i].is_mouse);
+                    if (in_state.dev[i].pad >= 0)
+                        joy_usb_handle_event(in_state.dev[i].pad, &ev);
+                    else
+                        handle_event(&ev, in_state.dev[i].is_mouse);
                 }
                 else if (r < 0 && errno == EAGAIN)
                 {
@@ -1604,6 +1799,10 @@ static void *input_thread(void *arg)
                 }
             }
         }
+
+        /* gamepads: emit changed joystick state (cheap when idle) */
+        if (dev_mask & KBD_USB_DEV_GAMEPAD)
+            joy_usb_tick();
 
         /* periodic mouse packet generation */
         uint64_t t = now_us();
@@ -1631,10 +1830,21 @@ static void *input_thread(void *arg)
 /* lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
-int kbd_usb_init(int grab)
+int kbd_usb_init(int grab, int devices)
 {
     if (atomic_load(&in_state.running))
         return 0;
+
+    dev_mask = devices;
+    if (dev_mask & KBD_USB_DEV_GAMEPAD)
+    {
+        static const joy_usb_emit_hooks h = {
+            .send_joy        = joy_send,
+            .set_joy_rbutton = joy_set_rbutton,
+            .send_key        = joy_send_key,
+        };
+        joy_usb_set_hooks(&h);
+    }
 
     /* channel 6 = GPIP4 (keyboard/MIDI ACIA IRQ) on the virtual MFP */
     mfp_hub_register_level(6, kbd_level_poll);
@@ -1649,7 +1859,10 @@ int kbd_usb_init(int grab)
         fprintf(stderr, "[KBD] input thread create failed\n");
         return -1;
     }
-    printf("[KBD] USB/Bluetooth IKBD injection enabled%s\n",
+    printf("[KBD] USB/Bluetooth IKBD injection enabled: %s%s%s%s\n",
+           (dev_mask & KBD_USB_DEV_KBDMOUSE) ? "keyboard+mouse" : "",
+           dev_mask == (KBD_USB_DEV_KBDMOUSE | KBD_USB_DEV_GAMEPAD) ? ", " : "",
+           (dev_mask & KBD_USB_DEV_GAMEPAD)  ? "gamepads" : "",
            grab ? " (devices grabbed, F12 releases)" : "");
     return 0;
 }
