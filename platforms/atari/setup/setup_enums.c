@@ -76,6 +76,56 @@ static const struct table tables[] = {
 };
 #undef T
 
+/*
+ * Where a setting belongs. Only the exceptions are listed: anything not
+ * here is SE_BOTH, so a new .cfg key shows up in both sections rather
+ * than vanishing.
+ */
+static const struct { const char *key; int env; } env_of[] = {
+    /* the ST's own video: APJ-OS draws through fVDI on the ET4000 */
+    { "monitor",        SE_GEM },
+    { "shifter",        SE_GEM },
+    /* slow the machine down to ST speed - for ST software, not a desktop */
+    { "cpu_compatible", SE_GEM },
+    { "m68k_speed",     SE_GEM },
+    { "cpu_clock_multiplier", SE_GEM },
+    { "loopcycles",     SE_GEM },
+    /* the graphics card and its HDMI output: APJ-OS only */
+    { "vga",            SE_APJ },
+    { "vga_render",     SE_APJ },
+    { "native_hdmi",    SE_APJ },
+    { "fps",            SE_APJ },
+};
+
+/* Keys that only matter while another key is on. */
+static const struct { const char *key, *needs; } needs_of[] = {
+    { "network_backend",  "network" },
+    { "network_tap",      "network" },
+    { "network_base",     "network" },
+    { "network_mac",      "network" },
+    { "network_irq",      "network" },
+    { "network_host_ip",  "network" },
+    { "network_atari_ip", "network" },
+    { "network_netmask",  "network" },
+    { "network_debug",    "network" },
+};
+
+int se_env(const char *key)
+{
+    for (unsigned i = 0; i < sizeof env_of / sizeof env_of[0]; i++)
+        if (!strcasecmp(key, env_of[i].key))
+            return env_of[i].env;
+    return SE_BOTH;
+}
+
+const char *se_needs(const char *key)
+{
+    for (unsigned i = 0; i < sizeof needs_of / sizeof needs_of[0]; i++)
+        if (!strcasecmp(key, needs_of[i].key))
+            return needs_of[i].needs;
+    return NULL;
+}
+
 static const struct table *find(const char *key)
 {
     for (unsigned i = 0; i < sizeof tables / sizeof tables[0]; i++)

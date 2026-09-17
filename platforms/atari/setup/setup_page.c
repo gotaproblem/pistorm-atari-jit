@@ -26,6 +26,8 @@ enum row_kind { ROW_PICK, ROW_KEY, ROW_SAVE, ROW_BOOT };
 struct row {
     enum row_kind kind;
     char text[SC_KEY_LEN];       /* section or key name */
+    int  offtopic;               /* not this environment's, or switched off
+                                  * by the key it depends on              */
 };
 
 struct state {
@@ -36,6 +38,8 @@ struct state {
     int  sel, top;               /* selection, first visible settings row */
     char sec[SC_SEC_LEN];        /* section being edited / booted */
     int  secs;                   /* countdown, -1 once stopped */
+    int  show_all;               /* Tab: list the off-topic rows too */
+    int  hidden;                 /* how many are being left out       */
     int  editing;
     int  choosing;               /* picking from a list of known values */
     int  choice;
@@ -80,10 +84,28 @@ static void build_rows(struct state *st)
     if (!st->sec[0] && st->nsec)
         snprintf(st->sec, sizeof st->sec, "%.*s", SC_SEC_LEN - 1, st->row[0].text);
 
+    /* which environment this section is: an unknown name shows everything */
+    int env = !strcasecmp(st->sec, "gem")    ? SE_GEM :
+              !strcasecmp(st->sec, "apj-os") ? SE_APJ : SE_BOTH;
+
     char keys[64][SC_KEY_LEN];
     int nk = sc_keys(&st->cfg, st->sec, keys, 64);
+    st->hidden = 0;
     for (int i = 0; i < nk && st->nrow < MAX_ROWS - 2; i++) {
+        int off = !(se_env(keys[i]) & env);
+        const char *needs = se_needs(keys[i]);
+        if (!off && needs) {
+            /* hidden when the key it hangs off is absent or switched off:
+             * the eight network_* rows only matter with `network` on */
+            const char *v = sc_get(&st->cfg, st->sec, needs);
+            off = !v || !sp_row_on(needs, v);
+        }
+        if (off && !st->show_all) {
+            st->hidden++;
+            continue;
+        }
         st->row[st->nrow].kind = ROW_KEY;
+        st->row[st->nrow].offtopic = off;
         snprintf(st->row[st->nrow].text, SC_KEY_LEN, "%.*s",
                  SC_KEY_LEN - 1, keys[i]);
         st->nrow++;
@@ -239,7 +261,7 @@ int sp_row_is_switch(const char *key, const char *val)
 }
 
 /* and is it on? */
-static int row_on(const char *key, const char *val)
+int sp_row_on(const char *key, const char *val)
 {
     const char *rest;
     int dev = device_key(key, val, &rest);
@@ -288,7 +310,7 @@ const char *sp_row_value(const char *key, const char *val, char *buf,
         return "";
     int dev = device_key(key, val, &rest);
     if (dev) {
-        int on = row_on(key, val);
+        int on = sp_row_on(key, val);
         const char *opts = first_word_is_bool(rest) ?
                            rest_after_word(rest, strcspn(rest, " \t")) : rest;
         if (*opts)
@@ -398,6 +420,7 @@ static void draw(struct ss_screen *ss, const struct state *st)
             const char *key = st->row[fk + k].text;
             const char *val = sc_get(&st->cfg, st->sec, key);
             int on = st->sel == fk + k;
+            int off = st->row[fk + k].offtopic;
             char vbuf[SC_LINE_LEN];
             if (on && st->choosing) {
                 const char *c = se_choice(key, st->choice);
@@ -411,7 +434,8 @@ static void draw(struct ss_screen *ss, const struct state *st)
                 snprintf(line, sizeof line, "%-20.20s %-48.48s",
                          sp_row_label(key, val),
                          sp_row_value(key, val, vbuf, sizeof vbuf));
-            ss_puts(ss, 4, row, line, on ? paper : ink, on ? hi : paper);
+            ss_puts(ss, 4, row, line,
+                    on ? paper : (off ? hi : ink), on ? hi : paper);
         }
         row++;
     }
@@ -430,6 +454,15 @@ static void draw(struct ss_screen *ss, const struct state *st)
                      (st->cfg.dirty ? "Save *" : "Save") : "Boot now");
         ss_puts(ss, 4 + (i == st->nrow - 1 ? 20 : 0), row, line,
                 on ? paper : ink, on ? hi : paper);
+    }
+
+    if (st->hidden || st->show_all) {
+        if (st->show_all)
+            snprintf(line, sizeof line, "Tab: hide unused");
+        else
+            snprintf(line, sizeof line, "Tab: show %d hidden", st->hidden);
+        ss_puts(ss, SS_COLS - 2 - (int)strlen(line), SS_ROWS - 2, line,
+                hi, paper);
     }
 
     ss_clear_row(ss, SS_ROWS - 1, paper);
@@ -453,7 +486,7 @@ static int toggle_switch(struct state *st)
     const char *val = sc_get(&st->cfg, st->sec, key);
     if (!sp_row_is_switch(key, val))
         return 0;
-    int on = row_on(key, val);
+    int on = sp_row_on(key, val);
     const char *now = on ? "disabled" : "enabled";
     char with[SC_LINE_LEN];
 
@@ -590,6 +623,11 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     break;
                 case ROW_KEY: {
                     const char *kk = st.row[st.sel].text;
+                    if (st.row[st.sel].offtopic) {
+                        snprintf(st.msg, sizeof st.msg,
+                                 "%.20s is not used by %.10s", kk, st.sec);
+                        break;
+                    }
                     if (se_count(kk)) {     /* a known set of values */
                         const char *v = sc_get(&st.cfg, st.sec, kk);
                         int at = se_index(kk, v ? v : "");
@@ -618,6 +656,14 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                 case ROW_BOOT:
                     goto boot;
                 }
+                break;
+            case SI_TAB:
+                st.show_all = !st.show_all;
+                st.sel = st.nsec;           /* the list just changed length */
+                st.top = 0;
+                snprintf(st.msg, sizeof st.msg, "%s",
+                         st.show_all ? "showing every key in the section"
+                                     : "showing what this machine uses");
                 break;
             case SI_ESC:
             case SI_F10:

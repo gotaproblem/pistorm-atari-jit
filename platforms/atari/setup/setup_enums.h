@@ -14,6 +14,24 @@
 extern "C" {
 #endif
 
+/* Which environment a setting belongs to, and what it depends on.
+ *
+ * APJ-OS runs FreeMiNT + XaAES + fVDI on the ET4000 over HDMI, so the
+ * ST's own video shape (monitor detect, shifter model) means nothing
+ * there; plain GEM runs on the ST's shifter, so the ET4000/HDMI keys mean
+ * nothing to it. Rows outside the section's environment are hidden, and
+ * Tab shows them greyed rather than gone.
+ *
+ * Some keys are only interesting when another one is on - the eight
+ * network_* keys behind `network`, the stbox_* keys behind `stbox` - so
+ * they hide with it. */
+#define SE_GEM   0x1
+#define SE_APJ   0x2
+#define SE_BOTH  (SE_GEM | SE_APJ)
+
+int         se_env(const char *key);          /* SE_* mask; BOTH if unlisted */
+const char *se_needs(const char *key);        /* key that must be on, or NULL */
+
 /* How many choices `key` has, 0 if it is not one of these keys. */
 int         se_count(const char *key);
 

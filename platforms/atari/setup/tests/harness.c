@@ -584,6 +584,30 @@ static void run_no_shifter(void)
     no_ram = 0;
 }
 
+/* which environment a setting belongs to, and what it hangs off */
+static void run_relevance(void)
+{
+    printf("relevance:\n");
+    /* the ST's own video shape means nothing under fVDI on the ET4000 */
+    CHECK(se_env("monitor") == SE_GEM, "monitor should be GEM-only");
+    CHECK(se_env("shifter") == SE_GEM, "shifter should be GEM-only");
+    CHECK(se_env("m68k_speed") == SE_GEM, "m68k_speed should be GEM-only");
+    /* and the card and its HDMI output mean nothing to plain GEM */
+    CHECK(se_env("vga") == SE_APJ, "vga should be APJ-OS only");
+    CHECK(se_env("native_hdmi") == SE_APJ, "native_hdmi should be APJ-OS only");
+    CHECK(se_env("fps") == SE_APJ, "fps should be APJ-OS only");
+    /* everything else belongs to both, including keys nobody listed */
+    CHECK(se_env("cpu") == SE_BOTH, "cpu should be in both");
+    CHECK(se_env("hostfs") == SE_BOTH, "hostfs should be in both");
+    CHECK(se_env("something_new") == SE_BOTH,
+          "an unlisted key must default to both, not vanish");
+
+    CHECK(se_needs("network_tap") && !strcmp(se_needs("network_tap"), "network"),
+          "network_tap does not hang off network");
+    CHECK(se_needs("network") == NULL, "network itself must not hang off itself");
+    CHECK(se_needs("cpu") == NULL, "cpu should not depend on anything");
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -600,6 +624,7 @@ int main(void)
     run_labels();
     run_enums();
     run_no_shifter();
+    run_relevance();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;
