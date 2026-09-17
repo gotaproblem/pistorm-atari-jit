@@ -1217,6 +1217,14 @@ static void orderly_teardown(void)
   fcntl(STDIN_FILENO, F_SETFL, oldf);
 }
 
+/* atexit: the terminal must come back whatever happens - see main() */
+void restore_tty(void)
+{
+  oldt.c_lflag |= ECHO;
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+  fcntl(STDIN_FILENO, F_SETFL, oldf);
+}
+
 void sigint_handler(int sig_num)
 {
   (void) sig_num;
@@ -1364,6 +1372,13 @@ int main (int argc, char *argv[])
   tcsetattr(STDIN_FILENO, TCSANOW, &newt);
   oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
   fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+  /* Put the terminal back however we leave, not only through the orderly
+   * path: ps_setup_protocol() exits straight out when /dev/mem cannot be
+   * opened (not run as root), and every early failure below does the
+   * same, which used to leave the shell with no echo and no line editing
+   * until the user typed a blind "stty sane". */
+  atexit(restore_tty);
 
   /* Initialise PiSTorm */
   pulse_reset_inprogress = 0;
