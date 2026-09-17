@@ -17,13 +17,18 @@ static const char *shifter[] = { "st", "ste" };
 static const char *blitter[] = { "disabled", "enabled", "real" };
 /* CONFITEM_MONITOR: forces the GPIP7 monitor-detect bit */
 static const char *monitor[] = { "auto", "mono", "colour" };
-/* the `vga` line is "<card> <driver>" */
+/* the `vga` line is "<card> <driver>". Only the ET4000 has an
+ * implementation (platforms/atari/et4000); ATI and MATROX are names in
+ * graphics_card_types[] with nothing behind them, so they are not offered.
+ * The four drivers are real: each selects an address map in emulator.c's
+ * et4kaddresses[] (NOVA/NVDI/FVDI at $D00000, XVDI at $B00000). */
 static const char *vga[]     = { "ET4000AX FVDI", "ET4000AX NVDI",
                                  "ET4000AX NOVA", "ET4000AX XVDI", "NONE" };
 /* jit_cache is in KB; 16384 is the compiled-in maximum */
 static const char *cache[]   = { "2048", "4096", "8192", "16384" };
-/* CONFITEM_TTRAM: a bool, or a size */
-static const char *ttram[]   = { "disabled", "32M", "64M", "128M" };
+/* CONFITEM_TTRAM: a bool, or a size; the parser clamps at 256 MB, which
+ * is the natmem reserve and the emulator.c ceiling ("all three must agree") */
+static const char *ttram[]   = { "disabled", "32M", "64M", "128M", "256M" };
 /* CONFITEM_STBOX_MACHINE */
 static const char *stbox[]   = { "st", "ste" };
 /* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
@@ -103,7 +108,6 @@ static const struct { const char *key, *dflt; } known[] = {
     { "stram_size",  "4M"       },
     { "blitter",     "enabled"  },
     { "dma_sound",   "disabled" },
-    { "rtc",         "disabled" },
     { "acsi",        "disabled" },
     { "monitor",     "auto"     },
     { "shifter",     "st"       },
@@ -138,12 +142,40 @@ static const struct { const char *key; int env; } env_of[] = {
     { "cpu_compatible", SE_GEM },
     { "m68k_speed",     SE_GEM },
     { "cpu_clock_multiplier", SE_GEM },
-    { "loopcycles",     SE_GEM },
-    /* the graphics card and its HDMI output: APJ-OS only */
+    /* the emulated graphics card, which fVDI drives: APJ-OS only.
+     * native_hdmi and fps are NOT here: native_hdmi is the ST-screen
+     * mirror on HDMI (config_file.c: "the native_hdmi ST-screen mirror"),
+     * which a GEM machine on an HDMI monitor needs, and fps paces the
+     * HDMI render thread whichever source it shows. */
     { "vga",            SE_APJ },
-    { "native_hdmi",    SE_APJ },
-    { "fps",            SE_APJ },
+    /* the ST Box - a sandboxed ST in a GEM window under APJ-OS */
+    { "stbox_tos",      SE_APJ },
+    { "stbox_machine",  SE_APJ },
+    { "stbox_plane",    SE_APJ },
 };
+
+/* Retired: parsed and read by nothing (the parser ignores them with a
+ * note). Never a row, so a leftover line cannot pass for a setting.
+ * Developer: real, but tuning/debug knobs - hidden unless Tab. */
+static const char *retired[]   = { "vga_render", "loopcycles", "rtc" };
+static const char *developer[] = { "addr32", "stram_cache", "stram_direct",
+                                   "network_debug", "jit" };
+
+int se_retired(const char *key)
+{
+    for (unsigned i = 0; i < sizeof retired / sizeof retired[0]; i++)
+        if (!strcasecmp(key, retired[i]))
+            return 1;
+    return 0;
+}
+
+int se_developer(const char *key)
+{
+    for (unsigned i = 0; i < sizeof developer / sizeof developer[0]; i++)
+        if (!strcasecmp(key, developer[i]))
+            return 1;
+    return 0;
+}
 
 /* Keys that only matter while another key is on. */
 static const struct { const char *key, *needs; } needs_of[] = {

@@ -32,6 +32,15 @@ extern "C" {
 int         se_env(const char *key);          /* SE_* mask; BOTH if unlisted */
 const char *se_needs(const char *key);        /* key that must be on, or NULL */
 
+/* Keys the page never offers to change:
+ *   retired   - parsed and read by nothing (vga_render, loopcycles, rtc):
+ *               the parser ignores them, and the page hides them so a
+ *               leftover line cannot be mistaken for a setting
+ *   developer - real, but tuning/debug knobs (addr32, stram_cache,
+ *               stram_direct, network_debug, jit): hidden unless Tab */
+int         se_retired(const char *key);
+int         se_developer(const char *key);
+
 /* Keys worth offering even when the .cfg does not have them, so a
  * machine can be given a setting it is missing rather than only edited.
  * Walk them with se_known(i); se_known_default() is the value a row gets

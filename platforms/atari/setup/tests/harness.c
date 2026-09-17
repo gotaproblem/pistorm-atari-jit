@@ -513,6 +513,9 @@ static void run_enums(void)
     CHECK(se_index("vga", "ET4000AX FVDI") == 0, "the vga pair was not found");
     CHECK(se_index("jit_cache", "16384") == 3, "jit_cache 16384 not found");
     CHECK(se_index("ttram", "128M") == 3, "ttram 128M not found");
+    CHECK(se_index("ttram", "256M") == 4, "ttram 256M (the parser's ceiling) missing");
+    CHECK(se_index("ttram", "512M") == -1, "ttram offers more than the parser allows");
+    CHECK(se_index("vga", "ATI NVDI") == -1, "vga offers a card with no implementation");
 
     /* spellings the parser accepts for the same choice, including a bare
      * key: `blitter` alone is enabled, `ttram` alone is 128M */
@@ -594,8 +597,22 @@ static void run_relevance(void)
     CHECK(se_env("m68k_speed") == SE_GEM, "m68k_speed should be GEM-only");
     /* and the card and its HDMI output mean nothing to plain GEM */
     CHECK(se_env("vga") == SE_APJ, "vga should be APJ-OS only");
-    CHECK(se_env("native_hdmi") == SE_APJ, "native_hdmi should be APJ-OS only");
-    CHECK(se_env("fps") == SE_APJ, "fps should be APJ-OS only");
+    CHECK(se_env("stbox_tos") == SE_APJ, "the ST Box is an APJ-OS feature");
+    /* the ST-screen mirror on HDMI serves a GEM machine on an HDMI
+     * monitor too, and fps paces that output whichever source it shows */
+    CHECK(se_env("native_hdmi") == SE_BOTH, "native_hdmi is the ST-screen mirror: both");
+    CHECK(se_env("fps") == SE_BOTH, "fps paces HDMI for either machine");
+
+    /* retired keys are never rows; developer keys hide unless Tab */
+    CHECK(se_retired("vga_render") && se_retired("loopcycles") && se_retired("rtc"),
+          "a retired key is still offered");
+    CHECK(!se_retired("cpu"), "cpu was retired");
+    CHECK(se_developer("addr32") && se_developer("stram_cache") &&
+          se_developer("stram_direct") && se_developer("network_debug"),
+          "a developer knob is on the main list");
+    CHECK(!se_developer("ttram"), "ttram was hidden as a developer knob");
+    for (int i = 0; se_known(i); i++)
+        CHECK(!se_retired(se_known(i)), "%s is offered AND retired", se_known(i));
     /* everything else belongs to both, including keys nobody listed */
     CHECK(se_env("cpu") == SE_BOTH, "cpu should be in both");
     CHECK(se_env("hostfs") == SE_BOTH, "hostfs should be in both");

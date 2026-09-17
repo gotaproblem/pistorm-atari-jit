@@ -92,14 +92,12 @@ struct emulator_config {
   bool mmu;              /* full MMU emulation, model follows cpu_type
                             (68030/040/060 only; interpreter only) */
   int  monitor_force;    /* MFP GPIP7 monitor detect: 0 real, 1 mono, 2 colour */
-  int loop_cycles;
   bool fpu;
   VGA_s graphics;
   int fps;
   bool ttram;
   uint32_t ttram_size;
   bool addr32;
-  bool rtc;
   ROM_s rom;//rom[2];
   //int rom_count;
   bool ide;

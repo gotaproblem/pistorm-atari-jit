@@ -29,12 +29,10 @@ typedef enum {
   CONFITEM_MONITOR,
   CONFITEM_JIT,
   CONFITEM_FPU,
-  CONFITEM_LOOPCYCLES,
   CONFITEM_GRAPHICS_CARD,
   CONFITEM_FPS,
   CONFITEM_TTRAM,
   CONFITEM_ADDR32,
-  CONFITEM_RTC,
   CONFITEM_ROM,
   CONFITEM_IDE,
   CONFITEM_HDD,
@@ -94,12 +92,10 @@ static const config_switch_def config_switches[] = {
   { "monitor", CONFITEM_MONITOR },
   { "jit", CONFITEM_JIT },
   { "fpu", CONFITEM_FPU },
-  { "loopcycles", CONFITEM_LOOPCYCLES },
   { "vga", CONFITEM_GRAPHICS_CARD },
   { "fps", CONFITEM_FPS },
   { "ttram", CONFITEM_TTRAM },
   { "addr32", CONFITEM_ADDR32 },
-  { "rtc", CONFITEM_RTC },
   { "rom", CONFITEM_ROM },
   { "ide", CONFITEM_IDE },
   { "hdd", CONFITEM_HDD },
@@ -822,11 +818,6 @@ struct emulator_config *load_config_file_section(char *filename,
         cfg->fpu = get_bool_default_true(parse_line + str_pos);
         break;
 
-      // depricated
-      case CONFITEM_LOOPCYCLES:
-        cfg->loop_cycles = get_int(parse_line + str_pos);
-        break;
-      
       case CONFITEM_GRAPHICS_CARD:
         {
           cfg->graphics.card = 0;
@@ -907,11 +898,6 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_ADDR32:
         cfg->addr32 = get_bool_default_true(parse_line + str_pos);
-        break;
-
-      // depricated
-      case CONFITEM_RTC:
-        cfg->rtc = true;
         break;
 
       case CONFITEM_ROM:
@@ -1335,10 +1321,13 @@ struct emulator_config *load_config_file_section(char *filename,
          * only warns if neither list knows the key. */
         if (psctrl_settings_config_key(cur_cmd, parse_line + str_pos))
           break;
-        if (!strcasecmp(cur_cmd, "vga_render")) {
-          /* Retired: it was parsed into the config and never read by
-           * anything. Ignored quietly so an old .cfg still loads. */
-          printf ("[CFG] vga_render is retired and does nothing - ignored\n");
+        if (!strcasecmp(cur_cmd, "vga_render") ||
+            !strcasecmp(cur_cmd, "loopcycles") ||
+            !strcasecmp(cur_cmd, "rtc")) {
+          /* Retired: parsed into the config and never read by anything
+           * (the last two were marked deprecated years ago). Ignored
+           * quietly so an old .cfg still loads. */
+          printf ("[CFG] %s is retired and does nothing - ignored\n", cur_cmd);
           break;
         }
         printf ("[CFG] Unknown config item %s on line %d.\n", cur_cmd, cur_line);

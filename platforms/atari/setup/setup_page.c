@@ -93,7 +93,9 @@ static void build_rows(struct state *st)
     int nk = sc_keys(&st->cfg, st->sec, keys, 64);
     st->hidden = 0;
     for (int i = 0; i < nk && st->nrow < MAX_ROWS - 2; i++) {
-        int off = !(se_env(keys[i]) & env);
+        if (se_retired(keys[i]))
+            continue;                       /* does nothing: never a row */
+        int off = !(se_env(keys[i]) & env) || se_developer(keys[i]);
         const char *needs = se_needs(keys[i]);
         if (!off && needs) {
             /* hidden when the key it hangs off is absent or switched off:
