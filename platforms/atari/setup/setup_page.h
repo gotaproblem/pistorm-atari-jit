@@ -22,6 +22,14 @@ extern "C" {
 int         sp_is_switch(const char *val);
 const char *sp_switch_text(const char *val);
 
+/* How a .cfg key and value are presented, and what a typed value is
+ * written back as. Exposed for the harness. */
+const char *sp_row_label(const char *key, const char *val);
+const char *sp_row_value(const char *key, const char *val, char *buf,
+                         unsigned long n);
+const char *sp_value_from_edit(const char *key, const char *typed, char *buf,
+                               unsigned long n);
+
 enum sp_result {
     SP_BOOT = 0,      /* boot the section named in `chosen`        */
     SP_QUIT,          /* leave without booting (the test tool)     */

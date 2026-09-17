@@ -169,12 +169,95 @@ int sp_is_switch(const char *val)
         return 0;
     if (!*val)
         return 1;                            /* a bare key is "on" */
+    if (!strncasecmp(val, "gamepad", 7)) {   /* usb gamepad [on|off] */
+        const char *rest = val + 7;
+        while (*rest == ' ' || *rest == '\t')
+            rest++;
+        return !*rest || word_in(rest, false_words, 6) ||
+               word_in(rest, true_words, 6);
+    }
     return word_in(val, false_words, 6) || word_in(val, true_words, 6);
 }
 
 static int switch_on(const char *val)
 {
-    return !val || !*val || !word_in(val, false_words, 6);
+    if (!val || !*val)
+        return 1;
+    if (!strncasecmp(val, "gamepad", 7)) {
+        const char *rest = val + 7;
+        while (*rest == ' ' || *rest == '\t')
+            rest++;
+        return !*rest || !word_in(rest, false_words, 6);
+    }
+    return !word_in(val, false_words, 6);
+}
+
+/*
+ * A few .cfg keys read badly as key + value, because the key names the
+ * subsystem and the value names what is being switched on:
+ *
+ *   kbd usb            -> "usb kbd/mouse    usb"   (config_file.c: kbd usb
+ *                         [nograb] [merge|standalone] injects the USB
+ *                         keyboard AND mouse into the IKBD stream)
+ *   usb gamepad        -> "usb gamepad      enabled"
+ *   hostfs S /path     -> "hostfs           S: /path"
+ *
+ * Only the display changes; the file keeps the emulator's own spelling.
+ */
+const char *sp_row_label(const char *key, const char *val)
+{
+    if (!strcasecmp(key, "kbd"))
+        return "usb kbd/mouse";
+    if (!strcasecmp(key, "usb") && val && !strncasecmp(val, "gamepad", 7))
+        return "usb gamepad";
+    return key;
+}
+
+/* hostfs drive letters read as a drive: "S /path" -> "S: /path" */
+static int hostfs_drive(const char *val)
+{
+    return val && ((*val >= 'A' && *val <= 'Z') || (*val >= 'a' && *val <= 'z')) &&
+           (val[1] == ' ' || val[1] == '\t' || val[1] == ':');
+}
+
+const char *sp_row_value(const char *key, const char *val, char *buf,
+                         unsigned long n)
+{
+    if (!val)
+        return "";
+    if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
+        const char *rest = val + 7;
+        while (*rest == ' ' || *rest == '\t')
+            rest++;
+        return *rest ? sp_switch_text(rest) : "enabled";
+    }
+    if (!strcasecmp(key, "hostfs") && hostfs_drive(val)) {
+        const char *rest = val + 1;
+        if (*rest == ':')
+            rest++;
+        while (*rest == ' ' || *rest == '\t')
+            rest++;
+        snprintf(buf, n, "%c: %s", *val, rest);
+        return buf;
+    }
+    return sp_switch_text(val);
+}
+
+/* What a typed value is written back as: the page shows "S: /path", the
+ * file keeps "S /path", and either spelling may be typed. */
+const char *sp_value_from_edit(const char *key, const char *typed, char *buf,
+                               unsigned long n)
+{
+    if (!strcasecmp(key, "hostfs") && hostfs_drive(typed)) {
+        const char *rest = typed + 1;
+        if (*rest == ':')
+            rest++;
+        while (*rest == ' ' || *rest == '\t')
+            rest++;
+        snprintf(buf, n, "%c %s", *typed, rest);
+        return buf;
+    }
+    return typed;
 }
 
 /* enabled / disabled for a switch, or the value itself */
@@ -244,11 +327,14 @@ static void draw(struct ss_screen *ss, const struct state *st)
             const char *key = st->row[fk + k].text;
             const char *val = sc_get(&st->cfg, st->sec, key);
             int on = st->sel == fk + k;
+            char vbuf[SC_LINE_LEN];
             if (on && st->editing)
-                snprintf(line, sizeof line, "%-20.20s %-48.48s", key, st->edit);
+                snprintf(line, sizeof line, "%-20.20s %-48.48s",
+                         sp_row_label(key, val), st->edit);
             else
-                snprintf(line, sizeof line, "%-20.20s %-48.48s", key,
-                         sp_switch_text(val));
+                snprintf(line, sizeof line, "%-20.20s %-48.48s",
+                         sp_row_label(key, val),
+                         sp_row_value(key, val, vbuf, sizeof vbuf));
             ss_puts(ss, 4, row, line, on ? paper : ink, on ? hi : paper);
         }
         row++;
@@ -292,17 +378,26 @@ static int toggle_switch(struct state *st)
     if (!sp_is_switch(val))
         return 0;
     const char *now = switch_on(val) ? "disabled" : "enabled";
-    sc_set(&st->cfg, st->sec, key, now);
-    snprintf(st->msg, sizeof st->msg, "%.20s = %s", key, now);
+    char with[SC_LINE_LEN];
+    if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
+        snprintf(with, sizeof with, "gamepad %s", now);   /* usb gamepad off */
+        sc_set(&st->cfg, st->sec, key, with);
+    } else {
+        sc_set(&st->cfg, st->sec, key, now);
+    }
+    snprintf(st->msg, sizeof st->msg, "%.20s = %s",
+             sp_row_label(key, val), now);
     return 1;
 }
 
 static void commit_edit(struct state *st)
 {
     const char *key = st->row[st->sel].text;
-    if (sc_set(&st->cfg, st->sec, key, st->edit) == 0)
-        snprintf(st->msg, sizeof st->msg, "%.20s = %.35s", key,
-                 sp_switch_text(st->edit));
+    char raw[SC_LINE_LEN];
+    const char *val = sp_value_from_edit(key, st->edit, raw, sizeof raw);
+    if (sc_set(&st->cfg, st->sec, key, val) == 0)
+        snprintf(st->msg, sizeof st->msg, "%.20s = %.35s",
+                 sp_row_label(key, val), st->edit);
     else
         snprintf(st->msg, sizeof st->msg, "could not set %.30s", key);
     st->editing = 0;
@@ -385,8 +480,11 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                 case ROW_KEY: {
                     if (toggle_switch(&st))
                         break;              /* a switch flips, not types */
-                    const char *v = sc_get(&st.cfg, st.sec, st.row[st.sel].text);
-                    snprintf(st.edit, sizeof st.edit, "%s", v ? v : "");
+                    const char *k = st.row[st.sel].text;
+                    const char *v = sc_get(&st.cfg, st.sec, k);
+                    char vbuf[SC_LINE_LEN];
+                    snprintf(st.edit, sizeof st.edit, "%s",
+                             v ? sp_row_value(k, v, vbuf, sizeof vbuf) : "");
                     st.editing = 1;
                     break;
                 }

@@ -415,6 +415,52 @@ static void run_switches(void)
           "the words written back are not stable");
 }
 
+/* the rows that read badly as key + value */
+static void run_labels(void)
+{
+    char buf[SC_LINE_LEN];
+    printf("row labels:\n");
+
+    CHECK(!strcmp(sp_row_label("kbd", "usb"), "usb kbd/mouse"),
+          "kbd reads as \"%s\"", sp_row_label("kbd", "usb"));
+    CHECK(!strcmp(sp_row_label("usb", "gamepad"), "usb gamepad"),
+          "usb gamepad reads as \"%s\"", sp_row_label("usb", "gamepad"));
+    CHECK(!strcmp(sp_row_label("cpu", "68040"), "cpu"), "cpu was relabelled");
+    CHECK(!strcmp(sp_row_label("hostfs", "S /x"), "hostfs"),
+          "hostfs was relabelled");
+
+    /* kbd keeps its value: usb, usb nograb, usb merge ... */
+    CHECK(!strcmp(sp_row_value("kbd", "usb", buf, sizeof buf), "usb"),
+          "kbd value changed");
+    CHECK(!strcmp(sp_row_value("kbd", "usb nograb merge", buf, sizeof buf),
+                  "usb nograb merge"), "kbd options were cut");
+
+    /* usb gamepad is a switch, whichever way it is written */
+    CHECK(!strcmp(sp_row_value("usb", "gamepad", buf, sizeof buf), "enabled"),
+          "usb gamepad reads \"%s\"", sp_row_value("usb", "gamepad", buf, sizeof buf));
+    CHECK(!strcmp(sp_row_value("usb", "gamepad off", buf, sizeof buf), "disabled"),
+          "usb gamepad off reads \"%s\"",
+          sp_row_value("usb", "gamepad off", buf, sizeof buf));
+    CHECK(sp_is_switch("gamepad") && sp_is_switch("gamepad disabled"),
+          "usb gamepad is not a switch row");
+
+    /* hostfs shows a drive letter as a drive, and writes back the
+     * emulator's own spelling whichever way it is typed */
+    CHECK(!strcmp(sp_row_value("hostfs", "S /home/pistorm/atari-share",
+                               buf, sizeof buf), "S: /home/pistorm/atari-share"),
+          "hostfs reads \"%s\"",
+          sp_row_value("hostfs", "S /home/pistorm/atari-share", buf, sizeof buf));
+    CHECK(!strcmp(sp_value_from_edit("hostfs", "S: /media/films", buf, sizeof buf),
+                  "S /media/films"), "a typed S: was not converted back");
+    CHECK(!strcmp(sp_value_from_edit("hostfs", "S /media/films", buf, sizeof buf),
+                  "S /media/films"), "a typed S was changed");
+    CHECK(!strcmp(sp_value_from_edit("cpu", "68030", buf, sizeof buf), "68030"),
+          "an ordinary value was rewritten");
+    /* a path that is not <letter> <path> must be left alone */
+    CHECK(!strcmp(sp_row_value("hostfs", "/home/pistorm", buf, sizeof buf),
+                  "/home/pistorm"), "a bare hostfs path was mangled");
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -428,6 +474,7 @@ int main(void)
     run_cfg();
     run_locate();
     run_switches();
+    run_labels();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;
