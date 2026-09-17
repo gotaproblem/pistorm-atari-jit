@@ -16,6 +16,12 @@ extern "C" {
 
 #include "shifter_setup.h"
 
+/* Switch rows: a key whose value is empty (a bare key in the .cfg means
+ * on) or one of the boolean words config_file.c understands. They show
+ * and are written as enabled / disabled. Exposed for the harness. */
+int         sp_is_switch(const char *val);
+const char *sp_switch_text(const char *val);
+
 enum sp_result {
     SP_BOOT = 0,      /* boot the section named in `chosen`        */
     SP_QUIT,          /* leave without booting (the test tool)     */

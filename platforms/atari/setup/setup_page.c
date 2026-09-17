@@ -10,6 +10,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "setup_page.h"
@@ -98,8 +99,7 @@ static void build_rows(struct state *st)
  * Layout, 25 rows:
  *   0  title bar: name, the .cfg path, and the clock
  *   1  the movement/action help, centred
- *   2  blank
- *   3  "Boot:"  then one row per section
+ *   2  "Boot:"  then one row per section
  *      blank
  *      "[section] settings:"  with "n-m of k" on the right
  *      the settings list - whatever is left
@@ -108,7 +108,7 @@ static void build_rows(struct state *st)
  *  24  message, or the countdown
  */
 #define ROW_HELP      1
-#define ROW_BOOT_HDR  3
+#define ROW_BOOT_HDR  2
 #define FOOTER_ROWS   3          /* blank, actions, message */
 
 static int list_top_row(const struct state *st)
@@ -145,6 +145,46 @@ static void scroll_to_sel(struct state *st)
 
 /* ------------------------------------------------------------------ */
 
+/* A switch is a key whose value is empty (present = on, the .cfg's own
+ * shorthand) or one of the words the emulator's parser treats as a
+ * boolean. They read and write as enabled / disabled, never "(on)":
+ * config_file.c's get_bool_default_true() takes "disabled" as false and
+ * anything else, including a bare key, as true. */
+static const char *false_words[] = { "0", "off", "no", "false", "disabled",
+                                     "disable" };
+static const char *true_words[]  = { "1", "on", "yes", "true", "enabled",
+                                     "enable" };
+
+static int word_in(const char *v, const char **list, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!strcasecmp(v, list[i]))
+            return 1;
+    return 0;
+}
+
+int sp_is_switch(const char *val)
+{
+    if (!val)
+        return 0;
+    if (!*val)
+        return 1;                            /* a bare key is "on" */
+    return word_in(val, false_words, 6) || word_in(val, true_words, 6);
+}
+
+static int switch_on(const char *val)
+{
+    return !val || !*val || !word_in(val, false_words, 6);
+}
+
+/* enabled / disabled for a switch, or the value itself */
+const char *sp_switch_text(const char *val)
+{
+    if (sp_is_switch(val))
+        return switch_on(val) ? "enabled" : "disabled";
+    return val;
+}
+
 static void draw(struct ss_screen *ss, const struct state *st)
 {
     int ink = ss->planes == 1 ? 1 : 3, paper = 0, hi = ss->planes == 1 ? 1 : 2;
@@ -178,7 +218,7 @@ static void draw(struct ss_screen *ss, const struct state *st)
     {
         const char *help = st->editing ?
             "type a value   Enter accept   Esc cancel" :
-            "Up/Down move   Left/Right pick   Enter pick or edit   Esc/X leave";
+            "Up/Down move   Left/Right pick or toggle   Enter edit   Esc/X leave";
         int at = (SS_COLS - (int)strlen(help)) / 2;
         ss_puts(ss, at < 0 ? 0 : at, ROW_HELP, help, ink, paper);
     }
@@ -208,7 +248,7 @@ static void draw(struct ss_screen *ss, const struct state *st)
                 snprintf(line, sizeof line, "%-20.20s %-48.48s", key, st->edit);
             else
                 snprintf(line, sizeof line, "%-20.20s %-48.48s", key,
-                         val && *val ? val : "(on)");
+                         sp_switch_text(val));
             ss_puts(ss, 4, row, line, on ? paper : ink, on ? hi : paper);
         }
         row++;
@@ -244,12 +284,25 @@ static void draw(struct ss_screen *ss, const struct state *st)
 
 /* ------------------------------------------------------------------ */
 
+/* flip a switch row in place - one keypress, and it works on a gamepad */
+static int toggle_switch(struct state *st)
+{
+    const char *key = st->row[st->sel].text;
+    const char *val = sc_get(&st->cfg, st->sec, key);
+    if (!sp_is_switch(val))
+        return 0;
+    const char *now = switch_on(val) ? "disabled" : "enabled";
+    sc_set(&st->cfg, st->sec, key, now);
+    snprintf(st->msg, sizeof st->msg, "%.20s = %s", key, now);
+    return 1;
+}
+
 static void commit_edit(struct state *st)
 {
     const char *key = st->row[st->sel].text;
     if (sc_set(&st->cfg, st->sec, key, st->edit) == 0)
         snprintf(st->msg, sizeof st->msg, "%.20s = %.35s", key,
-                 *st->edit ? st->edit : "(on)");
+                 sp_switch_text(st->edit));
     else
         snprintf(st->msg, sizeof st->msg, "could not set %.30s", key);
     st->editing = 0;
@@ -319,6 +372,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                 if (st.row[st.sel].kind == ROW_PICK)
                     snprintf(st.sec, sizeof st.sec, "%.*s", SC_SEC_LEN - 1,
                              st.row[st.sel].text);
+                else if (st.row[st.sel].kind == ROW_KEY)
+                    toggle_switch(&st);
                 break;
             case SI_ENTER:
                 switch (st.row[st.sel].kind) {
@@ -328,6 +383,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     st.msg[0] = '\0';
                     break;
                 case ROW_KEY: {
+                    if (toggle_switch(&st))
+                        break;              /* a switch flips, not types */
                     const char *v = sc_get(&st.cfg, st.sec, st.row[st.sel].text);
                     snprintf(st.edit, sizeof st.edit, "%s", v ? v : "");
                     st.editing = 1;

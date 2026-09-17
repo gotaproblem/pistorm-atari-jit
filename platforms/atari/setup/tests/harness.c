@@ -13,6 +13,7 @@
 #include "psfont8x8.h"
 #include "setup_input.h"
 #include "setup_cfg.h"
+#include "setup_page.h"
 #include <linux/input.h>
 
 uint8_t fc;
@@ -380,6 +381,40 @@ static void run_locate(void)
     CHECK(system(cmd) == 0, "could not clean up");
 }
 
+/* switch rows read as enabled/disabled, never "(on)" */
+static void run_switches(void)
+{
+    printf("switch values:\n");
+    static const char *on[]  = { "", "1", "on", "yes", "true", "enabled",
+                                 "enable", "ENABLED" };
+    static const char *off[] = { "0", "off", "no", "false", "disabled",
+                                 "disable", "OFF" };
+    for (unsigned i = 0; i < sizeof on / sizeof on[0]; i++) {
+        CHECK(sp_is_switch(on[i]), "\"%s\" is not read as a switch", on[i]);
+        CHECK(!strcmp(sp_switch_text(on[i]), "enabled"),
+              "\"%s\" shows as %s", on[i], sp_switch_text(on[i]));
+    }
+    for (unsigned i = 0; i < sizeof off / sizeof off[0]; i++) {
+        CHECK(sp_is_switch(off[i]), "\"%s\" is not read as a switch", off[i]);
+        CHECK(!strcmp(sp_switch_text(off[i]), "disabled"),
+              "\"%s\" shows as %s", off[i], sp_switch_text(off[i]));
+    }
+    static const char *not_switch[] = { "68040", "ET4000AX FVDI", "128M",
+                                        "S /home/pistorm/atari-share", "usb" };
+    for (unsigned i = 0; i < sizeof not_switch / sizeof not_switch[0]; i++) {
+        CHECK(!sp_is_switch(not_switch[i]), "\"%s\" taken for a switch",
+              not_switch[i]);
+        CHECK(!strcmp(sp_switch_text(not_switch[i]), not_switch[i]),
+              "\"%s\" was rewritten as \"%s\"", not_switch[i],
+              sp_switch_text(not_switch[i]));
+    }
+    /* what a toggle writes must survive the emulator's own parser rules:
+     * "disabled" is in its false list, "enabled" is not */
+    CHECK(!strcmp(sp_switch_text("disabled"), "disabled") &&
+          !strcmp(sp_switch_text("enabled"), "enabled"),
+          "the words written back are not stable");
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -392,6 +427,7 @@ int main(void)
     run_keymaps();
     run_cfg();
     run_locate();
+    run_switches();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;
