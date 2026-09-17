@@ -27,6 +27,7 @@
 #include "shifter_setup.h"
 #include "setup_input.h"
 #include "setup_page.h"
+#include "setup_cfg.h"
 
 static struct ss_screen scr;
 
@@ -235,17 +236,19 @@ int main(int argc, char **argv)
 
     if (!timings && !pattern_only) {
         char path[512], chosen[32] = "";
+        int made = 0;
         if (!cfg) {
-            const char *home = getenv("HOME");
-            snprintf(path, sizeof path, "%s/configs/psctrl.cfg",
-                     home ? home : "/home/pistorm");
+            if (sc_locate(path, sizeof path, &made) != 0) {
+                printf("no psctrl.cfg and no psctrl.cfg.default in the tree\n");
+                return 1;
+            }
             cfg = path;
         }
         int n = si_open(!no_st_kbd, 1);
         printf("input: %d source(s) - ST keyboard %s, %d USB keyboard(s), "
                "%d gamepad(s)\n", n, si_have_st() ? "yes" : "no",
                si_usb_keyboards(), si_gamepads());
-        printf("config: %s\n", cfg);
+        printf("config: %s%s\n", cfg, made ? "  (created from the default)" : "");
 
         enum sp_result r = sp_run(&scr, cfg, chosen, sizeof chosen);
         si_close();

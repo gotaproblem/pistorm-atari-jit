@@ -330,6 +330,56 @@ static void run_cfg(void)
     unlink(path); unlink(bak);
 }
 
+/* sc_locate: the file must be found without $HOME, which is /root under
+ * sudo. Everything happens inside a scratch tree, and ".." is inside it
+ * too, so a stray write cannot land anywhere real. */
+static void run_locate(void)
+{
+    char root[256], work[320], cwd[512], path[512];
+    int created = 0;
+
+    printf("psctrl.cfg lookup:\n");
+    if (!getcwd(cwd, sizeof cwd)) { CHECK(0, "getcwd failed"); return; }
+    snprintf(root, sizeof root, "%s/sc_loc_%d",
+             getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+    snprintf(work, sizeof work, "%s/work", root);
+    char cmd[900];
+    snprintf(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s/configs %s/configs",
+             root, root, work);
+    CHECK(system(cmd) == 0, "could not make the scratch tree");
+    CHECK(chdir(work) == 0, "could not enter the scratch tree");
+
+    /* 1. an existing repo-local config wins over nothing else existing */
+    FILE *f = fopen("configs/psctrl.cfg", "w");
+    if (f) { fputs("[psctrl]\nboot gem\n", f); fclose(f); }
+    CHECK(sc_locate(path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(!strcmp(path, "configs/psctrl.cfg"), "found \"%s\"", path);
+    CHECK(!created, "reported creating a file that was already there");
+
+    /* 2. the runtime tree beside the repo wins over the repo-local one */
+    f = fopen("../configs/psctrl.cfg", "w");
+    if (f) { fputs("[psctrl]\nboot apj-os\n", f); fclose(f); }
+    CHECK(sc_locate(path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(!strcmp(path, "../configs/psctrl.cfg"), "found \"%s\"", path);
+
+    /* 3. nothing there, but the tree has a default: it gets copied */
+    CHECK(unlink("../configs/psctrl.cfg") == 0, "cleanup failed");
+    CHECK(unlink("configs/psctrl.cfg") == 0, "cleanup failed");
+    f = fopen("configs/psctrl.cfg.default", "w");
+    if (f) { fputs("[psctrl]\ncountdown 5\nboot gem\n", f); fclose(f); }
+    CHECK(sc_locate(path, sizeof path, &created) == 0, "lookup failed");
+    CHECK(created, "did not report creating the file");
+    CHECK(access(path, R_OK) == 0, "the created file is not readable");
+    static struct sc_cfg c;
+    CHECK(sc_load(&c, path) == 0, "the created file does not parse");
+    CHECK(sc_get_int(&c, "psctrl", "countdown", -1) == 5,
+          "the created file lost its contents");
+
+    CHECK(chdir(cwd) == 0, "could not leave the scratch tree");
+    snprintf(cmd, sizeof cmd, "rm -rf %s", root);
+    CHECK(system(cmd) == 0, "could not clean up");
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -341,6 +391,7 @@ int main(void)
     run_mode(SS_MODE_MONO, "forced mono");
     run_keymaps();
     run_cfg();
+    run_locate();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;

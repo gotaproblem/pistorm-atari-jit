@@ -2,6 +2,7 @@
  * setup_cfg.c - see setup_cfg.h.
  */
 #include <ctype.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -278,6 +279,76 @@ int sc_save(struct sc_cfg *c, const char *path)
         return -1;
     snprintf(c->path, sizeof c->path, "%s", path);
     c->dirty = 0;
+    return 0;
+}
+
+static int copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    if (!in)
+        return -1;
+    FILE *out = fopen(to, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    take_ownership(out, to);
+    char buf[4096];
+    unsigned long n;
+    int ok = 1;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        ok &= fwrite(buf, 1, n, out) == n;
+    fclose(in);
+    ok &= fclose(out) == 0;
+    if (!ok)
+        unlink(to);
+    return ok ? 0 : -1;
+}
+
+int sc_locate(char *out, unsigned long n, int *created)
+{
+    if (created)
+        *created = 0;
+
+    const char *cand[3];
+    char home[512] = "";
+    cand[0] = "../configs/psctrl.cfg";
+    cand[1] = "configs/psctrl.cfg";
+
+    /* the invoking user, not $HOME: under sudo and under pistorm.service
+     * $HOME is /root, which is not where the configs live */
+    const char *user = getenv("SUDO_USER");
+    const struct passwd *pw = user && *user ? getpwnam(user) : NULL;
+    if (!pw)
+        pw = getpwuid(getuid());
+    if (pw && pw->pw_dir && *pw->pw_dir)
+        snprintf(home, sizeof home, "%s/configs/psctrl.cfg", pw->pw_dir);
+    cand[2] = home[0] ? home : NULL;
+
+    for (int i = 0; i < 3; i++)
+        if (cand[i] && access(cand[i], R_OK) == 0) {
+            snprintf(out, n, "%s", cand[i]);
+            return 0;
+        }
+
+    /* nothing there: make one from the tree's default */
+    const char *dflt = access("../configs/psctrl.cfg.default", R_OK) == 0 ?
+                       "../configs/psctrl.cfg.default" :
+                       "configs/psctrl.cfg.default";
+    if (access(dflt, R_OK) != 0)
+        return -1;
+    for (int i = 0; i < 3; i++) {
+        if (!cand[i])
+            continue;
+        if (copy_file(dflt, cand[i]) == 0) {
+            snprintf(out, n, "%s", cand[i]);
+            if (created)
+                *created = 1;
+            return 0;
+        }
+    }
+    /* could not write anywhere: run from the default, read-only */
+    snprintf(out, n, "%s", dflt);
     return 0;
 }
 

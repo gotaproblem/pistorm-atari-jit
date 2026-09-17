@@ -64,6 +64,21 @@ int sc_sections(const struct sc_cfg *c, char out[][SC_SEC_LEN], int max);
 int sc_keys(const struct sc_cfg *c, const char *sec,
             char out[][SC_KEY_LEN], int max);
 
+/* Find psctrl.cfg the way the emulator finds its .cfg - relative to the
+ * binary's directory, in the runtime tree beside the repo (INSTALL-README
+ * section 2) - and NOT through $HOME, which is /root under sudo and under
+ * pistorm.service. Search order:
+ *
+ *   ../configs/psctrl.cfg      the runtime tree, as run-pistorm.sh uses
+ *   configs/psctrl.cfg         a repo-local config
+ *   ~<invoking user>/configs/psctrl.cfg   ($SUDO_USER, not $HOME)
+ *
+ * If none exists but configs/psctrl.cfg.default does, it is copied to the
+ * first writable candidate and that path returned, so a fresh tree comes
+ * up configured. Returns 0 and fills `out`, or -1. `created` is set to 1
+ * when the file was made from the default. */
+int sc_locate(char *out, unsigned long n, int *created);
+
 /* Convenience for [psctrl]: integer with a default. */
 int sc_get_int(const struct sc_cfg *c, const char *sec, const char *key, int dflt);
 
