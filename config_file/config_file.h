@@ -123,7 +123,6 @@ struct emulator_config {
   bool stram_cache;
   bool stram_direct;
   uint32_t stram_size;   /* PHYSICAL ST-RAM bytes (0 = flat 4MB model) */
-  bool vga_render;
   bool native_hdmi;
   bool cpu_clock_multiplier_set;
   int cpu_clock_multiplier;

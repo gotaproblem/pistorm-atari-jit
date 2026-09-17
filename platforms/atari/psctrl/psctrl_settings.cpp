@@ -184,7 +184,6 @@ BOOT_BOOL(addr32)
 BOOT_BOOL(stram_cache)
 BOOT_BOOL(stram_direct)
 BOOT_BOOL(native_hdmi)
-BOOT_BOOL(vga_render)
 BOOT_BOOL(ym2149)
 BOOT_BOOL(dma_sound)
 /* shifter: the writer only renders it when the cfg set it explicitly, so
@@ -769,7 +768,6 @@ LIVE_BOOL("drm_dirtyband", "DRM dirty band", PS_TAB_VIDEO, &pst_drm_dirtyband, N
 ITEM("drm_async", "DRM async page flip", PS_TAB_VIDEO, PS_K_BOOL, PS_C_BOOT,
      PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_drm_async, gen_get, gen_set, NULL),
 BOOT_B("native_hdmi", "Native HDMI", PS_TAB_VIDEO, native_hdmi),
-BOOT_B("vga_render", "VGA render", PS_TAB_VIDEO, vga_render),
 ITEM("vga_card", "Graphics card", PS_TAB_VIDEO, PS_K_ENUM, PS_C_BOOT,
      PS_U_NONE, 0, 3, 1, L_card, 4, PS_F_NEWLINE, NULL, vg_card, vs_card, NULL),
 ITEM("vga_driver", "Graphics driver", PS_TAB_VIDEO, PS_K_ENUM, PS_C_BOOT,
@@ -1322,7 +1320,7 @@ uint32_t psctrl_settings_call(uint32_t subop, uint32_t p0, uint32_t p1,
 static const char *const g_bootkeys[] = {
   "machine", "cpu", "fpu", "mmu", "cpu_compatible", "shifter", "blitter",
   "stram_size", "ttram", "addr32", "stram_cache", "stram_direct",
-  "native_hdmi", "vga_render", "vga", "monitor", "ym2149", "dma_sound",
+  "native_hdmi", "vga", "monitor", "ym2149", "dma_sound",
   "ide", "kbd", "network", "network_irq", "fps", "rom", "stbox_tos",
   "stbox_plane", "jit_cache", "m68k_speed", "cpu_clock_multiplier"
 };

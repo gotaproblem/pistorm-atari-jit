@@ -113,7 +113,6 @@ static int render_boot_key(const char *key, const struct emulator_config *c,
   if (!strcmp(key, "stram_cache"))  { snprintf(out, n, "stram_cache %s", c->stram_cache ? "true" : "false"); return 1; }
   if (!strcmp(key, "stram_direct")) { snprintf(out, n, "stram_direct %s", c->stram_direct ? "true" : "false"); return 1; }
   if (!strcmp(key, "native_hdmi"))  { snprintf(out, n, "native_hdmi %s", c->native_hdmi ? "true" : "false"); return 1; }
-  if (!strcmp(key, "vga_render"))   { snprintf(out, n, "vga_render %s", c->vga_render ? "true" : "false"); return 1; }
   if (!strcmp(key, "vga")) {
     snprintf(out, n, "vga %s %s", card_name((int)c->graphics.card),
              driver_name((int)c->graphics.driver));

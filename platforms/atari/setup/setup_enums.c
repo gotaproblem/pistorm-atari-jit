@@ -141,7 +141,6 @@ static const struct { const char *key; int env; } env_of[] = {
     { "loopcycles",     SE_GEM },
     /* the graphics card and its HDMI output: APJ-OS only */
     { "vga",            SE_APJ },
-    { "vga_render",     SE_APJ },
     { "native_hdmi",    SE_APJ },
     { "fps",            SE_APJ },
 };

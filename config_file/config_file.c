@@ -46,7 +46,6 @@ typedef enum {
   CONFITEM_MACHINE,
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
-  CONFITEM_VGA_RENDER,
   CONFITEM_NATIVE_HDMI,
   CONFITEM_CPU_CLOCK_MULTIPLIER,
   CONFITEM_M68K_SPEED,
@@ -112,7 +111,6 @@ static const config_switch_def config_switches[] = {
   { "machine", CONFITEM_MACHINE },
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
-  { "vga_render", CONFITEM_VGA_RENDER },
   { "native_hdmi", CONFITEM_NATIVE_HDMI },
   { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
   { "m68k_speed", CONFITEM_M68K_SPEED },
@@ -620,7 +618,6 @@ struct emulator_config *load_config_file_section(char *filename,
   cfg->cpu_type = M68K_CPU_TYPE_68000 - 1;
   cfg->jit = true;
   cfg->blitter = true;
-  cfg->vga_render = true;
   cfg->native_hdmi = false;   /* default off: shifter is the game display;
                                  HDMI shows the splash unless enabled */
   
@@ -1052,11 +1049,6 @@ struct emulator_config *load_config_file_section(char *filename,
         printf ("[CFG] ST-RAM direct %s\n", cfg->stram_direct ? "enabled" : "disabled");
         break;
 
-      case CONFITEM_VGA_RENDER:
-        cfg->vga_render = get_bool_default_true(parse_line + str_pos);
-        printf ("[CFG] VGA render %s\n", cfg->vga_render ? "enabled" : "disabled");
-        break;
-
       case CONFITEM_NATIVE_HDMI:
         cfg->native_hdmi = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] Native HDMI %s\n", cfg->native_hdmi ? "enabled" : "disabled");
@@ -1242,6 +1234,12 @@ struct emulator_config *load_config_file_section(char *filename,
          * only warns if neither list knows the key. */
         if (psctrl_settings_config_key(cur_cmd, parse_line + str_pos))
           break;
+        if (!strcasecmp(cur_cmd, "vga_render")) {
+          /* Retired: it was parsed into the config and never read by
+           * anything. Ignored quietly so an old .cfg still loads. */
+          printf ("[CFG] vga_render is retired and does nothing - ignored\n");
+          break;
+        }
         printf ("[CFG] Unknown config item %s on line %d.\n", cur_cmd, cur_line);
         break;
     }
