@@ -181,7 +181,7 @@ int si_stick_state(int cur, int value, int centre, int on, int off)
 
 /* d-pad, stick and the face buttons. A = Enter, B = Esc, Start = boot
  * (the page treats SI_F10 as "boot now"). */
-static struct si_event map_pad_key(int code)
+struct si_event si_map_pad(int code)
 {
     switch (code) {
     case BTN_DPAD_UP:    return ev_make(SI_UP, SI_SRC_PAD, 0);
@@ -202,8 +202,13 @@ static struct si_event map_pad_key(int code)
     case BTN_THUMB2:
     case BTN_TOP2:
     case BTN_1:          return ev_make(SI_ESC, SI_SRC_PAD, 0);
+    /* X (BTN_NORTH, the same code as BTN_X) finishes the page, because
+     * Start is missing or remapped on a lot of pads. Start and the guide
+     * button do the same when they are reported. */
+    case BTN_NORTH:
     case BTN_START:
-    case BTN_MODE:       return ev_make(SI_F10, SI_SRC_PAD, 0);
+    case BTN_MODE:
+    case BTN_SELECT:     return ev_make(SI_F10, SI_SRC_PAD, 0);
     default:             return ev_make(SI_NONE, SI_SRC_PAD, 0);
     }
 }
@@ -431,7 +436,7 @@ static struct si_event usb_poll(void)
                     continue;
                 }
                 if (ie.type == EV_KEY && ie.value == 1) {
-                    struct si_event e = map_pad_key(ie.code);
+                    struct si_event e = si_map_pad(ie.code);
                     if (e.key != SI_NONE)
                         return e;
                 }

@@ -208,6 +208,13 @@ static void run_keymaps(void)
     CHECK(si_map_st(0x7F, 0).key == SI_NONE, "unmapped scancode produced a key");
     CHECK(si_map_evdev(KEY_MAX, 0).key == SI_NONE, "unmapped evdev code produced a key");
 
+    /* the pad's exit button: X, and the others that mean the same */
+    CHECK(si_map_pad(BTN_NORTH).key == SI_F10, "pad X does not finish");
+    CHECK(si_map_pad(BTN_START).key == SI_F10, "pad Start does not finish");
+    CHECK(si_map_pad(BTN_SOUTH).key == SI_ENTER, "pad A is not Enter");
+    CHECK(si_map_pad(BTN_EAST).key == SI_ESC, "pad B is not Esc");
+    CHECK(si_map_pad(BTN_NORTH).src == SI_SRC_PAD, "wrong source tag on a pad key");
+
     /* stick hysteresis: commits at 50 % of half-range, releases at 35 % */
     int centre = 0, on = 8192, off = 5734, st = 0;
     st = si_stick_state(st, 100, centre, on, off);

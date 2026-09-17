@@ -133,7 +133,7 @@ static void text_page(struct ss_screen *ss, const struct page *p)
     snprintf(line, sizeof line, "last key: %-40s", p->last);
     ss_puts(ss, 2, SS_ROWS - 4, line, ink, paper);
     ss_puts(ss, 2, SS_ROWS - 3,
-            "Up/Down select   Left/Right change   Enter pick   F10 or Esc finish",
+            "Up/Down select  Left/Right change  Enter/A pick  F10, Esc or pad X finish",
             ink, paper);
     ss_clear_row(ss, SS_ROWS - 2, paper);
     if (p->secs >= 0)
