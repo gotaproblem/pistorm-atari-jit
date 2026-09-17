@@ -53,6 +53,18 @@ uint32_t ss_flush(struct ss_screen *ss);
 /* Read the board back and count bytes that differ from `shown`. */
 uint32_t ss_verify(const struct ss_screen *ss);
 
+/* Text: both modes are an 80x25 grid of 8-pixel-wide cells (8 scanlines
+ * in colour, 16 in mono - the font's rows are doubled). Colours are
+ * 0..1 in mono, 0..3 in colour. */
+#define SS_COLS 80
+#define SS_ROWS 25
+
+void ss_putc(struct ss_screen *ss, int col, int row, unsigned char c,
+             int ink, int paper);
+void ss_puts(struct ss_screen *ss, int col, int row, const char *s,
+             int ink, int paper);
+void ss_clear_row(struct ss_screen *ss, int row, int paper);
+
 /* Pixel helpers on the shadow. Colour 0..1 (mono) or 0..3 (colour). */
 void ss_clear(struct ss_screen *ss, int colour);
 void ss_pixel(struct ss_screen *ss, int x, int y, int colour);

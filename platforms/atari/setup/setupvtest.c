@@ -4,7 +4,7 @@
  * time how fast the screen can be written over the bus.
  *
  *   sudo systemctl stop pistorm     (the emulator must not own the bus)
- *   ./setupvtest [--mono|--colour] [--60hz] [--hold SECONDS]
+ *   ./setupvtest [--mono|--colour] [--60hz] [--hold SECONDS] [--pattern]
  *
  * Output is a short report on the console; the pattern stays on the ST
  * monitor until the hold ends (default: until Enter).
@@ -58,6 +58,41 @@ static void pattern(struct ss_screen *ss, int phase)
                 ss_fill(ss, x, y, 16, cell, ink);
 }
 
+/* A mock-up of the setup page, to check the 80x25 grid and the font. */
+static void text_page(struct ss_screen *ss, int secs)
+{
+    int ink = ss->planes == 1 ? 1 : 3, paper = 0, hi = ss->planes == 1 ? 1 : 2;
+    char line[SS_COLS + 1];
+
+    ss_clear(ss, paper);
+    ss_clear_row(ss, 0, ink);
+    ss_puts(ss, 2, 0, "PiSTorm setup", paper, ink);
+    ss_puts(ss, SS_COLS - 22, 0, ss->planes == 1 ? "640x400 mono  "
+                                                 : "640x200 colour", paper, ink);
+
+    for (int c = 0; c < SS_COLS; c++)
+        line[c] = (char)('0' + c % 10);
+    line[SS_COLS] = 0;
+    ss_puts(ss, 0, 2, line, ink, paper);
+    ss_puts(ss, 0, 3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz "
+                      "0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", ink, paper);
+
+    ss_puts(ss, 2, 5, "Boot:", ink, paper);
+    ss_clear_row(ss, 6, paper);
+    ss_puts(ss, 4, 6, "  GEM                                     ", paper, hi);
+    ss_puts(ss, 4, 7, "  APJ-OS", ink, paper);
+    ss_puts(ss, 2, 9, "Settings:", ink, paper);
+    ss_puts(ss, 4, 10, "JIT power           4        live", ink, paper);
+    ss_puts(ss, 4, 11, "Translation cache   16384 K  restart", ink, paper);
+    ss_puts(ss, 4, 12, "TT-RAM              128 M    boot", ink, paper);
+    ss_puts(ss, 4, 13, "Blitter bus cost    instant  (GEM only)", hi, paper);
+
+    ss_puts(ss, 2, SS_ROWS - 3, "Up/Down select   Enter edit   B boot", ink, paper);
+    snprintf(line, sizeof line, "Booting GEM in %d...", secs);
+    ss_clear_row(ss, SS_ROWS - 2, paper);
+    ss_puts(ss, 2, SS_ROWS - 2, line, ink, paper);
+}
+
 static void countdown_block(struct ss_screen *ss, int n)
 {
     /* a text-line-sized strip: 8 rows colour / 16 rows mono = 1280 bytes */
@@ -70,15 +105,17 @@ static void countdown_block(struct ss_screen *ss, int n)
 int main(int argc, char **argv)
 {
     enum ss_mode force = SS_MODE_AUTO;
-    int hz50 = 1, hold = -1;
+    int hz50 = 1, hold = -1, pattern_only = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mono"))        force = SS_MODE_MONO;
         else if (!strcmp(argv[i], "--colour")) force = SS_MODE_COLOUR;
         else if (!strcmp(argv[i], "--60hz"))   hz50 = 0;
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pattern")) pattern_only = 1;
         else {
-            fprintf(stderr, "usage: %s [--mono|--colour] [--60hz] [--hold SECONDS]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--mono|--colour] [--60hz] [--hold SECONDS]"
+                            " [--pattern]\n", argv[0]);
             return 2;
         }
     }
@@ -133,6 +170,28 @@ int main(int argc, char **argv)
     printf("  one text line x%d    %6u bytes  %7.2f ms each\n", N, total / N, per);
     printf("  verify after flushes: %u bad bytes\n", ss_verify(&scr));
 
+    if (pattern_only) {
+        printf("\n--pattern: leaving the test pattern up\n");
+        goto hold_it;
+    }
+
+    printf("\ntext page (80x25 grid, 8x%d cells):\n", scr.planes == 1 ? 16 : 8);
+    text_page(&scr, 5);
+    t0 = now_ms();
+    ss_write_full(&scr, SS_W32);
+    printf("  full page            %6u bytes  %7.1f ms\n", SS_SCREEN_BYTES,
+           now_ms() - t0);
+    t0 = now_ms();
+    total = 0;
+    for (int n = 5; n > 0; n--) {
+        text_page(&scr, n);
+        total += ss_flush(&scr);
+    }
+    printf("  countdown tick x5    %6u bytes  %7.2f ms each\n", total / 5,
+           (now_ms() - t0) / 5);
+    printf("  verify: %u bad bytes\n", ss_verify(&scr));
+
+hold_it:
     if (hold < 0) {
         printf("\npattern is on the ST monitor - press Enter to finish\n");
         getchar();

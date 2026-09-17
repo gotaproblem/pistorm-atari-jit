@@ -4,6 +4,7 @@
 #include <string.h>
 #include "shifter_setup.h"
 #include "gpio/ps_protocol.h"
+#include "psfont8x8.h"
 
 extern uint8_t fc;                        /* gpio/ps_protocol.c */
 
@@ -177,6 +178,51 @@ void ss_pixel(struct ss_screen *ss, int x, int y, int colour)
         uint8_t m = (uint8_t)(1u << (bit >= 8 ? bit - 8 : bit));
         if ((colour >> pl) & 1) *b |= m; else *b &= (uint8_t)~m;
     }
+}
+
+/* One cell: 8 pixels wide, so every scanline of it is exactly one byte
+ * per plane and no shifting or masking is needed.
+ *   mono   byte = y * 80 + col
+ *   colour byte = y * 160 + (col >> 1) * 4 + plane * 2 + (col & 1)
+ * A plane's byte is all-ones, all-zeros or the glyph (or its inverse),
+ * depending on whether ink and paper differ in that plane's bit. */
+void ss_putc(struct ss_screen *ss, int col, int row, unsigned char c,
+             int ink, int paper)
+{
+    if ((unsigned)col >= SS_COLS || (unsigned)row >= SS_ROWS)
+        return;
+    const uint8_t *glyph = ps_font8x8[c & 0x7F];
+    int dup = ss->planes == 1 ? 2 : 1;          /* mono doubles each row */
+    int cell_h = 8 * dup;
+
+    for (int i = 0; i < 8; i++) {
+        uint8_t g = glyph[i];
+        for (int d = 0; d < dup; d++) {
+            int y = row * cell_h + i * dup + d;
+            for (int pl = 0; pl < ss->planes; pl++) {
+                int ib = (ink >> pl) & 1, pb = (paper >> pl) & 1;
+                uint8_t v = ib == pb ? (uint8_t)(ib ? 0xFF : 0x00)
+                                     : (uint8_t)(ib ? g : ~g);
+                if (ss->planes == 1)
+                    ss->shadow[y * 80 + col] = v;
+                else
+                    ss->shadow[y * 160 + (col >> 1) * 4 + pl * 2 + (col & 1)] = v;
+            }
+        }
+    }
+}
+
+void ss_puts(struct ss_screen *ss, int col, int row, const char *s,
+             int ink, int paper)
+{
+    for (; *s && col < SS_COLS; s++, col++)
+        ss_putc(ss, col, row, (unsigned char)*s, ink, paper);
+}
+
+void ss_clear_row(struct ss_screen *ss, int row, int paper)
+{
+    for (int col = 0; col < SS_COLS; col++)
+        ss_putc(ss, col, row, ' ', paper, paper);
 }
 
 void ss_fill(struct ss_screen *ss, int x, int y, int w, int h, int colour)
