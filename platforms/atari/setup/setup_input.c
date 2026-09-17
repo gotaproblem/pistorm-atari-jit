@@ -27,6 +27,12 @@
 #define BTN_SOUTH BTN_A
 #define BTN_EAST  BTN_B
 #endif
+#ifndef BTN_DPAD_UP
+#define BTN_DPAD_UP    0x220
+#define BTN_DPAD_DOWN  0x221
+#define BTN_DPAD_LEFT  0x222
+#define BTN_DPAD_RIGHT 0x223
+#endif
 
 #define ACIA_CTRL 0x00FFFC00u
 #define ACIA_DATA 0x00FFFC02u
@@ -39,9 +45,18 @@
 static struct {
     int  fd;
     int  is_pad;
+    char name[72];
+    char node[32];
+    /* pad only: stick calibration and the hysteresis state, the same
+     * scheme joy_usb.c uses (on at 50 % of half-range, off at 35 %). */
+    struct { int centre, on, off; } ax[2];
+    int  stick[2];
 } dev[MAX_DEV];
 static int ndev, n_kbd, n_pad, have_st, grabbed;
 static int shift_usb, shift_st;
+static int debug;
+
+void si_set_debug(int on) { debug = on; }
 
 /* ------------------------------------------------------------------ */
 /* keymaps                                                            */
@@ -148,6 +163,22 @@ struct si_event si_map_evdev(int code, int shift)
     return ev_make(SI_NONE, SI_SRC_USB, 0);
 }
 
+/* Stick hysteresis, lifted from joy_usb.c's stick_update(): once over
+ * the `on` threshold the axis stays committed until it comes back inside
+ * `off`, so a stick resting near the edge does not chatter. */
+int si_stick_state(int cur, int value, int centre, int on, int off)
+{
+    int d = value - centre;
+    if (cur == 0) {
+        if (d >= on)       return 1;
+        if (d <= -on)      return -1;
+        return 0;
+    }
+    if (cur > 0)
+        return d < off ? (d <= -on ? -1 : 0) : 1;
+    return d > -off ? (d >= on ? 1 : 0) : -1;
+}
+
 /* d-pad, stick and the face buttons. A = Enter, B = Esc, Start = boot
  * (the page treats SI_F10 as "boot now"). */
 static struct si_event map_pad_key(int code)
@@ -157,10 +188,22 @@ static struct si_event map_pad_key(int code)
     case BTN_DPAD_DOWN:  return ev_make(SI_DOWN, SI_SRC_PAD, 0);
     case BTN_DPAD_LEFT:  return ev_make(SI_LEFT, SI_SRC_PAD, 0);
     case BTN_DPAD_RIGHT: return ev_make(SI_RIGHT, SI_SRC_PAD, 0);
-    case BTN_SOUTH:
-    case BTN_TRIGGER:    return ev_make(SI_ENTER, SI_SRC_PAD, 0);
-    case BTN_EAST:       return ev_make(SI_ESC, SI_SRC_PAD, 0);
-    case BTN_START:      return ev_make(SI_F10, SI_SRC_PAD, 0);
+    /* BTN_SOUTH and BTN_A are the same code; BTN_EAST and BTN_B likewise.
+     * Older pads report BTN_THUMB/BTN_THUMB2 or BTN_TRIGGER instead, and
+     * some report only BTN_C/BTN_Z, so every plausible "first button" is
+     * Enter and every plausible second one is Esc. */
+    case BTN_SOUTH:                      /* == BTN_A                    */
+    case BTN_TRIGGER:                    /* == BTN_JOYSTICK             */
+    case BTN_THUMB:
+    case BTN_TOP:
+    case BTN_GEAR_UP:
+    case BTN_0:          return ev_make(SI_ENTER, SI_SRC_PAD, 0);
+    case BTN_EAST:                       /* == BTN_B                    */
+    case BTN_THUMB2:
+    case BTN_TOP2:
+    case BTN_1:          return ev_make(SI_ESC, SI_SRC_PAD, 0);
+    case BTN_START:
+    case BTN_MODE:       return ev_make(SI_F10, SI_SRC_PAD, 0);
     default:             return ev_make(SI_NONE, SI_SRC_PAD, 0);
     }
 }
@@ -252,21 +295,65 @@ static void try_dev(const char *path, int grab)
     if (has_bit(evb, EV_KEY)) ioctl(fd, EVIOCGBIT(EV_KEY, sizeof keyb), keyb);
     if (has_bit(evb, EV_ABS)) ioctl(fd, EVIOCGBIT(EV_ABS, sizeof absb), absb);
 
-    int pad = has_bit(evb, EV_KEY) && has_bit(evb, EV_ABS) &&
-              (has_bit(keyb, BTN_GAMEPAD) || has_bit(keyb, BTN_JOYSTICK)) &&
-              has_bit(absb, ABS_X) && has_bit(absb, ABS_Y);
+    /* Wider than joy_usb.c's rule on purpose: this page only needs four
+     * directions and a button, so a pad with a hat and no sticks, or one
+     * that advertises only BTN_DPAD_*, still counts. */
+    int pad_btn = has_bit(keyb, BTN_GAMEPAD) || has_bit(keyb, BTN_JOYSTICK) ||
+                  has_bit(keyb, BTN_DPAD_UP) || has_bit(keyb, BTN_THUMB);
+    int pad_dir = has_bit(absb, ABS_X) || has_bit(absb, ABS_HAT0X) ||
+                  has_bit(keyb, BTN_DPAD_UP);
+    int pad = has_bit(evb, EV_KEY) && pad_btn && pad_dir;
     int kbd = !pad && has_bit(evb, EV_KEY) &&
               has_bit(keyb, KEY_A) && has_bit(keyb, KEY_Z);
     if (!pad && !kbd) {
+        if (debug) {
+            char dname[72] = "?";
+            ioctl(fd, EVIOCGNAME(sizeof dname), dname);
+            printf("[input] %s: %s - skipped (key=%d abs=%d gamepad-btn=%d "
+                   "joystick-btn=%d dpad=%d absx=%d hat=%d KEY_A=%d)\n",
+                   path, dname, has_bit(evb, EV_KEY), has_bit(evb, EV_ABS),
+                   has_bit(keyb, BTN_GAMEPAD), has_bit(keyb, BTN_JOYSTICK),
+                   has_bit(keyb, BTN_DPAD_UP), has_bit(absb, ABS_X),
+                   has_bit(absb, ABS_HAT0X), has_bit(keyb, KEY_A));
+        }
         close(fd);
         return;
     }
     if (grab)
         ioctl(fd, EVIOCGRAB, (void *)1);
-    dev[ndev].fd = fd;
-    dev[ndev].is_pad = pad;
-    ndev++;
-    if (pad) n_pad++; else n_kbd++;
+
+    int i = ndev++;
+    memset(&dev[i], 0, sizeof dev[i]);
+    dev[i].fd = fd;
+    dev[i].is_pad = pad;
+    /* just the node name ("event3"); the full path is rebuilt when
+     * printing, so this buffer cannot be overrun by a long dirent */
+    const char *leaf = strrchr(path, '/');
+    snprintf(dev[i].node, sizeof dev[i].node, "%.31s", leaf ? leaf + 1 : path);
+    if (ioctl(fd, EVIOCGNAME(sizeof dev[i].name), dev[i].name) < 0)
+        snprintf(dev[i].name, sizeof dev[i].name, "?");
+
+    if (pad) {
+        n_pad++;
+        static const int code[2] = { ABS_X, ABS_Y };
+        for (int a = 0; a < 2; a++) {
+            struct input_absinfo ai;
+            memset(&ai, 0, sizeof ai);
+            if (ioctl(fd, EVIOCGABS(code[a]), &ai) < 0 || ai.maximum <= ai.minimum) {
+                ai.minimum = -32768;              /* xpad's range        */
+                ai.maximum =  32767;
+            }
+            int half = (ai.maximum - ai.minimum) / 2;
+            dev[i].ax[a].centre = ai.minimum + half;
+            dev[i].ax[a].on     = half / 2;       /* 50 %                */
+            dev[i].ax[a].off    = (half * 35) / 100;
+        }
+    } else {
+        n_kbd++;
+    }
+    if (debug)
+        printf("[input] %s: %s (%s)\n", path, dev[i].name,
+               pad ? "gamepad" : "keyboard");
 }
 
 int si_open(int want_st, int grab)
@@ -280,8 +367,8 @@ int si_open(int want_st, int grab)
         while ((e = readdir(d))) {
             if (strncmp(e->d_name, "event", 5) != 0)
                 continue;
-            char path[300];
-            snprintf(path, sizeof path, "/dev/input/%s", e->d_name);
+            char path[48];
+            snprintf(path, sizeof path, "/dev/input/%.30s", e->d_name);
             try_dev(path, grab);
         }
         closedir(d);
@@ -301,6 +388,16 @@ void si_close(void)
     ndev = n_kbd = n_pad = 0;
 }
 
+const char *si_device_name(int i, int *is_pad)
+{
+    if (i < 0 || i >= ndev)
+        return NULL;
+    if (is_pad)
+        *is_pad = dev[i].is_pad;
+    return dev[i].name;
+}
+
+int si_device_count(void)   { return ndev; }
 int si_have_st(void)        { return have_st; }
 int si_usb_keyboards(void)  { return n_kbd; }
 int si_gamepads(void)       { return n_pad; }
@@ -310,11 +407,29 @@ static struct si_event usb_poll(void)
     struct input_event ie;
     for (int i = 0; i < ndev; i++) {
         while (read(dev[i].fd, &ie, sizeof ie) == (ssize_t)sizeof ie) {
+            if (debug && ie.type != EV_SYN)
+                printf("[input] %s type %u code %u value %d\n",
+                       dev[i].node, ie.type, ie.code, ie.value);
             if (dev[i].is_pad) {
                 if (ie.type == EV_ABS && ie.code == ABS_HAT0X && ie.value)
                     return ev_make(ie.value < 0 ? SI_LEFT : SI_RIGHT, SI_SRC_PAD, 0);
                 if (ie.type == EV_ABS && ie.code == ABS_HAT0Y && ie.value)
                     return ev_make(ie.value < 0 ? SI_UP : SI_DOWN, SI_SRC_PAD, 0);
+                /* analogue sticks: an edge out of the centre is one key
+                 * press, so holding the stick over does not repeat. */
+                if (ie.type == EV_ABS && (ie.code == ABS_X || ie.code == ABS_Y ||
+                                          ie.code == ABS_RX || ie.code == ABS_RY)) {
+                    int a = (ie.code == ABS_X || ie.code == ABS_RX) ? 0 : 1;
+                    int s = si_stick_state(dev[i].stick[a], ie.value,
+                                           dev[i].ax[a].centre,
+                                           dev[i].ax[a].on, dev[i].ax[a].off);
+                    if (s != dev[i].stick[a]) {
+                        dev[i].stick[a] = s;
+                        if (s < 0) return ev_make(a ? SI_UP : SI_LEFT, SI_SRC_PAD, 0);
+                        if (s > 0) return ev_make(a ? SI_DOWN : SI_RIGHT, SI_SRC_PAD, 0);
+                    }
+                    continue;
+                }
                 if (ie.type == EV_KEY && ie.value == 1) {
                     struct si_event e = map_pad_key(ie.code);
                     if (e.key != SI_NONE)

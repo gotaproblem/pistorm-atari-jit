@@ -5,7 +5,7 @@
  *
  *   sudo systemctl stop pistorm     (the emulator must not own the bus)
  *   ./setupvtest [--mono|--colour] [--60hz] [--hold SECONDS] [--pattern]
- *                [--no-st-kbd]
+ *                [--no-st-kbd] [--input-debug] [--input-only]
  *
  * Output is a short report on the console; the pattern stays on the ST
  * monitor until the hold ends (default: until Enter).
@@ -159,6 +159,7 @@ int main(int argc, char **argv)
 {
     enum ss_mode force = SS_MODE_AUTO;
     int hz50 = 1, hold = -1, pattern_only = 0, no_st_kbd = 0;
+    int input_debug = 0, input_only = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mono"))        force = SS_MODE_MONO;
@@ -167,10 +168,40 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pattern")) pattern_only = 1;
         else if (!strcmp(argv[i], "--no-st-kbd")) no_st_kbd = 1;
+        else if (!strcmp(argv[i], "--input-debug")) input_debug = 1;
+        else if (!strcmp(argv[i], "--input-only")) input_only = input_debug = 1;
         else {
             fprintf(stderr, "usage: %s [--mono|--colour] [--60hz] [--hold SECONDS]"
-                            " [--pattern] [--no-st-kbd]\n", argv[0]);
+                            " [--pattern] [--no-st-kbd]\n"
+                            "       %s --input-only [--input-debug]"
+                            "   (keys only, screen untouched)\n",
+                            argv[0], argv[0]);
             return 2;
+        }
+    }
+
+    if (input_debug)
+        si_set_debug(1);
+
+    /* --input-only: no bus, no screen - just say what was found and
+     * print every key as it arrives. For diagnosing a quiet gamepad. */
+    if (input_only) {
+        int n = si_open(0, 0);
+        printf("%d device(s) kept: %d USB keyboard(s), %d gamepad(s)\n",
+               n, si_usb_keyboards(), si_gamepads());
+        for (int i = 0; i < si_device_count(); i++) {
+            int is_pad = 0;
+            const char *nm = si_device_name(i, &is_pad);
+            printf("  %-9s %s\n", is_pad ? "gamepad" : "keyboard", nm);
+        }
+        puts("press keys or move the pad; ^C to stop");
+        for (;;) {
+            struct si_event e = si_poll(500);
+            if (e.key != SI_NONE) {
+                char buf[48];
+                printf("key: %s\n", si_key_name(&e, buf, sizeof buf));
+                fflush(stdout);
+            }
         }
     }
 

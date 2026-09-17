@@ -43,6 +43,14 @@ struct si_event si_poll(int timeout_ms);
 /* Release the USB devices. The ACIA is left as TOS expects to find it. */
 void si_close(void);
 
+/* Print every device found and every raw event, to find out why a pad
+ * is not answering. */
+void si_set_debug(int on);
+
+/* The devices si_open() kept, for the page and for diagnostics. */
+int         si_device_count(void);
+const char *si_device_name(int i, int *is_pad);
+
 /* What si_open() found, for the page's status line. */
 int  si_have_st(void);
 int  si_usb_keyboards(void);
@@ -50,7 +58,9 @@ int  si_gamepads(void);
 
 const char *si_key_name(const struct si_event *e, char *buf, unsigned long n);
 
-/* Exposed for the host harness: the two scancode maps. */
+/* Exposed for the host harness: the two scancode maps and the stick
+ * hysteresis (-1 / 0 / 1 from a raw axis value). */
+int si_stick_state(int cur, int value, int centre, int on, int off);
 struct si_event si_map_st(unsigned char scancode, int shift);
 struct si_event si_map_evdev(int code, int shift);
 

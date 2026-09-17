@@ -208,6 +208,21 @@ static void run_keymaps(void)
     CHECK(si_map_st(0x7F, 0).key == SI_NONE, "unmapped scancode produced a key");
     CHECK(si_map_evdev(KEY_MAX, 0).key == SI_NONE, "unmapped evdev code produced a key");
 
+    /* stick hysteresis: commits at 50 % of half-range, releases at 35 % */
+    int centre = 0, on = 8192, off = 5734, st = 0;
+    st = si_stick_state(st, 100, centre, on, off);
+    CHECK(st == 0, "a stick near centre moved");
+    st = si_stick_state(st, 9000, centre, on, off);
+    CHECK(st == 1, "a stick pushed right did not commit");
+    st = si_stick_state(st, 7000, centre, on, off);
+    CHECK(st == 1, "a committed stick released too early");
+    st = si_stick_state(st, 2000, centre, on, off);
+    CHECK(st == 0, "a stick returned to centre stayed committed");
+    st = si_stick_state(st, -30000, centre, on, off);
+    CHECK(st == -1, "a stick thrown the other way did not follow");
+    st = si_stick_state(st, 30000, centre, on, off);
+    CHECK(st == 1, "a stick flicked across did not cross over");
+
     char buf[48];
     struct si_event e = si_map_st(0x1E, 1);
     CHECK(strcmp(si_key_name(&e, buf, sizeof buf), "'A' (ST)") == 0,
