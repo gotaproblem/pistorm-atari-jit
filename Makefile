@@ -429,7 +429,7 @@ ataritest: ataritest.c gpio/ps_protocol.c gpio/bus_lock.c
 
 # Pre-boot setup page, step 1: drive the real shifter with the 68k halted.
 # Not part of `all`: stop the emulator first, then run ./setupvtest.
-SETUP_SRC = platforms/atari/setup/shifter_setup.c
+SETUP_SRC = platforms/atari/setup/shifter_setup.c platforms/atari/setup/setup_input.c
 setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup
 

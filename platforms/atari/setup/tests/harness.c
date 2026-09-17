@@ -9,6 +9,8 @@
 #include <string.h>
 #include "shifter_setup.h"
 #include "psfont8x8.h"
+#include "setup_input.h"
+#include <linux/input.h>
 
 uint8_t fc;
 static uint8_t ram[0x100000], reg[0x10000];
@@ -159,6 +161,59 @@ static void run_mode(enum ss_mode mode, const char *name)
     printf("  one cell: %u bytes in %ld transactions\n", sent, txns);
 }
 
+/* The keymaps, checked without any hardware: the ST's scancodes and
+ * evdev's codes must reach the same key for the same physical key. */
+static void run_keymaps(void)
+{
+    static const struct { unsigned char st; int ev; enum si_key key; char ch, sh; } t[] = {
+        { 0x01, KEY_ESC,       SI_ESC,       0,    0   },
+        { 0x1C, KEY_ENTER,     SI_ENTER,     0,    0   },
+        { 0x0F, KEY_TAB,       SI_TAB,       0,    0   },
+        { 0x0E, KEY_BACKSPACE, SI_BACKSPACE, 0,    0   },
+        { 0x39, KEY_SPACE,     SI_SPACE,     ' ',  ' ' },
+        { 0x48, KEY_UP,        SI_UP,        0,    0   },
+        { 0x50, KEY_DOWN,      SI_DOWN,      0,    0   },
+        { 0x4B, KEY_LEFT,      SI_LEFT,      0,    0   },
+        { 0x4D, KEY_RIGHT,     SI_RIGHT,     0,    0   },
+        { 0x3B, KEY_F1,        SI_F1,        0,    0   },
+        { 0x44, KEY_F10,       SI_F10,       0,    0   },
+        { 0x1E, KEY_A,         SI_CHAR,      'a',  'A' },
+        { 0x32, KEY_M,         SI_CHAR,      'm',  'M' },
+        { 0x0B, KEY_0,         SI_CHAR,      '0',  ')' },
+        { 0x33, KEY_COMMA,     SI_CHAR,      ',',  '<' },
+    };
+    printf("keymaps:\n");
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        struct si_event a = si_map_st(t[i].st, 0), b = si_map_evdev(t[i].ev, 0);
+        struct si_event as = si_map_st(t[i].st, 1), bs = si_map_evdev(t[i].ev, 1);
+        CHECK(a.key == t[i].key, "ST $%02X gave key %d, wanted %d",
+              t[i].st, a.key, t[i].key);
+        CHECK(b.key == t[i].key, "evdev %d gave key %d, wanted %d",
+              t[i].ev, b.key, t[i].key);
+        CHECK(a.ch == t[i].ch && b.ch == t[i].ch, "unshifted char differs");
+        CHECK(as.ch == t[i].sh && bs.ch == t[i].sh, "shifted char differs");
+        CHECK(a.src == SI_SRC_ST && b.src == SI_SRC_USB, "wrong source tag");
+    }
+    /* every printable ASCII a person can type must come from some ST key */
+    int reachable[128] = { 0 };
+    for (int sc = 1; sc < 0x80; sc++)
+        for (int sh = 0; sh < 2; sh++) {
+            struct si_event e = si_map_st((unsigned char)sc, sh);
+            if (e.key == SI_CHAR) reachable[(int)(unsigned char)e.ch] = 1;
+        }
+    for (char c = 'a'; c <= 'z'; c++) CHECK(reachable[(int)c], "no ST key for '%c'", c);
+    for (char c = 'A'; c <= 'Z'; c++) CHECK(reachable[(int)c], "no ST key for '%c'", c);
+    for (char c = '0'; c <= '9'; c++) CHECK(reachable[(int)c], "no ST key for '%c'", c);
+    CHECK(si_map_st(0x00, 0).key == SI_NONE, "scancode 0 produced a key");
+    CHECK(si_map_st(0x7F, 0).key == SI_NONE, "unmapped scancode produced a key");
+    CHECK(si_map_evdev(KEY_MAX, 0).key == SI_NONE, "unmapped evdev code produced a key");
+
+    char buf[48];
+    struct si_event e = si_map_st(0x1E, 1);
+    CHECK(strcmp(si_key_name(&e, buf, sizeof buf), "'A' (ST)") == 0,
+          "key name reads \"%s\"", buf);
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -168,6 +223,7 @@ int main(void)
     run_mode(SS_MODE_AUTO, "auto-detect on a colour monitor");
     CHECK(s.mode == SS_MODE_COLOUR, "colour monitor detected as mono");
     run_mode(SS_MODE_MONO, "forced mono");
+    run_keymaps();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;

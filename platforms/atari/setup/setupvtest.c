@@ -5,6 +5,7 @@
  *
  *   sudo systemctl stop pistorm     (the emulator must not own the bus)
  *   ./setupvtest [--mono|--colour] [--60hz] [--hold SECONDS] [--pattern]
+ *                [--no-st-kbd]
  *
  * Output is a short report on the console; the pattern stays on the ST
  * monitor until the hold ends (default: until Enter).
@@ -19,6 +20,7 @@
 #include "gpio/ps_protocol.h"
 #include "gpio/bus_lock.h"
 #include "shifter_setup.h"
+#include "setup_input.h"
 
 static struct ss_screen scr;
 
@@ -72,8 +74,20 @@ static void ss_clock(struct ss_screen *ss)
             ss->planes == 1 ? 1 : 3);
 }
 
-/* A mock-up of the setup page, to check the 80x25 grid and the font. */
-static void text_page(struct ss_screen *ss, int secs)
+/* A mock-up of the setup page: a boot picker and a few settings rows,
+ * driven by whichever keyboard or gamepad is attached. */
+struct page {
+    int sel;            /* 0,1 = boot choices; 2.. = settings rows */
+    int boot;           /* 0 GEM, 1 APJ-OS                         */
+    int jit_power;
+    int cache_mb;
+    int secs;           /* countdown, -1 once a key has arrived    */
+    char last[48];
+};
+
+#define PAGE_ROWS 6     /* 2 boot choices + 4 settings rows        */
+
+static void text_page(struct ss_screen *ss, const struct page *p)
 {
     int ink = ss->planes == 1 ? 1 : 3, paper = 0, hi = ss->planes == 1 ? 1 : 2;
     char line[SS_COLS + 1];
@@ -82,30 +96,52 @@ static void text_page(struct ss_screen *ss, int secs)
     ss_clear_row(ss, 0, ink);
     ss_puts(ss, 2, 0, "PSCTRL PiSTorm Setup", paper, ink);
 
-    for (int c = 0; c < SS_COLS; c++)
-        line[c] = (char)('0' + c % 10);
-    line[SS_COLS] = 0;
-    ss_puts(ss, 0, 2, line, ink, paper);
-    ss_puts(ss, 0, 3, "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz "
-                      "0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", ink, paper);
+    ss_puts(ss, 2, 2, "Boot:", ink, paper);
+    for (int i = 0; i < 2; i++) {
+        int on = p->sel == i;
+        snprintf(line, sizeof line, " %s %-36s",
+                 p->boot == i ? "*" : " ", i == 0 ? "GEM" : "APJ-OS");
+        ss_clear_row(ss, 3 + i, paper);
+        ss_puts(ss, 4, 3 + i, line, on ? paper : ink, on ? hi : paper);
+    }
 
-    ss_puts(ss, 2, 5, "Boot:", ink, paper);
-    ss_clear_row(ss, 6, paper);
-    ss_puts(ss, 4, 6, "  GEM                                     ", paper, hi);
-    ss_puts(ss, 4, 7, "  APJ-OS", ink, paper);
-    ss_puts(ss, 2, 9, "Settings:", ink, paper);
-    ss_puts(ss, 4, 10, "JIT power           4        live", ink, paper);
-    ss_puts(ss, 4, 11, "Translation cache   16384 K  restart", ink, paper);
-    ss_puts(ss, 4, 12, "TT-RAM              128 M    boot", ink, paper);
-    ss_puts(ss, 4, 13, "Blitter bus cost    instant  (GEM only)", hi, paper);
+    ss_puts(ss, 2, 6, "Settings:", ink, paper);
+    static const char *names[4] = { "JIT power", "Translation cache",
+                                    "TT-RAM", "Blitter bus cost" };
+    for (int i = 0; i < 4; i++) {
+        char val[24];
+        switch (i) {
+        case 0: snprintf(val, sizeof val, "%d", p->jit_power); break;
+        case 1: snprintf(val, sizeof val, "%d K", p->cache_mb * 1024); break;
+        case 2: snprintf(val, sizeof val, "128 M"); break;
+        default: snprintf(val, sizeof val, "instant"); break;
+        }
+        int on = p->sel == 2 + i, grey = i == 3;   /* row 3 is GEM only */
+        snprintf(line, sizeof line, "%-20s%-10s%-14s", names[i], val,
+                 i == 0 ? "live" : i == 1 ? "restart" :
+                 i == 2 ? "boot" : "(GEM only)");
+        ss_clear_row(ss, 7 + i, paper);
+        ss_puts(ss, 4, 7 + i, line, on ? paper : (grey ? hi : ink),
+                on ? hi : paper);
+    }
 
-    snprintf(line, sizeof line, "%s, %s", ss->planes == 1 ? "640x400 mono"
-                                                          : "640x200 colour",
-             ss->hz50 ? "50 Hz" : "60 Hz");
+    snprintf(line, sizeof line, "input: %s%d USB keyboard%s, %d gamepad%s",
+             si_have_st() ? "ST keyboard, " : "", si_usb_keyboards(),
+             si_usb_keyboards() == 1 ? "" : "s", si_gamepads(),
+             si_gamepads() == 1 ? "" : "s");
+    ss_puts(ss, 2, SS_ROWS - 5, line, ink, paper);
+    snprintf(line, sizeof line, "last key: %-40s", p->last);
     ss_puts(ss, 2, SS_ROWS - 4, line, ink, paper);
-    ss_puts(ss, 2, SS_ROWS - 3, "Up/Down select   Enter edit   B boot", ink, paper);
-    snprintf(line, sizeof line, "Booting GEM in %d...", secs);
+    ss_puts(ss, 2, SS_ROWS - 3,
+            "Up/Down select   Left/Right change   Enter pick   F10 or Esc finish",
+            ink, paper);
     ss_clear_row(ss, SS_ROWS - 2, paper);
+    if (p->secs >= 0)
+        snprintf(line, sizeof line, "Booting %s in %d...",
+                 p->boot ? "APJ-OS" : "GEM", p->secs);
+    else
+        snprintf(line, sizeof line, "countdown stopped - %s selected",
+                 p->boot ? "APJ-OS" : "GEM");
     ss_puts(ss, 2, SS_ROWS - 2, line, ink, paper);
     ss_clock(ss);
 }
@@ -122,7 +158,7 @@ static void countdown_block(struct ss_screen *ss, int n)
 int main(int argc, char **argv)
 {
     enum ss_mode force = SS_MODE_AUTO;
-    int hz50 = 1, hold = -1, pattern_only = 0;
+    int hz50 = 1, hold = -1, pattern_only = 0, no_st_kbd = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mono"))        force = SS_MODE_MONO;
@@ -130,9 +166,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--60hz"))   hz50 = 0;
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--pattern")) pattern_only = 1;
+        else if (!strcmp(argv[i], "--no-st-kbd")) no_st_kbd = 1;
         else {
             fprintf(stderr, "usage: %s [--mono|--colour] [--60hz] [--hold SECONDS]"
-                            " [--pattern]\n", argv[0]);
+                            " [--pattern] [--no-st-kbd]\n", argv[0]);
             return 2;
         }
     }
@@ -187,13 +224,15 @@ int main(int argc, char **argv)
     printf("  one text line x%d    %6u bytes  %7.2f ms each\n", N, total / N, per);
     printf("  verify after flushes: %u bad bytes\n", ss_verify(&scr));
 
+    struct page pg = { 0, 0, 4, 16, 5, "-" };
     if (pattern_only) {
         printf("\n--pattern: leaving the test pattern up\n");
+        si_open(!no_st_kbd, 1);
         goto hold_it;
     }
 
     printf("\ntext page (80x25 grid, 8x%d cells):\n", scr.planes == 1 ? 16 : 8);
-    text_page(&scr, 5);
+    text_page(&scr, &pg);
     t0 = now_ms();
     ss_write_full(&scr, SS_W32);
     printf("  full page            %6u bytes  %7.1f ms\n", SS_SCREEN_BYTES,
@@ -201,26 +240,66 @@ int main(int argc, char **argv)
     t0 = now_ms();
     total = 0;
     for (int n = 5; n > 0; n--) {
-        text_page(&scr, n);
+        pg.secs = n;
+        text_page(&scr, &pg);
         total += ss_flush(&scr);
     }
     printf("  countdown tick x5    %6u bytes  %7.2f ms each\n", total / 5,
            (now_ms() - t0) / 5);
     printf("  verify: %u bad bytes\n", ss_verify(&scr));
 
+    int nsrc = si_open(!no_st_kbd, 1);
+    printf("\ninput: %d source(s) - ST keyboard %s, %d USB keyboard(s), %d gamepad(s)\n",
+           nsrc, si_have_st() ? "yes" : "no", si_usb_keyboards(), si_gamepads());
+
 hold_it:
-    printf("\nthe page is on the ST monitor, clock ticking - press Enter to finish\n");
+    printf("the page is on the ST monitor. Drive it with any keyboard or the\n"
+           "gamepad; F10, Esc or Enter here finishes.\n");
+    pg.secs = 5;
+    double tick = now_ms();
     for (double t_end = now_ms() + (hold < 0 ? 1e12 : hold * 1000.0);
          now_ms() < t_end; ) {
-        struct timeval tv = { 0, 250000 };
+        struct si_event e = si_poll(100);
+        if (e.key != SI_NONE) {
+            si_key_name(&e, pg.last, sizeof pg.last);
+            pg.secs = -1;                     /* any key stops the countdown */
+            switch (e.key) {
+            case SI_UP:    pg.sel = (pg.sel + PAGE_ROWS - 1) % PAGE_ROWS; break;
+            case SI_DOWN:  pg.sel = (pg.sel + 1) % PAGE_ROWS;             break;
+            case SI_LEFT:
+            case SI_RIGHT: {
+                int d = e.key == SI_RIGHT ? 1 : -1;
+                if (pg.sel == 0 || pg.sel == 1) pg.boot = pg.sel;
+                else if (pg.sel == 2) pg.jit_power = (pg.jit_power + d + 7) % 7;
+                else if (pg.sel == 3) pg.cache_mb = pg.cache_mb == 16 ? 8 : 16;
+                break;
+            }
+            case SI_ENTER: if (pg.sel < 2) pg.boot = pg.sel;              break;
+            case SI_ESC:
+            case SI_F10:   goto done;
+            default: break;
+            }
+        }
+        /* stdin ends it too, for a session over ssh */
+        struct timeval tv = { 0, 0 };
         fd_set r;
         FD_ZERO(&r); FD_SET(0, &r);
         if (select(1, &r, NULL, NULL, &tv) > 0)
             break;
-        if (!pattern_only) {
+        if (pattern_only) {
             ss_clock(&scr);
             ss_flush(&scr);
+            continue;
         }
+        if (pg.secs > 0 && now_ms() - tick >= 1000.0) {
+            tick = now_ms();
+            if (--pg.secs == 0)
+                pg.secs = 5;                  /* demo: just wraps round */
+        }
+        text_page(&scr, &pg);
+        ss_flush(&scr);
     }
+done:
+    si_close();
     return 0;
 }
