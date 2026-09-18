@@ -652,13 +652,20 @@ static void run_relevance(void)
     CHECK(!strcmp(se_choice("jit_power", 6), "6"), "jit_power stops short of 6");
 
     /* stram_size: the real bank combinations, never 0K */
-    CHECK(se_count("stram_size") == 6, "stram_size has %d choices",
+    CHECK(se_count("stram_size") == 7, "stram_size has %d choices",
           se_count("stram_size"));
+    CHECK(!strcmp(se_choice("stram_size", 0), ""),
+          "stram_size's first choice must be 'not set' (flat 4 MB)");
+    CHECK(strstr(se_label("stram_size", 0), "not set") != NULL,
+          "the not-set choice does not say so: \"%s\"", se_label("stram_size", 0));
+    CHECK(se_index("stram_size", "") == 0, "an absent stram_size should land on not-set");
     for (int i = 0; i < se_count("stram_size"); i++) {
         const char *v = se_choice("stram_size", i);
         CHECK(strcmp(v, "0") && strcmp(v, "0K"), "stram_size offers %s", v);
+        /* the only empty choice is the deliberate not-set one at index 0 */
+        CHECK(*v || i == 0, "an empty stram_size choice at index %d", i);
     }
-    CHECK(se_index("stram_size", "4M") == 5, "stram_size 4M not last");
+    CHECK(se_index("stram_size", "4M") == 6, "stram_size 4M not last");
 }
 
 int main(void)

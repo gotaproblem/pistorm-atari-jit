@@ -336,6 +336,13 @@ const char *sp_row_value(const char *key, const char *val, char *buf,
                          unsigned long n)
 {
     const char *rest;
+    /* a key with a known list reads as that list's label; an absent key
+     * lands on the "" choice when the list has one (stram_size: not set) */
+    if (se_count(key)) {
+        int i = se_index(key, val ? val : "");
+        if (i >= 0)
+            return se_label(key, i);
+    }
     if (!val)
         return "";
     int dev = device_key(key, val, &rest);
@@ -605,9 +612,16 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             case SI_DOWN:  st.choice = (st.choice + 1) % n;     break;
             case SI_ENTER: {
                 const char *c = se_choice(key, st.choice);
-                if (c && sc_set(&st.cfg, st.sec, key, c) == 0)
+                if (c && !*c) {
+                    /* the "not set" choice: take the line out of the
+                     * section, so the emulator sees the key as absent */
+                    sc_set(&st.cfg, st.sec, key, NULL);
+                    snprintf(st.msg, sizeof st.msg, "%.20s removed (not set)",
+                             sp_row_label(key, c));
+                } else if (c && sc_set(&st.cfg, st.sec, key, c) == 0) {
                     snprintf(st.msg, sizeof st.msg, "%.20s = %.35s",
-                             sp_row_label(key, c), c);
+                             sp_row_label(key, c), se_label(key, st.choice));
+                }
                 st.choosing = 0;
                 break;
             }

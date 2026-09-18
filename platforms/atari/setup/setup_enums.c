@@ -37,10 +37,22 @@ static const char *jitpow[]  = { "0", "1", "2", "3", "4", "5", "6" };
 static const char *jitpow_l[]= { "0 - JIT disabled", "1 - 256", "2 - 512",
                                  "3 - 1024 (default)", "4 - 2048",
                                  "5 - 4096", "6 - 8192" };
-/* stram_size: the real ST bank combinations stram_alias_init() can make
- * (2M/512K/128K chips), so never 0 and never an impossible size */
-static const char *stram[]   = { "128K", "512K", "1M", "2M", "2560K", "4M" };
-static const char *stram_l[] = { "128K", "512K", "1M", "2M", "2.5M", "4M" };
+/* stram_size. The Pi-side ST-RAM is a flat 4 MB backed by Pi memory, and
+ * that is what the guest sees when the key is ABSENT - a 1 MB board is
+ * told it has 4 MB. Setting the key does the opposite: the Pi aliases
+ * exactly like the real banks so TOS sizes the true amount, which the
+ * native Shifter display needs (TOS puts the frame buffer at the top of
+ * what it thinks it has). So "not set" is the way to get 4 MB, and the
+ * sizes below CAP at the chips actually on the board. The empty value
+ * means "remove the key". */
+static const char *stram[]   = { "", "128K", "512K", "1M", "2M", "2560K", "4M" };
+static const char *stram_l[] = { "not set - flat 4 MB, Pi-backed (APJ-OS)",
+                                 "128K  (honest: caps at the board)",
+                                 "512K  (honest: caps at the board)",
+                                 "1M    (honest: caps at the board)",
+                                 "2M    (honest: caps at the board)",
+                                 "2.5M  (honest: caps at the board)",
+                                 "4M    (honest: caps at the board)" };
 
 /* The words the parser accepts for the same choice. A bare key counts as
  * the empty string: `blitter` alone means enabled, `ttram` alone means
@@ -105,7 +117,7 @@ static const struct { const char *key, *dflt; } known[] = {
     { "network",     "disabled" },
     { "jit_power",   "3"        },
     { "jit_cache",   "16384"    },
-    { "stram_size",  "4M"       },
+    { "stram_size",  ""         },   /* "" = not set = flat 4 MB */
     { "blitter",     "enabled"  },
     { "dma_sound",   "disabled" },
     { "acsi",        "disabled" },
