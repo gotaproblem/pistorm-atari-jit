@@ -33,6 +33,7 @@ ttram 128M
 rom ../roms/emutos-aranym.rom
 ide
 hdd ../dkimages/dk0.img
+acsi disabled
 network disabled
 network_backend tap
 network_tap tap0
@@ -58,6 +59,7 @@ hostfs S /home/pistorm/atari-share
 rom ../roms/emutos-aranym.rom
 ide
 hdd ../dkimages/apj-os.img
+acsi disabled
 fdd ../dkimages/fdd/720k.st
 network disabled
 network_backend tap

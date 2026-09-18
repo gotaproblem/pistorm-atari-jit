@@ -698,6 +698,9 @@ struct emulator_config *load_config_file_section(char *filename,
 
   memset(cfg, 0x00, sizeof(struct emulator_config));
   cfg->cpu_type = M68K_CPU_TYPE_68000 - 1;
+  /* ACSI: the switch and the image lines, attached once the section is read */
+  int  acsi_enabled = 0, acsi_n = 0, acsi_id[8];
+  static char acsi_img[8][512];
   cfg->jit = true;
   cfg->blitter = true;
   cfg->native_hdmi = false;   /* default off: shifter is the game display;
@@ -999,15 +1002,23 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_ACSI:
         {
-          /* emulated ACSI target; `acsi image` takes the lowest free ID,
-           * `acsi 3:image` pins ID 3 (split off before disk_path, as for
-           * hdd). .hfs images are bare Mac HFS volumes (ACSI-DESIGN.md). */
-          extern int acsi_attach_at (int id, const char *path);
-          char ap[512];
-          int id;
-          const char *img = slot_prefix(parse_line + str_pos, &id);
-          resolve_path(g_disk_path, img, ap, sizeof ap);
-          acsi_attach_at (id, ap);
+          /* `acsi enabled` / `acsi disabled` is the switch, like `ide`;
+           * every other `acsi` line is an image: `acsi image` takes the
+           * lowest free ID, `acsi 3:image` pins ID 3 (split off before
+           * disk_path, as for hdd). The images are attached after the
+           * file is read, and only if the switch is on - so the switch
+           * may sit anywhere in the section. .hfs images are bare Mac
+           * HFS volumes (ACSI-DESIGN.md). */
+          if (is_bool_true(parse_line + str_pos) || is_bool_false(parse_line + str_pos)) {
+            acsi_enabled = get_bool_default_true(parse_line + str_pos) ? 1 : 0;
+            printf ("[CFG] ACSI %s\n", acsi_enabled ? "enabled" : "disabled");
+          } else if (acsi_n < 8) {
+            int id;
+            const char *img = slot_prefix(parse_line + str_pos, &id);
+            acsi_id[acsi_n] = id;
+            resolve_path(g_disk_path, img, acsi_img[acsi_n], sizeof acsi_img[acsi_n]);
+            acsi_n++;
+          }
         }
         break;
 
@@ -1365,6 +1376,14 @@ struct emulator_config *load_config_file_section(char *filename,
   skip_line:
     cur_line++;
   }
+
+  if (acsi_n && acsi_enabled == 1) {
+    extern int acsi_attach_at (int id, const char *path);
+    for (int i = 0; i < acsi_n; i++)
+      acsi_attach_at (acsi_id[i], acsi_img[i]);
+  } else if (acsi_n)
+    printf ("[CFG] ACSI: %d image line%s ignored - the section has no `acsi enabled`\n",
+            acsi_n, acsi_n == 1 ? "" : "s");
 
   if (cfg->cpu_type < M68K_CPU_TYPE_68020 - 1)
   {

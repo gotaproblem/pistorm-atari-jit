@@ -21,6 +21,10 @@
  * expands them into numbered slots in step 3.
  */
 #include <ctype.h>
+#include <dirent.h>
+#include <pwd.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +39,8 @@
 
 #define MAX_ROWS   96
 #define MAX_BUILDS 16
+#define MAX_FILES  128
+#define MAX_FNAME  64
 
 enum screen { SCR_BUILDS = 0, SCR_EDIT };
 /* ROW_LABEL: a heading the cursor skips (acsi, fdd, hostfs groups);
@@ -71,6 +77,11 @@ struct state {
     int  editing, choosing, choice;
     char edit[SC_LINE_LEN];
     char msg[64];
+    /* the image picker: the files in rom_path / disk_path / fdd_path */
+    int  picking, pick, ptop, nfiles;
+    char files[MAX_FILES][MAX_FNAME];
+    char pickdir[512];
+    const char *pickvar;
 };
 
 static double now_ms(void)
@@ -491,16 +502,36 @@ static const char *slot_of(const char *val, int *slot)
 /* which line sits in each slot of a repeated key: pinned lines first,
  * then the unpinned ones the way the emulator numbers them (hdd: next
  * slot in file order; acsi: lowest free ID). -1 = empty. */
+/* `acsi enabled` / `acsi disabled` is the group's switch, not an image */
+static int is_switch_line(const char *key, const char *v)
+{
+    return !strcasecmp(key, "acsi") && v && sp_is_switch(v);
+}
+
+/* the line index of the acsi switch, or -1 */
+static int acsi_switch_line(const struct state *st)
+{
+    int n = sc_count(&st->cfg, st->sec, "acsi");
+    for (int i = 0; i < n; i++)
+        if (is_switch_line("acsi", sc_get_n(&st->cfg, st->sec, "acsi", i)))
+            return i;
+    return -1;
+}
+
 static void slot_map(const struct state *st, const char *key, int map[DRIVE_SLOTS])
 {
     int n = sc_count(&st->cfg, st->sec, key), next = 0;
     for (int i = 0; i < DRIVE_SLOTS; i++) map[i] = -1;
     for (int i = 0; i < n; i++) {
-        int sl; slot_of(sc_get_n(&st->cfg, st->sec, key, i), &sl);
+        const char *v = sc_get_n(&st->cfg, st->sec, key, i);
+        if (is_switch_line(key, v)) continue;
+        int sl; slot_of(v, &sl);
         if (sl >= 0 && map[sl] < 0) map[sl] = i;
     }
     for (int i = 0; i < n; i++) {
-        int sl; slot_of(sc_get_n(&st->cfg, st->sec, key, i), &sl);
+        const char *v = sc_get_n(&st->cfg, st->sec, key, i);
+        if (is_switch_line(key, v)) continue;
+        int sl; slot_of(v, &sl);
         if (sl >= 0) continue;
         if (!strcasecmp(key, "hdd")) {
             if (next < DRIVE_SLOTS) map[next++] = i;
@@ -549,6 +580,9 @@ static void build_drive_rows(struct state *st)
     int ns = sc_count(&st->cfg, st->sec, "hostfs");
     const char *ide = sc_get(&st->cfg, st->sec, "ide");
     int ide_on = ide && sp_row_on("ide", ide);
+    int asw = acsi_switch_line(st);
+    const char *acsi = asw >= 0 ? sc_get_n(&st->cfg, st->sec, "acsi", asw) : NULL;
+    int acsi_on = acsi && sp_row_on("acsi", acsi);
     char num[4];
     struct row *r;
 
@@ -566,11 +600,13 @@ static void build_drive_rows(struct state *st)
     r = drow(st, ROW_SLOT, "fdd", 0, 0, DRIVE_SLOTS + 3, "A:");
     r->ticked = nf > 0;
     /* right column: acsi 0..7, then hostfs lines and an add row */
-    drow(st, ROW_LABEL, "acsi", 0, 1, 0, "");
+    r = drow(st, ROW_KEY, "acsi", asw, 1, 0, "");
+    r->ticked = acsi_on;
     for (int i = 0; i < DRIVE_SLOTS; i++) {
         snprintf(num, sizeof num, "%d", i);
         r = drow(st, ROW_SLOT, "acsi", amap[i], 1, 1 + i, num);
         r->ticked = amap[i] >= 0;
+        r->blocked = !acsi_on;
     }
     drow(st, ROW_LABEL, "hostfs", 0, 1, DRIVE_SLOTS + 2, "");
     int line = DRIVE_SLOTS + 3, room = SS_ROWS - ROW_LIST - FOOTER;
@@ -655,6 +691,81 @@ static const char *row_value(const struct state *st, const struct row *r,
 }
 
 /* tick: write the key's tick value (text keys ask first); untick: remove */
+/* ------------------------------------------------------------------ */
+/* the image picker                                                    */
+/* ------------------------------------------------------------------ */
+
+/* which [psctrl] path a key's files live under, or NULL */
+static const char *image_base_key(const char *key)
+{
+    if (!strcasecmp(key, "hdd") || !strcasecmp(key, "acsi")) return "disk_path";
+    if (!strcasecmp(key, "fdd"))                              return "fdd_path";
+    if (!strcasecmp(key, "rom") || !strcasecmp(key, "stbox_tos")) return "rom_path";
+    return NULL;
+}
+
+/* ~ is the invoking user's home, as config_file.c reads it */
+static const char *page_home(void)
+{
+    static char home[512];
+    if (home[0]) return home;
+    const char *u = getenv("SUDO_USER");
+    const struct passwd *pw = (u && *u) ? getpwnam(u) : NULL;
+    if (!pw) pw = getpwuid(getuid());
+    const char *h = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : getenv("HOME");
+    snprintf(home, sizeof home, "%s", h ? h : ".");
+    return home;
+}
+
+static int name_cmp(const void *a, const void *b)
+{
+    return strcasecmp((const char *)a, (const char *)b);
+}
+
+/* read the directory: regular files, no dotfiles, sorted; 0 = nothing
+ * to offer (no path set, no such directory, or empty) */
+static int open_picker(struct state *st, const char *key, const char *current)
+{
+    const char *var = image_base_key(key);
+    const char *base = var ? sc_get(&st->cfg, "psctrl", var) : NULL;
+    if (!base || !*base)
+        return 0;
+    if (base[0] == '~' && (base[1] == '/' || !base[1]))
+        snprintf(st->pickdir, sizeof st->pickdir, "%s%s", page_home(), base + 1);
+    else
+        snprintf(st->pickdir, sizeof st->pickdir, "%s", base);
+    DIR *d = opendir(st->pickdir);
+    if (!d) {
+        snprintf(st->msg, sizeof st->msg, "%s: cannot read %.40s", var, st->pickdir);
+        return 0;
+    }
+    st->nfiles = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && st->nfiles < MAX_FILES) {
+        if (e->d_name[0] == '.' || strlen(e->d_name) >= MAX_FNAME)
+            continue;
+        char full[1024]; struct stat sb;
+        snprintf(full, sizeof full, "%s/%s", st->pickdir, e->d_name);
+        if (stat(full, &sb) != 0 || !S_ISREG(sb.st_mode))
+            continue;
+        snprintf(st->files[st->nfiles++], MAX_FNAME, "%.*s", MAX_FNAME - 1, e->d_name);
+    }
+    closedir(d);
+    if (!st->nfiles) {
+        snprintf(st->msg, sizeof st->msg, "no files in %.50s", st->pickdir);
+        return 0;
+    }
+    qsort(st->files, (unsigned long)st->nfiles, MAX_FNAME, name_cmp);
+    st->pickvar = var;
+    st->pick = 0;                             /* 0 = type a name */
+    for (int i = 0; current && i < st->nfiles; i++)
+        if (!strcasecmp(st->files[i], current)) { st->pick = i + 1; break; }
+    st->ptop = 0;
+    st->picking = 1;
+    snprintf(st->msg, sizeof st->msg, "%d file%s", st->nfiles, st->nfiles == 1 ? "" : "s");
+    return 1;
+}
+
 static int is_disk(const char *key)
 {
     return !strcasecmp(key, "hdd") || !strcasecmp(key, "acsi");
@@ -673,7 +784,8 @@ static void tick(struct state *st, int open_editor_for_text)
     struct row *r = &st->row[st->sel];
     if (r->kind == ROW_SLOT || r->kind == ROW_ADD) {
         if (r->blocked) {
-            snprintf(st->msg, sizeof st->msg, "%.10s %s needs ide ticked", r->text, r->label);
+            snprintf(st->msg, sizeof st->msg, "%.10s %s needs %.10s ticked", r->text, r->label,
+                     !strcasecmp(r->text, "hdd") ? "ide" : r->text);
             return;
         }
         if (r->ticked) {
@@ -686,6 +798,8 @@ static void tick(struct state *st, int open_editor_for_text)
             return;
         }
         if (open_editor_for_text) {           /* a new line needs its value */
+            if (open_picker(st, r->text, NULL))
+                return;
             st->edit[0] = '\0';
             st->editing = 1;
             if (!strcasecmp(r->text, "hostfs"))
@@ -706,10 +820,11 @@ static void tick(struct state *st, int open_editor_for_text)
                  se_needs(r->text) ? se_needs(r->text) : "its parent");
         return;
     }
+    int ord = r->ord < 0 ? sc_count(&st->cfg, st->sec, r->text) : r->ord;
     if (r->ticked) {
         /* off = out of the build; the two the emulator has on by default
          * must say so */
-        sc_set_n(&st->cfg, st->sec, r->text, r->ord, se_off_value(r->text));
+        sc_set_n(&st->cfg, st->sec, r->text, ord, se_off_value(r->text));
         snprintf(st->msg, sizeof st->msg, "%.20s %s", r->text,
                  se_kind(r->text) == SE_K_SWITCH ? "off" : "removed from the build");
         return;
@@ -717,13 +832,15 @@ static void tick(struct state *st, int open_editor_for_text)
     const char *tv = se_tick_value(r->text);
     if (se_kind(r->text) == SE_K_TEXT && !*tv) {
         if (open_editor_for_text) {           /* needs a value first */
+            if (open_picker(st, r->text, NULL))
+                return;
             st->edit[0] = '\0';
             st->editing = 1;
             snprintf(st->msg, sizeof st->msg, "type a value for %.20s", r->text);
         }
         return;
     }
-    sc_set_n(&st->cfg, st->sec, r->text, r->ord, tv);
+    sc_set_n(&st->cfg, st->sec, r->text, ord, tv);
     if (se_kind(r->text) == SE_K_SWITCH)
         snprintf(st->msg, sizeof st->msg, "%.20s on", r->text);
     else
@@ -786,6 +903,8 @@ static void edit_row(struct state *st)
         snprintf(st->edit, sizeof st->edit, "%s",
                  !v ? "" : is_disk(r->text) ? slot_of(v, &sl) :
                  sp_row_value(r->text, v, vbuf, sizeof vbuf));
+        if (open_picker(st, r->text, st->edit))
+            return;
         st->editing = 1;
         return;
     }
@@ -812,6 +931,8 @@ static void edit_row(struct state *st)
     char vbuf[SC_LINE_LEN];
     snprintf(st->edit, sizeof st->edit, "%s",
              v ? sp_row_value(k, v, vbuf, sizeof vbuf) : "");
+    if (open_picker(st, k, st->edit))
+        return;
     st->editing = 1;
 }
 
@@ -886,13 +1007,12 @@ static void draw_drives(struct ss_screen *ss, const struct state *st)
         int on = st->sel == k, grey = 0;
         const char *v = sc_get_n(&st->cfg, st->sec, r->text, r->ord);
         switch (r->kind) {
-        case ROW_KEY:                         /* ide */
+        case ROW_KEY:                         /* ide, acsi */
             snprintf(cell, sizeof cell, "%s %-6.6s(disk_path)", r->ticked ? "[x]" : "[ ]", r->text);
             grey = !r->ticked;
             break;
         case ROW_LABEL:
             snprintf(cell, sizeof cell, "    %-6.6s%s", r->text,
-                     !strcasecmp(r->text, "acsi") ? "(disk_path)" :
                      !strcasecmp(r->text, "fdd")  ? "(fdd_path)" : "");
             break;
         case ROW_SLOT:
@@ -931,6 +1051,33 @@ static void draw_drives(struct ss_screen *ss, const struct state *st)
     }
 }
 
+/* the picker: the directory on the first line, then the files, with
+ * "type a name" first for anything not listed */
+static void draw_picker(struct ss_screen *ss, const struct state *st)
+{
+    int ink = c_ink(ss), hi = c_hi(ss);
+    char line[SC_LINE_LEN];
+    const struct row *r = &st->row[st->sel];
+    for (int i = 0; i < st->list_rows; i++)
+        ss_clear_row(ss, ROW_LIST + i, 0);
+    snprintf(line, sizeof line, " %.10s %-3.3s from %s %.50s", r->text, r->label,
+             st->pickvar ? st->pickvar : "", st->pickdir);
+    ss_puts(ss, 1, ROW_LIST, line, hi, 0);
+    int rows = st->list_rows - 1, n = st->nfiles + 1;
+    for (int i = 0; i < rows; i++) {
+        int k = st->ptop + i;
+        if (k >= n) break;
+        int on = k == st->pick;
+        snprintf(line, sizeof line, "   %-72.72s", k == 0 ? "(type a name)" : st->files[k - 1]);
+        ss_puts(ss, 1, ROW_LIST + 1 + i, line, on ? 0 : ink, on ? hi : 0);
+    }
+    if (n > rows) {
+        snprintf(line, sizeof line, "%d-%d of %d", st->ptop + 1,
+                 st->ptop + rows > n ? n : st->ptop + rows, n);
+        ss_puts(ss, SS_COLS - 1 - (int)strlen(line), ROW_TABS, line, ink, 0);
+    }
+}
+
 static void draw_edit(struct ss_screen *ss, const struct state *st)
 {
     int ink = c_ink(ss), hi = c_hi(ss);
@@ -943,12 +1090,19 @@ static void draw_edit(struct ss_screen *ss, const struct state *st)
         { "ESC", "cancel" } };
     ss_clear(ss, 0);
     draw_bar(ss, st->sec);
+    static const struct help hp[] = { { "Up/Down", "choose" }, { "Enter", "pick" },
+        { "ESC", "cancel" } };
     if (st->editing)       draw_help(ss, 1, he, 3);
     else if (st->choosing) draw_help(ss, 1, hc, 3);
+    else if (st->picking)  draw_help(ss, 1, hp, 3);
     else                   draw_help(ss, 1, h, 5);
     draw_tabs(ss, st->tab);
 
     int nk = st->nrow - 2;
+    if (st->picking) {
+        draw_picker(ss, st);
+        goto footer;
+    }
     if (st->tab == SE_TAB_DRIVES) {
         draw_drives(ss, st);
         goto footer;
@@ -989,13 +1143,21 @@ static void draw_edit(struct ss_screen *ss, const struct state *st)
                 tail = whybuf;
             }
             /* [-] = cannot be ticked here; the cursor skips it */
-            /* a number is short: its column shrinks to leave room for the
-             * default and range on the right */
-            snprintf(line, sizeof line, se_kind(r->text) == SE_K_INT ?
-                     " %s %-20.20s %-14.14s%s" : " %s %-20.20s %-36.36s%s",
-                     (r->why || r->blocked) ? "[-]" : r->ticked ? "[x]" : "[ ]",
-                     sp_row_label(r->text, sc_get_n(&st->cfg, st->sec, r->text, r->ord)),
-                     val, tail);
+            /* a row that cannot be used here says "empty" unless it has a
+             * value; a tail (reason, default and range) follows the value
+             * after a short column rather than sitting at the far right */
+            if ((r->why || r->blocked) && !r->ticked)
+                val = "empty";
+            if (*tail)
+                snprintf(line, sizeof line, " %s %-20.20s %-14.36s  %s",
+                         (r->why || r->blocked) ? "[-]" : r->ticked ? "[x]" : "[ ]",
+                         sp_row_label(r->text, sc_get_n(&st->cfg, st->sec, r->text, r->ord)),
+                         val, tail);
+            else
+                snprintf(line, sizeof line, " %s %-20.20s %-36.36s",
+                         (r->why || r->blocked) ? "[-]" : r->ticked ? "[x]" : "[ ]",
+                         sp_row_label(r->text, sc_get_n(&st->cfg, st->sec, r->text, r->ord)),
+                         val);
         }
         /* pad to the width so the cursor bar is always full */
         unsigned long len = strlen(line);
@@ -1081,6 +1243,27 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                 return SP_QUIT;
             default: break;
             }
+        } else if (st.picking) {
+            int n = st.nfiles + 1, rows = st.list_rows - 1;
+            switch (e.key) {
+            case SI_UP:   if (st.pick > 0) st.pick--; break;
+            case SI_DOWN: if (st.pick < n - 1) st.pick++; break;
+            case SI_ENTER:
+                st.picking = 0;
+                if (st.pick == 0) {           /* type it instead */
+                    st.editing = 1;
+                    snprintf(st.msg, sizeof st.msg, "type a name for %.20s", st.row[st.sel].text);
+                } else {
+                    snprintf(st.edit, sizeof st.edit, "%s", st.files[st.pick - 1]);
+                    commit_edit(&st);
+                }
+                break;
+            case SI_ESC:  st.picking = 0; st.msg[0] = '\0'; break;
+            case SI_F10:  st.picking = 0; snprintf(chosen, chosen_len, "%s", st.boot); return SP_QUIT;
+            default: break;
+            }
+            if (st.pick < st.ptop) st.ptop = st.pick;
+            if (st.pick >= st.ptop + rows) st.ptop = st.pick - rows + 1;
         } else if (st.choosing) {
             int n = se_count(st.row[st.sel].text);
             switch (e.key) {

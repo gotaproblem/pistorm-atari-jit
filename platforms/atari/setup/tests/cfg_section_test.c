@@ -150,8 +150,22 @@ int main(void)
         load_config_file_section(cfgp,"apj-os");
         CHECK(!strcmp(g_hdd_slot[3], want_hdd), "hdd 3:d.img should land in slot 3 with disk_path: [%s]", g_hdd_slot[3]);
         snprintf(want_hdd, sizeof want_hdd, "%s/disks/m.hfs", base);
+        CHECK(g_last_acsi_id == -2, "acsi images must not attach without `acsi enabled` (attached ID %d)", g_last_acsi_id);
+
+        /* the switch turns the images on, wherever it sits in the section */
+        FILE*pf4=fopen(cfgp,"w");
+        fprintf(pf4,"[psctrl]\ndisk_path %s/disks\n[apj-os]\ncpu 68040\nacsi 5:m.hfs\nacsi n.hfs\nacsi enabled\n", base);
+        fclose(pf4);
+        memset(g_acsi, 0, sizeof g_acsi); g_last_acsi_id = -2;
+        load_config_file_section(cfgp,"apj-os");
         CHECK(!strcmp(g_acsi[5], want_hdd), "acsi 5:m.hfs should pin ID 5 with disk_path: [%s]", g_acsi[5]);
         CHECK(g_last_acsi_id == -1, "an unpinned acsi asks for the lowest free ID, got %d", g_last_acsi_id);
+        FILE*pf5=fopen(cfgp,"w");
+        fprintf(pf5,"[apj-os]\ncpu 68040\nacsi disabled\nacsi n.hfs\n");
+        fclose(pf5);
+        g_last_acsi_id = -2;
+        load_config_file_section(cfgp,"apj-os");
+        CHECK(g_last_acsi_id == -2, "acsi disabled must attach nothing (attached ID %d)", g_last_acsi_id);
         CHECK(pc && !strcmp(pc->fdd.img_path, want_fdd), "fdd_path prefix: got [%s]", pc?pc->fdd.img_path:"");
 
         /* an absolute filename ignores the base; a path with no var is unchanged */

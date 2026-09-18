@@ -272,7 +272,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     /* Drives - the page expands hdd/acsi/hostfs into slots (step 3) */
     { "ide",            SE_TAB_DRIVES,  SE_K_SWITCH, "enabled" },
     { "hdd",            SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
-    { "acsi",           SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
+    { "acsi",           SE_TAB_DRIVES,  SE_K_SWITCH, "enabled" },   /* the switch; images are the other acsi lines */
     { "fdd",            SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
     { "hostfs",         SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
     /* Network */
@@ -385,6 +385,9 @@ static const struct { const char *key; const char *off; } absent_on[] = {
     { "comp_constjump", "0" },
     { "compnf",         "0" },
     { "compfpu",        "0" },
+    /* not an absent-on default: written out so the image lines below it
+     * stay in the file, ignored, until the switch comes back */
+    { "acsi",           "disabled" },
 };
 
 const char *se_off_value(const char *key)
