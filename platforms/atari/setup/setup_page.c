@@ -465,7 +465,8 @@ static void build_rows(struct state *st)
         r->ticked = v && (se_kind(k) == SE_K_SWITCH ? sp_row_on(k, v) :
                           se_kind(k) == SE_K_LIST   ? !list_off(k, v) : 1);
         r->blocked = parent_off(st, k);
-        r->why = se_cpu_rule(k, cpu);
+        r->why = se_env_rule(k, st->sec);
+        if (!r->why) r->why = se_cpu_rule(k, cpu);
     }
     st->row[st->nrow].kind = ROW_SAVE; st->row[st->nrow++].text[0] = '\0';
     st->row[st->nrow].kind = ROW_BOOT; st->row[st->nrow++].text[0] = '\0';
@@ -487,6 +488,8 @@ static const char *row_value(const struct state *st, const struct row *r,
     const char *v = sc_get_n(&st->cfg, st->sec, k, r->ord);
     if (se_kind(k) == SE_K_SWITCH)            /* the box is the value */
         return "";
+    if (v && se_kind(k) == SE_K_INT)          /* 0 is a number, not "off" */
+        return v;
     if (v && !(se_kind(k) == SE_K_LIST && list_off(k, v)))
         return sp_row_value(k, v, buf, n);
     switch (se_kind(k)) {
@@ -517,8 +520,7 @@ static void tick(struct state *st, int open_editor_for_text)
     if (r->ticked) {
         /* off = out of the build; the two the emulator has on by default
          * must say so */
-        sc_set_n(&st->cfg, st->sec, r->text, r->ord,
-                 se_absent_on(r->text) ? "disabled" : NULL);
+        sc_set_n(&st->cfg, st->sec, r->text, r->ord, se_off_value(r->text));
         snprintf(st->msg, sizeof st->msg, "%.20s %s", r->text,
                  se_kind(r->text) == SE_K_SWITCH ? "off" : "removed from the build");
         return;
@@ -553,9 +555,13 @@ static void commit_edit(struct state *st)
         return;
     }
     if (se_kind(r->text) == SE_K_INT) {
-        char *end; strtol(val, &end, 0);
+        char *end; long lo, hi, n = strtol(val, &end, 0);
         if (end == val || *end) {
             snprintf(st->msg, sizeof st->msg, "%.20s must be a number", r->text);
+            return;
+        }
+        if (se_int_range(r->text, &lo, &hi) && (n < lo || n > hi)) {
+            snprintf(st->msg, sizeof st->msg, "%.20s must be %d to %d", r->text, (int)lo, (int)hi);
             return;
         }
     }
@@ -681,7 +687,8 @@ static void draw_edit(struct ss_screen *ss, const struct state *st)
                      r->ticked ? "[x]" : "[ ]", r->text, st->edit);
         } else {
             val = row_value(st, r, vbuf, sizeof vbuf);
-            char whybuf[32];
+            char whybuf[48];
+            long lo, hi;
             if (r->why) {
                 snprintf(whybuf, sizeof whybuf, "(%.28s)", r->why);
                 tail = whybuf;
@@ -689,9 +696,20 @@ static void draw_edit(struct ss_screen *ss, const struct state *st)
                 snprintf(whybuf, sizeof whybuf, "(needs %.20s)",
                          se_needs(r->text) ? se_needs(r->text) : "parent");
                 tail = whybuf;
+            } else if (se_kind(r->text) == SE_K_INT) {
+                /* a typed number shows its default and range */
+                if (se_int_range(r->text, &lo, &hi))
+                    snprintf(whybuf, sizeof whybuf, "default %.10s  %d to %d",
+                             se_tick_value(r->text), (int)lo, (int)hi);
+                else
+                    snprintf(whybuf, sizeof whybuf, "default %.10s", se_tick_value(r->text));
+                tail = whybuf;
             }
             /* [-] = cannot be ticked here; the cursor skips it */
-            snprintf(line, sizeof line, " %s %-20.20s %-36.36s%s",
+            /* a number is short: its column shrinks to leave room for the
+             * default and range on the right */
+            snprintf(line, sizeof line, se_kind(r->text) == SE_K_INT ?
+                     " %s %-20.20s %-14.14s%s" : " %s %-20.20s %-36.36s%s",
                      (r->why || r->blocked) ? "[-]" : r->ticked ? "[x]" : "[ ]",
                      sp_row_label(r->text, sc_get_n(&st->cfg, st->sec, r->text, r->ord)),
                      val, tail);

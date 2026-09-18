@@ -33,6 +33,8 @@ static const char *cache[]   = { "2048", "4096", "8192", "16384" };
 static const char *ttram[]   = { "disabled", "32M", "64M", "128M", "256M" };
 /* CONFITEM_STBOX_MACHINE */
 static const char *stbox[]   = { "st", "ste" };
+/* audio_frames: the SDL buffer ladder (psctrl_settings.cpp L_frames) */
+static const char *frames[]  = { "512", "1024", "2048", "4096", "8192" };
 /* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
  * log2 ladder, 256 << (n-1), so 3 is the 1024 default (psctrl_settings.cpp) */
 static const char *jitpow[]  = { "0", "1", "2", "3", "4", "5", "6" };
@@ -103,6 +105,7 @@ static const struct table tables[] = {
     T("cpu", cpu), T("machine", machine), T("shifter", shifter),
     TL("blitter", blitter, blitter_l), T("monitor", monitor), T("vga", vga),
     T("jit_cache", cache), T("ttram", ttram), T("stbox_machine", stbox),
+    T("audio_frames", frames),
     TL("jit_power", jitpow, jitpow_l),
     TL("stram_size", stram, stram_l),
 };
@@ -156,16 +159,17 @@ static const struct { const char *key; int env; } env_of[] = {
     { "cpu_compatible", SE_GEM },
     { "m68k_speed",     SE_GEM },
     { "cpu_clock_multiplier", SE_GEM },
-    /* the emulated graphics card, which fVDI drives: APJ-OS only.
+    /* vga is NOT here: a GEM build drives the ET4000 through NVDI.
      * native_hdmi and fps are NOT here: native_hdmi is the ST-screen
      * mirror on HDMI (config_file.c: "the native_hdmi ST-screen mirror"),
      * which a GEM machine on an HDMI monitor needs, and fps paces the
      * HDMI render thread whichever source it shows. */
-    { "vga",            SE_APJ },
     /* the ST Box - a sandboxed ST in a GEM window under APJ-OS */
     { "stbox_tos",      SE_APJ },
     { "stbox_machine",  SE_APJ },
     { "stbox_plane",    SE_APJ },
+    { "stbox_slice_cyc",SE_APJ },
+    { "stbox_telemetry",SE_APJ },
 };
 
 /* Retired: parsed and read by nothing (the parser ignores them with a
@@ -250,16 +254,16 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "monitor",        SE_TAB_VIDEO,   SE_K_LIST,   "auto"    },
     { "shifter",        SE_TAB_VIDEO,   SE_K_LIST,   "st"      },
     { "stbox_plane",    SE_TAB_VIDEO,   SE_K_INT,    "0"       },
-    { "drm_dirtyband",  SE_TAB_VIDEO,   SE_K_INT,    "1"       },
-    { "drm_async",      SE_TAB_VIDEO,   SE_K_INT,    "0"       },
+    { "drm_dirtyband",  SE_TAB_VIDEO,   SE_K_SWITCH, "1"       },
+    { "drm_async",      SE_TAB_VIDEO,   SE_K_SWITCH, "1"       },
     { "vbl_refract_ns", SE_TAB_VIDEO,   SE_K_INT,    "5000000" },
     /* Sound */
     { "ym2149",         SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
     { "dma_sound",      SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
     { "ym_gain",        SE_TAB_SOUND,   SE_K_INT,    "100"     },
     { "ym_lag_ms",      SE_TAB_SOUND,   SE_K_INT,    "100"     },
-    { "lmc",            SE_TAB_SOUND,   SE_K_INT,    "1"       },
-    { "audio_frames",   SE_TAB_SOUND,   SE_K_INT,    "2048"    },
+    { "lmc",            SE_TAB_SOUND,   SE_K_SWITCH, "1"       },
+    { "audio_frames",   SE_TAB_SOUND,   SE_K_LIST,   "2048"    },
     /* Input */
     { "kbd",            SE_TAB_INPUT,   SE_K_SWITCH, "usb"     },
     { "usb",            SE_TAB_INPUT,   SE_K_SWITCH, "gamepad" },
@@ -289,12 +293,12 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "stram_cache",    SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "stram_direct",   SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "addr32",         SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
-    { "comp_constjump", SE_TAB_TUNING,  SE_K_INT,    "1"       },
-    { "compnf",         SE_TAB_TUNING,  SE_K_INT,    "1"       },
-    { "compfpu",        SE_TAB_TUNING,  SE_K_INT,    "1"       },
+    { "comp_constjump", SE_TAB_TUNING,  SE_K_SWITCH, "1"       },
+    { "compnf",         SE_TAB_TUNING,  SE_K_SWITCH, "1"       },
+    { "compfpu",        SE_TAB_TUNING,  SE_K_SWITCH, "1"       },
     { "blit_timed_ns",  SE_TAB_TUNING,  SE_K_INT,    "0"       },
     { "stbox_slice_cyc",SE_TAB_TUNING,  SE_K_INT,    "64"      },
-    { "stbox_telemetry",SE_TAB_TUNING,  SE_K_INT,    "0"       },
+    { "stbox_telemetry",SE_TAB_TUNING,  SE_K_SWITCH, "1"       },
     { "ipl_confirm_ns", SE_TAB_TUNING,  SE_K_INT,    "2000"    },
     { "blit_trace",     SE_TAB_TUNING,  SE_K_INT,    "0"       },
     { "debug",          SE_TAB_TUNING,  SE_K_TEXT,   ""        },
@@ -367,10 +371,75 @@ const char *se_cpu_rule(const char *key, const char *cpu)
     return NULL;
 }
 
-int se_absent_on(const char *key)
+/*
+ * Switches the emulator has ON when the line is absent, and the word
+ * that turns them off. config_file.c starts from all-zero except jit and
+ * blitter; the PSCTRL tunables (psctrl_tunables.c) default lmc and
+ * drm_dirtyband to 1 and comp_* to -1 (= the JIT's own default, on).
+ */
+static const struct { const char *key; const char *off; } absent_on[] = {
+    { "jit",            "disabled" },
+    { "blitter",        "disabled" },
+    { "lmc",            "0" },
+    { "drm_dirtyband",  "0" },
+    { "comp_constjump", "0" },
+    { "compnf",         "0" },
+    { "compfpu",        "0" },
+};
+
+const char *se_off_value(const char *key)
 {
-    /* config_file.c starts from all-zero except these two */
-    return !strcasecmp(key, "jit") || !strcasecmp(key, "blitter");
+    for (unsigned i = 0; i < sizeof absent_on / sizeof absent_on[0]; i++)
+        if (!strcasecmp(key, absent_on[i].key))
+            return absent_on[i].off;
+    return NULL;
+}
+
+/*
+ * Ranges of the typed numbers, as PSCTRL's own table (psctrl_settings.cpp)
+ * and config_file.c clamp them. The default is the catalogue tick value.
+ */
+static const struct { const char *key; long lo, hi; } irange[] = {
+    { "fps",             10, 60 },
+    { "vbl_refract_ns",   0, 20000000 },
+    { "ym_gain",          0, 400 },        /* hundredths: 100 = unity */
+    { "ym_lag_ms",        5, 200 },
+    { "mouse_thresh",     0, 15 },
+    { "mouse_scale",      1, 16 },
+    { "stbox_plane",      0, 128 },
+    { "stbox_slice_cyc",  8, 4096 },
+    { "blit_timed_ns",    0, 2000 },
+    { "ipl_confirm_ns",   0, 1000000 },
+    { "m68k_speed",      -1, 20 },
+    { "cpu_clock_multiplier", 0, 8 },
+    { "blit_trace",       0, 1000000 },
+    { "network_irq",      1, 7 },
+};
+
+int se_int_range(const char *key, long *lo, long *hi)
+{
+    for (unsigned i = 0; i < sizeof irange / sizeof irange[0]; i++)
+        if (!strcasecmp(key, irange[i].key)) {
+            if (lo) *lo = irange[i].lo;
+            if (hi) *hi = irange[i].hi;
+            return 1;
+        }
+    return 0;
+}
+
+/*
+ * Which build a key belongs to. A build whose name starts with "apj" is
+ * an APJ-OS build (apj-os, apj-os-test ...); anything else is a GEM
+ * machine. stbox_* only mean something under APJ-OS; the ST-speed and
+ * ST-video keys only mean something to a GEM machine.
+ */
+const char *se_env_rule(const char *key, const char *section)
+{
+    int apj = section && !strncasecmp(section, "apj", 3);
+    int env = se_env(key);
+    if (env == SE_APJ && !apj) return "apj-os only";
+    if (env == SE_GEM && apj)  return "gem only";
+    return NULL;
 }
 
 static const struct table *find(const char *key)

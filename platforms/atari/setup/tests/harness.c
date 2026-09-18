@@ -620,9 +620,27 @@ static void run_relevance(void)
     CHECK(se_env("monitor") == SE_GEM, "monitor should be GEM-only");
     CHECK(se_env("shifter") == SE_GEM, "shifter should be GEM-only");
     CHECK(se_env("m68k_speed") == SE_GEM, "m68k_speed should be GEM-only");
-    /* and the card and its HDMI output mean nothing to plain GEM */
-    CHECK(se_env("vga") == SE_APJ, "vga should be APJ-OS only");
+    /* the card serves a GEM build too (ET4000 through NVDI, as Steve's
+     * [gem] block has it); only the ST Box is APJ-OS's own */
+    CHECK(se_env("vga") == SE_BOTH, "vga serves gem (NVDI) as well as apj-os");
     CHECK(se_env("stbox_tos") == SE_APJ, "the ST Box is an APJ-OS feature");
+    CHECK(se_env("stbox_telemetry") == SE_APJ, "stbox_telemetry is ST Box");
+    CHECK(se_env_rule("stbox_tos", "gem") != NULL, "stbox_tos must be skipped outside apj-os");
+    CHECK(se_env_rule("stbox_tos", "apj-os") == NULL, "stbox_tos allowed in apj-os");
+    CHECK(se_env_rule("stbox_tos", "apj-os-test") == NULL, "an apj* build is APJ-OS");
+    CHECK(se_env_rule("cpu_compatible", "apj-os") != NULL, "cpu_compatible is gem only");
+    CHECK(se_env_rule("cpu", "gem") == NULL && se_env_rule("cpu", "apj-os") == NULL, "cpu is for both");
+    /* typed numbers carry PSCTRL's ranges; switches with an on default
+     * know their off word */
+    { long lo = 0, hi = 0;
+      CHECK(se_int_range("ym_gain", &lo, &hi) && lo == 0 && hi == 400, "ym_gain 0..400");
+      CHECK(se_int_range("ym_lag_ms", &lo, &hi) && lo == 5 && hi == 200, "ym_lag_ms 5..200");
+      CHECK(!se_int_range("rom", NULL, NULL), "rom has no range"); }
+    CHECK(se_kind("lmc") == SE_K_SWITCH, "lmc is a switch");
+    CHECK(se_kind("audio_frames") == SE_K_LIST && se_index("audio_frames", "2048") == 2, "audio_frames ladder");
+    CHECK(se_off_value("lmc") && !strcmp(se_off_value("lmc"), "0"), "lmc off is 0");
+    CHECK(se_off_value("blitter") && !strcmp(se_off_value("blitter"), "disabled"), "blitter off word");
+    CHECK(se_off_value("fpu") == NULL, "fpu absent is off");
     /* the ST-screen mirror on HDMI serves a GEM machine on an HDMI
      * monitor too, and fps paces that output whichever source it shows */
     CHECK(se_env("native_hdmi") == SE_BOTH, "native_hdmi is the ST-screen mirror: both");

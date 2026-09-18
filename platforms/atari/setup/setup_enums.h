@@ -67,8 +67,13 @@ const char *se_tick_value(const char *key);
 
 /* NULL = the key is allowed with this cpu, else why not ("needs 68020+") */
 const char *se_cpu_rule(const char *key, const char *cpu);
-/* a switch the emulator has ON when the line is absent (jit) */
-int         se_absent_on(const char *key);
+/* a switch the emulator has ON when the line is absent: the word that
+ * turns it off ("disabled", "0"); NULL for the rest (absent = off) */
+const char *se_off_value(const char *key);
+/* 1 and the clamp range of a typed number, 0 if it has none */
+int         se_int_range(const char *key, long *lo, long *hi);
+/* NULL = the key belongs in this build, else "apj-os only" / "gem only" */
+const char *se_env_rule(const char *key, const char *section);
 
 /* How many choices `key` has, 0 if it is not one of these keys. */
 int         se_count(const char *key);
