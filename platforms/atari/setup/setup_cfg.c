@@ -2,6 +2,7 @@
  * setup_cfg.c - see setup_cfg.h.
  */
 #include <ctype.h>
+#include <errno.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,12 +277,39 @@ static void take_ownership(FILE *out, const char *path)
     (void)fchmod(fd, mode);
 }
 
+static int fail(struct sc_cfg *c, const char *step)
+{
+    snprintf(c->err, sizeof c->err, "%s: %s", step, strerror(errno));
+    printf("[SETUP] save failed - %s\n", c->err);
+    return -1;
+}
+
+const char *sc_save_error(const struct sc_cfg *c)
+{
+    return c->err;
+}
+
+/* write the lines to an open stream */
+static int put_lines(const struct sc_cfg *c, FILE *f)
+{
+    for (int i = 0; i < c->n; i++)
+        if (fprintf(f, "%s\n", c->line[i].text) < 0)
+            return -1;
+    return 0;
+}
+
 int sc_save(struct sc_cfg *c, const char *path)
 {
+    char where[512];
     if (!path)
         path = c->path;
-    if (!path || !*path)
+    if (!path || !*path) {
+        snprintf(c->err, sizeof c->err, "no path");
         return -1;
+    }
+    snprintf(where, sizeof where, "%s", path);   /* path may be c->path */
+    path = where;
+    c->err[0] = '\0';
 
     char tmp[600], bak[600];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
@@ -289,23 +317,32 @@ int sc_save(struct sc_cfg *c, const char *path)
 
     FILE *f = fopen(tmp, "wb");
     if (!f)
-        return -1;
+        return fail(c, "open .tmp");
     take_ownership(f, path);
-    for (int i = 0; i < c->n; i++)
-        fprintf(f, "%s\n", c->line[i].text);
-    if (fclose(f) != 0) {
+    if (put_lines(c, f) != 0 || fclose(f) != 0) {
         unlink(tmp);
-        return -1;
+        return fail(c, "write .tmp");
     }
+    /* keep the old file as .bak - best effort, a save is not worth
+     * failing over the backup */
     if (access(path, F_OK) == 0) {
         unlink(bak);
-        if (rename(path, bak) != 0) {
-            unlink(tmp);
-            return -1;
-        }
+        if (rename(path, bak) != 0)
+            printf("[SETUP] no .bak this time - rename: %s\n", strerror(errno));
     }
-    if (rename(tmp, path) != 0)
-        return -1;
+    if (rename(tmp, path) != 0) {
+        /* a filesystem that will not rename over the file (some shares):
+         * write it in place instead */
+        int e = errno;
+        f = fopen(path, "wb");
+        if (!f || put_lines(c, f) != 0 || fclose(f) != 0) {
+            unlink(tmp);
+            errno = e;
+            return fail(c, "rename .tmp");
+        }
+        unlink(tmp);
+        printf("[SETUP] rename refused (%s) - written in place\n", strerror(e));
+    }
     snprintf(c->path, sizeof c->path, "%s", path);
     c->dirty = 0;
     return 0;

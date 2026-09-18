@@ -38,6 +38,7 @@ struct sc_cfg {
     int  n;
     int  dirty;
     char path[512];
+    char err[96];               /* why the last sc_save failed */
 };
 
 /* 0 on success, -1 if the file cannot be read or has too many lines. */
@@ -67,6 +68,8 @@ int sc_count(const struct sc_cfg *c, const char *sec, const char *key);
  * gets the owner of the directory it lands in, so a save while running
  * as root under pistorm.service does not leave a root-owned .cfg. */
 int sc_save(struct sc_cfg *c, const char *path);
+/* the step and errno text of the last failed save ("rename .tmp: ...") */
+const char *sc_save_error(const struct sc_cfg *c);
 
 /* Section names in file order, for the boot picker. Returns how many. */
 int sc_sections(const struct sc_cfg *c, char out[][SC_SEC_LEN], int max);

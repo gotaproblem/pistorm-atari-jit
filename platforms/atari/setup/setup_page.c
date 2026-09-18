@@ -808,8 +808,11 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             case SI_ENTER:
                 if (st.row[st.sel].kind == ROW_SAVE) {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
-                    snprintf(st.msg, sizeof st.msg, "%s",
-                             sc_save(&st.cfg, NULL) == 0 ? "saved" : "SAVE FAILED");
+                    if (sc_save(&st.cfg, NULL) == 0)
+                        snprintf(st.msg, sizeof st.msg, "saved");
+                    else
+                        snprintf(st.msg, sizeof st.msg, "SAVE FAILED - %.48s",
+                                 sc_save_error(&st.cfg));
                 } else if (st.row[st.sel].kind == ROW_BOOT) {
                     snprintf(st.boot, sizeof st.boot, "%s", st.sec);
                     goto boot;
