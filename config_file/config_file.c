@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <pwd.h>
+#include <unistd.h>
+#include <strings.h>
 #include <ctype.h>
 #include <sys/mman.h>
 #include "config_file.h"
@@ -567,6 +570,72 @@ void get_next_string(char *str, char *str_out, int *strpos, char separator) {
 }
 
 
+/*
+ * Path variables from the [psctrl] block. `rom_path`, `disk_path` and
+ * `fdd_path` let the machine sections name bare files (rom emutos.rom,
+ * hdd dk0.img, fdd 720k.st) and have them resolved under a common
+ * directory. Captured from the file wherever they appear, before the
+ * section filter, so they are set even though [psctrl] is not the loaded
+ * section; empty by default, so an unprefixed or "../roms/..." path still
+ * works exactly as before.
+ */
+static char g_rom_path[512];
+static char g_disk_path[512];
+static char g_fdd_path[512];
+
+/* expand a leading ~ / ~/ to the INVOKING user's home - not $HOME, which
+ * is /root under sudo and under pistorm.service (getpwnam of SUDO_USER,
+ * else getpwuid of the real uid, else $HOME) */
+static const char *user_home(void)
+{
+  static char home[512];
+  if (home[0])
+    return home;
+  const char *u = getenv("SUDO_USER");
+  const struct passwd *pw = (u && *u) ? getpwnam(u) : NULL;
+  if (!pw)
+    pw = getpwuid(getuid());
+  const char *h = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : getenv("HOME");
+  snprintf(home, sizeof home, "%s", h ? h : ".");
+  return home;
+}
+
+static void expand_home(const char *in, char *out, size_t n)
+{
+  if (in[0] == '~' && (in[1] == '/' || in[1] == '\0'))
+    snprintf(out, n, "%s%s", user_home(), in + 1);
+  else
+    snprintf(out, n, "%s", in);
+}
+
+/* Resolve `file` against `base`:
+ *   absolute (/... or ~...) -> used as given (base ignored)
+ *   base set, file relative  -> <base>/<file>
+ *   base empty               -> file unchanged (old behaviour)
+ * ~ in either part expands to the invoking user's home. */
+static const char *resolve_path(const char *base, const char *file,
+                                char *out, size_t n)
+{
+  while (*file == ' ' || *file == '\t')
+    file++;
+  if (file[0] == '/' || file[0] == '~') {
+    expand_home(file, out, n);
+    return out;
+  }
+  if (base && base[0]) {
+    char bexp[512];
+    expand_home(base, bexp, sizeof bexp);
+    size_t L = strlen(bexp);
+    if (L && bexp[L - 1] == '/')
+      snprintf(out, n, "%s%s", bexp, file);
+    else
+      snprintf(out, n, "%s/%s", bexp, file);
+    return out;
+  }
+  snprintf(out, n, "%s", file);
+  return out;
+}
+
 /* "[gem]" -> "gem" in `out`, else 0. Leading blanks allowed. */
 static int config_section_header(const char *line, char *out, size_t n)
 {
@@ -623,6 +692,7 @@ struct emulator_config *load_config_file_section(char *filename,
   
   char cur_section[32];
   memset(cur_section, 0, sizeof cur_section);
+  g_rom_path[0] = g_disk_path[0] = g_fdd_path[0] = '\0';
 
   while (!feof(in)) 
   {
@@ -642,6 +712,31 @@ struct emulator_config *load_config_file_section(char *filename,
         strncpy(cur_section, sec_name, sizeof cur_section - 1);
         goto skip_line;
       }
+      /* rom_path / disk_path / fdd_path apply wherever they sit (the
+       * [psctrl] block, which the section filter below would skip). */
+      {
+        int p = 0; char kw[32];
+        memset(kw, 0, sizeof kw);
+        get_next_string(parse_line, kw, &p, ' ');
+        if (!strcasecmp(kw, "rom_path") || !strcasecmp(kw, "disk_path") ||
+            !strcasecmp(kw, "fdd_path")) {
+          char val[512];
+          /* the value is the rest of the line; this runs before
+           * trim_whitespace, so strip the trailing newline/blanks here */
+          snprintf(val, sizeof val, "%s", parse_line + p);
+          size_t L = strlen(val);
+          while (L && (val[L-1]=='\n' || val[L-1]=='\r' ||
+                       val[L-1]==' '  || val[L-1]=='\t'))
+            val[--L] = '\0';
+          char *vp = val;
+          while (*vp == ' ' || *vp == '\t') vp++;
+          if (!strcasecmp(kw, "rom_path"))  snprintf(g_rom_path,  sizeof g_rom_path,  "%s", vp);
+          else if (!strcasecmp(kw, "disk_path")) snprintf(g_disk_path, sizeof g_disk_path, "%s", vp);
+          else                              snprintf(g_fdd_path,  sizeof g_fdd_path,  "%s", vp);
+          goto skip_line;
+        }
+      }
+
       if (want_section && strcasecmp(cur_section, want_section) != 0)
         goto skip_line;
     }
@@ -823,8 +918,9 @@ struct emulator_config *load_config_file_section(char *filename,
         {
           FILE *fp;
 
-          /* open file */
-          strcpy (cfg->rom.rom_path, parse_line + str_pos);
+          /* resolve under [psctrl] rom_path, then open */
+          resolve_path(g_rom_path, parse_line + str_pos,
+                       cfg->rom.rom_path, sizeof cfg->rom.rom_path);
           fp = fopen ( cfg->rom.rom_path, "rb" );
 
           if ( !fp )
@@ -874,15 +970,19 @@ struct emulator_config *load_config_file_section(char *filename,
         {
         static int idx = 0;
 
-        if (idx < 8)
-          set_hard_drive_image_file_atari ( idx++, parse_line + str_pos );
+        if (idx < 8) {
+          char hp[512];
+          resolve_path(g_disk_path, parse_line + str_pos, hp, sizeof hp);
+          set_hard_drive_image_file_atari ( idx++, hp );
+        }
         }
         break;
 
       case CONFITEM_FDD:
         {
           cfg->fdd.enabled = true;
-          strcpy (cfg->fdd.img_path, parse_line + str_pos);
+          resolve_path(g_fdd_path, parse_line + str_pos,
+                       cfg->fdd.img_path, sizeof cfg->fdd.img_path);
         }
         break;
 
@@ -891,7 +991,9 @@ struct emulator_config *load_config_file_section(char *filename,
           /* emulated ACSI target; IDs assigned in cfg order (0..7).
            * .hfs images are bare Mac HFS volumes (see ACSI-DESIGN.md). */
           extern int acsi_attach (const char *path);
-          acsi_attach (parse_line + str_pos);
+          char ap[512];
+          resolve_path(g_disk_path, parse_line + str_pos, ap, sizeof ap);
+          acsi_attach (ap);
         }
         break;
 
@@ -1182,9 +1284,8 @@ struct emulator_config *load_config_file_section(char *filename,
          * space-delimited token would silently truncate the path */
         while (parse_line[str_pos] == ' ' || parse_line[str_pos] == '\t')
           str_pos++;
-        strncpy(cfg->stbox_tos, parse_line + str_pos,
-                sizeof(cfg->stbox_tos) - 1);
-        cfg->stbox_tos[sizeof(cfg->stbox_tos) - 1] = '\0';
+        resolve_path(g_rom_path, parse_line + str_pos,
+                     cfg->stbox_tos, sizeof cfg->stbox_tos);
         trim_whitespace(cfg->stbox_tos);
         printf ("[CFG] STBOX TOS %s\n", cfg->stbox_tos);
         break;

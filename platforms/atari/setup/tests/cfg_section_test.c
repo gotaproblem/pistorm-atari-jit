@@ -13,9 +13,10 @@
 #include "config_file/config_file.h"
 
 /* stubs: reached only by hdd/acsi lines, which we do not exercise here */
+static char g_last_hdd[512];
 int  set_hard_drive_image_file_atari(uint8_t index, char *filename)
 {
-    (void)index; (void)filename; return 0;
+    (void)index; snprintf(g_last_hdd, sizeof g_last_hdd, "%s", filename); return 0;
 }
 int  acsi_attach(int id, const char *path) { (void)id; (void)path; return 0; }
 int  psctrl_settings_config_key(const char *key, const char *val)
@@ -106,6 +107,40 @@ int main(void)
     if (c) {
         CHECK(c->cpu_type == 0, "flat cpu_type %d, wanted 68000 (0)", c->cpu_type);
         CHECK(c->fps == 30, "flat fps %d, wanted 30", c->fps);
+    }
+
+    /* [psctrl] path vars prefix the bare filenames in the machine section */
+    char base[256], romdir[300], cfgp[256];
+    snprintf(base, sizeof base, "%s/romsec_base_%d", getenv("TMPDIR")?getenv("TMPDIR"):"/tmp", (int)getpid());
+    snprintf(romdir, sizeof romdir, "%s/roms", base);
+    char mk[700]; snprintf(mk, sizeof mk, "mkdir -p %s/roms %s/disks %s/fdd", base, base, base);
+    if (system(mk)==0) {
+        char rp[400]; snprintf(rp, sizeof rp, "%s/roms/e.rom", base);
+        FILE*rf=fopen(rp,"wb"); for(int i=0;i<256*1024;i++) fputc(0,rf); fclose(rf);
+        snprintf(cfgp, sizeof cfgp, "%s/paths_%d.cfg", getenv("TMPDIR")?getenv("TMPDIR"):"/tmp", (int)getpid());
+        FILE*pf=fopen(cfgp,"w");
+        fprintf(pf,"[psctrl]\nrom_path %s/roms\ndisk_path %s/disks\nfdd_path %s/fdd\nboot apj-os\n"
+                   "[apj-os]\ncpu 68040\nrom e.rom\nhdd d.img\nfdd f.st\n", base, base, base);
+        fclose(pf);
+        g_last_hdd[0]=0;
+        struct emulator_config*pc=load_config_file_section(cfgp,"apj-os");
+        char want_rom[400], want_hdd[400], want_fdd[400];
+        snprintf(want_rom, sizeof want_rom, "%s/roms/e.rom", base);
+        snprintf(want_hdd, sizeof want_hdd, "%s/disks/d.img", base);
+        snprintf(want_fdd, sizeof want_fdd, "%s/fdd/f.st", base);
+        CHECK(pc && !strcmp(pc->rom.rom_path, want_rom), "rom_path prefix: got [%s]", pc?pc->rom.rom_path:"");
+        CHECK(pc && pc->rom.rom_size>0, "prefixed rom did not open");
+        CHECK(!strcmp(g_last_hdd, want_hdd), "disk_path prefix: got [%s]", g_last_hdd);
+        CHECK(pc && !strcmp(pc->fdd.img_path, want_fdd), "fdd_path prefix: got [%s]", pc?pc->fdd.img_path:"");
+
+        /* an absolute filename ignores the base; a path with no var is unchanged */
+        FILE*pf2=fopen(cfgp,"w");
+        fprintf(pf2,"[apj-os]\ncpu 68040\nrom %s\nfdd ../rel/f.st\n", rp);
+        fclose(pf2);
+        struct emulator_config*pc2=load_config_file_section(cfgp,"apj-os");
+        CHECK(pc2 && !strcmp(pc2->rom.rom_path, rp), "absolute rom mangled: [%s]", pc2?pc2->rom.rom_path:"");
+        CHECK(pc2 && !strcmp(pc2->fdd.img_path, "../rel/f.st"), "relative fdd with no var changed: [%s]", pc2?pc2->fdd.img_path:"");
+        char rm[700]; snprintf(rm, sizeof rm, "rm -rf %s %s", base, cfgp); (void)!system(rm);
     }
 
     unlink(sec);
