@@ -1,6 +1,7 @@
 /*
  * setup_enums.c - see setup_enums.h.
  */
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -15,6 +16,7 @@ static const char *machine[] = { "st", "ste", "megast" };
 static const char *shifter[] = { "st", "ste" };
 /* CONFITEM_BLITTER: "real" = pass-through, else a boolean */
 static const char *blitter[] = { "disabled", "enabled", "real" };
+static const char *blitter_l[]={ "off", "emulated", "real - the board's own chip" };
 /* CONFITEM_MONITOR: forces the GPIP7 monitor-detect bit */
 static const char *monitor[] = { "auto", "mono", "colour" };
 /* the `vga` line is "<card> <driver>". Only the ET4000 has an
@@ -99,7 +101,7 @@ struct table { const char *key; const char **list; const char **labels; int n; }
 #define TL(k, a, l)  { k, a, l,    (int)(sizeof(a) / sizeof(a[0])) }
 static const struct table tables[] = {
     T("cpu", cpu), T("machine", machine), T("shifter", shifter),
-    T("blitter", blitter), T("monitor", monitor), T("vga", vga),
+    TL("blitter", blitter, blitter_l), T("monitor", monitor), T("vga", vga),
     T("jit_cache", cache), T("ttram", ttram), T("stbox_machine", stbox),
     TL("jit_power", jitpow, jitpow_l),
     TL("stram_size", stram, stram_l),
@@ -337,6 +339,38 @@ const char *se_tick_value(const char *key)
         if (!strcasecmp(key, cat[k].key))
             return cat[k].tick;
     return "";
+}
+
+/*
+ * What the cpu line allows. config_file.c drops fpu/ttram/addr32 below a
+ * 68020 ("CPU is 24-bit only"), the MMU cores exist for 68030+ only, and
+ * cpu_compatible is the prefetch-accurate 68000 core. A key outside its
+ * rule is greyed on the page, skipped by the cursor and never ticked.
+ */
+static const struct { const char *key; const char *cpus; const char *why; } rule[] = {
+    { "fpu",            " 68020 68030 68040 68060 ", "needs 68020+" },
+    { "ttram",          " 68020 68030 68040 68060 ", "needs 68020+" },
+    { "addr32",         " 68020 68030 68040 68060 ", "needs 68020+" },
+    { "mmu",            " 68030 68040 68060 ",       "needs 68030+" },
+    { "cpu_compatible", " 68000 ",                   "68000 only"   },
+};
+
+const char *se_cpu_rule(const char *key, const char *cpu)
+{
+    char pad[16];
+    if (!cpu || !*cpu)
+        cpu = "68000";                        /* config_file.c: cpu_type 0 */
+    snprintf(pad, sizeof pad, " %.12s ", cpu);
+    for (unsigned i = 0; i < sizeof rule / sizeof rule[0]; i++)
+        if (!strcasecmp(key, rule[i].key))
+            return strstr(rule[i].cpus, pad) ? NULL : rule[i].why;
+    return NULL;
+}
+
+int se_absent_on(const char *key)
+{
+    /* config_file.c starts from all-zero except these two */
+    return !strcasecmp(key, "jit") || !strcasecmp(key, "blitter");
 }
 
 static const struct table *find(const char *key)

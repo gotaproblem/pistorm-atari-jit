@@ -44,6 +44,7 @@ struct row {
     int  ord;                    /* nth occurrence (repeated keys)            */
     int  ticked;                 /* the build has the line                    */
     int  blocked;                /* parent off: greyed, cannot be ticked      */
+    const char *why;             /* cpu rule fails: "needs 68020+", or NULL   */
 };
 
 struct state {
@@ -387,8 +388,64 @@ static int parent_off(const struct state *st, const char *key)
     return !v || !sp_row_on(needs, v);
 }
 
+/* a list whose value is its "disabled" choice (blitter, ttram) is off:
+ * the box shows it, the chooser never offers it */
+static int list_off(const char *key, const char *val)
+{
+    int i = se_index(key, val);
+    return i >= 0 && !strcasecmp(se_choice(key, i), "disabled");
+}
+
+static int choice_is_off(const char *key, int i)
+{
+    const char *c = se_choice(key, i);
+    return c && !strcasecmp(c, "disabled");
+}
+
+/* a row the cursor may land on and the user may tick */
+static int usable(const struct row *r)
+{
+    return r->kind != ROW_KEY || (!r->blocked && !r->why);
+}
+
+/* step the cursor, skipping rows that cannot be used; stays put at the ends */
+static void move_sel(struct state *st, int dir)
+{
+    for (int i = st->sel + dir; i >= 0 && i < st->nrow; i += dir)
+        if (usable(&st->row[i])) { st->sel = i; return; }
+}
+
+/* after a rebuild the cursor may sit on a row that just became unusable */
+static void settle(struct state *st)
+{
+    if (usable(&st->row[st->sel]))
+        return;
+    int keep = st->sel;
+    move_sel(st, +1);
+    if (st->sel == keep) move_sel(st, -1);
+}
+
+/* the cpu changed: keys its rule now forbids leave the build */
+static void drop_by_rules(struct state *st)
+{
+    const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
+    char gone[48] = "";
+    for (int t = 0; t < SE_TAB_N; t++)
+        for (int i = 0; i < se_tab_count(t); i++) {
+            const char *k = se_tab_key(t, i);
+            if (!se_cpu_rule(k, cpu) || !sc_get(&st->cfg, st->sec, k))
+                continue;
+            sc_set(&st->cfg, st->sec, k, NULL);
+            snprintf(gone + strlen(gone), sizeof gone - strlen(gone), "%s%.14s",
+                     *gone ? ", " : "", k);
+        }
+    if (*gone)
+        snprintf(st->msg, sizeof st->msg, "cpu %.8s: dropped %.40s", cpu ? cpu : "68000", gone);
+}
+
 static void build_rows(struct state *st)
 {
+    const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
     st->nrow = 0;
     int n = se_tab_count(st->tab);
     for (int i = 0; i < n && st->nrow < MAX_ROWS - 2; i++) {
@@ -403,8 +460,12 @@ static void build_rows(struct state *st)
         r->kind = ROW_KEY;
         snprintf(r->text, sizeof r->text, "%.*s", SC_KEY_LEN - 1, k);
         r->ord = 0;
-        r->ticked = sc_get(&st->cfg, st->sec, k) != NULL;
+        const char *v = sc_get(&st->cfg, st->sec, k);
+        /* a switch is the box itself: ticked = in the build AND on */
+        r->ticked = v && (se_kind(k) == SE_K_SWITCH ? sp_row_on(k, v) :
+                          se_kind(k) == SE_K_LIST   ? !list_off(k, v) : 1);
         r->blocked = parent_off(st, k);
+        r->why = se_cpu_rule(k, cpu);
     }
     st->row[st->nrow].kind = ROW_SAVE; st->row[st->nrow++].text[0] = '\0';
     st->row[st->nrow].kind = ROW_BOOT; st->row[st->nrow++].text[0] = '\0';
@@ -415,6 +476,7 @@ static void build_rows(struct state *st)
     if (st->sel < nk && st->sel >= st->top + st->list_rows) st->top = st->sel - st->list_rows + 1;
     int max = nk - st->list_rows; if (max < 0) max = 0;
     if (st->top > max) st->top = max;
+    settle(st);
 }
 
 /* what a row shows: the value if ticked, else empty / disabled / default */
@@ -423,10 +485,11 @@ static const char *row_value(const struct state *st, const struct row *r,
 {
     const char *k = r->text;
     const char *v = sc_get_n(&st->cfg, st->sec, k, r->ord);
-    if (v)
+    if (se_kind(k) == SE_K_SWITCH)            /* the box is the value */
+        return "";
+    if (v && !(se_kind(k) == SE_K_LIST && list_off(k, v)))
         return sp_row_value(k, v, buf, n);
     switch (se_kind(k)) {
-    case SE_K_SWITCH: return "disabled";
     case SE_K_LIST: {
         const char *d = se_tick_value(k);
         int i = se_index(k, d);
@@ -442,14 +505,22 @@ static void tick(struct state *st, int open_editor_for_text)
     struct row *r = &st->row[st->sel];
     if (r->kind != ROW_KEY)
         return;
+    if (r->why) {
+        snprintf(st->msg, sizeof st->msg, "%.20s: %s", r->text, r->why);
+        return;
+    }
     if (r->blocked) {
-        snprintf(st->msg, sizeof st->msg, "%.20s needs %.20s on", r->text,
+        snprintf(st->msg, sizeof st->msg, "%.20s needs %.20s ticked", r->text,
                  se_needs(r->text) ? se_needs(r->text) : "its parent");
         return;
     }
     if (r->ticked) {
-        sc_set_n(&st->cfg, st->sec, r->text, r->ord, NULL);
-        snprintf(st->msg, sizeof st->msg, "%.20s removed from the build", r->text);
+        /* off = out of the build; the two the emulator has on by default
+         * must say so */
+        sc_set_n(&st->cfg, st->sec, r->text, r->ord,
+                 se_absent_on(r->text) ? "disabled" : NULL);
+        snprintf(st->msg, sizeof st->msg, "%.20s %s", r->text,
+                 se_kind(r->text) == SE_K_SWITCH ? "off" : "removed from the build");
         return;
     }
     const char *tv = se_tick_value(r->text);
@@ -462,7 +533,12 @@ static void tick(struct state *st, int open_editor_for_text)
         return;
     }
     sc_set_n(&st->cfg, st->sec, r->text, r->ord, tv);
-    snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text, tv);
+    if (se_kind(r->text) == SE_K_SWITCH)
+        snprintf(st->msg, sizeof st->msg, "%.20s on", r->text);
+    else
+        snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text, tv);
+    if (!strcasecmp(r->text, "cpu"))
+        drop_by_rules(st);
 }
 
 static void commit_edit(struct state *st)
@@ -493,7 +569,7 @@ static void edit_row(struct state *st)
     struct row *r = &st->row[st->sel];
     if (r->kind != ROW_KEY)
         return;
-    if (r->blocked) {
+    if (r->blocked || r->why) {
         tick(st, 0);                          /* prints why */
         return;
     }
@@ -502,22 +578,13 @@ static void edit_row(struct state *st)
     if (se_count(k)) {
         int at = se_index(k, v ? v : se_tick_value(k));
         st->choice = at < 0 ? 0 : at;
+        if (choice_is_off(k, st->choice))
+            st->choice = se_index(k, se_tick_value(k));
         st->choosing = 1;
         return;
     }
-    if (se_kind(k) == SE_K_SWITCH) {
-        if (!r->ticked) { tick(st, 0); return; }
-        const char *now = sp_row_on(k, v) ? "disabled" : "enabled";
-        /* kbd / usb keep their device word */
-        char with[SC_LINE_LEN];
-        if (!strcasecmp(k, "kbd"))
-            snprintf(with, sizeof with, "%s", sp_row_on(k, v) ? "disabled" : "usb");
-        else if (!strcasecmp(k, "usb"))
-            snprintf(with, sizeof with, "gamepad %s", now);
-        else
-            snprintf(with, sizeof with, "%s", now);
-        sc_set_n(&st->cfg, st->sec, k, r->ord, with);
-        snprintf(st->msg, sizeof st->msg, "%.20s = %s", sp_row_label(k, with), now);
+    if (se_kind(k) == SE_K_SWITCH) {          /* the box is the switch */
+        tick(st, 0);
         return;
     }
     char vbuf[SC_LINE_LEN];
@@ -538,6 +605,8 @@ static void choose_accept(struct state *st)
     } else if (sc_set_n(&st->cfg, st->sec, r->text, r->ord, c) == 0) {
         snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text,
                  se_label(r->text, st->choice));
+        if (!strcasecmp(r->text, "cpu"))
+            drop_by_rules(st);
     }
 }
 
@@ -604,22 +673,34 @@ static void draw_edit(struct ss_screen *ss, const struct state *st)
         const char *val;
         const char *tail = "";
         if (on && st->choosing) {
-            snprintf(line, sizeof line, " %s %-20.20s %d/%d  %-36.36s",
-                     r->ticked ? "[x]" : "[ ]", r->text, st->choice + 1,
-                     se_count(r->text), se_label(r->text, st->choice));
+            snprintf(line, sizeof line, " %s %-20.20s < %.36s >",
+                     r->ticked ? "[x]" : "[ ]", r->text,
+                     se_label(r->text, st->choice));
         } else if (on && st->editing) {
             snprintf(line, sizeof line, " %s %-20.20s %-44.44s",
                      r->ticked ? "[x]" : "[ ]", r->text, st->edit);
         } else {
             val = row_value(st, r, vbuf, sizeof vbuf);
-            if (r->blocked)       tail = "(parent off)";
-            else if (!r->ticked)  tail = "(not in build)";
+            char whybuf[32];
+            if (r->why) {
+                snprintf(whybuf, sizeof whybuf, "(%.28s)", r->why);
+                tail = whybuf;
+            } else if (r->blocked) {
+                snprintf(whybuf, sizeof whybuf, "(needs %.20s)",
+                         se_needs(r->text) ? se_needs(r->text) : "parent");
+                tail = whybuf;
+            }
+            /* [-] = cannot be ticked here; the cursor skips it */
             snprintf(line, sizeof line, " %s %-20.20s %-36.36s%s",
-                     r->ticked ? "[x]" : "[ ]",
+                     (r->why || r->blocked) ? "[-]" : r->ticked ? "[x]" : "[ ]",
                      sp_row_label(r->text, sc_get_n(&st->cfg, st->sec, r->text, r->ord)),
                      val, tail);
         }
-        int grey = r->blocked || !r->ticked;
+        /* pad to the width so the cursor bar is always full */
+        unsigned long len = strlen(line);
+        while (len < SS_COLS - 2) line[len++] = ' ';
+        line[len] = '\0';
+        int grey = r->blocked || r->why || !r->ticked;
         ss_puts(ss, 1, row, line, on ? 0 : (grey ? hi : ink), on ? hi : 0);
     }
     if (nk > st->list_rows) {
@@ -691,8 +772,14 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
         } else if (st.choosing) {
             int n = se_count(st.row[st.sel].text);
             switch (e.key) {
-            case SI_UP:    st.choice = (st.choice + n - 1) % n; break;
-            case SI_DOWN:  st.choice = (st.choice + 1) % n;     break;
+            case SI_UP:
+                do st.choice = (st.choice + n - 1) % n;
+                while (choice_is_off(st.row[st.sel].text, st.choice));
+                break;
+            case SI_DOWN:
+                do st.choice = (st.choice + 1) % n;
+                while (choice_is_off(st.row[st.sel].text, st.choice));
+                break;
             case SI_ENTER: choose_accept(&st); break;
             case SI_ESC:   st.choosing = 0; break;
             case SI_F10:   st.choosing = 0; snprintf(chosen, chosen_len, "%s", st.boot); return SP_QUIT;
@@ -712,8 +799,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             }
         } else {
             switch (e.key) {
-            case SI_UP:    if (st.sel > 0) st.sel--; break;
-            case SI_DOWN:  if (st.sel < st.nrow - 1) st.sel++; break;
+            case SI_UP:    move_sel(&st, -1); break;
+            case SI_DOWN:  move_sel(&st, +1); break;
             case SI_LEFT:  st.tab = (st.tab + SE_TAB_N - 1) % SE_TAB_N; st.sel = st.top = 0; break;
             case SI_RIGHT: st.tab = (st.tab + 1) % SE_TAB_N; st.sel = st.top = 0; break;
             case SI_SPACE:

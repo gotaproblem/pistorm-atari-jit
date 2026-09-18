@@ -65,6 +65,11 @@ int         se_kind(const char *key);            /* SE_K_*           */
  * "" = ask for the value first */
 const char *se_tick_value(const char *key);
 
+/* NULL = the key is allowed with this cpu, else why not ("needs 68020+") */
+const char *se_cpu_rule(const char *key, const char *cpu);
+/* a switch the emulator has ON when the line is absent (jit) */
+int         se_absent_on(const char *key);
+
 /* How many choices `key` has, 0 if it is not one of these keys. */
 int         se_count(const char *key);
 
