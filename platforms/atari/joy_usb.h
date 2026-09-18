@@ -73,6 +73,10 @@ typedef struct {
     void (*set_joy_rbutton)(int down);
     /* Start button -> Space bar tap (ST scancode $39). */
     void (*send_key)(uint8_t st_scan, int pressed);
+    /* Raw bytes for the guest (monitoring-mode reports). */
+    void (*send_raw)(const uint8_t *bytes, int n);
+    /* 1 when no real IKBD is answering, so nobody else will report. */
+    int  (*standalone)(void);
 } joy_usb_emit_hooks;
 void joy_usb_set_hooks(const joy_usb_emit_hooks *h);
 
@@ -87,9 +91,18 @@ uint8_t joy_usb_state(int st_port);
 int     joy_usb_count(void);
 
 /* Real-IKBD byte on its way to the main guest: merge pad state into a
- * joystick-interrogation reply ($FD j0 j1). Keeps its own packet framing;
- * call it with EVERY real byte the main guest receives, in order. */
+ * joystick-interrogation reply ($FD j0 j1) or a monitoring report. Keeps
+ * its own packet framing; call it with EVERY real byte the main guest
+ * receives, in order. */
 uint8_t joy_usb_real_rx_filter(uint8_t v);
+
+/* IKBD $17 (joystick monitoring, rate in 1/100 s) / $18 (fire button
+ * monitoring): the IKBD then sends nothing but reports. mode 0 = off,
+ * 1 = joystick monitoring, 2 = fire monitoring. Any thread. */
+#define JOY_MON_OFF  0
+#define JOY_MON_JOY  1
+#define JOY_MON_FIRE 2
+void joy_usb_monitor_set(int mode, int rate_cs);
 
 /* STE enhanced joypad ports, $FF9200 (buttons) / $FF9202 (directions and
  * column select). The real chips answer on an STE - merge our pads into

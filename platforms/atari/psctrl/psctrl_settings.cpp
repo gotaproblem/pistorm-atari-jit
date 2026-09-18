@@ -1339,6 +1339,7 @@ static const struct { const char *tag; volatile int *tgt; } g_dbg[] = {
   { "gemdos", &pst_dbg_gemdos },
   { "stram",  &pst_dbg_stram },
   { "net",    &pst_dbg_net },
+  { "ikbd",   &pst_dbg_ikbd },
   { "hostfs", &pst_dbg_hostfs }
 };
 #define NDBG ((int)(sizeof(g_dbg) / sizeof(g_dbg[0])))

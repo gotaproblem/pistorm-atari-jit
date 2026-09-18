@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <linux/input.h>
 
@@ -81,6 +82,44 @@ static joypad pads[JOY_USB_MAX_PADS] = {
 static _Atomic int n_pads;
 static _Atomic int resend_wanted;
 static joy_usb_emit_hooks hooks;
+
+/* monitoring modes ($17 / $18): what the IKBD reports, and how often */
+static _Atomic int mon_mode;
+static _Atomic int mon_rate_cs;
+static _Atomic int mon_idx;                /* byte parity of real reports */
+static uint64_t    mon_next_us;            /* standalone: next report due */
+
+static uint64_t mon_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+/* $17 report: %000000AB (A joystick 0 fire, B joystick 1 fire), then
+ * %LLLLRRRR (joystick 0 directions, joystick 1 directions) */
+static uint8_t mon_buttons(void)
+{
+    return (uint8_t)(((pads[1].joy & STJOY_FIRE) ? 2 : 0) |
+                     ((pads[0].joy & STJOY_FIRE) ? 1 : 0));
+}
+static uint8_t mon_dirs(void)
+{
+    return (uint8_t)(((pads[1].joy & 0x0F) << 4) | (pads[0].joy & 0x0F));
+}
+/* $18 report: joystick 1's fire sampled eight times a byte */
+static uint8_t mon_fire(void)
+{
+    return (pads[0].joy & STJOY_FIRE) ? 0xFF : 0x00;
+}
+
+void joy_usb_monitor_set(int mode, int rate_cs)
+{
+    atomic_store(&mon_mode, mode);
+    atomic_store(&mon_rate_cs, rate_cs < 1 ? 1 : rate_cs);
+    atomic_store(&mon_idx, 0);
+    mon_next_us = 0;
+}
 
 static int has_bit(const unsigned long *bits, int bit)
 {
@@ -284,6 +323,31 @@ void joy_usb_tick(void)
 {
     const int resend = atomic_exchange(&resend_wanted, 0);
 
+    /* monitoring with no real IKBD to do the reporting: report ourselves
+     * at the rate the guest asked for */
+    const int mon = atomic_load(&mon_mode);
+    if (mon != JOY_MON_OFF && hooks.send_raw && hooks.standalone && hooks.standalone())
+    {
+        for (int i = 0; i < JOY_USB_MAX_PADS; i++)
+            if (pads[i].dirty) publish(&pads[i]);
+        const uint64_t now = mon_now_us();
+        if (now >= mon_next_us)
+        {
+            mon_next_us = now + (uint64_t)atomic_load(&mon_rate_cs) * 10000u;
+            if (mon == JOY_MON_JOY)
+            {
+                uint8_t r[2] = { mon_buttons(), mon_dirs() };
+                hooks.send_raw(r, 2);
+            }
+            else
+            {
+                uint8_t r = mon_fire();
+                hooks.send_raw(&r, 1);
+            }
+        }
+        return;                            /* nothing else is reported  */
+    }
+
     for (int i = 0; i < JOY_USB_MAX_PADS; i++)
     {
         joypad *p = &pads[i];
@@ -357,6 +421,16 @@ uint8_t joy_usb_real_rx_filter(uint8_t v)
 
     if (!JOY_USB_enabled)
         return v;
+    /* monitoring: the real IKBD sends nothing but reports, so the pad is
+     * ORed into each one - pairs for $17, single bytes for $18 */
+    const int mon = atomic_load(&mon_mode);
+    if (mon == JOY_MON_JOY)
+    {
+        const int i = atomic_fetch_xor(&mon_idx, 1);
+        return (uint8_t)(v | (i == 0 ? mon_buttons() : mon_dirs()));
+    }
+    if (mon == JOY_MON_FIRE)
+        return (uint8_t)(v | mon_fire());
     if (left == 0)
     {
         hdr  = v;

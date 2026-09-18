@@ -114,6 +114,7 @@ extern volatile int pst_dbg_hostfs;       /* -1 = follow the cfg           */
 extern volatile int pst_dbg_gemdos;
 extern volatile int pst_dbg_stram;
 extern volatile int pst_dbg_net;
+extern volatile int pst_dbg_ikbd;         /* every IKBD command the guest sends */
 
 void psctrl_tunables_init(void);
 

@@ -319,8 +319,20 @@ static int ikbd_param_len(uint8_t cmd)
 
 static void ikbd_apply(uint8_t cmd)
 {
+    if (pst_dbg_ikbd)
+        printf("[IKBD] cmd $%02X\n", cmd);
+    /* a monitoring mode ($17/$18) lasts until the next real command */
+    if (cmd != 0x18 && cmd != 0x11 && cmd != 0x13)
+        joy_usb_monitor_set(JOY_MON_OFF, 0);
     switch (cmd)
     {
+        case 0x18:
+            /* fire button monitoring: joystick 1's fire, eight samples a
+             * byte, continuously - and nothing else */
+            joy_usb_monitor_set(JOY_MON_FIRE, 1);
+            ikbd.joy_event  = 0;
+            ikbd.mouse_mode = MOUSE_OFF;
+            break;
         case 0x08:
             ikbd.mouse_mode = MOUSE_REL;
             if (ikbd_in_reset_window())
@@ -665,6 +677,7 @@ uint8_t kbd_native_rx_filter(uint8_t v)
 
 static void ikbd_reset_state(void)
 {
+    joy_usb_monitor_set(JOY_MON_OFF, 0);
     ikbd.mouse_mode = MOUSE_REL;
     ikbd.y0_top = 1;
     ikbd.paused = 0;
@@ -736,8 +749,18 @@ void kbd_usb_tx_snoop(uint8_t v)
             /* The guest just set its own mouse threshold, which replaces
              * ours. Put ours back, or the saving silently disappears the
              * first time TOS or an app touches the mouse parameters. */
+            if (pst_dbg_ikbd)
+                printf("[IKBD] cmd $%02X (last param $%02X)\n", ikbd.pending_cmd, v);
             if (ikbd.pending_cmd == 0x0B)
                 mouse_thresh_arm(2000);
+            /* joystick monitoring: both sticks every v/100 s, nothing
+             * else reported, until the next command */
+            if (ikbd.pending_cmd == 0x17)
+            {
+                joy_usb_monitor_set(JOY_MON_JOY, v);
+                ikbd.joy_event  = 0;
+                ikbd.mouse_mode = MOUSE_OFF;
+            }
             ikbd.pending_cmd = 0;
         }
     }
@@ -1572,6 +1595,17 @@ static void joy_send_key(uint8_t st_scan, int pressed)
     send_key(st_scan, pressed);
 }
 
+static void joy_send_raw(const uint8_t *bytes, int n)
+{
+    if (!stbox_wants_input())
+        ring_push_packet(bytes, n);
+}
+
+static int joy_standalone(void)
+{
+    return quarantined();
+}
+
 static void mouse_flush(void)
 {
     if (stbox_wants_input())
@@ -1842,6 +1876,8 @@ int kbd_usb_init(int grab, int devices)
             .send_joy        = joy_send,
             .set_joy_rbutton = joy_set_rbutton,
             .send_key        = joy_send_key,
+            .send_raw        = joy_send_raw,
+            .standalone      = joy_standalone,
         };
         joy_usb_set_hooks(&h);
     }

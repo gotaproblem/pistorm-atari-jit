@@ -53,6 +53,7 @@ volatile int pst_dbg_hostfs      = -1;
 volatile int pst_dbg_gemdos      = 0;
 volatile int pst_dbg_stram       = 0;
 volatile int pst_dbg_net         = 0;
+volatile int pst_dbg_ikbd        = 0;
 
 /* --- reading the environment ---------------------------------------- */
 
@@ -165,6 +166,7 @@ void psctrl_tunables_init(void)
   pst_dbg_gemdos     = env_bool("PISTORM_GEMDOS_DEBUG",    pst_dbg_gemdos);
   pst_dbg_stram      = env_bool("PISTORM_STRAM_DEBUG",     pst_dbg_stram);
   pst_dbg_net        = env_bool("PISTORM_NET_DEBUG",       pst_dbg_net);
+  pst_dbg_ikbd       = env_bool("PISTORM_IKBD_DEBUG",      pst_dbg_ikbd);
 
   /* HOSTFS debug is three-valued: -1 means "whatever the cfg's own hostfs
    * debug flag says", which is how hostfs_debug_enabled() has always
