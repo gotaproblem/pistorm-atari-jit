@@ -29,6 +29,8 @@ struct row {
     int  offtopic;               /* not this environment's, or switched off
                                   * by the key it depends on              */
     int  unset;                  /* offered, but not in the .cfg yet      */
+    int  ord;                    /* nth occurrence of this key in the
+                                  * section: hdd can appear up to 8 times */
 };
 
 struct state {
@@ -110,6 +112,14 @@ static void build_rows(struct state *st)
         st->row[st->nrow].kind = ROW_KEY;
         st->row[st->nrow].offtopic = off;
         st->row[st->nrow].unset = 0;
+        {   /* which occurrence this is: count earlier rows with this key */
+            int ord = 0;
+            for (int j = st->nsec; j < st->nrow; j++)
+                if (st->row[j].kind == ROW_KEY && !st->row[j].unset &&
+                    !strcasecmp(st->row[j].text, keys[i]))
+                    ord++;
+            st->row[st->nrow].ord = ord;
+        }
         snprintf(st->row[st->nrow].text, SC_KEY_LEN, "%.*s",
                  SC_KEY_LEN - 1, keys[i]);
         st->nrow++;
@@ -136,6 +146,7 @@ static void build_rows(struct state *st)
         st->row[st->nrow].kind = ROW_KEY;
         st->row[st->nrow].offtopic = 0;
         st->row[st->nrow].unset = 1;
+        st->row[st->nrow].ord = 0;
         snprintf(st->row[st->nrow].text, SC_KEY_LEN, "%.*s", SC_KEY_LEN - 1, k);
         st->nrow++;
     }
@@ -455,8 +466,17 @@ static void draw(struct ss_screen *ss, const struct state *st)
         ss_clear_row(ss, row, paper);
         if (k < nk) {
             const char *key = st->row[fk + k].text;
-            const char *val = sc_get(&st->cfg, st->sec, key);
+            int ord = st->row[fk + k].ord;
+            const char *val = sc_get_n(&st->cfg, st->sec, key, ord);
             int unset = st->row[fk + k].unset;
+            /* "hdd #2" when the key appears more than once in the section */
+            char labelbuf[SC_KEY_LEN + 16];
+            const char *label = sp_row_label(key, val);
+            if (sc_count(&st->cfg, st->sec, key) > 1) {
+                snprintf(labelbuf, sizeof labelbuf, "%.*s #%d",
+                         SC_KEY_LEN - 1, label, (ord + 1) & 0xFF);
+                label = labelbuf;
+            }
             if (unset && !val)
                 val = se_known_default(key);
             int on = st->sel == fk + k;
@@ -465,14 +485,14 @@ static void draw(struct ss_screen *ss, const struct state *st)
             if (on && st->choosing) {
                 const char *c = se_label(key, st->choice);
                 snprintf(line, sizeof line, "%-20.20s %d/%d  %-40.40s",
-                         sp_row_label(key, val), st->choice + 1,
+                         label, st->choice + 1,
                          se_count(key), c ? c : "");
             } else if (on && st->editing)
                 snprintf(line, sizeof line, "%-20.20s %-48.48s",
-                         sp_row_label(key, val), st->edit);
+                         label, st->edit);
             else
                 snprintf(line, sizeof line, "%-20.20s %-38.38s%s",
-                         sp_row_label(key, val),
+                         label,
                          sp_row_value(key, val, vbuf, sizeof vbuf),
                          unset ? "(not set)" : "");
             ss_puts(ss, 4, row, line,
@@ -524,7 +544,8 @@ static void draw(struct ss_screen *ss, const struct state *st)
 static int toggle_switch(struct state *st)
 {
     const char *key = st->row[st->sel].text;
-    const char *val = sc_get(&st->cfg, st->sec, key);
+    int ord = st->row[st->sel].ord;
+    const char *val = sc_get_n(&st->cfg, st->sec, key, ord);
     if (!val)
         val = se_known_default(key);      /* offered but not in the file */
     if (!sp_row_is_switch(key, val))
@@ -542,15 +563,15 @@ static int toggle_switch(struct state *st)
                            rest_after_word(val, strcspn(val, " \t"));
         snprintf(with, sizeof with, "%s%s%s", on ? "disabled" : "usb",
                  *rest ? " " : "", rest);
-        sc_set(&st->cfg, st->sec, key, with);
+        sc_set_n(&st->cfg, st->sec, key, ord, with);
     } else if (!strcasecmp(key, "usb") && !strncasecmp(val, "gamepad", 7)) {
         const char *rest = rest_after_word(val, 7);
         if (first_word_is_bool(rest))
             rest = rest_after_word(rest, strcspn(rest, " \t"));
         snprintf(with, sizeof with, "gamepad %s%s%s", now, *rest ? " " : "", rest);
-        sc_set(&st->cfg, st->sec, key, with);
+        sc_set_n(&st->cfg, st->sec, key, ord, with);
     } else {
-        sc_set(&st->cfg, st->sec, key, now);
+        sc_set_n(&st->cfg, st->sec, key, ord, now);
     }
     snprintf(st->msg, sizeof st->msg, "%.20s = %s",
              sp_row_label(key, val), now);
@@ -560,9 +581,10 @@ static int toggle_switch(struct state *st)
 static void commit_edit(struct state *st)
 {
     const char *key = st->row[st->sel].text;
+    int ord = st->row[st->sel].ord;
     char raw[SC_LINE_LEN];
     const char *val = sp_value_from_edit(key, st->edit, raw, sizeof raw);
-    if (sc_set(&st->cfg, st->sec, key, val) == 0)
+    if (sc_set_n(&st->cfg, st->sec, key, ord, val) == 0)
         snprintf(st->msg, sizeof st->msg, "%.20s = %.35s",
                  sp_row_label(key, val), st->edit);
     else
@@ -606,6 +628,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
 
         if (st.choosing) {
             const char *key = st.row[st.sel].text;
+            int ord = st.row[st.sel].ord;
             int n = se_count(key);
             switch (e.key) {
             case SI_UP:    st.choice = (st.choice + n - 1) % n; break;
@@ -615,10 +638,10 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                 if (c && !*c) {
                     /* the "not set" choice: take the line out of the
                      * section, so the emulator sees the key as absent */
-                    sc_set(&st.cfg, st.sec, key, NULL);
+                    sc_set_n(&st.cfg, st.sec, key, ord, NULL);
                     snprintf(st.msg, sizeof st.msg, "%.20s removed (not set)",
                              sp_row_label(key, c));
-                } else if (c && sc_set(&st.cfg, st.sec, key, c) == 0) {
+                } else if (c && sc_set_n(&st.cfg, st.sec, key, ord, c) == 0) {
                     snprintf(st.msg, sizeof st.msg, "%.20s = %.35s",
                              sp_row_label(key, c), se_label(key, st.choice));
                 }
@@ -679,7 +702,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                         break;
                     }
                     if (se_count(kk)) {     /* a known set of values */
-                        const char *v = sc_get(&st.cfg, st.sec, kk);
+                        const char *v = sc_get_n(&st.cfg, st.sec, kk,
+                                                 st.row[st.sel].ord);
                         if (!v)
                             v = se_known_default(kk);
                         int at = se_index(kk, v ? v : "");
@@ -691,7 +715,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     if (toggle_switch(&st))
                         break;              /* a switch flips, not types */
                     const char *k = st.row[st.sel].text;
-                    const char *v = sc_get(&st.cfg, st.sec, k);
+                    const char *v = sc_get_n(&st.cfg, st.sec, k,
+                                             st.row[st.sel].ord);
                     if (!v)
                         v = se_known_default(k);
                     char vbuf[SC_LINE_LEN];

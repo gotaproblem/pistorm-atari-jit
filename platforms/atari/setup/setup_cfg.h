@@ -44,13 +44,24 @@ struct sc_cfg {
 int sc_load(struct sc_cfg *c, const char *path);
 int sc_load_text(struct sc_cfg *c, const char *text);
 
-/* The value (may be ""), or NULL if the key is not in that section. */
+/* The value (may be ""), or NULL if the key is not in that section.
+ * sc_get is the FIRST occurrence; some keys repeat (hdd up to 8 times,
+ * in order), so sc_get_n addresses the nth (0-based). */
 const char *sc_get(const struct sc_cfg *c, const char *sec, const char *key);
+const char *sc_get_n(const struct sc_cfg *c, const char *sec, const char *key,
+                     int n);
 
 /* Set, add or (val == NULL) remove a key. A new key is added at the end
  * of its section; a new section is added at the end of the file.
- * Returns 0, or -1 if the file is full. */
+ * Returns 0, or -1 if the file is full. sc_set edits the first
+ * occurrence; sc_set_n edits the nth, and adds only when n is the next
+ * one (n == count), so a second hdd can be appended but never a gap. */
 int sc_set(struct sc_cfg *c, const char *sec, const char *key, const char *val);
+int sc_set_n(struct sc_cfg *c, const char *sec, const char *key, int n,
+             const char *val);
+
+/* How many times `key` appears in `sec`. */
+int sc_count(const struct sc_cfg *c, const char *sec, const char *key);
 
 /* Write the file, keeping the previous one as <path>.bak. The new file
  * gets the owner of the directory it lands in, so a save while running

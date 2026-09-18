@@ -108,22 +108,43 @@ int sc_load(struct sc_cfg *c, const char *path)
     return 0;
 }
 
-static struct sc_line *find(const struct sc_cfg *c, const char *sec,
-                           const char *key)
+/* the nth line in `sec` whose key is `key`; NULL past the last */
+static struct sc_line *find_n(const struct sc_cfg *c, const char *sec,
+                             const char *key, int n)
 {
     char s[SC_SEC_LEN], k[SC_KEY_LEN];
     snprintf(s, sizeof s, "%s", sec); lower(s);
     snprintf(k, sizeof k, "%s", key); lower(k);
     for (int i = 0; i < c->n; i++)
         if (c->line[i].key[0] && !strcmp(c->line[i].sec, s) &&
-            !strcmp(c->line[i].key, k))
+            !strcmp(c->line[i].key, k) && n-- == 0)
             return (struct sc_line *)&c->line[i];
     return NULL;
 }
 
+static struct sc_line *find(const struct sc_cfg *c, const char *sec,
+                           const char *key)
+{
+    return find_n(c, sec, key, 0);
+}
+
+int sc_count(const struct sc_cfg *c, const char *sec, const char *key)
+{
+    int n = 0;
+    while (find_n(c, sec, key, n))
+        n++;
+    return n;
+}
+
 const char *sc_get(const struct sc_cfg *c, const char *sec, const char *key)
 {
-    struct sc_line *l = find(c, sec, key);
+    return sc_get_n(c, sec, key, 0);
+}
+
+const char *sc_get_n(const struct sc_cfg *c, const char *sec, const char *key,
+                     int n)
+{
+    struct sc_line *l = find_n(c, sec, key, n);
     return l ? line_value(l->text) : NULL;
 }
 
@@ -167,11 +188,21 @@ static int insert(struct sc_cfg *c, int at, const char *sec, const char *text)
 
 int sc_set(struct sc_cfg *c, const char *sec, const char *key, const char *val)
 {
+    return sc_set_n(c, sec, key, 0, val);
+}
+
+int sc_set_n(struct sc_cfg *c, const char *sec, const char *key, int n,
+             const char *val)
+{
     char s[SC_SEC_LEN], k[SC_KEY_LEN];
     snprintf(s, sizeof s, "%s", sec); lower(s);
     snprintf(k, sizeof k, "%s", key); lower(k);
 
-    struct sc_line *l = find(c, s, k);
+    /* adding: only ever the next occurrence, so no gaps in a repeated key */
+    if (n < 0 || n > sc_count(c, s, k))
+        return -1;
+
+    struct sc_line *l = find_n(c, s, k, n);
     if (!val) {                                  /* remove the key */
         if (!l)
             return 0;

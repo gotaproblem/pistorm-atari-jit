@@ -304,6 +304,31 @@ static void run_cfg(void)
     CHECK(!strcmp(sc_get(&c, "stbox", "stbox_tos"), "../roms/tos104.img"),
           "key in a new section not readable");
 
+    /* repeated keys: hdd may appear up to 8 times, in order. Editing the
+     * second must leave the first alone (field bug: both rows read and
+     * wrote the first line). */
+    CHECK(sc_set(&c, "apj-os", "hdd", "first.img") == 0, "hdd #1 add failed");
+    CHECK(sc_set_n(&c, "apj-os", "hdd", 1, "second.img") == 0, "hdd #2 add failed");
+    CHECK(sc_count(&c, "apj-os", "hdd") == 2, "hdd count %d, wanted 2",
+          sc_count(&c, "apj-os", "hdd"));
+    CHECK(!strcmp(sc_get_n(&c, "apj-os", "hdd", 0), "first.img"), "hdd #1 wrong");
+    CHECK(!strcmp(sc_get_n(&c, "apj-os", "hdd", 1), "second.img"), "hdd #2 wrong");
+    CHECK(sc_set_n(&c, "apj-os", "hdd", 1, "changed.img") == 0, "hdd #2 edit failed");
+    CHECK(!strcmp(sc_get_n(&c, "apj-os", "hdd", 0), "first.img"),
+          "editing hdd #2 changed hdd #1 to \"%s\"", sc_get_n(&c, "apj-os", "hdd", 0));
+    CHECK(!strcmp(sc_get_n(&c, "apj-os", "hdd", 1), "changed.img"),
+          "hdd #2 did not take: \"%s\"", sc_get_n(&c, "apj-os", "hdd", 1));
+    CHECK(!strcmp(sc_get(&c, "apj-os", "hdd"), "first.img"),
+          "plain sc_get must still be the first occurrence");
+    CHECK(sc_get_n(&c, "apj-os", "hdd", 2) == NULL, "a third hdd appeared from nowhere");
+    CHECK(sc_set_n(&c, "apj-os", "hdd", 3, "gap.img") != 0,
+          "adding hdd #4 with no #3 must be refused (no gaps)");
+    /* removing the second leaves exactly the first */
+    CHECK(sc_set_n(&c, "apj-os", "hdd", 1, NULL) == 0, "hdd #2 remove failed");
+    CHECK(sc_count(&c, "apj-os", "hdd") == 1 &&
+          !strcmp(sc_get(&c, "apj-os", "hdd"), "first.img"),
+          "removing hdd #2 disturbed hdd #1");
+
     /* save, reload, and diff against the original */
     char path[256];
     snprintf(path, sizeof path, "%s/sc_harness_%d.cfg",
