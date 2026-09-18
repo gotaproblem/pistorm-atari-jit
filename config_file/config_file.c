@@ -609,6 +609,23 @@ static void expand_home(const char *in, char *out, size_t n)
  *   base set, file relative  -> <base>/<file>
  *   base empty               -> file unchanged (old behaviour)
  * ~ in either part expands to the invoking user's home. */
+/* "3:image" or "3 image" -> slot 3 and "image"; anything else -> slot -1
+ * and the value untouched. Only a single digit 0-7 counts. */
+static const char *slot_prefix(const char *val, int *slot)
+{
+  *slot = -1;
+  while (*val == ' ' || *val == '\t')
+    val++;
+  if (val[0] >= '0' && val[0] <= '7' &&
+      (val[1] == ':' || val[1] == ' ' || val[1] == '\t')) {
+    *slot = val[0] - '0';
+    val += 2;
+    while (*val == ' ' || *val == '\t')
+      val++;
+  }
+  return val;
+}
+
 static const char *resolve_path(const char *base, const char *file,
                                 char *out, size_t n)
 {
@@ -954,13 +971,21 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_HDD:
         {
+        /* `hdd image` takes the next IDE slot in file order; `hdd 3:image`
+         * pins slot 3 (the setup page writes the pinned form so a slot
+         * keeps its number when another is removed). The prefix is split
+         * off BEFORE disk_path is applied, so the image stays bare. */
         static int idx = 0;
-
-        if (idx < 8) {
+        int slot;
+        const char *img = slot_prefix(parse_line + str_pos, &slot);
+        if (slot < 0)
+          slot = idx < 8 ? idx++ : -1;
+        if (slot >= 0 && slot < 8) {
           char hp[512];
-          resolve_path(g_disk_path, parse_line + str_pos, hp, sizeof hp);
-          set_hard_drive_image_file_atari ( idx++, hp );
-        }
+          resolve_path(g_disk_path, img, hp, sizeof hp);
+          set_hard_drive_image_file_atari ( (uint8_t)slot, hp );
+        } else
+          printf ("[CFG] hdd: no free IDE slot for '%s' on line %d.\n", img, cur_line);
         }
         break;
 
@@ -974,12 +999,15 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_ACSI:
         {
-          /* emulated ACSI target; IDs assigned in cfg order (0..7).
-           * .hfs images are bare Mac HFS volumes (see ACSI-DESIGN.md). */
-          extern int acsi_attach (const char *path);
+          /* emulated ACSI target; `acsi image` takes the lowest free ID,
+           * `acsi 3:image` pins ID 3 (split off before disk_path, as for
+           * hdd). .hfs images are bare Mac HFS volumes (ACSI-DESIGN.md). */
+          extern int acsi_attach_at (int id, const char *path);
           char ap[512];
-          resolve_path(g_disk_path, parse_line + str_pos, ap, sizeof ap);
-          acsi_attach (ap);
+          int id;
+          const char *img = slot_prefix(parse_line + str_pos, &id);
+          resolve_path(g_disk_path, img, ap, sizeof ap);
+          acsi_attach_at (id, ap);
         }
         break;
 

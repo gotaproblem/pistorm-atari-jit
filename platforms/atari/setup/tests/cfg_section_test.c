@@ -13,12 +13,21 @@
 #include "config_file/config_file.h"
 
 /* stubs: reached only by hdd/acsi lines, which we do not exercise here */
-static char g_last_hdd[512];
+static char g_last_hdd[512], g_hdd_slot[8][512], g_acsi[8][512];
+static int  g_last_hdd_idx = -1, g_last_acsi_id = -2;
 int  set_hard_drive_image_file_atari(uint8_t index, char *filename)
 {
-    (void)index; snprintf(g_last_hdd, sizeof g_last_hdd, "%s", filename); return 0;
+    g_last_hdd_idx = index;
+    snprintf(g_last_hdd, sizeof g_last_hdd, "%s", filename);
+    if (index < 8) snprintf(g_hdd_slot[index], 512, "%s", filename);
+    return 0;
 }
-int  acsi_attach(int id, const char *path) { (void)id; (void)path; return 0; }
+int  acsi_attach_at(int id, const char *path)
+{
+    g_last_acsi_id = id;
+    if (id >= 0 && id < 8) snprintf(g_acsi[id], 512, "%s", path);
+    return 0;
+}
 int  psctrl_settings_config_key(const char *key, const char *val)
 {
     (void)key; (void)val; return 0;
@@ -131,6 +140,18 @@ int main(void)
         CHECK(pc && !strcmp(pc->rom.rom_path, want_rom), "rom_path prefix: got [%s]", pc?pc->rom.rom_path:"");
         CHECK(pc && pc->rom.rom_size>0, "prefixed rom did not open");
         CHECK(!strcmp(g_last_hdd, want_hdd), "disk_path prefix: got [%s]", g_last_hdd);
+        CHECK(g_last_hdd_idx == 0, "an unpinned hdd takes slot 0, got %d", g_last_hdd_idx);
+
+        /* a slot prefix pins the slot and is split off before disk_path */
+        FILE*pf3=fopen(cfgp,"w");
+        fprintf(pf3,"[psctrl]\ndisk_path %s/disks\n[apj-os]\ncpu 68040\nhdd 3:d.img\nacsi 5:m.hfs\nacsi n.hfs\n", base);
+        fclose(pf3);
+        memset(g_hdd_slot, 0, sizeof g_hdd_slot); memset(g_acsi, 0, sizeof g_acsi);
+        load_config_file_section(cfgp,"apj-os");
+        CHECK(!strcmp(g_hdd_slot[3], want_hdd), "hdd 3:d.img should land in slot 3 with disk_path: [%s]", g_hdd_slot[3]);
+        snprintf(want_hdd, sizeof want_hdd, "%s/disks/m.hfs", base);
+        CHECK(!strcmp(g_acsi[5], want_hdd), "acsi 5:m.hfs should pin ID 5 with disk_path: [%s]", g_acsi[5]);
+        CHECK(g_last_acsi_id == -1, "an unpinned acsi asks for the lowest free ID, got %d", g_last_acsi_id);
         CHECK(pc && !strcmp(pc->fdd.img_path, want_fdd), "fdd_path prefix: got [%s]", pc?pc->fdd.img_path:"");
 
         /* an absolute filename ignores the base; a path with no var is unchanged */

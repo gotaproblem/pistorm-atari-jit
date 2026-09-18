@@ -472,6 +472,62 @@ static void drop_by_rules(struct state *st)
  * is one fdd (drive A) and hostfs takes a letter and a path per line.
  */
 #define DRIVE_SLOTS 8
+
+/* "3:image" -> 3 and "image"; no prefix -> -1 and the value as it is
+ * (the same rule as config_file.c's slot_prefix) */
+static const char *slot_of(const char *val, int *slot)
+{
+    *slot = -1;
+    if (!val) return "";
+    while (*val == ' ' || *val == '\t') val++;
+    if (val[0] >= '0' && val[0] <= '7' && (val[1] == ':' || val[1] == ' ' || val[1] == '\t')) {
+        *slot = val[0] - '0';
+        val += 2;
+        while (*val == ' ' || *val == '\t') val++;
+    }
+    return val;
+}
+
+/* which line sits in each slot of a repeated key: pinned lines first,
+ * then the unpinned ones the way the emulator numbers them (hdd: next
+ * slot in file order; acsi: lowest free ID). -1 = empty. */
+static void slot_map(const struct state *st, const char *key, int map[DRIVE_SLOTS])
+{
+    int n = sc_count(&st->cfg, st->sec, key), next = 0;
+    for (int i = 0; i < DRIVE_SLOTS; i++) map[i] = -1;
+    for (int i = 0; i < n; i++) {
+        int sl; slot_of(sc_get_n(&st->cfg, st->sec, key, i), &sl);
+        if (sl >= 0 && map[sl] < 0) map[sl] = i;
+    }
+    for (int i = 0; i < n; i++) {
+        int sl; slot_of(sc_get_n(&st->cfg, st->sec, key, i), &sl);
+        if (sl >= 0) continue;
+        if (!strcasecmp(key, "hdd")) {
+            if (next < DRIVE_SLOTS) map[next++] = i;
+        } else {
+            for (int k = 0; k < DRIVE_SLOTS; k++)
+                if (map[k] < 0) { map[k] = i; break; }
+        }
+    }
+}
+
+/* rewrite every line of the key in its pinned "n:image" form, so that
+ * removing or editing one slot never renumbers the others */
+static void pin_all(struct state *st, const char *key)
+{
+    int map[DRIVE_SLOTS];
+    slot_map(st, key, map);
+    for (int sl = 0; sl < DRIVE_SLOTS; sl++) {
+        if (map[sl] < 0) continue;
+        const char *v = sc_get_n(&st->cfg, st->sec, key, map[sl]);
+        int have; const char *img = slot_of(v, &have);
+        if (have == sl) continue;
+        char pinned[SC_LINE_LEN];
+        snprintf(pinned, sizeof pinned, "%d:%.*s", sl & 7, SC_LINE_LEN - 16, img);
+        sc_set_n(&st->cfg, st->sec, key, map[sl], pinned);
+    }
+}
+
 static struct row *drow(struct state *st, enum row_kind kind, const char *key,
                         int ord, int col, int line, const char *label)
 {
@@ -486,8 +542,9 @@ static struct row *drow(struct state *st, enum row_kind kind, const char *key,
 
 static void build_drive_rows(struct state *st)
 {
-    int nh = sc_count(&st->cfg, st->sec, "hdd");
-    int na = sc_count(&st->cfg, st->sec, "acsi");
+    int hmap[DRIVE_SLOTS], amap[DRIVE_SLOTS];
+    slot_map(st, "hdd", hmap);
+    slot_map(st, "acsi", amap);
     int nf = sc_count(&st->cfg, st->sec, "fdd");
     int ns = sc_count(&st->cfg, st->sec, "hostfs");
     const char *ide = sc_get(&st->cfg, st->sec, "ide");
@@ -501,11 +558,9 @@ static void build_drive_rows(struct state *st)
     r->ticked = ide_on;
     for (int i = 0; i < DRIVE_SLOTS; i++) {
         snprintf(num, sizeof num, "%d", i);
-        r = drow(st, ROW_SLOT, "hdd", i < nh ? i : nh, 0, 1 + i, num);
-        r->ticked = i < nh;
+        r = drow(st, ROW_SLOT, "hdd", hmap[i], 0, 1 + i, num);
+        r->ticked = hmap[i] >= 0;
         r->blocked = !ide_on;
-        /* only the next free slot can be ticked: slots are written in order */
-        if (!r->ticked && i > nh) r->why = "";
     }
     drow(st, ROW_LABEL, "fdd", 0, 0, DRIVE_SLOTS + 2, "");
     r = drow(st, ROW_SLOT, "fdd", 0, 0, DRIVE_SLOTS + 3, "A:");
@@ -514,9 +569,8 @@ static void build_drive_rows(struct state *st)
     drow(st, ROW_LABEL, "acsi", 0, 1, 0, "");
     for (int i = 0; i < DRIVE_SLOTS; i++) {
         snprintf(num, sizeof num, "%d", i);
-        r = drow(st, ROW_SLOT, "acsi", i < na ? i : na, 1, 1 + i, num);
-        r->ticked = i < na;
-        if (!r->ticked && i > na) r->why = "";
+        r = drow(st, ROW_SLOT, "acsi", amap[i], 1, 1 + i, num);
+        r->ticked = amap[i] >= 0;
     }
     drow(st, ROW_LABEL, "hostfs", 0, 1, DRIVE_SLOTS + 2, "");
     int line = DRIVE_SLOTS + 3, room = SS_ROWS - ROW_LIST - FOOTER;
@@ -601,6 +655,19 @@ static const char *row_value(const struct state *st, const struct row *r,
 }
 
 /* tick: write the key's tick value (text keys ask first); untick: remove */
+static int is_disk(const char *key)
+{
+    return !strcasecmp(key, "hdd") || !strcasecmp(key, "acsi");
+}
+
+/* after pin_all the line numbers may have moved: find this slot's line */
+static void slot_line(struct state *st, struct row *r)
+{
+    int map[DRIVE_SLOTS], sl = atoi(r->label);
+    slot_map(st, r->text, map);
+    r->ord = sl >= 0 && sl < DRIVE_SLOTS ? map[sl] : -1;
+}
+
 static void tick(struct state *st, int open_editor_for_text)
 {
     struct row *r = &st->row[st->sel];
@@ -609,7 +676,11 @@ static void tick(struct state *st, int open_editor_for_text)
             snprintf(st->msg, sizeof st->msg, "%.10s %s needs ide ticked", r->text, r->label);
             return;
         }
-        if (r->ticked) {                      /* the nth line goes; later slots move up */
+        if (r->ticked) {
+            if (is_disk(r->text)) {           /* the others keep their numbers */
+                pin_all(st, r->text);
+                slot_line(st, r);
+            }
             sc_set_n(&st->cfg, st->sec, r->text, r->ord, NULL);
             snprintf(st->msg, sizeof st->msg, "%.10s %s removed", r->text, r->label);
             return;
@@ -678,6 +749,16 @@ static void commit_edit(struct state *st)
         snprintf(st->msg, sizeof st->msg, "hostfs needs a drive letter first: S /path");
         return;
     }
+    char pinned[SC_LINE_LEN];
+    if (r->kind == ROW_SLOT && is_disk(r->text)) {
+        int typed_slot; const char *img = slot_of(val, &typed_slot);
+        snprintf(pinned, sizeof pinned, "%d:%.*s", atoi(r->label) & 7, SC_LINE_LEN - 16, img);
+        val = pinned;
+        pin_all(st, r->text);
+        slot_line(st, r);
+    }
+    int ord = r->ord < 0 ? sc_count(&st->cfg, st->sec, r->text) : r->ord;
+    r->ord = ord;
     if (se_kind(r->text) == SE_K_INT) {
         char *end; long lo, hi, n = strtol(val, &end, 0);
         if (end == val || *end) {
@@ -689,7 +770,7 @@ static void commit_edit(struct state *st)
             return;
         }
     }
-    if (sc_set_n(&st->cfg, st->sec, r->text, r->ord, val) == 0)
+    if (sc_set_n(&st->cfg, st->sec, r->text, ord, val) == 0)
         snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text, val);
 }
 
@@ -701,8 +782,10 @@ static void edit_row(struct state *st)
         if (!r->ticked) { tick(st, 1); return; }
         const char *v = sc_get_n(&st->cfg, st->sec, r->text, r->ord);
         char vbuf[SC_LINE_LEN];
+        int sl;
         snprintf(st->edit, sizeof st->edit, "%s",
-                 v ? sp_row_value(r->text, v, vbuf, sizeof vbuf) : "");
+                 !v ? "" : is_disk(r->text) ? slot_of(v, &sl) :
+                 sp_row_value(r->text, v, vbuf, sizeof vbuf));
         st->editing = 1;
         return;
     }
@@ -818,9 +901,14 @@ static void draw_drives(struct ss_screen *ss, const struct state *st)
             if (r->kind == ROW_ADD)
                 val = "add a drive";
             else if (r->ticked && v) {
-                val = sp_row_value(r->text, v, vbuf, sizeof vbuf);
-                if (!strcasecmp(r->text, "hostfs") && val[1] == ':')
-                    val += 2 + (val[2] == ' ');  /* the letter is the label */
+                int sl;
+                if (is_disk(r->text))
+                    val = slot_of(v, &sl);        /* the slot is the label */
+                else {
+                    val = sp_row_value(r->text, v, vbuf, sizeof vbuf);
+                    if (!strcasecmp(r->text, "hostfs") && val[1] == ':')
+                        val += 2 + (val[2] == ' ');  /* the letter is the label */
+                }
             }
             snprintf(cell, sizeof cell, "    %s %-3.3s%.27s",
                      (r->blocked || r->why) ? "[-]" : r->ticked ? "[x]" : "[ ]",
@@ -952,14 +1040,24 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
     st.secs = sc_get_int(&st.cfg, "psctrl", "countdown", 5);
     st.screen = SCR_BUILDS;
 
+    /* PISTORM_SETUP_TRACE=1: every key and what it did, on the console -
+     * the way to see where a page that stops responding got to */
+    int trace = getenv("PISTORM_SETUP_TRACE") != NULL;
     double tick_at = now_ms();
     for (;;) {
         if (st.screen == SCR_EDIT) build_rows(&st);
+        if (trace) { printf("[SETUP] draw: screen %d tab %d sel %d/%d\n", st.screen, st.tab, st.sel, st.nrow); fflush(stdout); }
         if (st.screen == SCR_BUILDS) draw_builds(ss, &st); else draw_edit(ss, &st);
         ss_flush(ss);
         sh_present(ss);
 
         struct si_event e = si_poll(100);
+        if (trace && e.key != SI_NONE) {
+            char kn[32];
+            printf("[SETUP] key %s on row '%s' ord %d -> ", si_key_name(&e, kn, sizeof kn),
+                   st.screen == SCR_EDIT ? st.row[st.sel].text : "-", st.row[st.sel].ord);
+            fflush(stdout);
+        }
         if (e.key != SI_NONE && st.secs > 0)
             st.secs = -1;
 
@@ -1044,6 +1142,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             }
         }
 
+        if (trace && e.key != SI_NONE) { printf("msg '%s' lines %d\n", st.msg, st.cfg.n); fflush(stdout); }
         if (st.secs > 0 && now_ms() - tick_at >= 1000.0) {
             tick_at = now_ms();
             if (--st.secs == 0) goto boot;
