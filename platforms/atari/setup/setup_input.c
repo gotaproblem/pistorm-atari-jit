@@ -209,6 +209,7 @@ struct si_event si_map_pad(int code)
     case BTN_START:
     case BTN_MODE:
     case BTN_SELECT:     return ev_make(SI_F10, SI_SRC_PAD, 0);
+    case BTN_WEST:       return ev_make(SI_TICK, SI_SRC_PAD, 0);  /* Y */
     default:             return ev_make(SI_NONE, SI_SRC_PAD, 0);
     }
 }
@@ -482,7 +483,8 @@ const char *si_key_name(const struct si_event *e, char *buf, unsigned long n)
     static const char *names[] = {
         "none", "up", "down", "left", "right", "enter", "esc", "tab",
         "backspace", "space", "home", "insert", "delete",
-        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10"
+        "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
+        "tick"
     };
     const char *src = e->src == SI_SRC_ST ? "ST" :
                       e->src == SI_SRC_PAD ? "pad" : "USB";

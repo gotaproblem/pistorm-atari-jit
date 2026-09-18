@@ -122,12 +122,6 @@ static struct sc_line *find_n(const struct sc_cfg *c, const char *sec,
     return NULL;
 }
 
-static struct sc_line *find(const struct sc_cfg *c, const char *sec,
-                           const char *key)
-{
-    return find_n(c, sec, key, 0);
-}
-
 int sc_count(const struct sc_cfg *c, const char *sec, const char *key)
 {
     int n = 0;

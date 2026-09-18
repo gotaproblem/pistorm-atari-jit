@@ -48,6 +48,23 @@ int         se_developer(const char *key);
 const char *se_known(int i);
 const char *se_known_default(const char *key);
 
+/* The catalogue: every key the emulator accepts, on the tab that holds
+ * the code that reads it. The editor lists ALL of them, ticked when the
+ * build has the line. Repeatable keys (hdd, acsi, hostfs) are one entry
+ * here; the Drives tab expands them into slots. */
+enum se_tab { SE_TAB_MACHINE = 0, SE_TAB_VIDEO, SE_TAB_SOUND, SE_TAB_INPUT,
+              SE_TAB_DRIVES, SE_TAB_NETWORK, SE_TAB_TUNING, SE_TAB_N };
+enum se_kind { SE_K_LIST = 0, SE_K_SWITCH, SE_K_TEXT, SE_K_INT };
+
+const char *se_tab_name(int tab);
+int         se_tab_count(int tab);               /* keys on that tab */
+const char *se_tab_key(int tab, int i);          /* the ith key      */
+int         se_kind(const char *key);            /* SE_K_*           */
+/* what a key is written as the moment it is ticked: a switch "enabled",
+ * a list its first real choice (se_known_default if listed), a text key
+ * "" = ask for the value first */
+const char *se_tick_value(const char *key);
+
 /* How many choices `key` has, 0 if it is not one of these keys. */
 int         se_count(const char *key);
 

@@ -218,6 +218,127 @@ const char *se_needs(const char *key)
     return NULL;
 }
 
+/*
+ * The catalogue. Placed by what reads the key: Machine = the CPU/memory/
+ * ROM shape, Video = ET4000 + HDMI + shifter, Sound = YM/DMA, Input =
+ * kbd/usb/mouse, Drives = the images (expanded to slots by the page),
+ * Network = the tap, Tuning = the PSCTRL live tunables and developer
+ * knobs. Kind decides the control: LIST has a chooser (se_count > 0),
+ * SWITCH toggles, TEXT is typed, INT is typed and checked as a number.
+ */
+static const struct { const char *key; int tab; int kind; const char *tick; } cat[] = {
+    /* Machine */
+    { "cpu",            SE_TAB_MACHINE, SE_K_LIST,   "68040"   },
+    { "fpu",            SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
+    { "mmu",            SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
+    { "machine",        SE_TAB_MACHINE, SE_K_LIST,   "ste"     },
+    { "stram_size",     SE_TAB_MACHINE, SE_K_LIST,   "1M"      },
+    { "ttram",          SE_TAB_MACHINE, SE_K_LIST,   "128M"    },
+    { "blitter",        SE_TAB_MACHINE, SE_K_LIST,   "enabled" },
+    { "jit_power",      SE_TAB_MACHINE, SE_K_LIST,   "3"       },
+    { "jit_cache",      SE_TAB_MACHINE, SE_K_LIST,   "16384"   },
+    { "rom",            SE_TAB_MACHINE, SE_K_TEXT,   ""        },
+    { "stbox_tos",      SE_TAB_MACHINE, SE_K_TEXT,   ""        },
+    { "stbox_machine",  SE_TAB_MACHINE, SE_K_LIST,   "ste"     },
+    { "cpu_compatible", SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
+    /* Video */
+    { "vga",            SE_TAB_VIDEO,   SE_K_LIST,   "ET4000AX FVDI" },
+    { "fps",            SE_TAB_VIDEO,   SE_K_INT,    "60"      },
+    { "native_hdmi",    SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
+    { "monitor",        SE_TAB_VIDEO,   SE_K_LIST,   "auto"    },
+    { "shifter",        SE_TAB_VIDEO,   SE_K_LIST,   "st"      },
+    { "stbox_plane",    SE_TAB_VIDEO,   SE_K_INT,    "0"       },
+    { "drm_dirtyband",  SE_TAB_VIDEO,   SE_K_INT,    "1"       },
+    { "drm_async",      SE_TAB_VIDEO,   SE_K_INT,    "0"       },
+    { "vbl_refract_ns", SE_TAB_VIDEO,   SE_K_INT,    "5000000" },
+    /* Sound */
+    { "ym2149",         SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
+    { "dma_sound",      SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
+    { "ym_gain",        SE_TAB_SOUND,   SE_K_INT,    "100"     },
+    { "ym_lag_ms",      SE_TAB_SOUND,   SE_K_INT,    "100"     },
+    { "lmc",            SE_TAB_SOUND,   SE_K_INT,    "1"       },
+    { "audio_frames",   SE_TAB_SOUND,   SE_K_INT,    "2048"    },
+    /* Input */
+    { "kbd",            SE_TAB_INPUT,   SE_K_SWITCH, "usb"     },
+    { "usb",            SE_TAB_INPUT,   SE_K_SWITCH, "gamepad" },
+    { "mouse_thresh",   SE_TAB_INPUT,   SE_K_INT,    "0"       },
+    { "mouse_scale",    SE_TAB_INPUT,   SE_K_INT,    "1"       },
+    /* Drives - the page expands hdd/acsi/hostfs into slots (step 3) */
+    { "ide",            SE_TAB_DRIVES,  SE_K_SWITCH, "enabled" },
+    { "hdd",            SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
+    { "acsi",           SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
+    { "fdd",            SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
+    { "hostfs",         SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
+    /* Network */
+    { "network",        SE_TAB_NETWORK, SE_K_SWITCH, "enabled" },
+    { "network_backend",SE_TAB_NETWORK, SE_K_TEXT,   "tap"     },
+    { "network_tap",    SE_TAB_NETWORK, SE_K_TEXT,   "tap0"    },
+    { "network_base",   SE_TAB_NETWORK, SE_K_TEXT,   "0x00F10000" },
+    { "network_mac",    SE_TAB_NETWORK, SE_K_TEXT,   ""        },
+    { "network_irq",    SE_TAB_NETWORK, SE_K_INT,    "4"       },
+    { "network_host_ip",SE_TAB_NETWORK, SE_K_TEXT,   "192.168.50.1" },
+    { "network_atari_ip",SE_TAB_NETWORK,SE_K_TEXT,   "192.168.50.2" },
+    { "network_netmask",SE_TAB_NETWORK, SE_K_TEXT,   "255.255.255.0" },
+    { "network_debug",  SE_TAB_NETWORK, SE_K_SWITCH, "enabled" },
+    /* Tuning - live tunables and developer knobs */
+    { "jit",            SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
+    { "m68k_speed",     SE_TAB_TUNING,  SE_K_INT,    "0"       },
+    { "cpu_clock_multiplier", SE_TAB_TUNING, SE_K_INT, "1"     },
+    { "stram_cache",    SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
+    { "stram_direct",   SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
+    { "addr32",         SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
+    { "comp_constjump", SE_TAB_TUNING,  SE_K_INT,    "1"       },
+    { "compnf",         SE_TAB_TUNING,  SE_K_INT,    "1"       },
+    { "compfpu",        SE_TAB_TUNING,  SE_K_INT,    "1"       },
+    { "blit_timed_ns",  SE_TAB_TUNING,  SE_K_INT,    "0"       },
+    { "stbox_slice_cyc",SE_TAB_TUNING,  SE_K_INT,    "64"      },
+    { "stbox_telemetry",SE_TAB_TUNING,  SE_K_INT,    "0"       },
+    { "ipl_confirm_ns", SE_TAB_TUNING,  SE_K_INT,    "2000"    },
+    { "blit_trace",     SE_TAB_TUNING,  SE_K_INT,    "0"       },
+    { "debug",          SE_TAB_TUNING,  SE_K_TEXT,   ""        },
+};
+#define NCAT ((int)(sizeof cat / sizeof cat[0]))
+static const char *tab_names[SE_TAB_N] = { "Machine", "Video", "Sound", "Input",
+                                           "Drives", "Network", "Tuning" };
+
+const char *se_tab_name(int tab)
+{
+    return (tab >= 0 && tab < SE_TAB_N) ? tab_names[tab] : "";
+}
+
+int se_tab_count(int tab)
+{
+    int n = 0;
+    for (int i = 0; i < NCAT; i++)
+        if (cat[i].tab == tab)
+            n++;
+    return n;
+}
+
+const char *se_tab_key(int tab, int i)
+{
+    for (int k = 0; k < NCAT; k++)
+        if (cat[k].tab == tab && i-- == 0)
+            return cat[k].key;
+    return NULL;
+}
+
+int se_kind(const char *key)
+{
+    for (int k = 0; k < NCAT; k++)
+        if (!strcasecmp(key, cat[k].key))
+            return cat[k].kind;
+    return SE_K_TEXT;
+}
+
+const char *se_tick_value(const char *key)
+{
+    for (int k = 0; k < NCAT; k++)
+        if (!strcasecmp(key, cat[k].key))
+            return cat[k].tick;
+    return "";
+}
+
 static const struct table *find(const char *key)
 {
     for (unsigned i = 0; i < sizeof tables / sizeof tables[0]; i++)
