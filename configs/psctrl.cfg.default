@@ -58,7 +58,7 @@ hostfs S /home/pistorm/atari-share
 rom ../roms/emutos-aranym.rom
 ide
 hdd ../dkimages/apj-os.img
-fdd ../dkimages/fdd/720K.st
+fdd ../dkimages/fdd/720k.st
 network disabled
 network_backend tap
 network_tap tap0
