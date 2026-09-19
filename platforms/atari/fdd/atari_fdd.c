@@ -883,55 +883,29 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
  *   PSG port A bit 2 (/DRIVE_B) = 0 → drive B selected
  * ========================================================================= */
 
-/*
- * The PSG sits on the upper byte lane: a byte access is the value, a
- * word access carries it in the high byte (move.w #$0E00,$FF8800.w).
- *
- * The floppy emulation only needs port A (drive and side select), so
- * everything else goes to the REAL chip - tones, mixer, envelope, and
- * the reads programs do before a read-modify-write of the mixer. Port A
- * itself reaches the real chip with the drive-select bits held high, so
- * a real drive on the ST never spins for a disk that is being served
- * from an image; its other bits (RS232 handshake, printer strobe) still
- * land. Before this, every PSG write disappeared here while a floppy
- * image was mounted and the real YM2149 stayed silent.
- *
- * When the emulated YM2149 (HDMI) is running it is the one that sounds,
- * and the real chip is left as it was - both playing at once is not
- * what either setting means.
- */
-#define PSG_DRIVE_BITS (PSG_DRIVE_A_SEL | PSG_DRIVE_B_SEL | PSG_SIDE_SEL)
-extern int ym2149_active(void);
-
 static uint32_t psg_read_addr(uint32_t addr, int size)
 {
-    uint32_t real = bus_read(addr, size);
-    if (addr == PSG_REG_SELECT && fdc.psg_reg_sel == PSG_PORT_A_REG) {
-        /* port A: the emulated drive/side bits over the real chip's rest */
-        uint8_t merged = (uint8_t)(((size == 2 ? real >> 8 : real) & ~PSG_DRIVE_BITS) |
-                                   (fdc.psg_porta & PSG_DRIVE_BITS));
-        return size == 2 ? ((uint32_t)merged << 8) | (real & 0xFFu) : merged;
-    }
-    return real;
+    (void)size;
+    if (addr == PSG_REG_SELECT && fdc.psg_reg_sel == PSG_PORT_A_REG)
+        return fdc.psg_porta;
+    return 0xFFu;
 }
 
 static void psg_write_addr(uint32_t addr, uint32_t val, int size)
 {
-    uint8_t v = (uint8_t)(size == 2 ? val >> 8 : val);
+    (void)size;
+    uint8_t v = val & 0xFF;
 
     if (addr == PSG_REG_SELECT) {
         fdc.psg_reg_sel = v & 0x0F;
-        if (!ym2149_active())
-            bus_write(addr, val, size);
+        //FDD_DBG("PSG: select reg %d", fdc.psg_reg_sel);
     } else if (addr == PSG_REG_WRITE) {
+        //FDD_DBG("PSG: write reg%d = 0x%02X", fdc.psg_reg_sel, v);
         if (fdc.psg_reg_sel == PSG_PORT_A_REG) {
             fdc.psg_porta = v;
             fdc_decode_drive_side();
-            v |= PSG_DRIVE_BITS;              /* real drives stay deselected */
-            val = size == 2 ? ((uint32_t)v << 8) | (val & 0xFFu) : v;
         }
-        if (!ym2149_active())
-            bus_write(addr, val, size);
+        /* All other PSG registers (mixer, tone, envelope etc) silently accepted */
     }
 }
 
