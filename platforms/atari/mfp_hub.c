@@ -215,15 +215,6 @@ static uint16_t deliverable(void)
     return pend;
 }
 
-/* is the channel enabled AND unmasked - will an interrupt ever come? */
-int mfp_hub_channel_armed(int ch)
-{
-    if (ch < 0 || ch > 15)
-        return 0;
-    uint16_t bit = (uint16_t)(1u << ch);
-    return (atomic_load(&g_ier) & atomic_load(&g_imr) & bit) != 0;
-}
-
 int mfp_hub_irq_wanted(void)
 {
     return deliverable() != 0;

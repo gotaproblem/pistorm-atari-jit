@@ -848,33 +848,29 @@ static int rx_ready_level(void)
  * byte first. Then the handler runs, finds the NEXT byte - a joystick
  * state without its $FF header - and takes it for a key: state $01 is
  * ESC. So a due byte stays hidden from status and data until the hub
- * has acknowledged the channel-6 interrupt for it - however long the
- * guest keeps interrupts masked, as the byte would sit in the real
- * ACIA. A guest that has channel 6 disabled or masked and only polls
- * sees it at once. (A first version let it show after 100 us anyway;
- * a game masking interrupts longer than that lost bytes to its own
- * polling loop and then took the next header for a state.)
+ * has acknowledged the channel-6 interrupt for it, or 100 us have
+ * passed (a game that polls with the interrupt masked still gets it).
  */
-static _Atomic uint32_t inj_seen_head = ~0u; /* ring_head the ack is for  */
-static _Atomic int      inj_iacked;
+#define INJ_GRACE_US 100
+static uint32_t inj_seen_head = ~0u;        /* ring_head the times are for */
+static uint64_t inj_ready_at;               /* when it became due          */
+static _Atomic int inj_iacked;
 
 static int head_visible(void)
 {
     uint32_t h = atomic_load_explicit(&ring_head, memory_order_relaxed);
-    if (h != atomic_load(&inj_seen_head))
+    uint64_t t = now_us();
+    if (h != inj_seen_head)
     {
-        atomic_store(&inj_seen_head, h);
+        inj_seen_head = h;
+        inj_ready_at  = t;
         atomic_store(&inj_iacked, 0);
     }
-    if (atomic_load(&inj_iacked))
-        return 1;
-    return !mfp_hub_channel_armed(6);        /* polling only: no wait     */
+    return atomic_load(&inj_iacked) || t - inj_ready_at >= INJ_GRACE_US;
 }
 
 void kbd_usb_note_iack(void)
 {
-    /* the acknowledge is for whatever is at the head now, seen or not */
-    atomic_store(&inj_seen_head, atomic_load_explicit(&ring_head, memory_order_relaxed));
     atomic_store(&inj_iacked, 1);
 }
 
@@ -1374,7 +1370,12 @@ static int kbd_level_poll(void)
 {
     if (!KBD_USB_enabled)
         return 0;
-    return rx_ready_level() || rx_priority_level();
+    if (rx_ready_level() || rx_priority_level())
+    {
+        (void)head_visible();                /* start the grace clock     */
+        return 1;
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

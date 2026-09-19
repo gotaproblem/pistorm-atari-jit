@@ -84,8 +84,6 @@ void mfp_hub_timer_a_event(void);
  * RIGHT NOW under the full rule (enabled, pending/asserting, masked-in,
  * outranks every virtual in-service channel). */
 int mfp_hub_irq_wanted(void);
-/* channel enabled and unmasked by the guest (an interrupt can be taken) */
-int mfp_hub_channel_armed(int ch);
 
 /* IACK, for intlev_ack (CPU thread): pick the highest deliverable
  * virtual channel; clear its pending latch (event sources), set its
