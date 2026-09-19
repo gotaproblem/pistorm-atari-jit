@@ -137,6 +137,11 @@ volatile unsigned pistorm_ipl_lat6 = 0;
 volatile unsigned pistorm_ipl_ep2 = 0;
 volatile unsigned pistorm_ipl_ep4 = 0;
 volatile unsigned pistorm_ipl_ep6 = 0;
+/* debug ipl: the shape of level 4 - interval since the previous level-4
+ * entry, and how long the level held. Buckets of the interval: <5ms,
+ * 5-15, 15-25, >25; of the duration: <50us, <500us, <3ms, >=3ms.
+ * Written by ipl_task on the entry/exit branch only. */
+volatile unsigned pistorm_ipl4_gap[4], pistorm_ipl4_len[4];
 /* HBL no-op skips: level-2 assertions dropped at the sampler because the
  * guest's HBL vector is a bare RTE (see pistorm_hbl_handler_is_rte). */
 volatile unsigned pistorm_ipl_hbl_skipped = 0;
@@ -491,6 +496,16 @@ static void *ipl_stats_task(void *)
     fprintf(stderr,
             "[ipl] ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
             e2 - p2, e4 - p4, e6 - p6, d2 - q2, d4 - q4, d6 - q6);
+    {
+      static unsigned pg[4], pl[4];
+      unsigned g[4], l[4];
+      for (int i = 0; i < 4; i++) { g[i] = pistorm_ipl4_gap[i]; l[i] = pistorm_ipl4_len[i]; }
+      fprintf(stderr,
+              "[ipl]   level 4: gap <5ms=%u 5-15=%u 15-25=%u >25=%u | held <50us=%u <500us=%u <3ms=%u >=3ms=%u\n",
+              g[0] - pg[0], g[1] - pg[1], g[2] - pg[2], g[3] - pg[3],
+              l[0] - pl[0], l[1] - pl[1], l[2] - pl[2], l[3] - pl[3]);
+      for (int i = 0; i < 4; i++) { pg[i] = g[i]; pl[i] = l[i]; }
+    }
 
     p2 = e2; p4 = e4; p6 = e6;
     q2 = d2; q4 = d4; q6 = d6;
@@ -759,6 +774,25 @@ static void *ipl_task(void *)
       if (ipl == 2)      pistorm_ipl_ep2++;
       else if (ipl == 4) pistorm_ipl_ep4++;
       else if (ipl == 6) pistorm_ipl_ep6++;
+      if (pst_dbg_ipl_stats)
+      {
+        /* shape of level 4: gap since the last entry, length of the last
+         * episode (arch timer, 54 MHz: 54 ticks = 1 us) */
+        static uint64_t l4_entry;
+        uint64_t nowt;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
+        if (g_ipl == 4)                     /* leaving level 4 */
+        {
+          uint64_t us = (nowt - l4_entry) / 54u;
+          pistorm_ipl4_len[us < 50u ? 0 : us < 500u ? 1 : us < 3000u ? 2 : 3]++;
+        }
+        if (ipl == 4)                       /* entering level 4 */
+        {
+          uint64_t us = l4_entry ? (nowt - l4_entry) / 54u : 0;
+          pistorm_ipl4_gap[us < 5000u ? 0 : us < 15000u ? 1 : us < 25000u ? 2 : 3]++;
+          l4_entry = nowt;
+        }
+      }
       g_ipl = ipl;
     }
 
