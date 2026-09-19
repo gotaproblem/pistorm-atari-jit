@@ -58,7 +58,7 @@ sudo reboot
 Answer the optional prompts up front with environment variables:
 
 ```bash
-BUILD=1 SERVICE=1 SAMBA=0 PISTORM_CFG=games.cfg ./install-full.sh
+BUILD=1 SERVICE=1 SAMBA=0 ./install-full.sh
 ```
 
 | Variable       | Effect                                              | Default |
@@ -67,7 +67,7 @@ BUILD=1 SERVICE=1 SAMBA=0 PISTORM_CFG=games.cfg ./install-full.sh
 | `SERVICE=1`    | Install the systemd auto-start unit                 | prompt  |
 | `SAMBA=1`      | Install + configure the Samba share                 | prompt  |
 | `KILLGUI=1`    | Disable the desktop and switch to console boot      | prompt (declining **aborts**) |
-| `PISTORM_CFG=` | Config the auto-start service launches              | `master.cfg` |
+| `PISTORM_CFG=` | Config the auto-start service launches              | `psctrl.cfg` |
 
 Any of these set to `1`/`y`/`yes` means yes; anything else means no. Unset means
 prompt on a TTY, or take the default when there is no TTY.
@@ -132,7 +132,8 @@ Created next to the repo (won't overwrite anything that already exists):
 ```
 <parent>/
 ├── roms/            EmuTOS is installed here; add your own TOS ROM here too
-├── configs/         atari.cfg, master.cfg (your own .cfg files go here)
+├── configs/         psctrl.cfg - the one config: [psctrl] + a section per build
+│                    (atari.cfg / master.cfg: the old flat single-machine files)
 ├── dkimages/
 │   └── fdd/         720k.st blank floppy; put disk/game images here
 ├── atari-share/     point a HOSTFS drive here. The GEM programs
@@ -188,8 +189,11 @@ burying you in compiler errors.
 Installs `/etc/systemd/system/pistorm.service`, which launches the emulator on
 **tty1 as root** (the GPIO/DMA bus needs root; KMSDRM/`native_hdmi` needs the
 console) and takes tty1 from the login prompt, appliance-style. It restarts on
-failure. Change the config it runs by editing that unit file, or set
-`PISTORM_CFG=` at install time.
+failure. It runs `../configs/psctrl.cfg`, so the **setup page** comes up on
+the ST monitor at every power-on and boots the last build after its countdown
+(see below). To boot with no page, set `countdown 0` in the `[psctrl]` block,
+or add `--no-setup` to `ExecStart` in the unit. `PISTORM_CFG=` at install
+time names a different file (a flat single-machine .cfg has no page).
 
 ```bash
 sudo systemctl start pistorm     # test now
@@ -337,22 +341,82 @@ sudo apt install nfs-common
 
 ---
 
+## The setup page
+
+`configs/psctrl.cfg` is the one configuration file. It has a `[psctrl]` block
+(the page's own keys: `countdown`, `boot`, the `rom_path` / `disk_path` /
+`fdd_path` directories, the title-bar clock) and one `[section]` per
+**build** - a complete machine. The installer's copy has `[gem]` and
+`[apj-os]`. The emulator loads exactly one build; nothing is inherited
+between them.
+
+The page is drawn by the Pi on the ST's own video (and mirrored to HDMI, or
+HDMI alone when no ST monitor answers) before the 68k boots, so it works with
+the ST keyboard, a USB keyboard or a gamepad. It comes up with the builds
+listed and a countdown on the one booted last; any key stops the countdown.
+
+**Builds screen**
+
+| Key | Does |
+|-----|------|
+| `Enter` | boot the build under the cursor |
+| `E` | edit it |
+| `N` | new build: type a name (it becomes `[name]`), then copy an existing build or start empty; opens in the editor |
+| `D` | delete the build under the cursor (asks `Y/N`; the last build cannot go) |
+| `S` | save |
+| `C` / `M` | title-bar clock: 24- or 12-hour; day first (`29 Apr 2026`) or month first |
+| `F12` (`Help` on the ST) | screen dump to `../screendumps/screendumpN.png` - on every screen |
+| `ESC` / pad X | leave the page (boots the last build); says so first if there are unsaved changes |
+
+**Editor** - seven tabs (`Left`/`Right`): Machine, Video, Sound, Input,
+Drives, Network, Tuning. Every key the emulator accepts is a row:
+
+```
+[x] cpu          68040
+[ ] fpu          empty
+[-] cpu_compatible empty        (gem only)
+```
+
+`[x]` the line is in the build, `[ ]` it is not written at all, `[-]` the
+build cannot use it (wrong CPU, or a build the key does not apply to).
+`Space` or pad Y ticks; `Enter` edits the value - a list to pick from, a
+switch, a number with its range shown, or text. On the Drives tab the IDE and
+ACSI slots 0-7 keep their numbers (`hdd 0:dk0.img`), floppy A: and the HostFS
+letters sit below. `Enter` on an image slot (and on `rom` / `stbox_tos` on
+the Machine tab) lists the files in `disk_path` / `fdd_path` / `rom_path` to
+pick from, or lets you type a name. `Save` and `Boot now`
+are the last two rows; `ESC` goes back to the builds screen. Booting saves
+anything unsaved.
+
+A build named `apj…` is treated as APJ-OS (it gets the `stbox_*` keys);
+any other name is a GEM machine (it gets `monitor`, `shifter`,
+`cpu_compatible`, ...).
+
+**Skipping it:** `countdown 0` in `[psctrl]`, or `--no-setup` on the
+command line (`sh run-pistorm.sh --no-setup`). `PISTORM_SETUP_TRACE=1`
+prints every key and what it did, for a page that stops responding.
+
+---
+
 ## Add your own ROM and games
 
 The installer ships **EmuTOS** (GPL, freely distributable) as the default ROM.
-To use a real Atari TOS instead, drop it in and point your `.cfg` at it:
+To use a real Atari TOS instead, drop it in and point your build at it:
 
 ```
-<parent>/roms/emutos-aranym.rom   # your own copy — NOT included/redistributable
+<parent>/roms/tos206uk.rom        # your own copy — NOT included/redistributable
 <parent>/dkimages/…               # your own disk/game images
 ```
 
-Then in your config (e.g. `configs/master.cfg`):
+Then in the build (`configs/psctrl.cfg`, or the page's Machine and Drives
+tabs) - bare names are looked for under `rom_path`, `disk_path` and
+`fdd_path` from the `[psctrl]` block, which the installer's copy points at
+the tree above:
 
 ```
-rom ../roms/emutos-aranym.rom
-hdd ../dkimages/yourdisk.img
-fdd ../dkimages/fdd/yourfloppy.st
+rom tos206uk.rom
+hdd 0:yourdisk.img
+fdd yourfloppy.st
 ```
 
 ---

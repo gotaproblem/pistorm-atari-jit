@@ -1,14 +1,24 @@
 # psctrl.cfg - the one PiSTorm configuration file.
 #
-# Three sections. The pre-boot setup page reads and writes this file, and
-# so does PSCTRL.ACC inside APJ-OS; see pistorm-setup-page-design.md.
+# One [psctrl] block and any number of builds - a build is a [section]
+# that describes a whole machine. The pre-boot setup page reads and
+# writes this file (INSTALL-README.md, "The setup page"), and so does
+# PSCTRL.ACC inside APJ-OS.
 #
-#   [psctrl]   the setup page's own keys
+#   [psctrl]   the setup page's own keys - never a machine
 #   [gem]      the plain GEM machine (TOS/EmuTOS desktop, ST video)
 #   [apj-os]   the APJ-OS machine (FreeMiNT + XaAES + fVDI, ET4000 on HDMI)
 #
-# The emulator loads ONE section, whichever the setup page picked. Each
-# section is complete on its own: nothing is inherited from another.
+# The emulator loads ONE build, whichever the setup page picked (or the
+# `boot` key below). Each build is complete on its own: nothing is
+# inherited from another. A build whose name starts with `apj` gets the
+# APJ-OS-only keys (stbox_*) on the page; the others get the GEM-only
+# ones (monitor, shifter, cpu_compatible, ...).
+#
+# Every line the page writes is `key value`; a key it has unticked is
+# not in the file at all. Repeated keys (hdd, acsi) carry their slot:
+# `hdd 0:dk0.img` is IDE drive 0, so removing a drive does not shift the
+# ones below it. A bare `hdd dk0.img` is the next free slot, as before.
 #
 # This file in the source tree is the DEFAULT. install-full.sh copies it
 # to ~/configs/psctrl.cfg if there is not one there already, and never
@@ -19,10 +29,18 @@
 
 [psctrl]
 # Seconds the setup page waits before booting the last choice. 0 boots
-# straight away and the page only opens on the key sequence.
+# straight away with no page (so does --no-setup on the command line).
 countdown 5
-# The section booted last, and the one the countdown will boot.
+# The build booted last, and the one the countdown will boot.
 boot apj-os
+# Where bare file names in the builds are looked for: `rom x.rom` under
+# rom_path, `hdd`/`acsi` images under disk_path, `fdd` under fdd_path.
+# The page's image picker lists these directories. Relative to the
+# emulator's directory; ~ is the invoking user's home. A path starting
+# with / or ~ in a build is used as it is.
+rom_path ../roms
+disk_path ../dkimages
+fdd_path ../dkimages/fdd
 # The title bar clock: 24 or 12 (11:45pm); dmy (29 Apr 2026) or mdy
 # (Apr 29 2026). C and M on the builds screen switch them.
 clock 24
@@ -34,9 +52,9 @@ fpu
 ym2149
 blitter
 ttram 128M
-rom ../roms/emutos-aranym.rom
+rom emutos-aranym.rom
 ide
-hdd ../dkimages/dk0.img
+hdd 0:dk0.img
 acsi disabled
 network disabled
 network_backend tap
@@ -60,11 +78,11 @@ ym2149
 ttram 128M
 jit_cache 16384
 hostfs S /home/pistorm/atari-share
-rom ../roms/emutos-aranym.rom
+rom emutos-aranym.rom
 ide
-hdd ../dkimages/apj-os.img
+hdd 0:apj-os.img
 acsi disabled
-fdd ../dkimages/fdd/720k.st
+fdd 720k.st
 network disabled
 network_backend tap
 network_tap tap0

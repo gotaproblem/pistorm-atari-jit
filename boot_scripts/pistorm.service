@@ -7,8 +7,11 @@ Type=simple
 Restart=always
 RestartSec=1
 User=root
-ExecStart=/home/pistorm/pistorm-atari/emulator --config ../configs/psctrl.cfg --no-setup
-WorkingDirectory=/home/pistorm/pistorm-atari
+# The setup page comes up on the ST monitor at every boot and boots the
+# last build after its countdown. Add --no-setup (or set `countdown 0`
+# in [psctrl]) to boot straight into the last build with no page.
+ExecStart=/home/pistorm/pistorm-atari-jit/emulator --config ../configs/psctrl.cfg
+WorkingDirectory=/home/pistorm/pistorm-atari-jit
 
 [Install]
 WantedBy=multi-user.target

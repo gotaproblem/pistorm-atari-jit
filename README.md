@@ -72,8 +72,9 @@ ldd ./emulator | grep libav
 See **VIDEO.md** for the full story, including how to publish a build for other people.
 
 ## Configuring
-Run the install.sh script to build the file tree and to copy files in to place
->bash install.sh
+Run the installer to build the file tree and copy files into place (see **INSTALL-README.md**)
+>./install-full.sh
+
 Reboot at this point
 
 ## Running
@@ -87,13 +88,17 @@ sudo ./ataritest --memory tests=rw
 If the tests fail then there is no point in continuing until the hardware issues are resolved.
 
 ### Step 2
-You should take some time to read the default emulator config file - **atari.cfg**. There is also a **master.cfg** which you can use as a template to create additional configurations. The files are annotated to help you on your way, it should be much simpler now.
+The configuration is one file, **../configs/psctrl.cfg** (the installer puts it there from `configs/psctrl.cfg.default`). It holds a `[psctrl]` block and one `[section]` per **build** - a build is a complete machine. Two come ready: `[gem]` (a plain TOS/EmuTOS desktop on the ST video) and `[apj-os]` (FreeMiNT + XaAES + fVDI on HDMI). The file is annotated.
+
+You do not have to edit it by hand: the **setup page** does that (Step 3), and shows every key the emulator accepts with its choices and ranges.
 
 ### Step 3
-So the tests pass and you have edited your configuration file, run the emulator Note: *you must have **atari.cfg** in your configs/ directory*
->sudo ./emulator
+So the tests pass, run the emulator through its launcher (it asks for sudo itself and relaunches on a Restart from the taskbar)
+>sh run-pistorm.sh
 
-You are not restricted to using just the **atari.cfg** config file. You can create how ever many you desire; in which case, supply the emulator command with --config *\<your-cfg-name>*
+The **setup page** comes up first, on the ST monitor and on HDMI: a list of the builds, with a countdown on the one that booted last. Any key stops the countdown. `Enter` boots the build under the cursor, `E` opens it in the editor (seven tabs - Machine, Video, Sound, Input, Drives, Network, Tuning - every key a tick box), `N` makes a new build (empty, or a copy of another), `D` deletes one, `S` saves, `F12` (Help on the ST keyboard) dumps the screen to `../screendumps/`. Nothing is written until you save or boot.
+
+To skip the page and boot the last build straight away: `sh run-pistorm.sh --no-setup`, or set `countdown 0` in the `[psctrl]` block. A flat single-machine .cfg (the old **atari.cfg** style) still works with `--config`, and has no page.
 
 And that is pretty much it... Over to you to enjoy
 

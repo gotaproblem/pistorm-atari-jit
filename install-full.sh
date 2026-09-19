@@ -266,9 +266,10 @@ mkdir -p "$ROOT"/roms "$ROOT"/configs "$ROOT"/atari-share \
 
 say "Installing default configs / EmuTOS / blank floppy (existing files kept)"
 # psctrl.cfg is the one config the emulator and the pre-boot setup page
-# both use ([psctrl] / [gem] / [apj-os]). copy_once, so your own file is
-# never overwritten. atari.cfg / master.cfg stay for now; they are only
-# read when a tree has no psctrl.cfg.
+# both use ([psctrl] plus a [section] per build - gem and apj-os to start
+# with; the page's N key makes more). copy_once, so your own file is
+# never overwritten. atari.cfg / master.cfg are the old flat single-
+# machine files; still shipped for anyone who runs --config with one.
 copy_once "$HERE/configs/psctrl.cfg.default" "$ROOT/configs/psctrl.cfg"
 copy_once "$HERE/configs/atari.cfg"         "$ROOT/configs/atari.cfg"
 copy_once "$HERE/configs/master.cfg"        "$ROOT/configs/master.cfg"
@@ -398,7 +399,10 @@ fi
 #    take tty1 away from getty (appliance style).
 # --------------------------------------------------------------------------
 if ask SERVICE "Auto-start the emulator on boot (systemd)?" n; then
-  CFG="${PISTORM_CFG:-master.cfg}"
+  # psctrl.cfg brings the setup page up on the ST monitor (and HDMI) at
+  # every boot, with its countdown; `countdown 0` in [psctrl], or adding
+  # --no-setup to ExecStart, boots the last build with no page.
+  CFG="${PISTORM_CFG:-psctrl.cfg}"
   say "Installing pistorm.service (config: ../configs/$CFG)"
   sudo tee /etc/systemd/system/pistorm.service >/dev/null <<UNIT
 [Unit]
