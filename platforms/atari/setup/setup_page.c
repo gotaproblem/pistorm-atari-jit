@@ -101,13 +101,32 @@ static double now_ms(void)
     return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
 }
 
-/* dd/mm/yy hh:mm - 14 characters, no seconds, so the bar has room */
+/* The clock in the title bar: 29 Apr 2026 23:45. Two switches, kept in
+ * [psctrl] so they survive: `clock 12` puts the hour on a 12-hour clock
+ * (11:45pm), `date mdy` puts the month first (Apr 29 2026). No seconds,
+ * so the bar has room. */
+static int clock_12h, date_mdy;
+
 static void stamp_now(char *buf, unsigned long n)
 {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    strftime(buf, n, "%d/%m/%y %H:%M", &tm);
+    strftime(buf, n, date_mdy ? (clock_12h ? "%b %d %Y %I:%M%P" : "%b %d %Y %H:%M")
+                              : (clock_12h ? "%d %b %Y %I:%M%P" : "%d %b %Y %H:%M"), &tm);
+    if (clock_12h) {                 /* %I pads with a zero: 03:05pm -> 3:05pm */
+        char *h = strrchr(buf, ' ');
+        if (h && h[1] == '0')
+            memmove(h + 1, h + 2, strlen(h + 2) + 1);
+    }
+}
+
+static void clock_load(const struct sc_cfg *c)
+{
+    const char *v = sc_get(c, "psctrl", "clock");
+    clock_12h = v && !strcmp(v, "12");
+    v = sc_get(c, "psctrl", "date");
+    date_mdy = v && !strcasecmp(v, "mdy");
 }
 
 /* A switch is a key whose value is empty (present = on, the .cfg's own
@@ -1036,9 +1055,11 @@ static void draw_builds(struct ss_screen *ss, const struct state *st)
         { "ESC", "cancel" } };
     ss_clear(ss, 0);
     draw_bar(ss, NULL);
+    const struct help hs[] = { { "C", clock_12h ? "12-hour clock" : "24-hour clock" },
+        { "M", date_mdy ? "month first" : "day first" } };
     if (st->naming)       draw_help(ss, 1, hn, 2);
     else if (st->copying) draw_help(ss, 1, hc, 3);
-    else                  draw_help(ss, 1, h, 7);
+    else                { draw_help(ss, 1, h, 7); draw_help(ss, 2, hs, 2); }
     ss_puts(ss, 1, 3, "Builds:", ink, 0);
     for (int i = 0; i < st->nbuilds; i++) {
         int on = i == st->bsel && !st->copying;
@@ -1313,6 +1334,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
     if (sc_load(&st.cfg, cfg_path) != 0)
         return SP_ERROR;
     load_builds(&st);
+    clock_load(&st.cfg);
     st.secs = sc_get_int(&st.cfg, "psctrl", "countdown", 5);
     st.screen = SCR_BUILDS;
 
@@ -1391,6 +1413,12 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                         st.asking = 1;
                         snprintf(st.msg, sizeof st.msg, "delete [%s] and everything in it? Y/N", st.builds[st.bsel]);
                     }
+                } else if (e.ch == 'c' || e.ch == 'C') {
+                    clock_12h = !clock_12h;
+                    sc_set(&st.cfg, "psctrl", "clock", clock_12h ? "12" : "24");
+                } else if (e.ch == 'm' || e.ch == 'M') {
+                    date_mdy = !date_mdy;
+                    sc_set(&st.cfg, "psctrl", "date", date_mdy ? "mdy" : "dmy");
                 } else if (e.ch == 's' || e.ch == 'S') {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
                     if (sc_save(&st.cfg, NULL) == 0) {

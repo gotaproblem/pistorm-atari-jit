@@ -23,6 +23,10 @@
 countdown 5
 # The section booted last, and the one the countdown will boot.
 boot apj-os
+# The title bar clock: 24 or 12 (11:45pm); dmy (29 Apr 2026) or mdy
+# (Apr 29 2026). C and M on the builds screen switch them.
+clock 24
+date dmy
 
 [gem]
 cpu 68030
