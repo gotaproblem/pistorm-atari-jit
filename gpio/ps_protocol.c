@@ -470,14 +470,47 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
    * Addressing: GPIP is the LOW byte. A byte read of $FFFA01 extracts
    * the low byte of data; a word read of $FFFA00 carries GPIP in its
    * low byte; the high byte of either is not GPIP. */
-  if (__builtin_expect (ps_gpip7_force != 0, 0)) {
+  {
     uint32_t a = ps_io->addr & 0x00FFFFFFu;
-    if ((ps_io->io_type == READ_BYTE && a == 0x00FFFA01u) ||
-        (ps_io->io_type == READ_WORD && a == 0x00FFFA00u)) {
+    if (__builtin_expect ((ps_io->io_type == READ_BYTE && a == 0x00FFFA01u) ||
+                          (ps_io->io_type == READ_WORD && a == 0x00FFFA00u), 0)) {
       if (ps_gpip7_force == 1)
         ps_io->data &= ~0x0080u;     /* mono monitor present   */
-      else
+      else if (ps_gpip7_force == 2)
         ps_io->data |=  0x0080u;     /* colour monitor present */
+      else {
+        /* Real wire, DEBOUNCED. The monitor-detect line is a DC level:
+         * it changes when a monitor is unplugged, not between two reads
+         * 20 ms apart. TOS 1.04 polls it every VBL and switches the
+         * shifter to high resolution the moment it reads "mono" - and
+         * one misread sample of this bit over the bus was enough to put
+         * a colour machine into 71.4 Hz timing for the rest of the run
+         * (field-measured: 72 VBL/s on a 50 Hz screen, some boots and
+         * not others, games 44% fast). The value the guest sees only
+         * changes after four consecutive reads agree, 80 ms at TOS's
+         * poll rate, so a real monitor swap still works. */
+        static int stable = -1, run = 0, glitches = 0;
+        int bit = (ps_io->data & 0x0080u) ? 1 : 0;
+        if (stable < 0)
+          stable = bit;
+        else if (bit != stable) {
+          if (++run >= 4) {
+            stable = bit; run = 0;
+            fprintf (stderr, "[GPIP] monitor detect now %s\n", bit ? "COLOUR" : "MONO");
+          }
+        } else if (run) {
+          if (glitches < 8)
+            fprintf (stderr, "[GPIP] monitor-detect glitch: read %s %d time%s, kept %s\n",
+                     stable ? "mono" : "colour", run, run == 1 ? "" : "s",
+                     stable ? "colour" : "mono");
+          glitches++;
+          run = 0;
+        }
+        if (stable)
+          ps_io->data |=  0x0080u;
+        else
+          ps_io->data &= ~0x0080u;
+      }
     }
   }
   return status;
