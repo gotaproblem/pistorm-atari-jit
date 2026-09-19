@@ -229,16 +229,80 @@ int sc_set_n(struct sc_cfg *c, const char *sec, const char *key, int n,
 
     int at = section_end(c, s);
     if (at < 0) {                                /* new section at the end */
-        char hdr[SC_LINE_LEN];
-        snprintf(hdr, sizeof hdr, "[%s]", s);
-        if (c->n && c->line[c->n - 1].text[0] && insert(c, c->n, s, "") != 0)
-            return -1;
-        if (insert(c, c->n, s, hdr) != 0)
+        if (sc_add_section(c, s) != 0)
             return -1;
         at = c->n;
     }
     if (insert(c, at, s, text) != 0)
         return -1;
+    c->dirty = 1;
+    return 0;
+}
+
+int sc_add_section(struct sc_cfg *c, const char *sec)
+{
+    char s[SC_SEC_LEN], hdr[SC_LINE_LEN];
+    snprintf(s, sizeof s, "%s", sec); lower(s);
+    if (!s[0])
+        return -1;
+    if (section_end(c, s) >= 0)
+        return 0;
+    snprintf(hdr, sizeof hdr, "[%s]", s);
+    if (c->n && c->line[c->n - 1].text[0] && insert(c, c->n, s, "") != 0)
+        return -1;
+    if (insert(c, c->n, s, hdr) != 0)
+        return -1;
+    c->dirty = 1;
+    return 0;
+}
+
+/* the kth key line of a section, scanned afresh each time because the
+ * copy below inserts lines while it walks */
+static const struct sc_line *key_line(const struct sc_cfg *c, const char *s, int k)
+{
+    for (int i = 0; i < c->n; i++)
+        if (c->line[i].key[0] && !strcmp(c->line[i].sec, s) && k-- == 0)
+            return &c->line[i];
+    return NULL;
+}
+
+int sc_copy_section(struct sc_cfg *c, const char *from, const char *to)
+{
+    char f[SC_SEC_LEN], t[SC_SEC_LEN];
+    snprintf(f, sizeof f, "%s", from); lower(f);
+    snprintf(t, sizeof t, "%s", to);   lower(t);
+    if (!strcmp(f, t) || sc_add_section(c, t) != 0)
+        return -1;
+    for (int k = 0; ; k++) {
+        const struct sc_line *l = key_line(c, f, k);
+        if (!l)
+            return 0;
+        char key[SC_KEY_LEN];
+        snprintf(key, sizeof key, "%s", l->key);
+        if (sc_set_n(c, t, key, sc_count(c, t, key), line_value(l->text)) != 0)
+            return -1;
+    }
+}
+
+int sc_del_section(struct sc_cfg *c, const char *sec)
+{
+    char s[SC_SEC_LEN];
+    snprintf(s, sizeof s, "%s", sec); lower(s);
+    int at = -1, n = 0;
+    for (int i = 0; i < c->n; i++)
+        if (!strcmp(c->line[i].sec, s)) {
+            if (at < 0) at = i;
+            n++;
+        }
+    if (at < 0)
+        return -1;
+    memmove(&c->line[at], &c->line[at + n],
+            (unsigned long)(c->n - at - n) * sizeof c->line[0]);
+    c->n -= n;
+    /* the blank line that separated it from the next section went with
+     * it; put one back so the sections do not run together */
+    if (at > 0 && at < c->n && c->line[at - 1].text[0] && c->line[at].text[0])
+        insert(c, at, c->line[at - 1].sec, "");
     c->dirty = 1;
     return 0;
 }

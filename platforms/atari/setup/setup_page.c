@@ -19,6 +19,12 @@
  *
  * Repeated keys (hdd, acsi, hostfs) are one row here; the Drives tab
  * expands them into numbered slots in step 3.
+ *
+ * The builds screen makes and removes builds: N asks for a name (it
+ * becomes the section [name]) and what to copy into it - an existing
+ * build, or nothing - then opens it in the editor; D deletes the build
+ * under the cursor after a Y; S saves. The last build cannot be
+ * deleted, so there is always something to boot.
  */
 #include <ctype.h>
 #include <dirent.h>
@@ -69,6 +75,10 @@ struct state {
     int  nbuilds, bsel;
     char boot[SC_SEC_LEN];       /* [psctrl] boot                              */
     int  secs;                   /* countdown, -1 once a key arrived           */
+    int  naming;                 /* N: typing the new build's name into edit   */
+    int  copying;                /* then choosing what to copy: 0 empty, 1.. builds */
+    int  asking;                 /* D: "delete [x]? Y/N" is up                 */
+    int  warned;                 /* ESC with unsaved changes: said so once     */
     /* editor */
     char sec[SC_SEC_LEN];        /* the build being edited                     */
     int  tab;
@@ -395,6 +405,63 @@ static void load_builds(struct state *st)
     for (int i = 0; i < st->nbuilds; i++)
         if (!strcasecmp(st->builds[i], st->boot))
             st->bsel = i;
+}
+
+/* N: the name typed so far becomes the section [name]. The parser
+ * lower-cases section names and the emulator keeps 31 characters, the
+ * page 15; psctrl is the page's own block. */
+static int name_ok(struct state *st)
+{
+    char *s = st->edit;
+    if (!*s) { snprintf(st->msg, sizeof st->msg, "a name is needed"); return 0; }
+    for (char *p = s; *p; p++) {
+        *p = (char)tolower((unsigned char)*p);
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
+            snprintf(st->msg, sizeof st->msg, "'%c' cannot be in a build name", *p);
+            return 0;
+        }
+    }
+    if (!strcmp(s, "psctrl")) {
+        snprintf(st->msg, sizeof st->msg, "[psctrl] is the page's own block");
+        return 0;
+    }
+    for (int i = 0; i < st->nbuilds; i++)
+        if (!strcmp(st->builds[i], s)) {
+            snprintf(st->msg, sizeof st->msg, "there is already a [%.15s]", s);
+            return 0;
+        }
+    return 1;
+}
+
+/* the new section, empty or a copy of the chosen build, then the editor */
+static void new_build(struct state *st)
+{
+    int r = st->choice ? sc_copy_section(&st->cfg, st->builds[st->choice - 1], st->edit)
+                       : sc_add_section(&st->cfg, st->edit);
+    st->copying = 0;
+    if (r != 0) {
+        snprintf(st->msg, sizeof st->msg, "could not add [%.15s] - the file is full", st->edit);
+        return;
+    }
+    snprintf(st->sec, sizeof st->sec, "%.15s", st->edit);
+    load_builds(st);
+    st->screen = SCR_EDIT; st->tab = 0; st->sel = 0; st->top = 0;
+    snprintf(st->msg, sizeof st->msg, "new build [%s] - Save keeps it", st->sec);
+}
+
+static void delete_build(struct state *st)
+{
+    char name[SC_SEC_LEN];
+    snprintf(name, sizeof name, "%s", st->builds[st->bsel]);
+    st->asking = 0;
+    if (sc_del_section(&st->cfg, name) != 0)
+        return;
+    if (!strcasecmp(st->boot, name))
+        sc_set(&st->cfg, "psctrl", "boot", NULL);
+    load_builds(st);
+    if (st->bsel >= st->nbuilds && st->nbuilds)
+        st->bsel = st->nbuilds - 1;
+    snprintf(st->msg, sizeof st->msg, "deleted [%s] - S saves it", name);
 }
 
 /* is this row's parent (se_needs) on? absent or off = blocked */
@@ -961,26 +1028,51 @@ static void draw_builds(struct ss_screen *ss, const struct state *st)
 {
     int ink = c_ink(ss), hi = c_hi(ss);
     char line[SS_COLS + 1];
-    static const struct help h[] = { { "Up/Down", "move" }, { "Enter", "boot" },
-        { "E", "edit" }, { "ESC/pad X", "leave" }, { "F12", "dump" } };
+    static const struct help h[] = { { "Enter", "boot" }, { "E", "edit" },
+        { "N", "new" }, { "D", "delete" }, { "S", "save" }, { "ESC/pad X", "leave" },
+        { "F12", "dump" } };
+    static const struct help hn[] = { { "Enter", "next" }, { "ESC", "cancel" } };
+    static const struct help hc[] = { { "Up/Down", "move" }, { "Enter", "create" },
+        { "ESC", "cancel" } };
     ss_clear(ss, 0);
     draw_bar(ss, NULL);
-    draw_help(ss, 1, h, 5);
+    if (st->naming)       draw_help(ss, 1, hn, 2);
+    else if (st->copying) draw_help(ss, 1, hc, 3);
+    else                  draw_help(ss, 1, h, 7);
     ss_puts(ss, 1, 3, "Builds:", ink, 0);
     for (int i = 0; i < st->nbuilds; i++) {
-        int on = i == st->bsel;
+        int on = i == st->bsel && !st->copying;
         snprintf(line, sizeof line, " %s %-16.16s%s",
                  strcasecmp(st->builds[i], st->boot) ? " " : "*", st->builds[i],
                  strcasecmp(st->builds[i], st->boot) ? "" : "  (boots on countdown)");
         ss_puts(ss, 3, 4 + i, line, on ? 0 : ink, on ? hi : 0);
+    }
+    if (st->copying) {
+        /* the new build's name is in edit; what goes into it is the choice */
+        snprintf(line, sizeof line, "New build [%.15s] - copy from:", st->edit);
+        ss_puts(ss, 44, 3, line, ink, 0);
+        for (int i = 0; i <= st->nbuilds; i++) {
+            int on = i == st->choice;
+            snprintf(line, sizeof line, " %-30.30s",
+                     i ? st->builds[i - 1] : "<empty - every key unticked>");
+            ss_puts(ss, 46, 4 + i, line, on ? 0 : ink, on ? hi : 0);
+        }
+        ss_puts(ss, 44, 6 + st->nbuilds, "The copy opens in the editor.", hi, 0);
+        ss_puts(ss, 44, 7 + st->nbuilds, "Nothing is written until you Save.", hi, 0);
     }
     snprintf(line, sizeof line, "rom_path %.16s  disk_path %.16s  fdd_path %.16s",
              sc_get(&st->cfg, "psctrl", "rom_path") ? sc_get(&st->cfg, "psctrl", "rom_path") : "-",
              sc_get(&st->cfg, "psctrl", "disk_path") ? sc_get(&st->cfg, "psctrl", "disk_path") : "-",
              sc_get(&st->cfg, "psctrl", "fdd_path") ? sc_get(&st->cfg, "psctrl", "fdd_path") : "-");
     ss_puts(ss, 1, SS_ROWS - 3, line, hi, 0);
+    ss_clear_row(ss, SS_ROWS - 2, 0);
     ss_clear_row(ss, SS_ROWS - 1, 0);
-    if (st->msg[0])
+    if (st->naming) {
+        ss_puts(ss, 1, SS_ROWS - 2, "becomes the section [name]: letters, digits, - and _, 15 at most",
+                hi, 0);
+        snprintf(line, sizeof line, "New build name: %.15s_", st->edit);
+        ss_puts(ss, 1, SS_ROWS - 1, line, ink, 0);
+    } else if (st->msg[0])
         ss_puts(ss, 1, SS_ROWS - 1, st->msg, ink, 0);
     else if (st->secs > 0) {
         snprintf(line, sizeof line, "Booting %.15s in %d...", st->boot, st->secs);
@@ -1249,7 +1341,34 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             snap(ss, &st);
             e.key = SI_NONE;
         }
-        if (st.screen == SCR_BUILDS) {
+        if (st.screen == SCR_BUILDS && st.naming) {
+            unsigned long n = strlen(st.edit);
+            switch (e.key) {
+            case SI_CHAR:
+                if (n + 1 < SC_SEC_LEN) { st.edit[n] = e.ch; st.edit[n + 1] = '\0'; }
+                break;
+            case SI_BACKSPACE: if (n) st.edit[n - 1] = '\0'; break;
+            case SI_ENTER:
+                if (name_ok(&st)) { st.naming = 0; st.copying = 1; st.choice = 0; st.msg[0] = '\0'; }
+                break;
+            case SI_ESC: st.naming = 0; st.msg[0] = '\0'; break;
+            default: break;
+            }
+        } else if (st.screen == SCR_BUILDS && st.copying) {
+            switch (e.key) {
+            case SI_UP:    if (st.choice > 0) st.choice--; break;
+            case SI_DOWN:  if (st.choice < st.nbuilds) st.choice++; break;
+            case SI_ENTER: new_build(&st); break;
+            case SI_ESC:   st.copying = 0; st.msg[0] = '\0'; break;
+            default: break;
+            }
+        } else if (st.screen == SCR_BUILDS && st.asking) {
+            st.asking = 0; st.msg[0] = '\0';
+            if (e.key == SI_CHAR && (e.ch == 'y' || e.ch == 'Y'))
+                delete_build(&st);
+            else if (e.key != SI_NONE)
+                snprintf(st.msg, sizeof st.msg, "not deleted");
+        } else if (st.screen == SCR_BUILDS) {
             switch (e.key) {
             case SI_UP:   if (st.bsel > 0) st.bsel--; break;
             case SI_DOWN: if (st.bsel < st.nbuilds - 1) st.bsel++; break;
@@ -1261,10 +1380,33 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     snprintf(st.sec, sizeof st.sec, "%s", st.builds[st.bsel]);
                     st.screen = SCR_EDIT; st.tab = 0; st.sel = 0; st.top = 0;
                     st.msg[0] = '\0';
+                } else if (e.ch == 'n' || e.ch == 'N') {
+                    if (st.nbuilds >= MAX_BUILDS)
+                        snprintf(st.msg, sizeof st.msg, "%d builds is as many as the page lists", MAX_BUILDS);
+                    else { st.naming = 1; st.edit[0] = '\0'; st.msg[0] = '\0'; }
+                } else if ((e.ch == 'd' || e.ch == 'D') && st.nbuilds) {
+                    if (st.nbuilds == 1)
+                        snprintf(st.msg, sizeof st.msg, "the last build stays - make another first");
+                    else {
+                        st.asking = 1;
+                        snprintf(st.msg, sizeof st.msg, "delete [%s] and everything in it? Y/N", st.builds[st.bsel]);
+                    }
+                } else if (e.ch == 's' || e.ch == 'S') {
+                    sc_set(&st.cfg, "psctrl", "boot", st.boot);
+                    if (sc_save(&st.cfg, NULL) == 0) {
+                        snprintf(st.msg, sizeof st.msg, "saved");
+                        st.warned = 0;
+                    } else
+                        snprintf(st.msg, sizeof st.msg, "SAVE FAILED - %.48s", sc_save_error(&st.cfg));
                 }
                 break;
             case SI_ESC:
             case SI_F10:
+                if (st.cfg.dirty && !st.warned && e.key == SI_ESC) {
+                    st.warned = 1;
+                    snprintf(st.msg, sizeof st.msg, "unsaved changes - S saves, ESC again leaves them");
+                    break;
+                }
                 snprintf(chosen, chosen_len, "%s", st.boot);
                 return SP_QUIT;
             default: break;
@@ -1329,9 +1471,10 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             case SI_ENTER:
                 if (st.row[st.sel].kind == ROW_SAVE) {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
-                    if (sc_save(&st.cfg, NULL) == 0)
+                    if (sc_save(&st.cfg, NULL) == 0) {
                         snprintf(st.msg, sizeof st.msg, "saved");
-                    else
+                        st.warned = 0;
+                    } else
                         snprintf(st.msg, sizeof st.msg, "SAVE FAILED - %.48s",
                                  sc_save_error(&st.cfg));
                 } else if (st.row[st.sel].kind == ROW_BOOT) {

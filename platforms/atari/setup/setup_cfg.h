@@ -64,6 +64,16 @@ int sc_set_n(struct sc_cfg *c, const char *sec, const char *key, int n,
 /* How many times `key` appears in `sec`. */
 int sc_count(const struct sc_cfg *c, const char *sec, const char *key);
 
+/* Builds are sections. sc_add_section puts an empty [sec] at the end of
+ * the file (nothing to do if it exists); sc_copy_section appends every
+ * key line of [from] to [to] in order, adding [to] if it is missing -
+ * comments are not copied; sc_del_section removes [sec] and every line
+ * in it. -1 when the file is full, the names are the same, or (delete)
+ * there is no such section. Names are lower-cased like the parser does. */
+int sc_add_section(struct sc_cfg *c, const char *sec);
+int sc_copy_section(struct sc_cfg *c, const char *from, const char *to);
+int sc_del_section(struct sc_cfg *c, const char *sec);
+
 /* Write the file, keeping the previous one as <path>.bak. The new file
  * gets the owner of the directory it lands in, so a save while running
  * as root under pistorm.service does not leave a root-owned .cfg. */

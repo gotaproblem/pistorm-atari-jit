@@ -329,6 +329,43 @@ static void run_cfg(void)
           !strcmp(sc_get(&c, "apj-os", "hdd"), "first.img"),
           "removing hdd #2 disturbed hdd #1");
 
+    /* builds: new (empty), new as a copy, delete */
+    CHECK(sc_add_section(&c, "Empty") == 0, "empty section failed");
+    CHECK(sc_sections(&c, secs, 8) == 5 && !strcmp(secs[4], "empty"),
+          "the new empty section is not listed last, lower-cased");
+    char keys[4][SC_KEY_LEN];
+    CHECK(sc_keys(&c, "empty", keys, 4) == 0, "an empty section has keys");
+    CHECK(sc_add_section(&c, "empty") == 0 && sc_sections(&c, secs, 8) == 5,
+          "adding a section that exists must do nothing");
+    CHECK(sc_copy_section(&c, "apj-os", "apj-two") == 0, "copy failed");
+    CHECK(!strcmp(sc_get(&c, "apj-two", "cpu"), "68040") &&
+          !strcmp(sc_get(&c, "apj-two", "vga"), "ET4000AX FVDI") &&
+          !strcmp(sc_get(&c, "apj-two", "hostfs"), "S /home/pistorm/atari-share") &&
+          !strcmp(sc_get(&c, "apj-two", "hdd"), "first.img"),
+          "the copy is missing keys");
+    CHECK(sc_count(&c, "apj-two", "hdd") == 1, "the copy has %d hdd lines, wanted 1",
+          sc_count(&c, "apj-two", "hdd"));
+    CHECK(!strcmp(sc_get(&c, "apj-os", "cpu"), "68040") && sc_count(&c, "apj-os", "hdd") == 1,
+          "copying changed the source");
+    CHECK(sc_copy_section(&c, "gem", "gem") != 0, "a section copied onto itself");
+    CHECK(sc_set(&c, "apj-two", "cpu", "68030") == 0 &&
+          !strcmp(sc_get(&c, "apj-os", "cpu"), "68040"),
+          "editing the copy changed the original");
+    CHECK(sc_del_section(&c, "empty") == 0, "delete failed");
+    CHECK(sc_del_section(&c, "empty") != 0, "deleting a section twice must fail");
+    CHECK(sc_sections(&c, secs, 8) == 5 && !strcmp(secs[4], "apj-two"),
+          "the wrong section went");
+    CHECK(sc_del_section(&c, "stbox") == 0 && sc_get(&c, "stbox", "stbox_tos") == NULL,
+          "a deleted section's keys are still readable");
+    {
+        /* sections still separated by a blank line, none run together */
+        int bad = 0;
+        for (int i = 1; i < c.n; i++)
+            if (c.line[i].text[0] == '[' && c.line[i - 1].text[0])
+                bad++;
+        CHECK(!bad, "%d section header(s) with no blank line above", bad);
+    }
+
     /* save, reload, and diff against the original */
     char path[256];
     snprintf(path, sizeof path, "%s/sc_harness_%d.cfg",
