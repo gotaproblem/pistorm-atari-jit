@@ -683,8 +683,19 @@ static void *ipl_task(void *)
       continue;
     }
     status = *ioread;
-    //if (ps_bus_active)
-    //  continue;                       /* transaction raced the sample */
+    /* The after-check of the bracket. It was commented out, which left
+     * the race the comment above describes wide open: a transaction that
+     * starts between the flag test and the read leaves the IPL field
+     * carrying whatever the Pi is driving. A guest polling the ACIA in a
+     * tight loop (Xenon 2, every 10 us) drives the SAME pattern each
+     * time, so the raced samples agree with each other and the
+     * persistence filter - built for transients - confirms them:
+     * 72 level-4/s delivered on a 50 Hz screen, the game 44% fast, on
+     * some boots and not others, and gone the moment anything thinned
+     * that loop (USB injection off, a printf in the path). Field-
+     * measured 19 Sep with debug ipl / debug mfp. */
+    if (ps_bus_active)
+      continue;                         /* transaction raced the sample */
     if (status & 0x01)
     {
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
