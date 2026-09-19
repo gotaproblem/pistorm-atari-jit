@@ -1451,8 +1451,9 @@ int main (int argc, char *argv[])
           fclose(chk);
           memset(config_file, 0, sizeof(config_file));
           strcpy(config_file, argv[g]);
-
-          break;
+          /* keep scanning: run-pistorm.sh puts --config first, and a
+           * `break` here used to hide every switch after it (--no-setup
+           * was silently ignored) */
         }
       }
     }

@@ -25,9 +25,13 @@ cd "$self_dir" || exit 1
 
 # The emulator needs /dev/mem for the GPIO, so it has to run as root. Ask
 # for that here rather than letting it exit with "Unable to open /dev/mem".
+# sudo resets the environment, so PISTORM_* variables set in front of this
+# script (PISTORM_IKBD_DEBUG=1 sh run-pistorm.sh ...) are carried across
+# by hand - they are the only ones the emulator reads.
 if [ "$(id -u)" -ne 0 ]; then
 	echo "[run-pistorm] needs root for /dev/mem - re-running under sudo"
-	exec sudo -- /bin/sh "$self" "$@"
+	keep=$(env | grep '^PISTORM_[A-Z0-9_]*=' | tr '\n' ' ')
+	exec sudo -- env $keep /bin/sh "$self" "$@"
 fi
 while :; do
 	./emulator --config ../configs/psctrl.cfg "$@"
