@@ -646,6 +646,431 @@ static void stram_alias_init(void)
             "hardware\n", (eff0 + eff1) >> 10, eff0 >> 10, eff1 >> 10);
 }
 
+/* ==================================================================
+ * THE REAL MMU'S MEMORY CONFIGURATION ($FF8001)
+ *
+ * The guest's idea of how much ST-RAM there is and the REAL MMU's idea
+ * of what chips are soldered to the board are two different facts, and
+ * only one of them is negotiable.
+ *
+ * With `stram_size` absent the Pi-side model is a flat 4MB, TOS sizes
+ * 4MB out of Pi RAM (sr_bget never touches the real chips), and then
+ * writes memcfg $0A - 2M|2M - to the real MMU. On a board with two
+ * 512K chips that programs the wrong row/column multiplexing, and the
+ * victim is the NATIVE display: the CPU presents a full address for its
+ * write-through while the Shifter's fetch runs off the MMU's own video
+ * counter, so the two no longer agree about where a pixel lives. Field
+ * symptom on a 1MB Mega ST: the picture doubled and shifted.
+ *
+ * The guest may believe whatever the model tells it. The chip gets the
+ * truth. So: probe the banks once at startup, program the board's own
+ * value, and substitute that value into every guest write that would
+ * land on $FF8001 - while reads give the guest back what it wrote, so
+ * its own bookkeeping stays self-consistent.
+ *
+ * This is a no-op on a board whose real size matches what the guest was
+ * told, because then the guest writes the same value we would.
+ * ================================================================== */
+
+/* defined below, used by pistorm_stram_phys_init() */
+static inline uae_u32 stram_screen_base(void);
+static void stram_shadow_init(uint32_t phys_top, int mirrors);
+
+static uint32_t g_stram_phys_top    = 0;     /* real DRAM the board has  */
+static uint8_t g_stram_phys_memcfg  = 0;     /* 0 = not established yet  */
+static uint8_t g_stram_guest_memcfg = 0x0A;  /* what the guest last wrote*/
+static int     g_stram_mirror_ok    = -1;    /* -1 unknown, 1 mirrors    */
+
+/* memcfg field encoding, matching stram_bank_tab above: 0=128K, 1=512K,
+ * 2=2M. Bank 0 is bits 3:2, bank 1 bits 1:0. An absent bank takes the
+ * smallest code, which is what a stock machine ends up holding. */
+static uint8_t stram_bank_code(uint32_t sz)
+{
+    if (sz >= (2048u << 10)) return 2;
+    if (sz >= (512u << 10))  return 1;
+    return 0;
+}
+
+/* Does the board repeat its RAM every megabyte across the 4MB space?
+ *
+ * It decides whether the flat model can work at all on the native
+ * display: TOS puts the frame buffer just under the top of the memory
+ * it was told about - about $3F8000 on a 4MB model - which is nowhere
+ * near 1MB of real DRAM. If the MMU ignores the address bits above its
+ * programmed size then $3F8000 and $0F8000 are the same cells, the
+ * Shifter's fetch and our write-through alias identically, and the
+ * picture is correct. If it does not, no amount of memcfg fixing will
+ * put that frame buffer on the screen and it needs a shadow buffer in
+ * low RAM instead.
+ *
+ * Two patterns, because one proves nothing: a floating bus can return
+ * the value you just wrote. The mirror has to FOLLOW. */
+static void stram_probe_mirror(void)
+{
+    const uint32_t a = 0x000400u;          /* past the vectors; the guest
+                                              has not booted yet, so the
+                                              contents are nobody's */
+    const uint32_t pat[2] = { 0xA5A50F0Fu, 0x5A5AF0F0u };
+    uint8_t old_fc = fc;
+    int ok[3] = { 1, 1, 1 };
+
+    fc = 0x5;                              /* supervisor data */
+    for (int p = 0; p < 2; p++) {
+        ps_write_32(a, pat[p]);
+        for (int i = 0; i < 3; i++) {
+            uint32_t off = (uint32_t)(i + 1) * 0x100000u;
+            if (ps_read_32(off + a) != pat[p])
+                ok[i] = 0;
+        }
+    }
+    ps_write_32(a, 0);
+    fc = old_fc;
+    g_buserr = 0;
+
+    g_stram_mirror_ok = (ok[0] && ok[1] && ok[2]);
+    fprintf(stderr, "[STRAM] 4MB mirror: 1M=%s 2M=%s 3M=%s - %s\n",
+            ok[0] ? "yes" : "no", ok[1] ? "yes" : "no", ok[2] ? "yes" : "no",
+            g_stram_mirror_ok
+              ? "a frame buffer above the real RAM still reaches the Shifter"
+              : "the Shifter CANNOT reach a frame buffer above the real RAM"
+                " (a shadow buffer in low RAM would be needed)");
+}
+
+/* Probe the board and take ownership of $FF8001. Call once, after the
+ * bus is up and before the guest runs. */
+extern "C" void pistorm_stram_phys_init(void)
+{
+    uint8_t old_fc = fc;
+    uint32_t p0, p1;
+
+    /* An escape hatch, because this is the one thing here that writes the
+     * real MMU's configuration register: PISTORM_STRAM_PHYS=0 leaves
+     * $FF8001 to the guest exactly as before, for an A/B. */
+    {
+        const char *e = getenv("PISTORM_STRAM_PHYS");
+        if (e && *e == '0') {
+            fprintf(stderr, "[STRAM] PISTORM_STRAM_PHYS=0 - $FF8001 left to "
+                            "the guest\n");
+            return;
+        }
+    }
+
+    fc = 0x5;                                  /* supervisor data      */
+    ps_write_8(0xFF8001u, 0x0A);               /* 2M|2M while probing  */
+    p0 = stram_probe_bank(0x000000u);
+    p1 = stram_probe_bank(0x200000u);
+    fc = old_fc;
+    g_buserr = 0;
+
+    if (!p0) {
+        fprintf(stderr, "[STRAM] bank 0 not detected - leaving $FF8001 to "
+                        "the guest, as before\n");
+        return;
+    }
+
+    g_stram_phys_memcfg = (uint8_t)((stram_bank_code(p0) << 2) |
+                                     stram_bank_code(p1));
+
+    /* PISTORM_STRAM_MEMCFG=<hex> forces the value instead, for a board
+     * the probe reads wrong - the probe has been wrong before (a Mega ST
+     * with 512K+512K once probed as 2048K+2048K). $05 is 512K+512K,
+     * $0A is 2M+2M, $00 is 128K+128K. Bank 0 is bits 3:2. */
+    {
+        const char *e = getenv("PISTORM_STRAM_MEMCFG");
+        if (e && *e) {
+            unsigned long f = strtoul(e, NULL, 0);
+            g_stram_phys_memcfg = (uint8_t)(f & 0x0Fu);
+            fprintf(stderr, "[STRAM] PISTORM_STRAM_MEMCFG overrides the "
+                            "probe: $%02X\n", g_stram_phys_memcfg);
+        }
+    }
+
+    fc = 0x5;
+    ps_write_8(0xFF8001u, g_stram_phys_memcfg);
+    fc = old_fc;
+    g_buserr = 0;
+
+    fprintf(stderr, "[STRAM] board memcfg $%02X (bank0 %uK, bank1 %uK) - the "
+                    "chip keeps this whatever the guest writes\n",
+            g_stram_phys_memcfg, p0 >> 10, p1 >> 10);
+
+    stram_probe_mirror();
+
+    /* Probed sizes, not the memcfg codes: an absent bank is coded 128K
+     * (the smallest field value, which is what a stock machine holds)
+     * and counting that would put the shadow in a bank that is not
+     * there. */
+    g_stram_phys_top = p0 + p1;
+    stram_shadow_init(g_stram_phys_top, g_stram_mirror_ok);
+}
+
+/* How much DRAM the board really has, 0 if never established.
+ *
+ * Anything that moves data over the REAL bus on the guest's behalf has
+ * to respect this, because the guest's own idea of memory is the flat
+ * 4MB model and the board is not obliged to agree. It matters most for
+ * a REAL bus-master DMA and its mirror sync: the device writes into
+ * space the board does not decode, and the sync then reads that nothing
+ * back and lays it over the guest's good memory in natmem. Before the
+ * memcfg fix this was hidden - the board was programmed 2M|2M, so those
+ * addresses folded into real cells and a write followed by a read still
+ * round-tripped. With the MMU told the truth they do not. */
+extern "C" unsigned int pistorm_stram_phys_top(void)
+{
+    return g_stram_phys_top;
+}
+
+/* Substitute the board's value into anything that would write $FF8001.
+ * Byte at $FF8001, or the word/long at $FF8000 that covers it; every
+ * other address passes through untouched. Also records what the guest
+ * meant to write, for the read shim below. */
+extern "C" unsigned int pistorm_stram_memcfg_bus_value(unsigned int a,
+                                                       unsigned int v,
+                                                       int size)
+{
+    a &= 0x00FFFFFFu;
+    if (!g_stram_phys_memcfg)
+        return v;                          /* never established */
+
+    if (size == 1 && a == 0x00FF8001u) {
+        g_stram_guest_memcfg = (uint8_t)v;
+        return g_stram_phys_memcfg;
+    }
+    if (size == 2 && a == 0x00FF8000u) {
+        g_stram_guest_memcfg = (uint8_t)v;
+        return (v & 0xFF00u) | g_stram_phys_memcfg;
+    }
+    if (size == 4 && a == 0x00FF8000u) {
+        g_stram_guest_memcfg = (uint8_t)(v >> 16);
+        return (v & 0xFF00FFFFu) | ((unsigned int)g_stram_phys_memcfg << 16);
+    }
+    return v;
+}
+
+/* Give the guest back its own value. Returns 1 when it served the read. */
+extern "C" int pistorm_stram_memcfg_read_shim(unsigned int a, int size,
+                                              unsigned int *out)
+{
+    a &= 0x00FFFFFFu;
+    if (!g_stram_phys_memcfg || size != 1 || a != 0x00FF8001u)
+        return 0;
+    *out = g_stram_guest_memcfg;
+    return 1;
+}
+
+/* ==================================================================
+ * SHADOW FRAME BUFFER
+ *
+ * Measured on a 1MB Mega ST: the MMU does NOT repeat its RAM across the
+ * 4MB space (mirror 1M=no 2M=no 3M=no). So with the flat 4MB model the
+ * guest's frame buffer sits at about $3F8000, the board decodes nothing
+ * above $0FFFFF, and the Shifter has nothing to scan - a black screen.
+ *
+ * Before the memcfg fix above, that same frame buffer WAS visible, but
+ * only by accident: the wrongly-programmed 2M|2M muxing folded those
+ * addresses back into real cells in an order nobody chose, which is the
+ * doubled and shifted picture. So there is no memcfg value that both
+ * addresses the chips correctly and puts a 4MB-model frame buffer on
+ * the screen. The buffer has to be somewhere the board really has.
+ *
+ * So: reserve the top 32K of real DRAM, point the REAL Shifter at it,
+ * and send the guest's screen writes there instead of to an address
+ * that decodes nowhere.
+ *
+ * Cost. The guest's screen writes were already being written through to
+ * the bus - stram_needs_bus_write() has always included the screen - so
+ * translating the address is free. The one new cost is a refill when
+ * the guest MOVES its screen: 32K of bus writes, about 2ms. A static
+ * screen never pays it; a double-buffered game that flips every frame
+ * pays it once a frame, because the back buffer it was drawing into is
+ * at an address we were not translating.
+ *
+ * The guest's own view never changes: rtg.high/mid/low keep the guest's
+ * base, so the HDMI renderer and everything else still see the screen
+ * where the guest put it. Only the real chip is told otherwise, and
+ * guest reads of those registers are answered from the shadow of its
+ * own writes.
+ * ================================================================== */
+
+#define STRAM_SHADOW_SIZE 0x8000u      /* one ST screen               */
+
+static uint32_t g_shadow_base = 0;     /* 0 = not engaged             */
+static uint32_t g_shadow_src  = 0;     /* the guest base it mirrors   */
+static int      g_shadow_have_base = 0;/* the guest has programmed it */
+
+static inline int stram_shadow_on(void) { return g_shadow_base != 0; }
+
+/* WHERE THE GUEST SAYS ITS SCREEN IS - from the registers it wrote, and
+ * only once it has written them. Deliberately NOT stram_screen_base(),
+ * which falls back to _v_bas_ad at $44e: during TOS 2.06's memory test
+ * that word is whatever the test last left there, and a garbage base
+ * would redirect unrelated write-through into the shadow.
+ *
+ * The same flag gates the register read shim. Answering a read of
+ * $FF8201/$FF8203 out of rtg before the guest has written them hands
+ * back 0 - and TOS 2.06 reads those registers for Physbase(). A screen
+ * at address 0 means the next screen clear wipes the vector table, and
+ * the machine lands on an illegal instruction: four bombs, straight
+ * after the memory test. Before the first write the real chip answers,
+ * exactly as it did before any of this. */
+static inline uae_u32 stram_shadow_guest_base(void)
+{
+    uae_u32 b;
+
+    if (!g_shadow_have_base)
+        return 0;
+    b = (((uae_u32)rtg.high) << 16) |
+        (((uae_u32)rtg.mid)  << 8)  |
+        ((uae_u32)rtg.low & 0xFEu);
+
+    /* SANITY. A screen base below $8000 is not a screen - it is the
+     * vector table, the sysvars and the OS variables, and no TOS puts a
+     * frame buffer there. Believing one would redirect the low-RAM
+     * write-through into the shadow, leave the real low RAM stale, and
+     * the next hdc_sync_pull() would haul that staleness back over the
+     * guest's own vectors. Which is what an illegal instruction at
+     * $000000FC with a vector table full of ROM fragments looks like.
+     * Out of range means no translation, which is the old behaviour. */
+    if (b < 0x8000u || b + STRAM_SHADOW_SIZE > ST_RAM_SIZE)
+        return 0;
+    return b;
+}
+
+/* Point the real Shifter at the shadow. fc is already data here - every
+ * caller arrives through a guest write path that has run fc_data(). */
+static void stram_shadow_program_base(void)
+{
+    if (!stram_shadow_guest_base())
+        return;                        /* nothing sane to mirror yet */
+    ps_write_8(0x00FF8201u, (uae_u8)(g_shadow_base >> 16));
+    ps_write_8(0x00FF8203u, (uae_u8)(g_shadow_base >> 8));
+    if (emulator_machine_is_ste())    /* $FF820D is STE-only - see the
+                                         detection note below */
+        ps_write_8(0x00FF820Du, (uae_u8)(g_shadow_base & 0xFEu));
+}
+
+/* Copy the guest's screen into the shadow. Only when the guest's base
+ * has actually moved - a register rewritten with the same value is the
+ * common case and must not cost 32K of bus traffic. */
+static void stram_shadow_refill(void)
+{
+    uae_u32 scr = stram_shadow_guest_base();
+
+    if (!scr || scr == g_shadow_src)
+        return;
+    g_shadow_src = scr;
+    {   /* the first few moves, so the log says what the shadow believes
+         * when something goes wrong later */
+        static int shown;
+        if (shown < 8) {
+            shown++;
+            fprintf(stderr, "[STRAM] shadow: guest screen $%06X -> $%06X\n",
+                    scr, g_shadow_base);
+        }
+    }
+    for (uint32_t o = 0; o < STRAM_SHADOW_SIZE; o += 4)
+        ps_write_32(g_shadow_base + o,
+                    do_get_mem_long((uae_u32 *)(natmem_offset + scr + o)));
+}
+
+/* Screen writes land in the shadow; everything else keeps its address. */
+static inline uae_u32 stram_bus_addr(uaecptr a)
+{
+    if (__builtin_expect(g_shadow_base == 0, 1))
+        return a & 0x00FFFFFFu;
+    {
+        uae_u32 scr = stram_shadow_guest_base();
+        if (scr && a >= scr && a < scr + STRAM_SHADOW_SIZE)
+            return g_shadow_base + (a - scr);
+    }
+    return a & 0x00FFFFFFu;
+}
+
+/* The guest's write is ALWAYS forwarded to the chip first, and the base
+ * bytes are corrected afterwards. Two reasons it is this way round and
+ * not a "consume the write" shim:
+ *
+ * 1. $FF820D IS THE STE DETECTION. EmuTOS and TOS 2.06 decide which
+ *    machine they are on by writing that register and reading it back -
+ *    on a plain ST the write does not stick and the read does not agree.
+ *    Swallowing the write and answering the read from our own shadow
+ *    made both of them believe a 1MB Mega ST was an STE, and they went
+ *    off to program hardware that is not fitted: no boot, nothing on the
+ *    console. TOS 1.04 does not run that test, which is why it was the
+ *    only one that worked.
+ * 2. A word or long write covers neighbours. The long at $FF820C spans
+ *    $FF820F, the STE line width - consuming it would quietly drop that.
+ *
+ * So the chip sees exactly what it always saw, and then we put the
+ * shadow's address back into the two (three on an STE) bytes that say
+ * where to scan from. */
+static void stram_shadow_video_after(uaecptr a, int size)
+{
+    int hit;
+
+    if (!stram_shadow_on())
+        return;
+    a &= 0x00FFFFFFu;
+    if (size == 1)
+        hit = (a == 0x00FF8201u || a == 0x00FF8203u || a == 0x00FF820Du);
+    else if (size == 2)
+        hit = (a == 0x00FF8200u || a == 0x00FF8202u || a == 0x00FF820Cu);
+    else
+        hit = (a == 0x00FF8200u || a == 0x00FF820Cu);
+    if (!hit)
+        return;
+    g_shadow_have_base = 1;            /* the guest owns a base now */
+    stram_shadow_refill();
+    stram_shadow_program_base();
+}
+
+/* Guest reads of the base registers get the guest's own value back.
+ *
+ * $FF820D is NOT answered on a plain ST: it does not exist there, and
+ * answering it is the STE-detection trap described above. On an STE it
+ * is a real register and the guest is entitled to read its own value. */
+extern "C" int pistorm_video_base_read_shim(unsigned int a, int size,
+                                            unsigned int *out)
+{
+    if (!g_shadow_base || !g_shadow_have_base || size != 1)
+        return 0;                      /* see stram_shadow_guest_base() */
+    switch (a & 0x00FFFFFFu) {
+    case 0x00FF8201u: *out = rtg.high; return 1;
+    case 0x00FF8203u: *out = rtg.mid;  return 1;
+    case 0x00FF820Du:
+        if (!emulator_machine_is_ste())
+            return 0;                  /* let the real bus answer */
+        *out = rtg.low;
+        return 1;
+    default:          return 0;
+    }
+}
+
+/* Engage if the board cannot reach where the guest puts its screen.
+ * Called from pistorm_stram_phys_init once the banks and the mirror are
+ * known. Never engages when bank aliasing is on - there the guest has
+ * been told the truth about the board and puts its screen inside it. */
+static void stram_shadow_init(uint32_t phys_top, int mirrors)
+{
+    {
+        const char *e = getenv("PISTORM_STRAM_SHADOW");
+        if (e && *e == '0') {
+            fprintf(stderr, "[STRAM] PISTORM_STRAM_SHADOW=0 - no shadow "
+                            "frame buffer\n");
+            return;
+        }
+    }
+    if (g_stram_alias || mirrors || !phys_top || phys_top >= ST_RAM_SIZE)
+        return;
+    if (phys_top < STRAM_SHADOW_SIZE * 2)
+        return;                        /* nowhere sensible to put it  */
+    g_shadow_base = (phys_top - STRAM_SHADOW_SIZE) & 0x00FFFF00u;
+    fprintf(stderr, "[STRAM] shadow frame buffer at $%06X (top 32K of the "
+                    "board's %uK) - the Shifter scans this, the guest keeps "
+                    "its own screen address\n",
+            g_shadow_base, phys_top >> 10);
+}
+
 static inline uae_u32 stram_be32(uaecptr a)
 {
     return ((uae_u32)natmem_offset[a] << 24) |
@@ -3071,6 +3496,15 @@ static uae_u32 hw_bget(uaecptr a)
         return et4000_io_read8(g_et4000, nova_io_alias_card_addr(a));
     if (hw_mfp_addr(a))
         return hw_mfp_bget(a);
+    {   /* $FF8001 and the video base: the guest reads back what IT
+         * wrote, not what the chip holds - see pistorm_stram_phys_init()
+         * and the shadow frame buffer */
+        unsigned int mc;
+        if (pistorm_stram_memcfg_read_shim(a, 1, &mc))
+            return mc;
+        if (pistorm_video_base_read_shim(a, 1, &mc))
+            return mc;
+    }
 
     switch (hw_page_addr(a))
     {
@@ -3121,6 +3555,8 @@ static void hw_lput(uaecptr a, uae_u32 v)
      * to hw_bus_* unsnooped - the model missed every guest memcfg write
      * on this, the dispatcher that actually runs (1MB Mega ST case) */
     stram_memcfg_snoop(a, v, 4);
+    v = pistorm_stram_memcfg_bus_value(a, v, 4);   /* the chip keeps the
+                                                      board's own value */
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return;
@@ -3135,6 +3571,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
              * the reference display for those. */
             st_video_snoop32(a, (uint32_t)v);
             hw_bus_lput(a, v);
+            stram_shadow_video_after(a, 4);
             break;
         case HW_PAGE_FDD_DMA:
             hw_fdd_lput(a, v);
@@ -3196,6 +3633,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
     fc_data();
     a = hw_fold_addr(a);
     stram_memcfg_snoop(a, v, 2);   /* see hw_lput */
+    v = pistorm_stram_memcfg_bus_value(a, v, 2);
 
     if (fpu_in_regs(a))
         return;
@@ -3209,6 +3647,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
         case HW_PAGE_VIDEO:
             st_video_snoop16(a, (uint16_t)v);
             hw_bus_wput(a, v);
+            stram_shadow_video_after(a, 2);
             break;
         case HW_PAGE_FDD_DMA:
             hw_fdd_wput(a, v);
@@ -3275,6 +3714,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
     fc_data();
     a = hw_fold_addr(a);
     stram_memcfg_snoop(a, v, 1);   /* see hw_lput */
+    v = pistorm_stram_memcfg_bus_value(a, v, 1);
 
     if (fpu_in_regs(a))
         return;
@@ -3288,6 +3728,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
         case HW_PAGE_VIDEO:
             st_video_snoop8(a, (uint8_t)v);
             hw_bus_bput(a, v);
+            stram_shadow_video_after(a, 1);
             break;
         case HW_PAGE_FDD_DMA:
             hw_fdd_bput(a, v);
@@ -3485,7 +3926,7 @@ static void sr_lput(uaecptr a, uae_u32 v)
         do_put_mem_long((uae_u32 *)(natmem_offset + a), v); // update mirror (BE)
     stram_snoop_lowram(a, 4);
     if (stram_needs_bus_write(a, 4)) {
-        uae_u32 bus_a = a & 0x00FFFFFF;
+        uae_u32 bus_a = stram_bus_addr(a);   /* screen -> shadow */
         fc_data();
         ps_write_32(bus_a, v); // write-through to bus
     }
@@ -3498,7 +3939,7 @@ static void sr_wput(uaecptr a, uae_u32 v)
     do_put_mem_word((uae_u16 *)sr_ptr(a), (uae_u16)v);
     stram_snoop_lowram(a, 2);
     if (stram_needs_bus_write(a, 2)) {
-        uae_u32 bus_a = a & 0x00FFFFFF;
+        uae_u32 bus_a = stram_bus_addr(a);   /* screen -> shadow */
         fc_data();
         ps_write_16(bus_a, (uint16_t)v);
     }
@@ -3511,7 +3952,7 @@ static void sr_bput(uaecptr a, uae_u32 v)
     *sr_ptr(a) = (uae_u8)v;
     stram_snoop_lowram(a, 1);
     if (stram_needs_bus_write(a, 1)) {
-        uae_u32 bus_a = a & 0x00FFFFFF;
+        uae_u32 bus_a = stram_bus_addr(a);   /* screen -> shadow */
         fc_data();
         ps_write_8(bus_a, (uint8_t)v);
     }
@@ -3543,7 +3984,7 @@ extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
         uint8_t old_fc = fc;
         fc = 5;
         g_buserr = 0;
-        ps_write_16(a, v);
+        ps_write_16(stram_bus_addr(a), v);   /* screen -> shadow */
         g_buserr = 0;
         fc = old_fc;
     }

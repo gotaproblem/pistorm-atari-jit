@@ -267,6 +267,24 @@ extern volatile uint8_t g_buserr;
 extern "C"
 #endif
 void pistorm_stram_memcfg_snoop(unsigned int a, unsigned int v, int size);
+/* $FF8001: the real MMU keeps the board's own configuration whatever the
+ * guest writes, and the guest reads back its own value. See
+ * pistorm_stram_phys_init() in pistorm_natmem.cpp.
+ *
+ * Braces, not the bare `extern "C"` the line above uses: that form binds
+ * to ONE declaration, so the three below took C++ linkage and the link
+ * failed on pistorm_stram_phys_init(). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void pistorm_stram_phys_init(void);
+unsigned int pistorm_stram_memcfg_bus_value(unsigned int a, unsigned int v,
+                                            int size);
+int pistorm_stram_memcfg_read_shim(unsigned int a, int size,
+                                   unsigned int *out);
+#ifdef __cplusplus
+}
+#endif
 
 static inline void cpu_data_fc(void)
 {
@@ -2132,6 +2150,12 @@ int main (int argc, char *argv[])
    * ps_gpip7_seed(). This also prints what the wire says, which is the
    * first thing to look at when a game runs 44% fast. */
   ps_gpip7_seed ();
+
+  /* Probe the board's real DRAM banks and take $FF8001 off the guest.
+   * After jit_mem_init (so stram_alias_init has had its go at the
+   * register) and before the CPU thread starts, because TOS programs
+   * memcfg in its first hundred instructions. */
+  pistorm_stram_phys_init ();
   jit_cpu_set_perf_options(config->cpu_clock_multiplier,
                            config->cpu_clock_multiplier_set ? 1 : 0,
                            config->m68k_speed,
@@ -2605,6 +2629,12 @@ extern "C"
     if (blitter_disabled_addr(address))
       return 0xFF;
 
+    {   /* $FF8001: give the guest back the value IT wrote */
+      unsigned int mc;
+      if (pistorm_stram_memcfg_read_shim(address, 1, &mc))
+        return mc;
+    }
+
     /* host-emulated STE DMA sound: serve reads from the register shadow
        (the range bus-errors on the real ST bus - hardware is host-side) */
     if (DMA_Sound_enabled && dmasnd_owns(address))
@@ -2988,6 +3018,7 @@ extern "C"
      * and it forwarded $FF8001 to the real chip while the natmem model
      * kept its boot value (1MB Mega ST field case) */
     pistorm_stram_memcfg_snoop(address, value, 1);
+    value = pistorm_stram_memcfg_bus_value(address, value, 1);
     mfp_note_eoi_write(address, value, false);
     mfp_hub_write_snoop (address, value, 0);  /* one shadow for all virtual channels */
     if (KBD_USB_enabled)
@@ -3124,6 +3155,7 @@ extern "C"
 
     cpu_data_fc();
     pistorm_stram_memcfg_snoop(address, value, 2);
+    value = pistorm_stram_memcfg_bus_value(address, value, 2);
     mfp_note_eoi_write(address, value, true);
     mfp_hub_write_snoop (address, value, 1);  /* one shadow for all virtual channels */
     if (KBD_USB_enabled)
@@ -3155,6 +3187,7 @@ extern "C"
 
     st_video_snoop32(address, (uint32_t)value);
     pistorm_stram_memcfg_snoop(address & 0x00FFFFFFu, value, 4);
+    value = pistorm_stram_memcfg_bus_value(address & 0x00FFFFFFu, value, 4);
 
     /* see the 8-bit path; catches the classic
      * move.l #$RR00VV00,$FF8800 */

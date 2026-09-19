@@ -699,11 +699,37 @@ static void bus_write(uint32_t addr, uint32_t val, int size)
 
 #define HDC_MAX_SYNC_SECTORS 256u        /* 128 KB bound per sync pass */
 
+extern unsigned int pistorm_stram_phys_top(void);   /* pistorm_natmem.cpp */
+
+/* The window a real bus master may be synced through. The guest's model
+ * is a flat 4MB; the board may have far less, and above what it has
+ * there is nothing to read. Pulling that nothing into the natmem mirror
+ * overwrites memory the guest is using - vectors and sysvars included,
+ * which is an illegal instruction a moment later. */
+static int hdc_window_ok(uint32_t base, uint32_t len)
+{
+    uint32_t top = pistorm_stram_phys_top();
+
+    if (!len || base >= 0x400000u || base + len > 0x400000u)
+        return 0;
+    if (top && base + len > top) {
+        static int shown;
+        if (shown < 8) {
+            shown++;
+            FDD_LOG("DMA window 0x%06X+%u is past the board's %uK of real "
+                    "RAM - not syncing (the transfer itself cannot have "
+                    "landed either)", base, len, top >> 10);
+        }
+        return 0;
+    }
+    return 1;
+}
+
 static void hdc_sync_pull(void)
 {
     fdc.hdc_pending = false;
     uint32_t len = (uint32_t)fdc.hdc_count * 512u;
-    if (!len || fdc.hdc_base >= 0x400000u || fdc.hdc_base + len > 0x400000u)
+    if (!hdc_window_ok(fdc.hdc_base, len))
         return;
     uint8_t buf[512];
     for (uint32_t off = 0; off < len; off += 512u) {
@@ -733,7 +759,7 @@ static void hdc_sync_pull(void)
 static void hdc_sync_push(void)
 {
     uint32_t len = (uint32_t)fdc.hdc_count * 512u;
-    if (!len || fdc.hdc_base >= 0x400000u || fdc.hdc_base + len > 0x400000u)
+    if (!hdc_window_ok(fdc.hdc_base, len))
         return;
     uint8_t buf[512];
     for (uint32_t off = 0; off < len; off += 512u) {
