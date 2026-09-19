@@ -802,12 +802,21 @@ void kbd_usb_ctrl_snoop(uint8_t v)
 /* ------------------------------------------------------------------ */
 
 /* the byte at the head of the ring is due (pacing, packet order) - this
- * is what raises the interrupt */
+ * is what raises the interrupt.
+ *
+ * Every byte, the rest of a packet included, waits out the serial link:
+ * 1.28 ms after the previous one at 7812.5 bps. The rest of a packet
+ * used to be released the instant its first byte was read, so that no
+ * real-IKBD byte could land between header and state - but that gave a
+ * game 40 us between the two interrupts where the hardware gives it
+ * 1.28 ms, and Xenon 2 does something in that time it needs. The packet
+ * still goes ahead of real bytes (priority) once it has started. */
 static int rx_priority_level(void)
 {
     return KBD_USB_enabled &&
            atomic_load_explicit(&in_packet, memory_order_relaxed) &&
-           ring_used() > 0;
+           ring_used() > 0 &&
+           now_us() >= atomic_load_explicit(&next_ready_us, memory_order_relaxed);
 }
 
 static int rx_ready_level(void)
