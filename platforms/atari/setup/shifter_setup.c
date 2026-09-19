@@ -1,6 +1,8 @@
 /*
  * shifter_setup.c - see shifter_setup.h.
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "shifter_setup.h"
 #include "gpio/ps_protocol.h"
@@ -250,4 +252,29 @@ void ss_fill(struct ss_screen *ss, int x, int y, int w, int h, int colour)
     for (int j = y; j < y + h; j++)
         for (int i = x; i < x + w; i++)
             ss_pixel(ss, i, j, colour);
+}
+
+/* the page as 640x400 XRGB for the emulator's screendump writer: colour
+ * rows doubled to keep the monitor's 2:1 pixels; mono as is */
+void ss_export_xrgb(const struct ss_screen *ss, uint32_t *out)
+{
+    static const uint32_t rgb[4] = { 0xEEEEEEu, 0xCC0000u, 0x00AA00u, 0x000000u };
+    const int dup = ss->planes == 1 ? 1 : 2;
+    for (int yo = 0; yo < 400; yo++) {
+        const int y = yo / dup;
+        for (int x = 0; x < 640; x++) {
+            int c;
+            if (ss->planes == 1)
+                c = ((ss->shadow[y * 80 + (x >> 3)] >> (7 - (x & 7))) & 1) ? 3 : 0;
+            else {
+                int g = x >> 4, bit = 15 - (x & 15); c = 0;
+                for (int p = 0; p < 2; p++) {
+                    uint16_t wd = (uint16_t)((ss->shadow[y * 160 + g * 4 + p * 2] << 8) |
+                                              ss->shadow[y * 160 + g * 4 + p * 2 + 1]);
+                    c |= ((wd >> bit) & 1) << p;
+                }
+            }
+            out[(unsigned long)yo * 640 + x] = rgb[c];
+        }
+    }
 }

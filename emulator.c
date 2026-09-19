@@ -1341,6 +1341,17 @@ void *cpu_task(void *)
 }
 
 
+/* The setup page's F12 / Help: same file naming and encoder as the
+ * console's `s` (et4000.c), which is not running yet while the page is. */
+extern "C" void screendump_next_path(char *out, size_t n);
+extern "C" int  write_png_rgb(const char *path, const uint32_t *pixels,
+                              uint32_t w, uint32_t h, uint32_t stride_px);
+static int setup_page_dump(const uint32_t *xrgb, int w, int h, char *path, unsigned long n)
+{
+  screendump_next_path(path, n);
+  return write_png_rgb(path, xrgb, (uint32_t)w, (uint32_t)h, (uint32_t)w);
+}
+
 int main (int argc, char *argv[])
 {
   struct emulator_config *config;
@@ -1547,6 +1558,7 @@ int main (int argc, char *argv[])
                  (scr.shifter && hdmi) ? " and " : "",
                  hdmi ? "HDMI" : "");
           si_open(1, 1);
+          sp_set_dumper(setup_page_dump);
           enum sp_result r = sp_run(&scr, config_file, chosen, sizeof chosen);
           si_close();
           if (hdmi)

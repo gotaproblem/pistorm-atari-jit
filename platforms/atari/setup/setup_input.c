@@ -107,6 +107,7 @@ struct si_event si_map_st(unsigned char sc, int shift)
     case 0x47: return ev_make(SI_HOME, SI_SRC_ST, 0);
     case 0x52: return ev_make(SI_INSERT, SI_SRC_ST, 0);
     case 0x53: return ev_make(SI_DELETE, SI_SRC_ST, 0);
+    case 0x62: return ev_make(SI_SNAP, SI_SRC_ST, 0);     /* Help      */
     default: break;
     }
     if (sc >= 0x3B && sc <= 0x44)                        /* F1..F10 */
@@ -154,6 +155,7 @@ struct si_event si_map_evdev(int code, int shift)
     case KEY_HOME:       return ev_make(SI_HOME, SI_SRC_USB, 0);
     case KEY_INSERT:     return ev_make(SI_INSERT, SI_SRC_USB, 0);
     case KEY_DELETE:     return ev_make(SI_DELETE, SI_SRC_USB, 0);
+    case KEY_F12:        return ev_make(SI_SNAP, SI_SRC_USB, 0);
     default: break;
     }
     if (code >= KEY_F1 && code <= KEY_F10)
@@ -484,7 +486,7 @@ const char *si_key_name(const struct si_event *e, char *buf, unsigned long n)
         "none", "up", "down", "left", "right", "enter", "esc", "tab",
         "backspace", "space", "home", "insert", "delete",
         "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
-        "tick"
+        "tick", "snap"
     };
     const char *src = e->src == SI_SRC_ST ? "ST" :
                       e->src == SI_SRC_PAD ? "pad" : "USB";

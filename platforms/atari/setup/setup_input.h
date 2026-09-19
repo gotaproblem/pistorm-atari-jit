@@ -22,6 +22,7 @@ enum si_key {
     SI_F1, SI_F2, SI_F3, SI_F4, SI_F5,
     SI_F6, SI_F7, SI_F8, SI_F9, SI_F10,
     SI_TICK,                      /* pad Y: tick / untick a row      */
+    SI_SNAP,                      /* F12 / ST Help: save a screen dump */
     SI_CHAR                       /* printable: see si_event.ch */
 };
 

@@ -1987,7 +1987,7 @@ int write_png_rgb(const char *path, const uint32_t *pixels,
  * its own directory with ../screendumps already there; otherwise the file
  * silently overwrote itself somewhere else.
  */
-static void screendump_next_path(char *out, size_t n)
+void screendump_next_path(char *out, size_t n)
 {
     const char *env = getenv("PISTORM_SCREENDUMP_DIR");
     char dir[1024];

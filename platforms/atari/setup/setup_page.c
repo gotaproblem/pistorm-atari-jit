@@ -962,10 +962,10 @@ static void draw_builds(struct ss_screen *ss, const struct state *st)
     int ink = c_ink(ss), hi = c_hi(ss);
     char line[SS_COLS + 1];
     static const struct help h[] = { { "Up/Down", "move" }, { "Enter", "boot" },
-        { "E", "edit" }, { "ESC/pad X", "leave" } };
+        { "E", "edit" }, { "ESC/pad X", "leave" }, { "F12", "dump" } };
     ss_clear(ss, 0);
     draw_bar(ss, NULL);
-    draw_help(ss, 1, h, 4);
+    draw_help(ss, 1, h, 5);
     ss_puts(ss, 1, 3, "Builds:", ink, 0);
     for (int i = 0; i < st->nbuilds; i++) {
         int on = i == st->bsel;
@@ -1191,6 +1191,28 @@ footer:;
 /* the loop                                                            */
 /* ================================================================== */
 
+/* F12 / Help: hand the page to the emulator's screendump writer */
+static sp_dump_fn dumper;
+void sp_set_dumper(sp_dump_fn fn) { dumper = fn; }
+
+static void snap(struct ss_screen *ss, struct state *st)
+{
+    static uint32_t px[640 * 400];
+    char path[600];
+    if (!dumper) {
+        snprintf(st->msg, sizeof st->msg, "no screendump writer in this build");
+        return;
+    }
+    ss_export_xrgb(ss, px);
+    if (dumper(px, 640, 400, path, sizeof path) != 0) {
+        snprintf(st->msg, sizeof st->msg, "screen dump failed");
+        return;
+    }
+    const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+    snprintf(st->msg, sizeof st->msg, "saved %.55s", name);
+    printf("[SETUP] screen dump %s\n", path);
+}
+
 enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                       char *chosen, unsigned long chosen_len)
 {
@@ -1223,6 +1245,10 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
         if (e.key != SI_NONE && st.secs > 0)
             st.secs = -1;
 
+        if (e.key == SI_SNAP) {
+            snap(ss, &st);
+            e.key = SI_NONE;
+        }
         if (st.screen == SCR_BUILDS) {
             switch (e.key) {
             case SI_UP:   if (st.bsel > 0) st.bsel--; break;

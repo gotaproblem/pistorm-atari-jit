@@ -74,6 +74,10 @@ void ss_clear_row(struct ss_screen *ss, int row, int paper);
 
 /* Pixel helpers on the shadow. Colour 0..1 (mono) or 0..3 (colour). */
 void ss_clear(struct ss_screen *ss, int colour);
+
+/* The page as 640x400 XRGB (colour rows doubled to keep the monitor's
+ * 2:1 pixels; mono as is) for the emulator's screendump writer. */
+void ss_export_xrgb(const struct ss_screen *ss, uint32_t *out);
 void ss_pixel(struct ss_screen *ss, int x, int y, int colour);
 void ss_fill(struct ss_screen *ss, int x, int y, int w, int h, int colour);
 

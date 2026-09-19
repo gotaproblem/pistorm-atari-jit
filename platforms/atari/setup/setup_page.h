@@ -40,6 +40,12 @@ enum sp_result {
 
 /* Runs until the countdown expires, Boot is chosen, or the page is quit.
  * `chosen` gets the section name to boot. */
+/* The emulator's screendump writer (et4000.c: same directory, numbering
+ * and encoder as the console's `s`). Called on F12 / Help with the page
+ * as 640x400 XRGB; fills `path` with what it wrote. Unset = no dumps. */
+typedef int (*sp_dump_fn)(const uint32_t *xrgb, int w, int h, char *path, unsigned long n);
+void sp_set_dumper(sp_dump_fn fn);
+
 enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                       char *chosen, unsigned long chosen_len);
 
