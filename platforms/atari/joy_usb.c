@@ -319,8 +319,22 @@ void joy_usb_resend(void)
     atomic_store(&resend_wanted, 1);
 }
 
+/* The IKBD reports a joystick change when its own scan loop next looks
+ * at the port - not the instant the stick moves. The pad's state is
+ * sampled on the same footing: once per IKBD_SCAN_US, and a packet goes
+ * out only at a scan, however many USB events arrived in between. */
+#define IKBD_SCAN_US 10000
+static uint64_t next_scan_us;
+
 void joy_usb_tick(void)
 {
+    {
+        const uint64_t now = mon_now_us();
+        if (now < next_scan_us)
+            return;                        /* between scans             */
+        next_scan_us = (next_scan_us && now - next_scan_us < IKBD_SCAN_US)
+                       ? next_scan_us + IKBD_SCAN_US : now + IKBD_SCAN_US;
+    }
     const int resend = atomic_exchange(&resend_wanted, 0);
 
     /* monitoring with no real IKBD to do the reporting: report ourselves

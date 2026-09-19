@@ -97,8 +97,19 @@ static _Atomic uint32_t ring_head;  /* consumer (CPU thread)             */
 static _Atomic uint32_t ring_tail;  /* producers (see above)             */
 static pthread_mutex_t  ring_push_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* consumer-side presentation state (CPU thread owns, ipl_task reads)   */
-static _Atomic uint64_t next_ready_us;   /* serial pacing gate           */
+/*
+ * The serial link, modelled as the wire it stands in for. The IKBD sends
+ * at 7812.5 bps on a clock that never stops: a byte completes
+ * IKBD_BYTE_US after the previous one completed, or after it was put on
+ * an idle line - never sooner, and not later because the guest was slow
+ * to read the last one. head_done_us is when the byte at the head of
+ * the ring completes; until then the guest sees nothing of it. Earlier
+ * the clock restarted from the guest's READ of the previous byte, which
+ * is no clock a real link has.
+ */
+static uint64_t         ring_t[RING_SIZE];  /* when each byte was queued */
+static _Atomic uint64_t head_done_us;       /* head byte completes at    */
+static _Atomic uint64_t line_done_us;       /* last byte completed at    */
 static _Atomic uint64_t real_quiet_us;   /* no new pkt before this       */
 static _Atomic int      in_packet;       /* mid-injected-packet flag     */
 
@@ -242,8 +253,18 @@ static void ring_push_packet(const uint8_t *bytes, int n)
         return;
     }
     uint32_t t = atomic_load_explicit(&ring_tail, memory_order_relaxed);
+    uint64_t now = now_us();
     for (int i = 0; i < n; i++)
+    {
         ring[(t + (uint32_t)i) & RING_MASK] = (uint16_t)bytes[i] | (i == 0 ? PKT_START : 0);
+        ring_t[(t + (uint32_t)i) & RING_MASK] = now;
+    }
+    if (ring_used() == 0)
+    {
+        /* idle line: this byte starts now, or when the last one ended */
+        uint64_t last = atomic_load(&line_done_us);
+        atomic_store(&head_done_us, (last > now ? last : now) + IKBD_BYTE_US);
+    }
     atomic_store_explicit(&ring_tail, t + (uint32_t)n, memory_order_release);
     pthread_mutex_unlock(&ring_push_lock);
 }
@@ -816,7 +837,7 @@ static int rx_priority_level(void)
     return KBD_USB_enabled &&
            atomic_load_explicit(&in_packet, memory_order_relaxed) &&
            ring_used() > 0 &&
-           now_us() >= atomic_load_explicit(&next_ready_us, memory_order_relaxed);
+           now_us() >= atomic_load_explicit(&head_done_us, memory_order_relaxed);
 }
 
 static int rx_ready_level(void)
@@ -825,8 +846,8 @@ static int rx_ready_level(void)
         return 0;
 
     uint64_t t = now_us();
-    if (t < atomic_load_explicit(&next_ready_us, memory_order_relaxed))
-        return 0;                            /* serial pacing             */
+    if (t < atomic_load_explicit(&head_done_us, memory_order_relaxed))
+        return 0;                            /* still on the wire         */
 
     if (!atomic_load_explicit(&in_packet, memory_order_relaxed))
     {
@@ -899,8 +920,17 @@ uint8_t kbd_usb_rx_read(void)
               !(ring[(h + 1) & RING_MASK] & PKT_START);
     atomic_store_explicit(&in_packet, mid, memory_order_relaxed);
 
-    atomic_store_explicit(&next_ready_us, now_us() + IKBD_BYTE_US,
-                          memory_order_relaxed);
+    /* the line runs on: the next byte completes IKBD_BYTE_US after this
+     * one did, or after it was queued if the line had gone idle */
+    {
+        uint64_t done = atomic_load(&head_done_us);
+        atomic_store(&line_done_us, done);
+        if (((t2 - (h + 1)) & RING_MASK) != 0)
+        {
+            uint64_t q = ring_t[(h + 1) & RING_MASK];
+            atomic_store(&head_done_us, (q > done ? q : done) + IKBD_BYTE_US);
+        }
+    }
     kbd_usb_stat_injected_bytes++;
     /* the guest took a joystick packet header: the way to see whether a
      * game reads what the pad queued */
