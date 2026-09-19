@@ -843,6 +843,10 @@ uint8_t kbd_usb_rx_read(void)
     atomic_store_explicit(&next_ready_us, now_us() + IKBD_BYTE_US,
                           memory_order_relaxed);
     kbd_usb_stat_injected_bytes++;
+    /* the guest took a joystick packet header: the way to see whether a
+     * game reads what the pad queued */
+    if (pst_dbg_ikbd && (e & PKT_START) && ((uint8_t)e == 0xFE || (uint8_t)e == 0xFF))
+        printf("[IKBD] guest read $%02X\n", (uint8_t)e);
     return (uint8_t)e;
 }
 
@@ -1572,7 +1576,12 @@ static int joy_send(int st_port, uint8_t state, uint8_t pad_buttons)
     pthread_mutex_unlock(&ikbd.lock);
 
     if (!ev || paused)
+    {
+        if (pst_dbg_ikbd)
+            printf("[IKBD] pad -> joystick %d state $%02X NOT sent (%s)\n",
+                   st_port, state, paused ? "paused" : "event reporting off");
         return 1;                          /* not reported in this mode */
+    }
     if (st_port == 0 && mouse_on && !both)
         return 1;                          /* port 0 belongs to the mouse */
     if (st_port == 1 && mouse_on)
@@ -1582,6 +1591,9 @@ static int joy_send(int st_port, uint8_t state, uint8_t pad_buttons)
         return 1;                          /* nothing new on the wire   */
     uint8_t pkt[2] = { (uint8_t)(0xFE | (st_port & 1)), state };
     ring_push_packet(pkt, 2);
+    if (pst_dbg_ikbd)
+        printf("[IKBD] pad -> $%02X $%02X queued (mouse %s, ring %u)\n",
+               pkt[0], pkt[1], mouse_on ? "on" : "off", (unsigned)ring_used());
     return 1;
 }
 
