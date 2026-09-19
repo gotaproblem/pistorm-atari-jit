@@ -506,7 +506,8 @@ void intlev_ack (uint8_t nr)
     if (nr == 6)
     {
         extern bool DMA_Sound_enabled;
-        if ((DMA_Sound_enabled || KBD_USB_enabled) && mfp_hub_irq_wanted())
+        if ((DMA_Sound_enabled || KBD_USB_enabled || pst_fdd_mfp_irq) &&
+            mfp_hub_irq_wanted())
         {
             uint8_t live = 0;
             ps_read_ipl(&live);

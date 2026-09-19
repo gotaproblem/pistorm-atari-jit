@@ -140,15 +140,23 @@ static uint64_t now_ns(void)
 
 void ym2149_snoop8(uint32_t addr, uint8_t val)
 {
-    if (!atomic_load_explicit(&g_on, memory_order_relaxed))
-        return;
     uint32_t a = addr & 0x00FFFFFFu;
     if (a < 0x00FF8800u || a > 0x00FF88FFu || (a & 1u))
         return;                              /* odd byte: PSG not connected */
     if ((a & 2u) == 0) {
+        /* Track the select latch EVEN WHEN THE EMULATED CHIP IS OFF.
+         * ym2149_selected_reg() is what stbox_realfdc.c restores the
+         * guest's PSG select to after borrowing register 14 for drive
+         * and side control. With the tracking behind the g_on test, the
+         * latch stayed 0 whenever `ym2149 disabled` was set, so the
+         * restore selected register 0 and the guest's next data write -
+         * meant for whatever it had selected - landed in the fine tone
+         * period of channel A. */
         g_latch = val & 0x0F;                /* YM2149 decodes 4 addr bits */
         return;
     }
+    if (!atomic_load_explicit(&g_on, memory_order_relaxed))
+        return;                              /* no emulated chip to feed  */
     /* data write to the latched register */
     unsigned h = atomic_load_explicit(&g_head, memory_order_relaxed);
     unsigned t = atomic_load_explicit(&g_tail, memory_order_acquire);

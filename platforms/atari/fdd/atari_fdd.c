@@ -16,6 +16,7 @@
 
 #include "atari_fdd.h"
 #include "gpio/ps_protocol.h"
+#include "platforms/atari/mfp_hub.h"
 
 #include <stdio.h>
 #include "platforms/atari/psctrl/psctrl_tunables.h"
@@ -189,6 +190,40 @@ bool fdd_route_address(uint32_t addr)
     return false;
 }
 
+/* MFP channel 7 = GPIP5 = the shared WD1772 INTRQ / ACSI /IRQ line.
+ *
+ * FINDING (19 Sep): the emulated FDC and the emulated ACSI targets have
+ * never been able to raise an actual interrupt. fdd_gpip() pulls bit 5
+ * low in the GPIP BYTE, which serves a guest that POLLS $FFFA01 - what
+ * TOS and EmuTOS do, and why floppy I/O works - but the real MFP sits on
+ * the real board with its real GPIP5 pin, and nothing we emulate can
+ * move that pin. Software that waits on the FDC interrupt instead of
+ * polling therefore waits forever.
+ *
+ * mfp_hub already knows how to be an MFP channel, and a GPIP line is a
+ * LEVEL source (it asserts while the condition holds and re-requests
+ * after EOI while still asserted), so the whole fix is to hand it this
+ * poll. The hub applies the 68901 delivery rule - enabled in IERB,
+ * unmasked in IMRB, outranks every virtual in-service channel - so a
+ * guest that has not asked for the interrupt is not given one.
+ *
+ * Off by default (pst_fdd_mfp_irq): every configuration that works today
+ * works by polling, and turning a new interrupt source on under a
+ * working system is exactly the kind of change that costs a day. */
+static int fdd_mfp_level_poll(void)
+{
+    if (!pst_fdd_mfp_irq)
+        return 0;
+    if (acsi_irq_active())
+        return 1;
+    /* Side-effect free: fdd_irq_active() ARMS irq_ready on its first
+     * call, which is the GPIP poll path's one-read delay. Reading the
+     * two flags here must not consume that. */
+    return (fdc.selected_drive >= 0 &&
+            fdc.drives[fdc.selected_drive].disk_inserted &&
+            fdc.irq_pending && fdc.irq_ready) ? 1 : 0;
+}
+
 void fdd_init(void)
 {
     memset(&fdc, 0, sizeof(fdc));
@@ -208,6 +243,8 @@ void fdd_init(void)
         fdc.drives[i].num_sides     = 2;
         motor_ticks[i]              = 0;
     }
+
+    mfp_hub_register_level(7, fdd_mfp_level_poll);   /* GPIP5 - see above */
 
     FDD_INFO("Initialised");
 }
@@ -578,7 +615,6 @@ void fdd_status(void)
     //fprintf(stderr, "[FDD] dma_mode=0x%04X dma_addr=0x%06X scount=%d dstat=0x%02X\n",
     //        fdc.dma_mode, fdc.dma_addr, fdc.dma_sector_count, fdc.dma_status);
     for (int i = 0; i < FDD_MAX_DRIVES; i++) {
-        fdd_drive_t *d = &fdc.drives[i];
         //fprintf(stderr, "[FDD] Drive %c: %s track=%d%s%s\n",
         //        'A' + i,
         //        d->disk_inserted ? d->image_path : "(no disk)",
@@ -884,55 +920,80 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
  * ========================================================================= */
 
 /*
- * The PSG sits on the upper byte lane: a byte access is the value, a
- * word access carries it in the high byte (move.w #$0E00,$FF8800.w).
+ * The floppy emulation needs exactly ONE thing from the PSG: port A's
+ * drive and side select bits. It is not the chip's owner and must not
+ * behave like one. Three rules, each of them a bug that was paid for:
  *
- * The floppy emulation only needs port A (drive and side select), so
- * everything else goes to the REAL chip - tones, mixer, envelope, and
- * the reads programs do before a read-modify-write of the mixer. Port A
- * itself reaches the real chip with the drive-select bits held high, so
- * a real drive on the ST never spins for a disk that is being served
- * from an image; its other bits (RS232 handshake, printer strobe) still
- * land. Before this, every PSG write disappeared here while a floppy
- * image was mounted and the real YM2149 stayed silent.
+ * 1. EVERY write reaches the real chip, exactly as it does when no image
+ *    is mounted. With no image, natmem's HW_PAGE_PSG case is
+ *    ym2149_snoop* followed by hw_bus_*put - the real YM2149 is
+ *    programmed. Swallowing the writes here (mixer, tone, envelope all
+ *    dropped on the floor) is why `ym2149 disabled` gave no sound at all
+ *    while a floppy image was mounted.
  *
- * When the emulated YM2149 (HDMI) is running it is the one that sounds,
- * and the real chip is left as it was - both playing at once is not
- * what either setting means.
+ *    Gating the pass-through on ym2149_active() is NOT the fix. It
+ *    leaves the real chip unprogrammed while rule 2 still reads FROM it,
+ *    and a register read-modify-write - select 7, read the mixer, OR in
+ *    a channel, write it back, which is what TOS and most players do -
+ *    then folds a stale chip's bits into the emulated one. Wrong mixer
+ *    bits are noise channels left open: that is the noise.
+ *
+ * 2. Reads come from the real chip, with our emulated drive-select bits
+ *    laid back over port A. Returning $FF, as this used to, is a
+ *    different answer from the one the identical read gets when no image
+ *    is mounted.
+ *
+ * 3. Byte lane. The PSG sits on D8-D15, so a byte access carries the
+ *    value and a WORD access carries it in the HIGH byte
+ *    (move.w #$0E00,$FF8800). This took the low byte of both, so every
+ *    word-form PSG write - a great deal of ST software - selected
+ *    register 0 and wrote 0, and drive/side select was never decoded for
+ *    those programs at all. Long writes arrive here already split into
+ *    two words by fdd_io_write().
+ *
+ * Drive select: a drive whose disk we are serving from an image must not
+ * also spin its real mechanism, so ITS select bit (and only its) is held
+ * high on the way to the chip. A drive with no image is untouched, so a
+ * real drive B still works beside an image in A. Port A's other bits -
+ * RS232 RTS/DTR, printer strobe - always pass through.
  */
-#define PSG_DRIVE_BITS (PSG_DRIVE_A_SEL | PSG_DRIVE_B_SEL | PSG_SIDE_SEL)
-extern int ym2149_active(void);
+
+/* Select bits to hold high on the real chip: the drives we are serving. */
+static uint8_t psg_served_bits(void)
+{
+    uint8_t m = 0;
+    if (fdc.drives[0].disk_inserted) m |= PSG_DRIVE_A_SEL;
+    if (fdc.drives[1].disk_inserted) m |= PSG_DRIVE_B_SEL;
+    return m;
+}
 
 static uint32_t psg_read_addr(uint32_t addr, int size)
 {
     uint32_t real = bus_read(addr, size);
-    if (addr == PSG_REG_SELECT && fdc.psg_reg_sel == PSG_PORT_A_REG) {
-        /* port A: the emulated drive/side bits over the real chip's rest */
-        uint8_t merged = (uint8_t)(((size == 2 ? real >> 8 : real) & ~PSG_DRIVE_BITS) |
-                                   (fdc.psg_porta & PSG_DRIVE_BITS));
-        return size == 2 ? ((uint32_t)merged << 8) | (real & 0xFFu) : merged;
+    uint8_t  m    = psg_served_bits();
+
+    if (addr == PSG_REG_SELECT && fdc.psg_reg_sel == PSG_PORT_A_REG && m) {
+        uint8_t hi = (uint8_t)(size == 2 ? (real >> 8) : real);
+        hi = (uint8_t)((hi & (uint8_t)~m) | (fdc.psg_porta & m));
+        return size == 2 ? (((uint32_t)hi << 8) | (real & 0xFFu)) : hi;
     }
     return real;
 }
 
 static void psg_write_addr(uint32_t addr, uint32_t val, int size)
 {
-    uint8_t v = (uint8_t)(size == 2 ? val >> 8 : val);
+    uint8_t v = (uint8_t)(size == 2 ? (val >> 8) : val);
 
     if (addr == PSG_REG_SELECT) {
-        fdc.psg_reg_sel = v & 0x0F;
-        if (!ym2149_active())
-            bus_write(addr, val, size);
-    } else if (addr == PSG_REG_WRITE) {
-        if (fdc.psg_reg_sel == PSG_PORT_A_REG) {
-            fdc.psg_porta = v;
-            fdc_decode_drive_side();
-            v |= PSG_DRIVE_BITS;              /* real drives stay deselected */
-            val = size == 2 ? ((uint32_t)v << 8) | (val & 0xFFu) : v;
-        }
-        if (!ym2149_active())
-            bus_write(addr, val, size);
+        fdc.psg_reg_sel = (uint8_t)(v & 0x0F);
+    } else if (addr == PSG_REG_WRITE && fdc.psg_reg_sel == PSG_PORT_A_REG) {
+        uint8_t m = psg_served_bits();
+        fdc.psg_porta = v;
+        fdc_decode_drive_side();
+        v = (uint8_t)(v | m);              /* served drives stay deselected */
+        val = (size == 2) ? (((uint32_t)v << 8) | (val & 0xFFu)) : v;
     }
+    bus_write(addr, val, size);            /* always - see rule 1 above */
 }
 
 static void fdc_decode_drive_side(void)
@@ -1465,7 +1526,6 @@ static void fdc_do_read_sectors(void)
             img_ret < 0 ? "FAIL" : "ok",
             img_ret < 0 ? 0 : buf[0], img_ret < 0 ? 0 : buf[1]);
 #endif
-    static int read_count = 0;
     //fprintf(stderr, "[COUNT] Read #%d T%d S%d Sec%d %s\n",
     //        ++read_count, track, side, sector,
     //        img_ret < 0 ? "FAIL" : "OK");
@@ -1601,8 +1661,6 @@ static void fdc_do_read_address(void)
                  ? fdc.drives[drv].current_track
                  : fdc.track_reg;
     int side   = fdc.selected_side;
-    int sector = fdc.sector_reg;
-    int count  = fdc.dma_sector_count ? fdc.dma_sector_count : 1;
 
     //FDD_LOG("Read address: drive=%d track=%d side=%d", drv, track, side);
 
@@ -1613,7 +1671,6 @@ static void fdc_do_read_address(void)
         return;
     }
 
-    fdd_drive_t *d = &fdc.drives[drv];
     uint8_t id[6];
     id[0] = (uint8_t)track;
     id[1] = (uint8_t)side;

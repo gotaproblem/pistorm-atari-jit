@@ -82,7 +82,8 @@ rom emutos-aranym.rom
 ide
 hdd 0:apj-os.img
 acsi disabled
-fdd 720k.st
+fdd A:720k.st
+#fdd B:second.st       # the ST's second drive; A: and B:, or 0: and 1:
 network disabled
 network_backend tap
 network_tap tap0

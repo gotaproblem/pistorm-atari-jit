@@ -19,6 +19,22 @@ extern "C" {
  * driven data bits instead of the CPLD's IPL lines - discard them. */
 extern volatile uint8_t ps_bus_active;
 extern volatile int ps_gpip7_force;   /* GPIP7 monitor detect: 0 real, 1 mono, 2 colour */
+extern volatile int      ps_gpip7_stable;   /* debounced: -1 none, 0 mono, 1 colour */
+extern volatile unsigned ps_gpip7_glitches; /* single disagreeing reads discarded    */
+extern volatile unsigned ps_gpip7_reads;    /* guest reads of the monitor-detect bit */
+
+/* Sample the monitor-detect line properly before the guest's first read
+ * decides the boot resolution. Call once, after the bus is up and before
+ * the CPU thread starts. No-op if the bit is forced. */
+void ps_gpip7_seed (void);
+
+/* Take / release the bus exclusion a transaction takes, WITHOUT running a
+ * transaction. ps_bus_trylock() returns 1 with the bus held (the caller
+ * must then call ps_bus_unlock()) or 0 if a transaction owns it. This is
+ * what makes ipl_task's GPLEV0 sample exclusive rather than merely
+ * unlikely to collide - see ps_protocol.c. */
+int  ps_bus_trylock (void);
+void ps_bus_unlock (void);
 
 
 #ifdef USING_PI_CLK

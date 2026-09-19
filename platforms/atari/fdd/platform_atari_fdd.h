@@ -34,8 +34,8 @@ extern "C" {
 #endif
 
 /* Call once at platform startup - no RAM pointer needed,
- * DMA uses ps_write_16/ps_read_16 directly */
-void platform_fdd_init(char*);
+ * DMA uses ps_write_16/ps_read_16 directly. image_b may be NULL. */
+void platform_fdd_init(const char *image_a, const char *image_b);
 
 #ifdef __cplusplus
 }

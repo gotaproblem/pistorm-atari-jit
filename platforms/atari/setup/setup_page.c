@@ -50,7 +50,7 @@
 
 enum screen { SCR_BUILDS = 0, SCR_EDIT };
 /* ROW_LABEL: a heading the cursor skips (acsi, fdd, hostfs groups);
- * ROW_SLOT: the nth line of a repeated key (hdd 0..7, acsi 0..7, fdd A:,
+ * ROW_SLOT: the nth line of a repeated key (hdd 0..7, acsi 0..7, fdd A:/B:,
  * hostfs S:) - ticked when that line exists; ROW_ADD: "add a hostfs
  * drive" - ticking it opens the editor for a new line */
 enum row_kind { ROW_KEY = 0, ROW_LABEL, ROW_SLOT, ROW_ADD, ROW_SAVE, ROW_BOOT };
@@ -65,6 +65,9 @@ struct row {
     /* Drives tab: two columns of cells */
     int  col, line;              /* 0 left / 1 right, line within the list    */
     char label[8];               /* "0".."7", "A:", "S:", "+"                 */
+    int  slot;                   /* pinned slot for a disk row; label is what
+                                    the user sees and is not always a number
+                                    (the floppy shows A:/B:)                  */
 };
 
 struct state {
@@ -565,10 +568,12 @@ static void drop_by_rules(struct state *st)
  *
  * config_file.c numbers hdd lines 0..7 and acsi lines 0..7 in the order
  * they appear (an ID prefix on acsi would defeat disk_path), so slot n
- * is the nth line; ticking an empty slot appends the next line. There
- * is one fdd (drive A) and hostfs takes a letter and a path per line.
+ * is the nth line; ticking an empty slot appends the next line. The
+ * floppy has two slots of its own - drives A: and B:, written "0:" and
+ * "1:" in the file - and hostfs takes a letter and a path per line.
  */
 #define DRIVE_SLOTS 8
+#define FDD_SLOTS   2           /* the ST has two floppy drives, A: and B: */
 
 /* "3:image" -> 3 and "image"; no prefix -> -1 and the value as it is
  * (the same rule as config_file.c's slot_prefix) */
@@ -659,9 +664,10 @@ static struct row *drow(struct state *st, enum row_kind kind, const char *key,
 
 static void build_drive_rows(struct state *st)
 {
-    int hmap[DRIVE_SLOTS], amap[DRIVE_SLOTS];
+    int hmap[DRIVE_SLOTS], amap[DRIVE_SLOTS], fmap[DRIVE_SLOTS];
     slot_map(st, "hdd", hmap);
     slot_map(st, "acsi", amap);
+    slot_map(st, "fdd", fmap);
     int nf = sc_count(&st->cfg, st->sec, "fdd");
     int ns = sc_count(&st->cfg, st->sec, "hostfs");
     const char *ide = sc_get(&st->cfg, st->sec, "ide");
@@ -673,7 +679,7 @@ static void build_drive_rows(struct state *st)
     struct row *r;
 
     st->nrow = 0;
-    /* left column: ide + hdd 0..7, then fdd */
+    /* left column: ide + hdd 0..7, then fdd A: and B: */
     r = drow(st, ROW_KEY, "ide", 0, 0, 0, "");
     r->ticked = ide_on;
     for (int i = 0; i < DRIVE_SLOTS; i++) {
@@ -681,10 +687,20 @@ static void build_drive_rows(struct state *st)
         r = drow(st, ROW_SLOT, "hdd", hmap[i], 0, 1 + i, num);
         r->ticked = hmap[i] >= 0;
         r->blocked = !ide_on;
+        r->slot = i;
     }
     drow(st, ROW_LABEL, "fdd", 0, 0, DRIVE_SLOTS + 2, "");
-    r = drow(st, ROW_SLOT, "fdd", 0, 0, DRIVE_SLOTS + 3, "A:");
-    r->ticked = nf > 0;
+    /* Drive B had no row at all, which is why a second image could be
+     * mounted live from PSCTRL but never from the boot settings. Both
+     * drives are slots of the same repeated key now, pinned "0:"/"1:"
+     * in the file and shown as A: and B:. */
+    for (int i = 0; i < FDD_SLOTS; i++) {
+        r = drow(st, ROW_SLOT, "fdd", fmap[i], 0, DRIVE_SLOTS + 3 + i,
+                 i ? "B:" : "A:");
+        r->ticked = fmap[i] >= 0;
+        r->slot = i;
+    }
+    (void)nf;
     /* right column: acsi 0..7, then hostfs lines and an add row */
     r = drow(st, ROW_KEY, "acsi", asw, 1, 0, "");
     r->ticked = acsi_on;
@@ -693,6 +709,7 @@ static void build_drive_rows(struct state *st)
         r = drow(st, ROW_SLOT, "acsi", amap[i], 1, 1 + i, num);
         r->ticked = amap[i] >= 0;
         r->blocked = !acsi_on;
+        r->slot = i;
     }
     drow(st, ROW_LABEL, "hostfs", 0, 1, DRIVE_SLOTS + 2, "");
     int line = DRIVE_SLOTS + 3, room = SS_ROWS - ROW_LIST - FOOTER;
@@ -852,15 +869,20 @@ static int open_picker(struct state *st, const char *key, const char *current)
     return 1;
 }
 
+/* Keys whose lines carry a pinned "n:image" slot number, so that editing
+ * or removing one never renumbers the others. The floppy is one of them:
+ * its two slots are drive A and drive B. */
 static int is_disk(const char *key)
 {
-    return !strcasecmp(key, "hdd") || !strcasecmp(key, "acsi");
+    return !strcasecmp(key, "hdd") || !strcasecmp(key, "acsi") ||
+           !strcasecmp(key, "fdd");
 }
 
 /* after pin_all the line numbers may have moved: find this slot's line */
 static void slot_line(struct state *st, struct row *r)
 {
-    int map[DRIVE_SLOTS], sl = atoi(r->label);
+    int map[DRIVE_SLOTS], sl = r->slot;   /* not atoi(label): the floppy's
+                                             labels are "A:" and "B:"      */
     slot_map(st, r->text, map);
     r->ord = sl >= 0 && sl < DRIVE_SLOTS ? map[sl] : -1;
 }
@@ -955,7 +977,7 @@ static void commit_edit(struct state *st)
     char pinned[SC_LINE_LEN];
     if (r->kind == ROW_SLOT && is_disk(r->text)) {
         int typed_slot; const char *img = slot_of(val, &typed_slot);
-        snprintf(pinned, sizeof pinned, "%d:%.*s", atoi(r->label) & 7, SC_LINE_LEN - 16, img);
+        snprintf(pinned, sizeof pinned, "%d:%.*s", r->slot & 7, SC_LINE_LEN - 16, img);
         val = pinned;
         pin_all(st, r->text);
         slot_line(st, r);

@@ -68,7 +68,8 @@ typedef struct HDD
 typedef struct FDD
 {
   bool enabled;
-  char img_path [256];
+  char img_path  [256];   /* drive A: (`fdd image`, `fdd A:image`)        */
+  char img_path_b[256];   /* drive B: (`fdd B:image`) - empty = no image  */
 } FDD_s;
 
 typedef struct HOSTFS

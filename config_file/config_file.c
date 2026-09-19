@@ -611,6 +611,33 @@ static void expand_home(const char *in, char *out, size_t n)
  * ~ in either part expands to the invoking user's home. */
 /* "3:image" or "3 image" -> slot 3 and "image"; anything else -> slot -1
  * and the value untouched. Only a single digit 0-7 counts. */
+/* As slot_prefix(), but for the floppy: the drive may be named by letter
+ * (`A:` / `B:`, as every Atari user thinks of it) or by number (`0:` /
+ * `1:`, the form the generic slot machinery writes). */
+static const char *fdd_slot_prefix(const char *val, int *slot)
+{
+  *slot = -1;
+  while (*val == ' ' || *val == '\t')
+    val++;
+  {
+    char c = *val;
+    int  d = -1;
+    if (c >= '0' && c <= '9')                 d = c - '0';
+    else if (c == 'A' || c == 'a')            d = 0;
+    else if (c == 'B' || c == 'b')            d = 1;
+    if (d >= 0 && (val[1] == ':' || val[1] == ' ' || val[1] == '\t')) {
+      /* A bare filename beginning "b " or "0:" is not a thing, but a
+       * PATH could start with a letter and a colon on no system we run
+       * on, so the two-character prefix is unambiguous here. */
+      *slot = d;
+      val += 2;
+      while (*val == ' ' || *val == '\t')
+        val++;
+    }
+  }
+  return val;
+}
+
 static const char *slot_prefix(const char *val, int *slot)
 {
   *slot = -1;
@@ -994,9 +1021,29 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_FDD:
         {
+          /* `fdd image`     - the next free drive, A then B
+           * `fdd A:image`   - pinned to drive A    (also `fdd 0:image`)
+           * `fdd B:image`   - pinned to drive B    (also `fdd 1:image`)
+           * The setup page writes the pinned form, so editing or
+           * removing one drive never moves the other - the same rule
+           * `hdd` and `acsi` follow. The prefix is split off BEFORE
+           * fdd_path is applied, so the image name stays bare. */
+          int drv;
+          const char *img = fdd_slot_prefix(parse_line + str_pos, &drv);
+          if (drv < 0)
+            drv = cfg->fdd.img_path[0] ? 1 : 0;
+          if (drv > 1) {
+            printf ("[CFG] fdd: only drives A and B exist, line %d ignored.\n",
+                    cur_line);
+            break;
+          }
           cfg->fdd.enabled = true;
-          resolve_path(g_fdd_path, parse_line + str_pos,
-                       cfg->fdd.img_path, sizeof cfg->fdd.img_path);
+          if (drv == 0)
+            resolve_path(g_fdd_path, img,
+                         cfg->fdd.img_path, sizeof cfg->fdd.img_path);
+          else
+            resolve_path(g_fdd_path, img,
+                         cfg->fdd.img_path_b, sizeof cfg->fdd.img_path_b);
         }
         break;
 

@@ -175,6 +175,50 @@ int main(void)
         struct emulator_config*pc2=load_config_file_section(cfgp,"apj-os");
         CHECK(pc2 && !strcmp(pc2->rom.rom_path, rp), "absolute rom mangled: [%s]", pc2?pc2->rom.rom_path:"");
         CHECK(pc2 && !strcmp(pc2->fdd.img_path, "../rel/f.st"), "relative fdd with no var changed: [%s]", pc2?pc2->fdd.img_path:"");
+        /* --- the two floppy drives -------------------------------------
+         * Drive B had no way into a boot config at all: `fdd` set drive
+         * A and a second line overwrote it. A drive is now named by
+         * letter or by number, and a bare line takes the next free one -
+         * the same rule hdd and acsi follow. */
+        FILE*pf6=fopen(cfgp,"w");
+        fprintf(pf6,"[psctrl]\nfdd_path %s/floppies\n[apj-os]\ncpu 68000\n"
+                    "fdd B:side2.st\nfdd A:boot.st\n", base);
+        fclose(pf6);
+        struct emulator_config*fcfg=load_config_file_section(cfgp,"apj-os");
+        char wa[700], wb[700];
+        snprintf(wa, sizeof wa, "%s/floppies/boot.st",  base);
+        snprintf(wb, sizeof wb, "%s/floppies/side2.st", base);
+        CHECK(fcfg && fcfg->fdd.enabled, "two fdd lines must enable the floppy");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path,   wa), "fdd A: [%s]", fcfg?fcfg->fdd.img_path:"");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path_b, wb), "fdd B: [%s]", fcfg?fcfg->fdd.img_path_b:"");
+
+        /* numeric slots are the form the setup page writes */
+        FILE*pf7=fopen(cfgp,"w");
+        fprintf(pf7,"[psctrl]\nfdd_path %s/floppies\n[apj-os]\ncpu 68000\n"
+                    "fdd 1:side2.st\nfdd 0:boot.st\n", base);
+        fclose(pf7);
+        fcfg=load_config_file_section(cfgp,"apj-os");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path,   wa), "fdd 0: [%s]", fcfg?fcfg->fdd.img_path:"");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path_b, wb), "fdd 1: [%s]", fcfg?fcfg->fdd.img_path_b:"");
+
+        /* bare lines fill A then B, and nothing claims a third drive */
+        FILE*pf8=fopen(cfgp,"w");
+        fprintf(pf8,"[psctrl]\nfdd_path %s/floppies\n[apj-os]\ncpu 68000\n"
+                    "fdd boot.st\nfdd side2.st\n", base);
+        fclose(pf8);
+        fcfg=load_config_file_section(cfgp,"apj-os");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path,   wa), "bare fdd #1 -> A: [%s]", fcfg?fcfg->fdd.img_path:"");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path_b, wb), "bare fdd #2 -> B: [%s]", fcfg?fcfg->fdd.img_path_b:"");
+
+        /* one image still means one drive, and B stays empty */
+        FILE*pf9=fopen(cfgp,"w");
+        fprintf(pf9,"[psctrl]\nfdd_path %s/floppies\n[apj-os]\ncpu 68000\nfdd boot.st\n", base);
+        fclose(pf9);
+        fcfg=load_config_file_section(cfgp,"apj-os");
+        CHECK(fcfg && !strcmp(fcfg->fdd.img_path, wa), "single fdd -> A: [%s]", fcfg?fcfg->fdd.img_path:"");
+        CHECK(fcfg && fcfg->fdd.img_path_b[0] == 0, "single fdd must leave B: empty: [%s]",
+              fcfg?fcfg->fdd.img_path_b:"");
+
         char rm[700]; snprintf(rm, sizeof rm, "rm -rf %s %s", base, cfgp); (void)!system(rm);
     }
 

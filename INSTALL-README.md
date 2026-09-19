@@ -416,8 +416,16 @@ the tree above:
 ```
 rom tos206uk.rom
 hdd 0:yourdisk.img
-fdd yourfloppy.st
+fdd A:yourfloppy.st
+fdd B:otherside.st
 ```
+
+The ST has two floppy drives and so does the emulation. A drive is named
+by letter (`fdd A:` / `fdd B:`) or by number (`fdd 0:` / `fdd 1:`, the
+form the setup page writes); a bare `fdd image` takes the next free
+drive, A then B. Drive B has its own row on the Drives tab. A drive with
+no image is left alone on the bus, so a real floppy drive on the ST still
+answers in B: while an image is served in A:.
 
 ---
 

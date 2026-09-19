@@ -145,6 +145,40 @@ volatile unsigned pistorm_ipl4_gap[4], pistorm_ipl4_len[4];
 /* HBL no-op skips: level-2 assertions dropped at the sampler because the
  * guest's HBL vector is a bare RTE (see pistorm_hbl_handler_is_rte). */
 volatile unsigned pistorm_ipl_hbl_skipped = 0;
+
+/* LOOP HEALTH. The ep and del counters say what we did with the line;
+ * these say whether we were LOOKING at all. ipl_task should come round
+ * every ~15 us
+ * (~66,000 passes a second). If passes/s collapses towards the interrupt
+ * rate itself then the line is not being sampled, it is being sampled
+ * ONCE per delivery, and every count above is a count of loop passes
+ * rather than of anything the Atari did. busy = ps_bus_trylock found a
+ * transaction in progress; txn = the sample was thrown away because the
+ * CPLD flagged a cycle still running. */
+volatile unsigned pistorm_ipl_passes = 0;
+volatile unsigned pistorm_ipl_busy   = 0;
+volatile unsigned pistorm_ipl_txn    = 0;
+
+/* TRANSITION TRACE. The counters are rates; this is the sequence - every
+ * confirmed change of the line and every decision taken about it, with a
+ * timestamp.
+ *
+ * It is a CIRCULAR buffer that dumps itself the first time a second goes
+ * bad (del4 over 60 on a screen that makes 50), because the fault is
+ * intermittent per boot and arrives minutes into a game. A one-shot
+ * buffer that filled at startup captured the desktop booting, which is
+ * the one window we do not care about. Recording costs one timestamp per
+ * transition, ~150 a second when things are normal. */
+#define IPL_TRC_MAX 400u
+struct ipl_trc_e { uint64_t t; uint8_t from, to, act; };
+volatile struct ipl_trc_e pistorm_ipl_trc[IPL_TRC_MAX];
+volatile unsigned pistorm_ipl_trc_n = 0;      /* total, never wraps */
+volatile unsigned pistorm_ipl_trc_shown = 0;
+/* act: 0 line changed  1 DELIVERED  2 skipped HBL-is-RTE
+ *      3 skipped refractory  4 blocked by av_held/level  5 sample discarded */
+static const char *const ipl_trc_act[6] = {
+    "line", "DELIVER", "skip-hbl-rte", "skip-refract", "blocked", "discard"
+};
 /* Verdict helper, defined in cpu/newcpu.cpp (needs regs.vbr). */
 int pistorm_hbl_handler_is_rte(void);
 }
@@ -497,6 +531,18 @@ static void *ipl_stats_task(void *)
             "[ipl] ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
             e2 - p2, e4 - p4, e6 - p6, d2 - q2, d4 - q4, d6 - q6);
     {
+      static unsigned pp, pb, pt;
+      unsigned np = pistorm_ipl_passes, nb = pistorm_ipl_busy,
+               nt = pistorm_ipl_txn;
+      fprintf(stderr,
+              "[ipl]   loop: passes=%u/s busy=%u/s txn=%u/s%s\n",
+              np - pp, nb - pb, nt - pt,
+              (np - pp) < 1000 ? "   <- NOT SAMPLING: the loop is not going"
+                                 " round, every count above is a loop pass"
+                               : "");
+      pp = np; pb = nb; pt = nt;
+    }
+    {
       static unsigned pg[4], pl[4];
       unsigned g[4], l[4];
       for (int i = 0; i < 4; i++) { g[i] = pistorm_ipl4_gap[i]; l[i] = pistorm_ipl4_len[i]; }
@@ -505,6 +551,77 @@ static void *ipl_stats_task(void *)
               g[0] - pg[0], g[1] - pg[1], g[2] - pg[2], g[3] - pg[3],
               l[0] - pl[0], l[1] - pl[1], l[2] - pl[2], l[3] - pl[3]);
       for (int i = 0; i < 4; i++) { pg[i] = g[i]; pl[i] = l[i]; }
+    }
+
+    /* WHAT THE VIDEO HARDWARE IS ACTUALLY DOING, beside the counters -
+     * because "games run at 72 Hz" has two completely different causes
+     * and ep4 alone does not separate them:
+     *
+     *   rez=2 (640x400)  the Shifter really IS in high resolution. The
+     *                    machine makes 71.4 VBLs a second and ep4 is
+     *                    telling the truth. TOS chose that from the
+     *                    monitor-detect bit - look at mono/reads/glitch
+     *                    below, and `monitor colour` in the build is the
+     *                    override.
+     *   rez=0 or 1, ep4 ~72   the Shifter is at 50/60 Hz and cannot make
+     *                    that many VBLs. The extra ones are ours.
+     *   del4 > ep4       redelivery inside one blanking interval.
+     *
+     * mono= is the debounced monitor-detect bit as the guest sees it,
+     * reads= how many times the guest has looked at it, glitch= reads
+     * that disagreed with the held value and were discarded. A high
+     * glitch count with rez=2 is the wire; reads=0 with rez=2 means TOS
+     * did not get high resolution from this bit at all.
+     *
+     * Read at FC=5 (supervisor data) rather than through the CPU
+     * thread's shared fc global, and only once a second. */
+    {
+      uint8_t berr = 0;
+      uint8_t rez  = ps_read_8_fc (0x00FF8260u, 5, &berr) & 0x03u;
+      uint8_t sync = ps_read_8_fc (0x00FF820Au, 5, &berr) & 0x03u;
+      /* The bus read above is one sample of a register over the wire.
+       * rtg.hw_rez and pistorm_guest_hz are the SNOOPED truth - the last
+       * value the guest actually wrote to $FF8260/$FF820A, captured in
+       * st_video_snoop8(). If those two disagree with the bus read, the
+       * bus read is the one to distrust, and 71.4 here with 320x200
+       * there means the machine really did go to mono timing. */
+      extern volatile double pistorm_guest_hz;
+      fprintf(stderr,
+              "[ipl]   shifter: rez=%u (%s) sync=%s | snooped rez=%02X "
+              "guest=%.1fHz | mono=%s reads=%u glitch=%u\n",
+              rez,
+              rez == 0 ? "320x200" : rez == 1 ? "640x200" :
+              rez == 2 ? "640x400 - 71.4 Hz" : "?",
+              (sync & 2u) ? "50Hz" : "60Hz",
+              (unsigned)rtg.hw_rez, (double)pistorm_guest_hz,
+              ps_gpip7_force == 1 ? "FORCED mono" :
+              ps_gpip7_force == 2 ? "FORCED colour" :
+              ps_gpip7_stable < 0 ? "never read" :
+              ps_gpip7_stable ? "colour" : "MONO",
+              ps_gpip7_reads, ps_gpip7_glitches);
+    }
+
+    /* A screen in 320x200 at 50 Hz makes 50 VBLs. More than 60 delivered
+     * in a second is the fault, so dump what led up to it - once. */
+    if (!pistorm_ipl_trc_shown && (d4 - q4) > 60)
+    {
+      unsigned n = pistorm_ipl_trc_n;
+      unsigned have = n < IPL_TRC_MAX ? n : IPL_TRC_MAX;
+      unsigned first = n - have;
+      uint64_t t0 = pistorm_ipl_trc[first % IPL_TRC_MAX].t;
+      fprintf(stderr, "[ipl] --- BAD SECOND (del4=%u): last %u transitions, "
+                      "us since the first ---\n", d4 - q4, have);
+      for (unsigned i = 0; i < have; i++)
+      {
+        unsigned k = (first + i) % IPL_TRC_MAX;
+        fprintf(stderr, "[ipltrc] %8llu  %u->%u  %s\n",
+                (unsigned long long)((pistorm_ipl_trc[k].t - t0) / 54u),
+                pistorm_ipl_trc[k].from, pistorm_ipl_trc[k].to,
+                ipl_trc_act[pistorm_ipl_trc[k].act < 6
+                            ? pistorm_ipl_trc[k].act : 5]);
+      }
+      fprintf(stderr, "[ipl] --- end of trace ---\n");
+      pistorm_ipl_trc_shown = 1;   /* stops recording too - see IPL_TRC */
     }
 
     p2 = e2; p4 = e4; p6 = e6;
@@ -527,6 +644,20 @@ static void *ipl_task(void *)
   uint64_t ipl_cand_tick = 0;           /* arch-timer stamp of candidate */
   const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
   const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
+  uint8_t trc_last = 0;                 /* last level put in the trace */
+#define IPL_TRC(f, t_, a)                                              \
+  do {                                                                 \
+    if (pst_dbg_ipl_stats && !pistorm_ipl_trc_shown) {                 \
+      unsigned n_ = pistorm_ipl_trc_n % IPL_TRC_MAX;                   \
+      uint64_t tt_;                                                    \
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(tt_));              \
+      pistorm_ipl_trc[n_].t    = tt_;                                  \
+      pistorm_ipl_trc[n_].from = (f);                                  \
+      pistorm_ipl_trc[n_].to   = (t_);                                 \
+      pistorm_ipl_trc[n_].act  = (a);                                  \
+      pistorm_ipl_trc_n++;                                             \
+    }                                                                  \
+  } while (0)
   /* ipl_confirm_ticks and av4_refract_ticks used to be locals computed
    * once here. They are now published globals (psctrl_tunables), because
    * this loop runs on core 3 at SCHED_FIFO and must not divide: the
@@ -689,30 +820,54 @@ static void *ipl_task(void *)
      * data pattern bits, not the CPLD's IPL lines. Field-measured: ~13
      * phantom level-4/s + ~90 phantom level-2/s riding on IDE streaming
      * traffic, pacing Bad Apple's VBL-gated player ~12% fast. The sample
-     * is bracketed (flag checked before AND after the read) so a
-     * transaction starting mid-read also discards it; the persistence
-     * filter below covers the residual race. */
-    if (ps_bus_active)
-    {
-      asm volatile("yield" ::: "memory");
-      continue;
-    }
-    status = *ioread;
-    /* The after-check of the bracket. It was commented out, which left
-     * the race the comment above describes wide open: a transaction that
-     * starts between the flag test and the read leaves the IPL field
-     * carrying whatever the Pi is driving. A guest polling the ACIA in a
-     * tight loop (Xenon 2, every 10 us) drives the SAME pattern each
-     * time, so the raced samples agree with each other and the
-     * persistence filter - built for transients - confirms them:
+     * is taken under the bus lock, so it cannot overlap a transaction at
+     * all; the persistence filter below is then only what it was built
+     * to be - a filter for transients on the CPLD's own lines. */
+    pistorm_ipl_passes++;
+
+    /* EXCLUSION, not a probability argument.
+     *
+     * The previous shape of this was a bracket: test ps_bus_active, read
+     * GPLEV0, test it again. Nothing in that stops a transaction from
+     * starting after the first test - it only relies on a transaction
+     * outliving the two instructions between the tests, and on the
+     * persistence filter below to mop up whatever slips through. The
+     * filter is built for TRANSIENTS, and the failure that matters is not
+     * transient: a guest polling the ACIA in a tight loop (Xenon 2, every
+     * 10 us) drives the same bus pattern every time, so its raced samples
+     * all show the SAME bogus level and the filter confirms them -
      * 72 level-4/s delivered on a 50 Hz screen, the game 44% fast, on
      * some boots and not others, and gone the moment anything thinned
-     * that loop (USB injection off, a printf in the path). Field-
-     * measured 19 Sep with debug ipl / debug mfp. */
-    if (ps_bus_active)
-      continue;                         /* transaction raced the sample */
+     * that loop. ipl_confirm_ns made no difference at any value, which is
+     * what told a race apart from a glitch.
+     *
+     * ps_read_ipl() - the CPU thread's own sampler, called from
+     * intlev_ack - has always taken the bus lock for exactly this
+     * reason. This is that, without the wait: ipl_task must never block
+     * behind the CPU thread, so it takes the lock only if it is free and
+     * skips the sample otherwise. Nothing is lost by skipping - the next
+     * pass is 15 us away and every real IPL source (VBL, HBL, MFP) is
+     * level-held until serviced. Held for two instructions, so the CPU
+     * thread's worst case is a few ns in ps_lock_bus(). */
+    if (!ps_bus_trylock ())
+    {
+      /* Back off instead of spinning. MEASURED: ~139,000 of ~205,000
+       * passes a second find the bus busy, and `continue` skips the
+       * wait at the bottom of the loop - so two thirds of this core's
+       * passes were hammering the same atomic flag the CPU thread takes
+       * for every transaction, on a different core, for nothing. 1 us
+       * keeps the sampling cadence well inside the 15 us the loop
+       * targets while leaving the cacheline alone. */
+      pistorm_ipl_busy++;
+      asm volatile("yield" ::: "memory");
+      wait_ns (1000);
+      continue;                         /* a transaction owns the bus */
+    }
+    status = *ioread;
+    ps_bus_unlock ();
     if (status & 0x01)
     {
+      pistorm_ipl_txn++;
       // A very short sleep here is fine as it's just waiting for a hardware cycle finish
       asm volatile("yield" ::: "memory");
       wait_ns (250);
@@ -814,6 +969,12 @@ static void *ipl_task(void *)
      * the line and would otherwise re-arm the same VBL. Level 2 gets no
      * refractory: HBL's period is 64us. Level 6 (MFP, vector handshake
      * works) is untouched. */
+    if (ipl != trc_last)
+    {
+      IPL_TRC(trc_last, ipl, 0);
+      trc_last = ipl;
+    }
+
     if (ipl != av_held)
       av_held = 0;                      /* line left the level: re-arm */
     if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask && ipl != av_held)
@@ -831,6 +992,7 @@ static void *ipl_task(void *)
         {
           av_held = 2;
           pistorm_ipl_hbl_skipped++;
+          IPL_TRC(g_ipl, ipl, 2);
           continue;
         }
       }
@@ -839,7 +1001,10 @@ static void *ipl_task(void *)
         uint64_t nowt;
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
         if (nowt - av4_last_tick < av4_refract_ticks)
+        {
+          IPL_TRC(g_ipl, ipl, 3);
           continue;                     /* same VBL blanking interval */
+        }
         av4_last_tick = nowt;
       }
       if (ipl == 2 || ipl == 4)
@@ -851,6 +1016,7 @@ static void *ipl_task(void *)
       if (g_irq == 0)
         g_irq_latch_us = get_time_us();
 #endif
+      IPL_TRC(g_irq, ipl, 1);
       g_irq = ipl;
       if (ipl == 2)      pistorm_ipl_lat2++;
       else if (ipl == 4) pistorm_ipl_lat4++;
@@ -867,7 +1033,10 @@ static void *ipl_task(void *)
      * t0+=dur sequence (see dmasnd_capture.c field lesson). */
     if (DMA_Sound_enabled)
       dmasnd_pump();
-    if ((KBD_USB_enabled || DMA_Sound_enabled) &&
+    /* pst_fdd_mfp_irq joins the gate so the emulated FDC/ACSI can reach
+     * the hub's channel 7 (GPIP5). It is 0 unless asked for, so the cost
+     * when it is off is the load of one int. */
+    if ((KBD_USB_enabled || DMA_Sound_enabled || pst_fdd_mfp_irq) &&
         mfp_hub_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
     {
       g_irq = 6;
@@ -1717,8 +1886,7 @@ int main (int argc, char *argv[])
   {
     FDD_enabled = true;
 
-    platform_fdd_init (config->fdd.img_path);
-    //printf ("[INIT] FDD Image Attached %s\n", cfg->fdd.img_path);
+    platform_fdd_init (config->fdd.img_path, config->fdd.img_path_b);
   }
   else if (acsi_enabled())
   {
@@ -1830,6 +1998,9 @@ int main (int argc, char *argv[])
   {
     pthread_setname_np(ipl_tid, "pistorm: ipl");
     PS_INFO("[MAIN] IPL thread created successfully\n");
+    /* Unconditional, so "is this the build with the fix in it?" is never
+     * a question anyone has to spend a boot on. */
+    printf("[MAIN] IPL sampling: bus-locked (ps_bus_trylock)\n");
   }
 
   /* One line per second of interrupt rates. Runs in its own thread so
@@ -1956,6 +2127,11 @@ int main (int argc, char *argv[])
     extern volatile int ps_gpip7_force;
     ps_gpip7_force = config->monitor_force;
   }
+  /* And when it is NOT forced, seed the debounce from 17 reads rather
+   * than letting TOS's single boot-time read set it - see
+   * ps_gpip7_seed(). This also prints what the wire says, which is the
+   * first thing to look at when a game runs 44% fast. */
+  ps_gpip7_seed ();
   jit_cpu_set_perf_options(config->cpu_clock_multiplier,
                            config->cpu_clock_multiplier_set ? 1 : 0,
                            config->m68k_speed,
@@ -2723,8 +2899,11 @@ extern "C"
      * (HW_PAGE_PSG); this legacy path did not, so any PSG write routed
      * here reached the real chip but never the emulated one - native
      * audio perfect, HDMI audio missing writes. */
-    if (ym2149_active())
-      ym2149_snoop8(address, (uint8_t)value);
+    /* Unconditional: the snoop tests g_on itself, and it must see the
+     * SELECT writes even with the emulated chip off so
+     * ym2149_selected_reg() stays true (stbox_realfdc restores through
+     * it). See ym2149_snoop8(). */
+    ym2149_snoop8(address, (uint8_t)value);
 
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {
@@ -2860,8 +3039,7 @@ extern "C"
 
     st_video_snoop16(address, (uint16_t)value);
 
-    if (ym2149_active())                        /* see the 8-bit path */
-      ym2149_snoop16(address, (uint16_t)value);
+    ym2149_snoop16(address, (uint16_t)value);    /* see the 8-bit path */
 
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {
@@ -2978,10 +3156,9 @@ extern "C"
     st_video_snoop32(address, (uint32_t)value);
     pistorm_stram_memcfg_snoop(address & 0x00FFFFFFu, value, 4);
 
-    if (ym2149_active())                        /* see the 8-bit path;
-                                                 * catches the classic
-                                                 * move.l #$RR00VV00,$FF8800 */
-      ym2149_snoop32(address, (uint32_t)value);
+    /* see the 8-bit path; catches the classic
+     * move.l #$RR00VV00,$FF8800 */
+    ym2149_snoop32(address, (uint32_t)value);
 
     if (DMA_Sound_enabled && dmasnd_owns(address))
     {

@@ -46,6 +46,16 @@ static volatile uint32_t g_status;
  * reads it while the main thread writes it at startup. */
 volatile int ps_gpip7_force = 0;
 
+/* The debounced monitor-detect state, hoisted out of the read path so
+ * the 1 Hz stats line can report it: -1 not sampled yet, 0 MONO,
+ * 1 COLOUR. ps_gpip7_glitches counts single reads that disagreed with
+ * the held value and were discarded; ps_gpip7_reads counts the guest's
+ * reads of the bit at all. A guest that never reads it cannot be
+ * choosing its resolution from it. */
+volatile int      ps_gpip7_stable   = -1;
+volatile unsigned ps_gpip7_glitches = 0;
+volatile unsigned ps_gpip7_reads    = 0;
+
 volatile uint32_t *gpio;
 volatile uint32_t *ioset;
 volatile uint32_t *ioclr;
@@ -90,6 +100,37 @@ static inline void ps_wait_idle(void)
 {
   while (*ioread & PI_TXN_IN_PROGRESS)
     asm volatile ("yield" ::: "memory");
+}
+
+/* Non-blocking form of the pair above, for a thread that wants to LOOK at
+ * GPLEV0 without running a transaction - ipl_task's IPL sample.
+ *
+ * The old bracket (test ps_bus_active, read, test it again) was a
+ * probability argument, not an exclusion: nothing stopped a transaction
+ * from beginning after the first test, and the second test only caught
+ * it because a transaction outlives the two instructions between them.
+ * ps_read_ipl() - the CPU thread's own sampler, used by intlev_ack -
+ * has always taken the real lock instead, and that is the difference
+ * between "almost never wrong" and "cannot be wrong". ipl_task must not
+ * BLOCK behind the CPU thread, so it takes the same lock without
+ * waiting and skips the sample when the bus is busy; the next pass is
+ * 15 us away and every real IPL source is level-held.
+ *
+ * Returns 1 with the bus held (caller MUST call ps_bus_unlock), or 0. */
+int ps_bus_trylock (void)
+{
+  if (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
+    return 0;                       /* a transaction owns the bus */
+  ps_bus_active = 1;
+  asm volatile ("dmb sy" ::: "memory");
+  return 1;
+}
+
+void ps_bus_unlock (void)
+{
+  asm volatile ("dmb sy" ::: "memory");
+  ps_bus_active = 0;
+  atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
 }
 
 
@@ -489,24 +530,25 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
          * not others, games 44% fast). The value the guest sees only
          * changes after four consecutive reads agree, 80 ms at TOS's
          * poll rate, so a real monitor swap still works. */
-        static int stable = -1, run = 0, glitches = 0;
+        static int run = 0;
         int bit = (ps_io->data & 0x0080u) ? 1 : 0;
-        if (stable < 0)
-          stable = bit;
-        else if (bit != stable) {
+        if (ps_gpip7_stable < 0)
+          ps_gpip7_stable = bit;
+        else if (bit != ps_gpip7_stable) {
           if (++run >= 4) {
-            stable = bit; run = 0;
+            ps_gpip7_stable = bit; run = 0;
             fprintf (stderr, "[GPIP] monitor detect now %s\n", bit ? "COLOUR" : "MONO");
           }
         } else if (run) {
-          if (glitches < 8)
+          if (ps_gpip7_glitches < 8)
             fprintf (stderr, "[GPIP] monitor-detect glitch: read %s %d time%s, kept %s\n",
-                     stable ? "mono" : "colour", run, run == 1 ? "" : "s",
-                     stable ? "colour" : "mono");
-          glitches++;
+                     ps_gpip7_stable ? "mono" : "colour", run, run == 1 ? "" : "s",
+                     ps_gpip7_stable ? "colour" : "mono");
+          ps_gpip7_glitches++;
           run = 0;
         }
-        if (stable)
+        ps_gpip7_reads++;
+        if (ps_gpip7_stable)
           ps_io->data |=  0x0080u;
         else
           ps_io->data &= ~0x0080u;
@@ -567,7 +609,6 @@ inline uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_ou
 inline uint8_t ps_read_8 (uint32_t addr) 
 {
   ps_io_t ps_io;
-  uint32_t l;
 
   ps_io.data = 0;
   ps_io.addr = addr;
@@ -761,6 +802,52 @@ void ps_write_latchtype ( uint16_t latchtype )
   usleep ( 1000 );
   status = (ps_read_status_reg () >> 8) & 0xC000;
   printf ( "reading latch-type - status bits 0x%04X\n", status );
+}
+
+/* Seed the monitor-detect debounce before the guest boots.
+ *
+ * The debounce in ps_read_txn() protects every read of the bit EXCEPT
+ * the first one: `stable` starts at -1 and the first sample becomes the
+ * held value with nothing to compare it against. That one read is the
+ * one that matters - TOS decides the boot resolution from the monitor
+ * bit in the ROM's first dozen instructions, and a single bad sample
+ * there puts a colour machine into 640x400 and 71.4 Hz, which is 44%
+ * fast for anything VBL-paced.
+ *
+ * So take the sample here, before the CPU thread exists, with time to
+ * take it properly: 17 reads of a DC line, majority wins. The spread is
+ * printed because it is the measurement that says whether the wire is
+ * trustworthy at all - "colour 17/17" and "colour 9 / mono 8" mean very
+ * different things and only one of them is a monitor.
+ *
+ * No-op when `monitor mono|colour` has already forced the bit. */
+void ps_gpip7_seed (void)
+{
+  int mono = 0, colour = 0;
+
+  if (ps_gpip7_force)
+    return;
+
+  for (int i = 0; i < 17; i++) {
+    uint8_t berr = 0;
+    uint8_t g = ps_read_8_fc (0x00FFFA01u, 5, &berr);
+    if (berr)
+      continue;
+    if (g & 0x80u) colour++; else mono++;
+  }
+
+  if (!mono && !colour) {
+    fprintf (stderr, "[GPIP] monitor detect: no readable sample at startup, "
+                     "leaving it to the first guest read\n");
+    return;
+  }
+
+  ps_gpip7_stable = colour >= mono ? 1 : 0;
+  fprintf (stderr, "[GPIP] monitor detect at startup: %s (colour %d / mono %d "
+                   "of 17)%s\n",
+           ps_gpip7_stable ? "COLOUR" : "MONO", colour, mono,
+           (mono && colour) ? "  <- the wire is not steady, this is suspect"
+                            : "");
 }
 
 /* read GPIO pins 0-7 - check that an IO is not running first */

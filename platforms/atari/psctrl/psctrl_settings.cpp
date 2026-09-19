@@ -840,6 +840,7 @@ LIVE_BOOL("ipl_stats", "IPL statistics", PS_TAB_DEBUG, &pst_dbg_ipl_stats, NULL)
 LIVE_BOOL("irq_stats", "IRQ statistics", PS_TAB_DEBUG, &pst_dbg_irq_stats, NULL),
 LIVE_BOOL("mfp_debug", "MFP trace", PS_TAB_DEBUG, &pst_dbg_mfp, NULL),
 LIVE_BOOL("mfp_hub_debug", "MFP hub trace", PS_TAB_DEBUG, &pst_dbg_mfp_hub, NULL),
+LIVE_BOOL("fdd_mfp_irq", "FDC MFP interrupt", PS_TAB_DEBUG, &pst_fdd_mfp_irq, NULL),
 LIVE_INT("blit_trace", "Blits to trace", PS_TAB_DEBUG, PS_U_NONE,
          0, 10000, 10, &pst_dbg_blit_trace, NULL),
 ITEM("dmasnd_debug", "DMA sound trace", PS_TAB_DEBUG, PS_K_ENUM, PS_C_LIVE,

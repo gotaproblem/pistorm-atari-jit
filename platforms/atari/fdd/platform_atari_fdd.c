@@ -33,16 +33,25 @@ void *fdd_vbl_thread(void *arg)
  * Platform init
  * ========================================================================= */
 
-void platform_fdd_init(char *image)
+/* Both drives, in one place. `image_b` may be NULL or empty - drive B
+ * then has no image and its select bits are left alone, so a real drive
+ * B on the ST still answers beside an image in A. */
+void platform_fdd_init(const char *image_a, const char *image_b)
 {
-    bool wp = 0;
+    const bool wp = 0;
+    static const char *const nm[2] = { "A:", "B:" };
+    const char *img[2] = { image_a, image_b };
 
     fdd_init();
 
-    if (fdd_insert_disk (0, image, wp) != 0)
-        fprintf(stderr, "[FDD] Drive A: failed to mount %s\n", image);
-    else
-        PS_INFO("[FDD] Drive A: %s%s\n", image, wp ? " (WP)" : " RW");   /* the mount line above says it */
+    for (int d = 0; d < 2; d++) {
+        if (!img[d] || !img[d][0])
+            continue;
+        if (fdd_insert_disk (d, img[d], wp) != 0)
+            fprintf(stderr, "[FDD] Drive %s failed to mount %s\n", nm[d], img[d]);
+        else
+            PS_INFO("[FDD] Drive %s %s%s\n", nm[d], img[d], wp ? " (WP)" : " RW");
+    }
 }
 
 #ifdef __cplusplus

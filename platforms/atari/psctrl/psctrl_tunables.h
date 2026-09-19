@@ -101,6 +101,17 @@ extern volatile int pst_verbose;
 #define PS_INFO(...) \
   do { if (pst_verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 
+/* --- behaviour switches -------------------------------------------- */
+/* Deliver the emulated FDC/ACSI completion as a REAL MFP interrupt
+ * (channel 7 = GPIP5) as well as a level in the GPIP byte. Default off:
+ * TOS and EmuTOS POLL the GPIP bit, and everything that works today
+ * works by polling. Turn it on for software that waits on the FDC
+ * interrupt instead - an interrupt-driven trackloader, a floppy driver
+ * that enables IERB bit 7. Nothing is delivered unless the guest has
+ * itself enabled and unmasked that channel, so this cannot invent an
+ * interrupt the guest did not ask for. */
+extern volatile int pst_fdd_mfp_irq;
+
 /* --- debug / trace flags ------------------------------------------- */
 extern volatile int pst_dbg_ipl_stats;
 extern volatile int pst_dbg_irq_stats;
