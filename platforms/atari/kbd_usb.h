@@ -62,6 +62,9 @@ void kbd_usb_shutdown(void);
 /* True when an injected byte is presented (pacing + real-traffic gaps
  * respected) and the guest should see RDRF|IRQ on the keyboard ACIA. */
 int kbd_usb_rx_ready(void);
+/* The MFP hub acknowledged channel 6: the due injected byte may now be
+ * seen by the guest (see head_visible in kbd_usb.c). */
+void kbd_usb_note_iack(void);
 
 /* True while we are mid-way through delivering a multi-byte injected packet;
  * injected bytes then take priority over real RX so packets never interleave. */

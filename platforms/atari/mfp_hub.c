@@ -232,6 +232,11 @@ int mfp_hub_iack(void)
 
     uint16_t bit = (uint16_t)(1u << ch);
     atomic_fetch_and(&g_vpend, (uint16_t)~bit);  /* pending -> taken    */
+    if (ch == 6)
+    {
+        extern void kbd_usb_note_iack(void);     /* the ACIA byte is now the handler's */
+        kbd_usb_note_iack();
+    }
     if (atomic_load(&g_vr) & 0x08u)              /* software-EOI mode   */
         atomic_fetch_or(&g_visr, bit);
 
