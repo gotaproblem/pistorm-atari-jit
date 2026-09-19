@@ -976,6 +976,19 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
         st_palette[i] = (uint16_t)(value >> 16);
         if (i + 1 < 16)
             st_palette[i + 1] = (uint16_t)value;
+        else
+            /* $FF825E: palette 15 in the high word, the low word lands on
+             * $FF8260 - the resolution register. This used to be dropped,
+             * so a rez written with a move.l reached the real GLUE but
+             * neither the trace nor the HDMI mirror: the machine ran
+             * 71.4 Hz timing while the picture looked low-res. */
+            st_video_snoop8(0x00FF8260u, (uint8_t)(value >> 8));
+    } else if (a == 0x00FF8260u) {
+        /* rez in the high byte; $FF8262 (low word) has no register on an ST */
+        st_video_snoop8(a, (uint8_t)(value >> 24));
+    } else if (a == 0x00FF8208u) {
+        /* long over $FF8208..$FF820B: $820A (sync) sits in the low word */
+        st_video_snoop8(0x00FF820Au, (uint8_t)(value >> 8));
     }
 }
 
