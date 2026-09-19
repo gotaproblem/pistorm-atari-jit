@@ -1104,7 +1104,7 @@ static void acc_note(char kind, uint8_t v)
 {
     if (!pst_dbg_ikbd)
         return;
-    if (kind == 'D' && (v == 0xFE || v == 0xFF)) {
+    if (kind == 'D' && (v == 0xFE || v == 0xFF) && strcmp(acc_src, "held")) {
         atomic_store(&acc_trace_left, 6);
         acc_prev_us = now_us();
         printf("[IKBD] --- joystick header $%02X (%s) ---\n", v, acc_src);
@@ -1171,22 +1171,47 @@ static uint8_t status_shim_inner(uint8_t real)
     return real;
 }
 
-static uint8_t data_shim_inner(void);
+/*
+ * The 6850's receive data register holds the last byte received until
+ * the next one arrives, and a read of it with RDRF clear returns that
+ * byte again. Games lean on this: Xenon 2 never looks at RDRF at all,
+ * it reads $FFFC02 in a loop and acts on whatever is there, so a real
+ * joystick packet's state byte is "seen" for the 1.28 ms until the next
+ * byte. An injected byte used to be handed out exactly once - the next
+ * read fell through to the real chip's register, which still held the
+ * real IKBD's last byte - so the pad's state was visible for one read
+ * of ten microseconds and the game never caught it. The merged stream
+ * now keeps its own "last byte", whichever side it came from.
+ */
+static uint8_t acia_last = 0xFF;             /* idle line at power-on     */
+
+static uint8_t data_shim_inner(int *fresh);
 uint8_t kbd_usb_acia_data_shim(void)
 {
+    int fresh = 0;
     acc_src = "real";
-    uint8_t v = data_shim_inner();
+    uint8_t v = data_shim_inner(&fresh);
+    if (fresh)
+        acia_last = v;
+    else
+    {
+        v = acia_last;
+        acc_src = "held";
+    }
     acc_note('D', v);
     return v;
 }
 
-static uint8_t data_shim_inner(void)
+/* *fresh = 1 when a new byte was consumed (real or injected); 0 means
+ * nothing new and the caller repeats the last one, as the chip does */
+static uint8_t data_shim_inner(int *fresh)
 {
     if (mouse_thresh < 0)
         mouse_cfg_init();
     if (thresh_tx_left > 0)
         mouse_thresh_pump();
 
+    *fresh = 1;
     if (kbd_usb_rx_priority())
         return kbd_usb_rx_read();
 
@@ -1198,7 +1223,8 @@ static uint8_t data_shim_inner(void)
         real_drain(rs);
         if (kbd_usb_rx_ready())
             return kbd_usb_rx_read();
-        return 0xFF;                          /* idle line, never a key    */
+        *fresh = 0;
+        return 0;
     }
 
     /* fresh real status decides whose byte the guest gets */
@@ -1218,7 +1244,8 @@ static uint8_t data_shim_inner(void)
     }
     if (kbd_usb_rx_ready())
         return kbd_usb_rx_read();
-    return joy_usb_real_rx_filter(ps_read_8(KBD_ACIA_DATA_ADDR));
+    *fresh = 0;
+    return 0;
 }
 
 uint8_t kbd_usb_gpip_shim(uint8_t real)
