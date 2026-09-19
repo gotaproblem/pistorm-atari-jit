@@ -1098,26 +1098,33 @@ static void real_drain(uint8_t rs)
  * the accesses that follow a $FE/$FF header, with the gap between them
  * and where each data byte came from. This is what shows whether a
  * game takes one byte per interrupt, polls, or reads a pair at once. */
-static _Atomic int acc_trace_left;
+static _Atomic int acc_trace_left;          /* data reads still to show  */
 static uint64_t    acc_prev_us;
+static int         acc_status_n;            /* status reads since then   */
+static uint8_t     acc_status_last;
 static void acc_note(char kind, uint8_t v)
 {
     if (!pst_dbg_ikbd)
         return;
-    if (kind == 'D' && (v == 0xFE || v == 0xFF) && strcmp(acc_src, "held")) {
-        atomic_store(&acc_trace_left, 6);
+    if (kind == 'S') {                       /* counted, shown with the next data read */
+        if (atomic_load(&acc_trace_left) > 0) { acc_status_n++; acc_status_last = v; }
+        return;
+    }
+    if ((v == 0xFE || v == 0xFF) && strcmp(acc_src, "held")) {
+        atomic_store(&acc_trace_left, 4);
         acc_prev_us = now_us();
+        acc_status_n = 0;
         printf("[IKBD] --- joystick header $%02X (%s) ---\n", v, acc_src);
         return;
     }
     if (atomic_load(&acc_trace_left) > 0) {
         atomic_fetch_sub(&acc_trace_left, 1);
         uint64_t t = now_us();
-        printf("[IKBD]   +%5llu us %s $%02X%s%s\n",
-               (unsigned long long)(t - acc_prev_us),
-               kind == 'S' ? "status" : "data  ", v,
-               kind == 'D' ? " " : "", kind == 'D' ? acc_src : "");
+        printf("[IKBD]   +%5llu us data $%02X %s  (%d status reads between, last $%02X)\n",
+               (unsigned long long)(t - acc_prev_us), v, acc_src,
+               acc_status_n, acc_status_last);
         acc_prev_us = t;
+        acc_status_n = 0;
     }
 }
 
