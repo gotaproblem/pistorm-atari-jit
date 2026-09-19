@@ -294,6 +294,7 @@ static int ikbd_in_reset_window(void)
 static int quarantined(void);
 static void ring_push_packet(const uint8_t *bytes, int n);
 static _Atomic int joy_last_pkt[2];
+static const char *acc_src = "";       /* debug ikbd: origin of the last data byte */
 
 /* total parameter bytes following each IKBD command opcode */
 static int ikbd_param_len(uint8_t cmd)
@@ -845,8 +846,7 @@ uint8_t kbd_usb_rx_read(void)
     kbd_usb_stat_injected_bytes++;
     /* the guest took a joystick packet header: the way to see whether a
      * game reads what the pad queued */
-    if (pst_dbg_ikbd && (e & PKT_START) && ((uint8_t)e == 0xFE || (uint8_t)e == 0xFF))
-        printf("[IKBD] guest read $%02X\n", (uint8_t)e);
+    acc_src = "injected";
     return (uint8_t)e;
 }
 
@@ -1094,7 +1094,42 @@ static void real_drain(uint8_t rs)
 /* ---- shared ACIA/GPIP shims (used by pistorm_natmem.cpp and the ---- */
 /* ---- legacy emulator.c memory handlers)                          ---- */
 
+/* debug ikbd: how the guest reads the ACIA around a joystick packet -
+ * the accesses that follow a $FE/$FF header, with the gap between them
+ * and where each data byte came from. This is what shows whether a
+ * game takes one byte per interrupt, polls, or reads a pair at once. */
+static _Atomic int acc_trace_left;
+static uint64_t    acc_prev_us;
+static void acc_note(char kind, uint8_t v)
+{
+    if (!pst_dbg_ikbd)
+        return;
+    if (kind == 'D' && (v == 0xFE || v == 0xFF)) {
+        atomic_store(&acc_trace_left, 6);
+        acc_prev_us = now_us();
+        printf("[IKBD] --- joystick header $%02X (%s) ---\n", v, acc_src);
+        return;
+    }
+    if (atomic_load(&acc_trace_left) > 0) {
+        atomic_fetch_sub(&acc_trace_left, 1);
+        uint64_t t = now_us();
+        printf("[IKBD]   +%5llu us %s $%02X%s%s\n",
+               (unsigned long long)(t - acc_prev_us),
+               kind == 'S' ? "status" : "data  ", v,
+               kind == 'D' ? " " : "", kind == 'D' ? acc_src : "");
+        acc_prev_us = t;
+    }
+}
+
+static uint8_t status_shim_inner(uint8_t real);
 uint8_t kbd_usb_acia_status_shim(uint8_t real)
+{
+    uint8_t v = status_shim_inner(real);
+    acc_note('S', v);
+    return v;
+}
+
+static uint8_t status_shim_inner(uint8_t real)
 {
     atomic_store_explicit(&real_last_status, real, memory_order_relaxed);
     real_observe_status(real);
@@ -1136,7 +1171,16 @@ uint8_t kbd_usb_acia_status_shim(uint8_t real)
     return real;
 }
 
+static uint8_t data_shim_inner(void);
 uint8_t kbd_usb_acia_data_shim(void)
+{
+    acc_src = "real";
+    uint8_t v = data_shim_inner();
+    acc_note('D', v);
+    return v;
+}
+
+static uint8_t data_shim_inner(void)
 {
     if (mouse_thresh < 0)
         mouse_cfg_init();
