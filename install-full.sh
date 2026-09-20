@@ -285,32 +285,51 @@ chmod +x "$HERE/capmux.sh" 2>/dev/null || true
 # something on the Atari to drive them, and atari-share is the one directory
 # the guest can actually reach: it is what a HOSTFS drive points at. Anywhere
 # else and you are back to writing them onto a floppy image to get them across.
+#
+# They go in atari-share/apj-os/natfeats - where APJ-OS expects them - not
+# loose in atari-share.
+#
+# A NAMED LIST, not a *.PRG/*.TTP glob. A glob installs whatever happens to
+# be sitting in the directory and says nothing about what is not there,
+# which is how a stale VIDPLAY.TTP kept shipping long after VIDGEM replaced
+# it, and how PDFGEM, WEBGEM and PSMON stayed missing from a fresh clone
+# without a word. A list names what is absent. It also lets .ACC through,
+# which that glob could never match - PSCTRL is an accessory.
+GEM_APPS="PSCTRL.ACC PSCTRL.PRG PSMON.ACC PSMON.PRG MP3GEM.PRG VIDGEM.PRG \
+          PDFGEM.PRG WEBGEM.PRG"
+GEM_DEST="$ROOT/atari-share/apj-os/natfeats"
 if [ -d "$HERE/configs/gem-binaries" ]; then
-  say "Installing GEM programs into $ROOT/atari-share"
-  for prg in "$HERE"/configs/gem-binaries/*.PRG "$HERE"/configs/gem-binaries/*.TTP; do
-    [ -e "$prg" ] || continue                 # nullglob is not set; skip misses
-    copy_newer "$prg" "$ROOT/atari-share/$(basename "$prg")"
+  say "Installing GEM programs into $GEM_DEST"
+  mkdir -p "$GEM_DEST"
+  for prg in $GEM_APPS; do
+    if [ -e "$HERE/configs/gem-binaries/$prg" ]; then
+      copy_newer "$HERE/configs/gem-binaries/$prg" "$GEM_DEST/$prg"
+    else
+      warn "configs/gem-binaries/$prg missing — not installed"
+    fi
   done
-  ls "$ROOT"/atari-share/*.PRG "$ROOT"/atari-share/*.TTP 2>/dev/null \
+  ls "$GEM_DEST"/*.PRG "$GEM_DEST"/*.ACC 2>/dev/null \
     | sed 's|.*/|    |' || true
 else
   warn "no configs/gem-binaries — GEM programs not installed"
 fi
 
 # ---- STBOX (sandboxed ST in a GEM window) ---------------------------------
-# STBOX.PRG went to atari-share with the other GEM programs above. It also
-# needs: a TOS ROM for the sandbox machine (PISTORM_STBOX_TOS, set in the
-# systemd unit below - we can't ship real TOS, so the user drops one in), and
-# somewhere for game disk images that HOSTFS can reach, because the in-box
-# file selector browses the HOSTFS drives - an image outside atari-share is
-# invisible to it.
-say "Creating STBOX game-image directory $ROOT/atari-share/games"
-mkdir -p "$ROOT/atari-share/games"
+# STBOX keeps its own directory, alongside natfeats rather than in it, and
+# the box's game images sit next to it. It also needs a TOS ROM for the
+# sandbox machine (PISTORM_STBOX_TOS, set in the systemd unit below - we
+# can't ship real TOS, so the user drops one in). The images have to live
+# somewhere HOSTFS can reach, because the in-box file selector browses the
+# HOSTFS drives - an image outside atari-share is invisible to it.
+STBOX_DEST="$ROOT/atari-share/apj-os/STBox"
+say "Installing STBOX into $STBOX_DEST"
+mkdir -p "$STBOX_DEST"
+copy_newer "$HERE/configs/gem-binaries/STBOX.PRG" "$STBOX_DEST/STBOX.PRG"
 
 if [ -f "$HERE/configs/pistormbg.jpg" ]; then
-  say "Installing desktop wallpaper into $ROOT/atari-share/bg"
-  mkdir -p "$ROOT/atari-share/bg"
-  copy_newer "$HERE/configs/pistormbg.jpg" "$ROOT/atari-share/bg/pistormbg.jpg"
+  say "Installing desktop wallpaper into $ROOT/atari-share/apj-os/bg"
+  mkdir -p "$ROOT/atari-share/apj-os/bg"
+  copy_newer "$HERE/configs/pistormbg.jpg" "$ROOT/atari-share/apj-os/bg/pistormbg.jpg"
 fi
 
 # APJ-OS Wi-Fi onboarding: after flashing the SD image, a user on any OS
@@ -687,14 +706,15 @@ else
 fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
-echo "  GEM programs : $ROOT/atari-share/   (point a HOSTFS drive here)"
+echo "  GEM programs : $ROOT/atari-share/apj-os/natfeats/"
+echo "                 (point a HOSTFS drive at $ROOT/atari-share)"
 echo
 echo "  STBOX (ST games in a GEM window):"
 echo "      TOS for the box -> $ROOT/roms/stbox-tos.rom"
 echo "        (TOS 1.04/2.06 or 192/256K EmuTOS; the bundled Aranym EmuTOS"
 echo "         is for the main machine and will NOT boot the box)"
-echo "      game images (.st/.msa) -> $ROOT/atari-share/games/"
-echo "      then run STBOX.PRG from the HOSTFS drive and pick a game."
+echo "      game images (.st/.msa) -> $ROOT/atari-share/apj-os/STBox/"
+echo "      then run STBOX.PRG from apj-os/STBox on the HOSTFS drive."
 echo "      Running without the service? export PISTORM_STBOX_TOS yourself."
 echo
 if [ -e /etc/systemd/system/psweb.socket ]; then
