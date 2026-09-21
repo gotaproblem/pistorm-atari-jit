@@ -195,6 +195,45 @@ static int render_key(const char *key, const struct emulator_config *c,
   return psctrl_settings_render_key(key, out, n);
 }
 
+/* "[apj-os]" -> "apj-os". Returns 0 for any other line. Local to the
+ * saver so it does not depend on the parser's private copy. */
+static int save_section_header(const char *line, char *out, unsigned long n)
+{
+  unsigned long i = 0;
+
+  while (*line == ' ' || *line == '\t')
+    line++;
+  if (*line != '[')
+    return 0;
+  line++;
+  while (*line && *line != ']' && i + 1 < n)
+    out[i++] = *line++;
+  out[i] = '\0';
+  return *line == ']' && i > 0;
+}
+
+/* Append the managed keys that the target block did not already contain,
+ * under one marked comment, at the current write position (inside the
+ * target section). */
+static int flush_unseen(FILE *out, const struct emulator_config *cfg,
+                        const char *seen, int nkeys)
+{
+  char rendered[MAXLINE];
+  int wrote = 0, i;
+
+  for (i = 0; i < nkeys; i++) {
+    if (seen[i])
+      continue;
+    if (!render_key(psctrl_settings_key_at(i), cfg, rendered, sizeof(rendered)))
+      continue;
+    if (!wrote)
+      fprintf(out, "# --- written by PSCTRL ---\n");
+    fprintf(out, "%s\n", rendered);
+    wrote = 1;
+  }
+  return wrote;
+}
+
 /* first whitespace-delimited token of a config line, lower-cased */
 static int line_key(const char *line, char *out, unsigned long n)
 {
@@ -280,50 +319,67 @@ int config_file_save(const char *path, const struct emulator_config *cfg)
   }
   take_ownership(out, path);
 
-  in = fopen(path, "r");
-  if (in) {
-    while (fgets(line, sizeof(line), in)) {
-      if (!line_key(line, key, sizeof(key))) {
-        fputs(line, out);                       /* comment or blank */
-        continue;
-      }
-      if (render_key(key, cfg, rendered, sizeof(rendered))) {
-        int dup = 0;
-
-        /* one line per managed key: the first occurrence takes the
-         * value, any later copy of the same key is dropped rather than
-         * carried along - a second `stram_size` is not a setting, it is
-         * a question of which one the parser saw last */
-        for (i = 0; i < nkeys; i++)
-          if (!strcmp(psctrl_settings_key_at(i), key)) {
-            if (seen[i])
-              dup = 1;
-            seen[i] = 1;
-          }
-        if (!dup)
-          fprintf(out, "%s\n", rendered);
-        continue;
-      }
-      fputs(line, out);                         /* not ours: verbatim */
-    }
-    fclose(in);
-  }
-
-  /* Anything managed that the file did not already mention. One block,
-   * marked, so the next person to read the file can see what wrote it. */
+  /* One file, several machine blocks. A save must edit only the block the
+   * running config was booted from - the boot tool's own rule - or it
+   * rewrites the other machines' settings. want is that block; empty means
+   * an old sectionless .cfg, and then the whole file is managed, exactly
+   * as before. */
   {
-    int first = 1;
+    const char *want = emulator_config_section();
+    int scoped = want && *want;
+    int in_target = !scoped;      /* whole file counts as "in" when unscoped */
+    int target_seen = !scoped;
+    char sec[32];
 
-    for (i = 0; i < nkeys; i++) {
-      if (seen[i])
-        continue;
-      if (!render_key(psctrl_settings_key_at(i), cfg, rendered, sizeof(rendered)))
-        continue;
-      if (first) {
-        fprintf(out, "\n# --- written by PSCTRL ---\n");
-        first = 0;
+    in = fopen(path, "r");
+    if (in) {
+      while (fgets(line, sizeof(line), in)) {
+        if (scoped && save_section_header(line, sec, sizeof(sec))) {
+          /* Leaving the target block: drop in whatever it was missing
+           * before the next section starts, keeping a blank line between
+           * the added keys and that next header. */
+          if (in_target && flush_unseen(out, cfg, seen, nkeys))
+            fputc('\n', out);
+          in_target = (strcasecmp(sec, want) == 0);
+          if (in_target)
+            target_seen = 1;
+          fputs(line, out);                     /* the header, verbatim */
+          continue;
+        }
+        if (!line_key(line, key, sizeof(key))) {
+          fputs(line, out);                     /* comment or blank */
+          continue;
+        }
+        /* A managed key outside the target block is another machine's and
+         * is left exactly as it is. */
+        if (in_target && render_key(key, cfg, rendered, sizeof(rendered))) {
+          int dup = 0;
+
+          /* one line per managed key: the first occurrence in the block
+           * takes the value, any later copy is dropped */
+          for (i = 0; i < nkeys; i++)
+            if (!strcmp(psctrl_settings_key_at(i), key)) {
+              if (seen[i])
+                dup = 1;
+              seen[i] = 1;
+            }
+          if (!dup)
+            fprintf(out, "%s\n", rendered);
+          continue;
+        }
+        fputs(line, out);                       /* not ours, or not here */
       }
-      fprintf(out, "%s\n", rendered);
+      fclose(in);
+    }
+
+    /* The target block was the last in the file (or the only content, or
+     * unscoped): flush what it still lacks at the end. */
+    if (in_target)
+      flush_unseen(out, cfg, seen, nkeys);
+    else if (scoped && !target_seen) {
+      /* The file never had this block - add it, then its keys. */
+      fprintf(out, "\n[%s]\n", want);
+      flush_unseen(out, cfg, seen, nkeys);
     }
   }
 

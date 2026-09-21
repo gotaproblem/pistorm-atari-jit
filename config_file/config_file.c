@@ -152,10 +152,22 @@ char cfg_filename[256];
  * rather than guessing. Set by load_config_file(). */
 static char g_cfg_path[512];
 
+/* And WHICH block of it - psctrl.cfg is one file with [gem]/[apj-os]/
+ * [games] sections, and a save must stay inside the one that was booted
+ * or it rewrites the others. Empty means the file had no sections (an old
+ * single-block .cfg), and the saver then edits the whole file as before. */
+static char g_cfg_section[32];
+
 const char *emulator_config_path(void)
 {
   return g_cfg_path;
 }
+
+const char *emulator_config_section(void)
+{
+  return g_cfg_section;
+}
+
 
 static config_item get_config_item_type(char *cmd) {
   for (size_t i = 0; i < sizeof(config_switches) / sizeof(config_switches[0]); i++) {
@@ -579,6 +591,23 @@ static char g_rom_path[512];
 static char g_disk_path[512];
 static char g_fdd_path[512];
 
+static void expand_home(const char *in, char *out, size_t n);   /* below */
+
+/* The [psctrl] rom_path, expanded, so the settings UI can opendir() it to
+ * list the TOS images beside the configured one. Returning the raw value
+ * left a leading ~ that opendir cannot resolve, the scan found nothing,
+ * and the picker fell back to the GEM file selector - which stores an
+ * unusable guest path. Empty if the file set no rom_path. */
+const char *emulator_config_rom_path(void)
+{
+  static char expanded[512];
+
+  if (!g_rom_path[0])
+    return "";
+  expand_home(g_rom_path, expanded, sizeof expanded);
+  return expanded;
+}
+
 /* expand a leading ~ / ~/ to the INVOKING user's home - not $HOME, which
  * is /root under sudo and under pistorm.service (getpwnam of SUDO_USER,
  * else getpwuid of the real uid, else $HOME) */
@@ -700,6 +729,8 @@ struct emulator_config *load_config_file_section(char *filename,
   FILE *in = fopen(filename, "rb");
 
   snprintf(g_cfg_path, sizeof(g_cfg_path), "%s", filename ? filename : "");
+  snprintf(g_cfg_section, sizeof(g_cfg_section), "%s",
+           want_section ? want_section : "");
   if (in == NULL) {
     printf ("[CFG] Failed to open config file %s for reading.\n", filename);
     return NULL;

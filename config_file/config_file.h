@@ -185,6 +185,11 @@ int emulator_config_stbox_plane(void);         /* 0 if unset  */
 uint32_t emulator_config_stram_size(void);     /* bytes; 0 = flat 4MB */
 /* The file the running config was loaded from - PS_SAVE edits that one */
 const char *emulator_config_path(void);
+/* The section of that file the running config was loaded from, or "" if
+ * the file had no [sections]. The saver edits only within this block. */
+const char *emulator_config_section(void);
+/* The configured rom_path directory (for the TOS-image picker), or "". */
+const char *emulator_config_rom_path(void);
 int emulator_config_stbox_ste(void);           /* 1 = STE default */
 /* Rewrite the .cfg in place, keeping comments, ordering and every key the
  * emulator does not manage. See config_file_save.c. */
