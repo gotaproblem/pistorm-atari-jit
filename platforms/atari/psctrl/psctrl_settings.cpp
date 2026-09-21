@@ -1005,15 +1005,33 @@ static const char *item_str(const struct ps_item *it)
   return "";
 }
 
+extern "C" int emulator_gemdos_to_host(const char *gem, char *out, size_t n);
+
+/* A ROM/TOS field is now filled by the native file selector, which hands
+ * back a GEMDOS path (S:\dir\file). Turn it into the real host path the
+ * emulator will fopen, exactly as STBOX.PRG's TOS argument is mapped. A
+ * bare filename or an absolute host path is left as-is - the loader still
+ * resolves a bare name against rom_path. */
+static const char *setstr_map(const char *s, char *buf, size_t n)
+{
+  if (s && emulator_gemdos_to_host(s, buf, n))
+    return buf;
+  return s;
+}
+
 static int item_setstr(const struct ps_item *it, const char *s)
 {
+  char mapped[PATH_MAX];
+
   if (!strcmp(it->name, "rom")) {
+    s = setstr_map(s, mapped, sizeof mapped);
     boot_seed();
     snprintf(g_boot.rom.rom_path, sizeof(g_boot.rom.rom_path), "%s", s);
     g_boot_dirty = 1;
     return PS_R_RESTART;
   }
   if (!strcmp(it->name, "stbox_tos")) {
+    s = setstr_map(s, mapped, sizeof mapped);
     boot_seed();
     snprintf(g_boot.stbox_tos, sizeof(g_boot.stbox_tos), "%s", s);
     g_boot_dirty = 1;
@@ -1281,20 +1299,31 @@ uint32_t psctrl_settings_call(uint32_t subop, uint32_t p0, uint32_t p1,
     }
 
     case PSCTRL_LIST: {
+      char (*list)[64];
+      int *count;
       uint32_t n;
 
-      if (p0 != PS_LIST_FLOPPY)
+      /* Floppy drives browse disk images, rescanned on the count query
+       * (p1 < 0) so a freshly copied image shows up.
+       * PS_LIST_TOS deliberately serves NOTHING: an empty list sends the
+       * accessory to the native GEM file selector for the ROM/box-TOS
+       * fields, instead of the old three-at-a-time form_alert. The picked
+       * path is mapped back to a host path in item_setstr(). */
+      if (p0 == PS_LIST_FLOPPY) {
+        if ((int32_t)p1 < 0 || g_fdlist_n < 0)
+          fdlist_scan();
+        list = g_fdlist; count = &g_fdlist_n;
+      } else {
         return 0;
-      if ((int32_t)p1 < 0 || g_fdlist_n < 0)
-        fdlist_scan();
+      }
       if ((int32_t)p1 < 0)
-        return (uint32_t)g_fdlist_n;
-      if ((int32_t)p1 >= g_fdlist_n || !p2 || !p3)
+        return (uint32_t)*count;
+      if ((int32_t)p1 >= *count || !p2 || !p3)
         return 0;
-      n = (uint32_t)strlen(g_fdlist[p1]) + 1;
+      n = (uint32_t)strlen(list[p1]) + 1;
       if (n > p3)
         n = p3;
-      psctrl_guest_write(p2, g_fdlist[p1], n);
+      psctrl_guest_write(p2, list[p1], n);
       return n - 1;
     }
   }

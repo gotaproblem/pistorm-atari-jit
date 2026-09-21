@@ -4882,6 +4882,17 @@ static bool mp3_gemdos_to_host(const char *gem_in, char *out, size_t outsz)
   return true;
 }
 
+/* Public wrapper so the settings dialog can turn a file-selector path
+ * (S:\dir\rom, U:\S\dir\rom, /s/dir/rom) into a real host path, the
+ * same translation STBOX.PRG's TOS argument and MP3PLAY already use.
+ * Returns 0 and leaves out[] untouched when the string is not a GEMDOS
+ * path (a bare filename or an already-absolute one), so the caller keeps
+ * its existing handling for those. */
+extern "C" int emulator_gemdos_to_host(const char *gem, char *out, size_t n)
+{
+  return mp3_gemdos_to_host(gem, out, n) ? 1 : 0;
+}
+
 static uae_u32 nf_call_mp3(uae_u32 subid, uaecptr params)
 {
   switch (subid) {
