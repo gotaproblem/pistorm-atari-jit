@@ -250,6 +250,9 @@ typedef struct {
     volatile uint8_t  ste;           /* 1: STE palette/linewidth/hscroll */
     volatile uint8_t  linewidth;     /* $FF820F words added per line    */
     volatile uint8_t  hscroll;       /* $FF8265 0-15                    */
+    volatile uint16_t vis_lines;     /* visible low/med lines this frame:
+                                        200, or more when a game opens the
+                                        bottom border (Defender: 232)     */
     uint8_t          *ram;           /* sandbox ST-RAM (stable pointer) */
     uint32_t          ram_size;
 } stbox_shared_t;

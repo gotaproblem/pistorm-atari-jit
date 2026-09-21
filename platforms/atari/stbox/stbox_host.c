@@ -321,11 +321,19 @@ static const uint8_t lvl[8] = { 0, 36, 73, 109, 146, 182, 219, 255 };
  * report: SIGSEGV loading Xenon 2). */
 static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
 {
+    /* Low/med visible height: 200, or more when the guest opened the
+     * bottom border this frame. Clamped so the linear read below cannot
+     * leave the buffer whatever height was published. */
+    int vh = (int)stbox_shared.vis_lines;
+    if (vh < 200) vh = 200;
+    if (vh > 248) vh = 248;
+
     if (!stbox_shared.ste) {
+        uint32_t need = (uint32_t)vh * 160u;   /* low-res bytes for vh lines */
         uint32_t vb = stbox_shared.video_base & (stbox_shared.ram_size - 1);
-        if (stbox_shared.ram_size >= 32000 &&
-            vb > stbox_shared.ram_size - 32000)
-            vb = stbox_shared.ram_size - 32000;
+        if (stbox_shared.ram_size >= need &&
+            vb > stbox_shared.ram_size - need)
+            vb = stbox_shared.ram_size - need;
         const uint8_t *src = stbox_shared.ram + vb;
         int res = stbox_shared.shift_res;
         uint32_t pal[16];
@@ -335,7 +343,7 @@ static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
                      ((uint32_t)lvl[(p >> 4) & 7] << 8) | lvl[p & 7];
         }
         if (res == 0) {
-            for (int y = 0; y < 200; y++) {
+            for (int y = 0; y < vh; y++) {
                 uint32_t *d = (uint32_t *)(dst + y * pitch);
                 const uint8_t *s = src + y * 160;
                 for (int g = 0; g < 20; g++, s += 8) {
@@ -346,7 +354,7 @@ static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
                                    (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3)];
                 }
             }
-            *out_w = 320; *out_h = 200;
+            *out_w = 320; *out_h = vh;
         } else if (res == 1) {
             for (int y = 0; y < 200; y++) {
                 uint32_t *d = (uint32_t *)(dst + y * pitch);
@@ -395,7 +403,7 @@ static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
         const int groups = 20 + (hs ? 1 : 0);
         const uint32_t stride = (uint32_t)groups * 8 + (uint32_t)lw;
         uint8_t px[336];
-        for (int y = 0; y < 200; y++) {
+        for (int y = 0; y < vh; y++) {
             uint32_t la = vb + (uint32_t)y * stride;
             uint8_t *o = px;
             for (int g = 0; g < groups; g++, la += 8) {
@@ -411,7 +419,7 @@ static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
             const uint8_t *s = px + hs;
             for (int x = 0; x < 320; x++) *d++ = pal[s[x]];
         }
-        *out_w = 320; *out_h = 200;
+        *out_w = 320; *out_h = vh;
     } else if (res == 1) {
         const int groups = 40 + (hs ? 1 : 0);
         const uint32_t stride = (uint32_t)groups * 4 + (uint32_t)lw;
@@ -857,12 +865,22 @@ int stbox_start(const stbox_cfg_t *cfg)
     if (!g_cfg.ram_kb) g_cfg.ram_kb = 4096;
     uint32_t ram_size = g_cfg.ram_kb * 1024u;
 
-    /* ROM: NatFeat path (per-launch, from STBOX.PRG), then the env
-     * override, then the .cfg's stbox_tos line */
-    const char *path = g_cfg.tos_path[0] ? g_cfg.tos_path
-                                         : getenv("PISTORM_STBOX_TOS");
+    /* ROM, most explicit first:
+     *   1. the path STBOX.PRG passed for THIS launch (a TOS on its
+     *      command line);
+     *   2. the .cfg's stbox_tos - the user's own choice in PSCTRL, and
+     *      the whole point of that field. It only overrode nothing before
+     *      because it sat BELOW the env, so the service's install default
+     *      won every time and the setting looked ignored;
+     *   3. PISTORM_STBOX_TOS - the install default, set in the systemd
+     *      unit, used when the user has chosen nothing.
+     * emulator_config_stbox_tos() is already resolved against rom_path at
+     * load, so a bare "tos104uk.rom" from the picker becomes ~/roms/... */
+    const char *path = g_cfg.tos_path[0] ? g_cfg.tos_path : NULL;
     if (!path || !*path)
         path = emulator_config_stbox_tos();
+    if (!path || !*path)
+        path = getenv("PISTORM_STBOX_TOS");
     if (!path || !*path) {
         fprintf(stderr, "[STBOX] no TOS image (STBOX.PRG path, "
                         "PISTORM_STBOX_TOS, or cfg 'stbox_tos')\n");

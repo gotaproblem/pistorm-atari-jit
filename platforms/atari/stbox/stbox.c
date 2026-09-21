@@ -186,6 +186,7 @@ static inline uint32_t ram_map(uint32_t a, int *ok)
 static uint32_t g_vid_base;        /* latched video base                */
 static uint8_t  g_sync;            /* $FF820A                           */
 static uint8_t  g_res;             /* $FF8260                           */
+static uint8_t  g_bottom_open;     /* border opened during this frame   */
 static uint16_t g_pal[16];
 
 /* ------------------------------------------------------------------ */
@@ -1334,7 +1335,18 @@ static void hw_write(uint32_t a, uint32_t v, int size)
     if (a == 0xFF8203) { g_vid_base = (g_vid_base & (g_ste ? 0xFF00FF : 0xFF0000)) |
                                       ((v & 0xFF) << 8);
                          stbox_shared.video_base = g_vid_base; return; }
-    if (a == 0xFF820A) { g_sync = (uint8_t)v; return; }
+    if (a == 0xFF820A) {
+        g_sync = (uint8_t)v;
+        /* Bottom-border removal: the GLUE's vertical-border compare is at
+         * the start of line 263 (PAL). A game defeats it by flipping the
+         * sync rate for one line right there, and the display then runs on
+         * to the physical bottom - about 32 more low-res lines. A write to
+         * SYNC (or REZ) in that window is the whole signature; anywhere
+         * else it is an ordinary rate set and means nothing here. */
+        if (g_line >= 260 && g_line <= 266)
+            g_bottom_open = 1;
+        return;
+    }
     if (a >= 0xFF8240 && a < 0xFF8260) {
         int idx = (a - 0xFF8240) >> 1;
         uint16_t w = g_pal[idx];
@@ -1345,7 +1357,12 @@ static void hw_write(uint32_t a, uint32_t v, int size)
         stbox_shared.palette[idx] = g_pal[idx];
         return;
     }
-    if (a == 0xFF8260) { g_res = v & 3; stbox_shared.shift_res = g_res; return; }
+    if (a == 0xFF8260) {
+        g_res = v & 3; stbox_shared.shift_res = g_res;
+        if (g_line >= 260 && g_line <= 266)
+            g_bottom_open = 1;
+        return;
+    }
 
     if (g_ste) {
         /* STE shifter */
@@ -1784,6 +1801,7 @@ static void machine_cold_reset(void)
     stbox_shared.ste = (uint8_t)g_ste;
     stbox_shared.linewidth = 0;
     stbox_shared.hscroll = 0;
+    stbox_shared.vis_lines = 200;
     g_halted = 0;
     g_berr_nest = 0;
     g_frame_cyc = 0; g_next_line_cyc = CYC_PER_LINE; g_line = 0;
@@ -2024,6 +2042,12 @@ void stbox_slice(uint64_t now)
                 g_frame_cyc -= CYC_PER_VBL;
                 g_next_line_cyc = CYC_PER_LINE;
                 g_vbl_pending = 1;
+                /* Publish the height this frame actually reached, then
+                 * disarm for the next one. Sticky-free: a game that stops
+                 * opening the border is back to 200 the very next frame,
+                 * which is correct - the border is closed again. */
+                stbox_shared.vis_lines = g_bottom_open ? 232 : 200;
+                g_bottom_open = 0;
                 stbox_shared.frame++;
                 update_irq();
             } else {
