@@ -3587,9 +3587,6 @@ kludge_me_do:
 			set_interrupt_mask_from_vector(nr);
 		}
 
-	if (regs.intmask <= 0)
-		fprintf(stderr, "[GOTCHA] 2924 invalid intmask %d\n", regs.intmask);
-
 	newpc = x_get_word(regs.vbr + 4 * vector_nr) << 16; // read high address
 	newpc |= x_get_word(regs.vbr + 4 * vector_nr + 2);	// read low address
 	exception_in_exception = 0;
@@ -3752,9 +3749,6 @@ static void Exception_mmu030(int nr, uaecptr oldpc)
 		set_interrupt_mask_from_vector(nr);
 	}
 
-	if (regs.intmask <= 0)
-		fprintf(stderr, "[GOTCHA] 3049 invalid intmask %d\n", regs.intmask);
-
 	m68k_setpci(newpc);
 	fill_prefetch();
 	exception_check_trace(nr);
@@ -3912,8 +3906,6 @@ static void Exception_mmu(int nr, uaecptr oldpc)
 		if (nr < 24 || nr >= 32)
 			fprintf(stderr, "Exception_mmu(): invalid nr 0x%X to set mask\n", nr);
 		set_interrupt_mask_from_vector(nr);
-		if (regs.intmask <= 0)
-			fprintf(stderr, "[GOTCHA] 3049 invalid intmask %d\n", regs.intmask);
 	}
 	fill_prefetch();
 	exception_check_trace(nr);
@@ -4314,8 +4306,6 @@ kludge_me_do:
 		if (nr < 24 || nr >= 32)
 			fprintf(stderr, "Exception_normal(): invalid nr 0x%X to set mask\n", nr);
 		set_interrupt_mask_from_vector(nr);
-		if (regs.intmask <= 0)
-			fprintf(stderr, "[GOTCHA] 3436 invalid intmask %d\n", regs.intmask);
 	}
 
 	newpc = x_get_long(regs.vbr + 4 * vector_nr);
@@ -5708,9 +5698,6 @@ static void m68k_reset_sr()
 	regs.m = (regs.sr >> 12) & 1;
 	regs.intmask = (regs.sr >> 8) & 7;
 	g_irq_mask = regs.intmask;
-
-	if (regs.intmask <= 0)
-		fprintf(stderr, "[GOTCHA] 3761 invalid intmask %d\n", regs.intmask);
 
 	/* set stack pointer */
 	if (regs.s)

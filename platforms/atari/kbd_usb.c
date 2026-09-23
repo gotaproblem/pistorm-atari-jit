@@ -275,6 +275,16 @@ static struct {
     int  pending_cmd;
     int  pending_params;     /* params still to swallow                  */
     int  memload_left;       /* extra counted bytes for cmd 0x20         */
+    uint8_t param[8];        /* the parameter bytes themselves           */
+    int  param_n;
+    /* $09 absolute mouse mode. ikbd_apply() only ever runs for commands
+     * with NO parameters, so its $09/$0A cases were unreachable: the mode
+     * was never recorded and relative packets kept being injected into a
+     * guest expecting $F7 reports. Handled in ikbd_apply_params() now.  */
+    int  abs_x, abs_y;
+    int  abs_max_x, abs_max_y;
+    int  abs_btn_action;     /* $07 param: bit0 report press, bit1 rel.  */
+    int  abs_btn_latch;      /* $F7 button byte, latched since last read */
 } ikbd = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .mouse_mode = MOUSE_REL, .y0_top = 1, .paused = 0, .joy_event = 1,
@@ -318,6 +328,60 @@ static int ikbd_param_len(uint8_t cmd)
     }
 }
 
+/* Clamp the tracked absolute position to the box set by $09. */
+static void ikbd_abs_clamp(void)
+{
+    if (ikbd.abs_x < 0) ikbd.abs_x = 0;
+    if (ikbd.abs_y < 0) ikbd.abs_y = 0;
+    if (ikbd.abs_x > ikbd.abs_max_x) ikbd.abs_x = ikbd.abs_max_x;
+    if (ikbd.abs_y > ikbd.abs_max_y) ikbd.abs_y = ikbd.abs_max_y;
+}
+
+/* $F7 absolute position report. Button byte is the latched
+ * since-last-read set: b0 right down, b1 right up, b2 left down,
+ * b3 left up. Caller holds ikbd.lock. */
+static void ikbd_abs_report(void)
+{
+    uint8_t pkt[6];
+    pkt[0] = 0xF7;
+    pkt[1] = (uint8_t)ikbd.abs_btn_latch;
+    pkt[2] = (uint8_t)((ikbd.abs_x >> 8) & 0xFF);
+    pkt[3] = (uint8_t)(ikbd.abs_x & 0xFF);
+    pkt[4] = (uint8_t)((ikbd.abs_y >> 8) & 0xFF);
+    pkt[5] = (uint8_t)(ikbd.abs_y & 0xFF);
+    ikbd.abs_btn_latch = 0;
+    ring_push_packet(pkt, 6);
+}
+
+/* Effects of the commands that carry parameters. These never reached
+ * ikbd_apply(), so until now $09/$0A/$07/$0E did nothing at all.
+ * Caller holds ikbd.lock. */
+static void ikbd_apply_params(uint8_t cmd)
+{
+    switch (cmd)
+    {
+        case 0x07:                      /* set mouse button action      */
+            ikbd.abs_btn_action = ikbd.param[0];
+            break;
+        case 0x09:                      /* set absolute positioning     */
+            ikbd.abs_max_x = (ikbd.param[0] << 8) | ikbd.param[1];
+            ikbd.abs_max_y = (ikbd.param[2] << 8) | ikbd.param[3];
+            ikbd.abs_x = ikbd.abs_y = 0;
+            ikbd.abs_btn_latch = 0;
+            ikbd.mouse_mode = MOUSE_ABS;
+            break;
+        case 0x0A:                      /* set keycode mouse            */
+            ikbd.mouse_mode = MOUSE_KEYCODE;
+            break;
+        case 0x0E:                      /* load position: fill,xh,xl,yh,yl */
+            ikbd.abs_x = (ikbd.param[1] << 8) | ikbd.param[2];
+            ikbd.abs_y = (ikbd.param[3] << 8) | ikbd.param[4];
+            ikbd_abs_clamp();
+            break;
+        default: break;
+    }
+}
+
 static void ikbd_apply(uint8_t cmd)
 {
     if (pst_dbg_ikbd)
@@ -356,6 +420,12 @@ static void ikbd_apply(uint8_t cmd)
                 }
             }
             joy_usb_resend();               /* fire moves to the stick */
+            break;
+        case 0x0D:
+            /* interrogate absolute mouse position. Only answer when no
+             * real IKBD is there to answer for us - same rule as $16. */
+            if (ikbd.mouse_mode == MOUSE_ABS && quarantined())
+                ikbd_abs_report();
             break;
         case 0x0F: ikbd.y0_top = 0;                          break;
         case 0x10: ikbd.y0_top = 1;                          break;
@@ -689,6 +759,10 @@ static void ikbd_reset_state(void)
     ikbd.pending_cmd = 0;
     ikbd.pending_params = 0;
     ikbd.memload_left = 0;
+    ikbd.param_n = 0;
+    ikbd.abs_x = ikbd.abs_y = 0;
+    ikbd.abs_max_x = ikbd.abs_max_y = 0;
+    ikbd.abs_btn_action = ikbd.abs_btn_latch = 0;
     /* flush anything queued under the old mode */
     atomic_store(&ring_head, atomic_load(&ring_tail));
     atomic_store(&in_packet, 0);
@@ -711,6 +785,8 @@ void kbd_usb_tx_snoop(uint8_t v)
     }
     else if (ikbd.pending_params > 0)
     {
+        if (ikbd.param_n < (int)sizeof ikbd.param)
+            ikbd.param[ikbd.param_n++] = v;
         ikbd.pending_params--;
         if (ikbd.pending_cmd == 0x80 && v == 0x01)
         {
@@ -762,6 +838,8 @@ void kbd_usb_tx_snoop(uint8_t v)
                 ikbd.joy_event  = 0;
                 ikbd.mouse_mode = MOUSE_OFF;
             }
+            else
+                ikbd_apply_params((uint8_t)ikbd.pending_cmd);
             ikbd.pending_cmd = 0;
         }
     }
@@ -772,6 +850,7 @@ void kbd_usb_tx_snoop(uint8_t v)
         {
             ikbd.pending_cmd = v;
             ikbd.pending_params = n;
+            ikbd.param_n = 0;
         }
         else
         {
@@ -1040,7 +1119,15 @@ static void real_byte_consumed(uint8_t rs)
         atomic_store_explicit(&probe_saw_clean, 0, memory_order_relaxed);
         real_state_set(IKBD_ABSENT);
     }
-    atomic_fetch_add(&rate_win_bytes, 1);
+    /* Absolute mode ($09): every byte arriving here is a $F7 report the
+     * guest asked for with its own $0D interrogation. Basilisk II polls
+     * continuously and clears RATE_FLOOD_BPS with ease - that is the guest
+     * talking, not a noisy line, so it must not feed the flood windows or
+     * a working keyboard gets quarantined two seconds into the session.
+     * Same unlocked read of mouse_mode the scaler uses; a stale value
+     * costs one miscounted byte across a mode change. */
+    if (ikbd.mouse_mode != MOUSE_ABS)
+        atomic_fetch_add(&rate_win_bytes, 1);
     atomic_fetch_add(&real_rx_total, 1);
 }
 
@@ -1792,12 +1879,48 @@ static void mouse_flush(void)
     const int buttons = in_state.buttons |
                         (atomic_load_explicit(&joy_rbutton, memory_order_relaxed) ? 0x01 : 0);
 
-    if (paused || mode != MOUSE_REL)
+    if (paused || mode == MOUSE_OFF || mode == MOUSE_KEYCODE)
     {
-        /* not injectable in abs/keycode/off modes - drop deltas so they
+        /* not injectable in keycode/off modes - drop deltas so they
          * don't burst out when relative mode returns */
         in_state.dx = in_state.dy = 0;
         in_state.last_sent_buttons = buttons;
+        return;
+    }
+
+    if (mode == MOUSE_ABS)
+    {
+        /* $09: the IKBD reports nothing of its own accord in absolute
+         * mode - it maintains a position the guest polls with $0D, plus
+         * button reports if $07 asked for them. Accumulating here is what
+         * the old code was missing; it discarded the deltas, which pinned
+         * the pointer at 0,0 for anything that uses absolute mode
+         * (Basilisk II sets 639x399 at startup). */
+        const int d = kbd_usb_mouse_div > 0 ? kbd_usb_mouse_div : 1;
+        int ax = in_state.dx / d, ay = in_state.dy / d;
+        in_state.dx -= ax * d;          /* keep the sub-division remainder */
+        in_state.dy -= ay * d;
+        const int down = buttons & ~in_state.last_sent_buttons;
+        const int up   = in_state.last_sent_buttons & ~buttons;
+        in_state.last_sent_buttons = buttons;
+
+        pthread_mutex_lock(&ikbd.lock);
+        if (!ikbd.y0_top)
+            ay = -ay;
+        ikbd.abs_x += ax;
+        ikbd.abs_y += ay;
+        ikbd_abs_clamp();
+        /* latched button bits: b0 right down, b1 right up,
+         *                      b2 left down,  b3 left up          */
+        if (down & 0x02) ikbd.abs_btn_latch |= 0x01;
+        if (up   & 0x02) ikbd.abs_btn_latch |= 0x02;
+        if (down & 0x01) ikbd.abs_btn_latch |= 0x04;
+        if (up   & 0x01) ikbd.abs_btn_latch |= 0x08;
+        if (quarantined() &&
+            ((down && (ikbd.abs_btn_action & 0x01)) ||
+             (up   && (ikbd.abs_btn_action & 0x02))))
+            ikbd_abs_report();
+        pthread_mutex_unlock(&ikbd.lock);
         return;
     }
 

@@ -978,14 +978,9 @@ int ide_attach_hdf ( struct ide_controller *c, int drive, int fd )
     return -1;
   }
 
-  d->fd = fd;
-  d->present = 1;
-  d->lba = 1;           /* LBA addressing only */
-
-  d->heads = 16;
-  d->sectors = 63;
-  d->header_present = 0;
-
+  /* Validate BEFORE claiming the slot: the old order set present/fd and
+   * then returned -1 on a too-small image, leaving a half-attached drive
+   * that IDENTIFY would answer for. */
   off64_t file_size = lseek64 ( fd, 0, SEEK_END );
   lseek64 ( fd, 0, SEEK_SET );
 
@@ -993,6 +988,14 @@ int ide_attach_hdf ( struct ide_controller *c, int drive, int fd )
     printf ( "[IDE/HDD] File size is too small. Image must be > 4 MB\n" );
     return -1;
   }
+
+  d->fd = fd;
+  d->present = 1;
+  d->lba = 1;           /* LBA addressing only */
+
+  d->heads = 16;
+  d->sectors = 63;
+  d->header_present = 0;
 
   /* if drive < 528 MB word[1] (default cylinders) <= 1024 */
   /* word[3] <= 16 */

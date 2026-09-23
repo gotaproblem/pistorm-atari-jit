@@ -837,6 +837,8 @@ static void mmu030_do_fake_prefetch(void)
 	} ENDTRY
 }
 
+static int mmu030_tc_log_budget = 8;   /* enable+disable messages, total */
+
 bool mmu030_decode_tc(uae_u32 TC, bool check)
 {
 #if MMU_IPAGECACHE030
@@ -853,7 +855,15 @@ bool mmu030_decode_tc(uae_u32 TC, bool check)
     } else {
 		if (mmu030.enabled) {
 			mmu030_do_fake_prefetch();
-			write_log(_T("MMU disabled PC=%08x\n"), M68K_GETPC);
+			/* Capped: Basilisk II toggles the MMU around every native
+			 * call-out, which made this line the loudest thing on the
+			 * console. Shared counter with the enable message below. */
+			if (mmu030_tc_log_budget > 0) {
+				mmu030_tc_log_budget--;
+				write_log(_T("MMU disabled PC=%08x\n"), M68K_GETPC);
+				if (mmu030_tc_log_budget == 0)
+					write_log(_T("MMU enable/disable: further messages suppressed after 8\n"));
+			}
 		}
         mmu030.enabled = false;
         return false;
@@ -876,7 +886,12 @@ bool mmu030_decode_tc(uae_u32 TC, bool check)
     mmu030.translation.init_shift = (TC & TC_IS_MASK) >> 16;
 	regs.mmu_page_size = 1 << mmu030.translation.page.size;
 
-	write_log(_T("68030 MMU enabled. Page size = %d PC=%08x\n"), regs.mmu_page_size, M68K_GETPC);
+	if (mmu030_tc_log_budget > 0) {
+		mmu030_tc_log_budget--;
+		write_log(_T("68030 MMU enabled. Page size = %d PC=%08x\n"), regs.mmu_page_size, M68K_GETPC);
+		if (mmu030_tc_log_budget == 0)
+			write_log(_T("MMU enable/disable: further messages suppressed after 8\n"));
+	}
 
 	if (mmu030.translation.page.size<8) {
         write_log(_T("MMU Configuration Exception: Bad value in TC register! (bad page size: %i byte)\n"),

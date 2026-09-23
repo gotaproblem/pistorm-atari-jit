@@ -88,7 +88,7 @@ extern "C"
 #define ATARI_VGA_BANK_PROFILE 0
 #endif
 #define ATARI_BLITTER_TRACE 0
-#define ATARI_ACIA_TRACE 0
+#define ATARI_ACIA_TRACE 1     /* runtime-gated on `debug ikbd` - see acia_trace_enabled() */
 
 #if ATARI_VGA_BANK_PROFILE
 typedef struct {
@@ -2054,6 +2054,13 @@ static inline void blitter_trace(const char *op, uaecptr a, uae_u32 v, int size)
 #endif
 
 #if ATARI_ACIA_TRACE
+/* Runtime gate: `debug ikbd` in the cfg, or PISTORM_IKBD_DEBUG=1. Was
+ * referenced but never defined, so the trace could not be compiled in. */
+static inline int acia_trace_enabled(void)
+{
+    return pst_dbg_ikbd != 0;
+}
+
 static inline int acia_addr(uaecptr a)
 {
     a &= 0x00FFFFFFu;
@@ -2063,8 +2070,28 @@ static inline int acia_addr(uaecptr a)
 static inline void acia_trace(const char *op, uaecptr a, uae_u32 v, int size)
 {
     static unsigned count;
-    if (!acia_trace_enabled() || !acia_addr(a) || count >= 256000)
+    if (!acia_trace_enabled() || !acia_addr(a))
         return;
+    /* A status read with RDRF clear is an idle poll. A guest that spins
+     * on the status register (Basilisk II does) produces thousands a
+     * second, which exhausted the old 256000-line cap in seconds and
+     * made the trace look as if it had stopped. The 6850 sits on D8-D15,
+     * so the register byte is the high byte of a word/long access. */
+    const unsigned reg = a & 0x00FFFFFFu;
+    const unsigned rb  = (size == 1) ? (v & 0xFFu)
+                       : (size == 2) ? ((v >> 8) & 0xFFu)
+                                     : ((v >> 24) & 0xFFu);
+    if (op[0] == 'R' && (reg == 0x00FFFC00u || reg == 0x00FFFC04u) && !(rb & 0x01u))
+        return;
+    if (count >= 2000000)
+    {
+        if (count == 2000000)
+        {
+            count++;
+            fprintf(stderr, "[ACIA] trace cap reached - further lines suppressed\n");
+        }
+        return;
+    }
     count++;
     fprintf(stderr, "[ACIA] %s%d %06X -> %0*X berr=%u fc=%u\n",
             op, size * 8, (unsigned)(a & 0x00FFFFFFu),

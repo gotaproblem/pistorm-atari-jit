@@ -182,19 +182,30 @@ void InitIDE (void)
         {
           //printf ( "[IDE%d] Attaching FDD image %s.\n", port, atari_image_file [i] );
 
-          ide_attach_st ( atariIDE [port], i, atarifd );
-          num_IDE_drives++;
-
-          printf ( "[IDE%d] FDD Image %s attached as HDD%d\n", port, atari_image_file [i], i );
+          if ( ide_attach_st ( atariIDE [port], i % 2, atarifd ) == 0 )
+          {
+            num_IDE_drives++;
+            printf ( "[IDE%d] FDD Image %s attached as HDD%d\n", port, atari_image_file [i], i );
+          }
+          else
+            printf ( "[IDE%d] FDD Image %s NOT attached as HDD%d\n", port, atari_image_file [i], i );
         }
 
         else if ( strcmp ( atari_image_file [i] + ( strlen (atari_image_file [i] ) - 3 ), "img" ) == 0 
           || strncmp ( atari_image_file [i], "/dev/loop0", 10 ) == 0 )
         {
-          ide_attach_hdf ( atariIDE [port], i, atarifd );
-          num_IDE_drives++;
-          
-          printf ("[IDE%d] HDD%d Image Attached %s\n", port, i, atari_image_file[i]);
+          /* i is the global slot (0..7); the controller only has a master
+           * and a slave, so the drive index is i % 2. ide_attach_* masks
+           * with & 1 internally, which hid this for slots 0-3 but aliased
+           * slot 4 onto slot 0's controller. Also honour the return: it
+           * fails on an already-present slot or an undersized image. */
+          if ( ide_attach_hdf ( atariIDE [port], i % 2, atarifd ) == 0 )
+          {
+            num_IDE_drives++;
+            printf ("[IDE%d] HDD%d Image Attached %s\n", port, i, atari_image_file[i]);
+          }
+          else
+            printf ("[IDE%d] HDD%d Image %s NOT attached\n", port, i, atari_image_file[i]);
         }
       }
     }
