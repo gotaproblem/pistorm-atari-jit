@@ -255,8 +255,35 @@ typedef struct {
                                         bottom border (Defender: 232)     */
     uint8_t          *ram;           /* sandbox ST-RAM (stable pointer) */
     uint32_t          ram_size;
+    volatile uint32_t cap_idx;       /* newest complete stbox_cap[] frame,
+                                        STBOX_CAP_NONE until the first     */
 } stbox_shared_t;
 extern stbox_shared_t stbox_shared;
+
+/* SCANLINE CAPTURE (low and medium resolution). Core 3 copies each
+ * displayed line out of the box's RAM as the box's beam finishes it, with
+ * the palette that line was shown in, from a video base latched at the
+ * start of the frame the way the Shifter latches it. The renderer then
+ * converts a complete, consistent frame instead of reading live RAM
+ * while the box is drawing the next one - which showed half-drawn
+ * frames, and the back buffer of any game that sets the next screen
+ * before the VBL (flicker), and one palette for the whole frame (raster
+ * colours smeared). Three buffers: the renderer reads the newest while
+ * core 3 fills another, and a buffer is only rewritten two frames
+ * (40 ms) after it was published. High resolution (71 Hz, 400 lines)
+ * does not fit the box's PAL frame model and stays on the live path. */
+#define STBOX_CAP_ROWS  248          /* 200, or 232 with the bottom border */
+#define STBOX_CAP_PITCH 168          /* 160 + one STE hscroll word group  */
+#define STBOX_CAP_BUFS  3
+#define STBOX_CAP_NONE  0xFFFFFFFFu
+typedef struct {
+    uint8_t  pix[STBOX_CAP_ROWS * STBOX_CAP_PITCH];
+    uint16_t pal[STBOX_CAP_ROWS][16];
+    uint16_t rows;                   /* visible rows this frame           */
+    uint8_t  res;                    /* shifter resolution at frame start */
+    uint8_t  hscroll;                /* STE fine scroll at frame start    */
+} stbox_cap_t;
+extern stbox_cap_t stbox_cap[STBOX_CAP_BUFS];
 
 #ifdef __cplusplus
 }

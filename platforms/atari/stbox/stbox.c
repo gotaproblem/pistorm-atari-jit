@@ -72,6 +72,7 @@
 /* machine state                                                      */
 /* ------------------------------------------------------------------ */
 stbox_shared_t stbox_shared;
+stbox_cap_t stbox_cap[STBOX_CAP_BUFS];          /* see stbox.h            */
 
 static uint8_t *g_ram;             /* ST-RAM                            */
 static uint32_t g_ram_mask;        /* size-1 (power of two sizes only)  */
@@ -201,6 +202,41 @@ static int ste_noblit(void){ if (g_ste_noblit<0){const char*e=getenv("PISTORM_ST
 static int ste_nodma (void){ if (g_ste_nodma <0){const char*e=getenv("PISTORM_STBOX_NODMA"); g_ste_nodma =(e&&*e=='1');} return g_ste_nodma; }
 static uint8_t  g_linewidth;       /* $FF820F: words added per line     */
 static uint8_t  g_hscroll;         /* $FF8265: 0-15 pixels              */
+
+static unsigned g_cap_w;                        /* buffer being filled    */
+static uint32_t g_disp_base;                    /* base latched at VBL    */
+
+/* Copy the line the beam just finished into the capture buffer. Called
+ * from the slice loop at every line end: memory-only, at most 168 + 32
+ * bytes, so it keeps the ipl_task admission rule. The address follows
+ * the same model as the $FF8205/07/09 video counter: row r starts at
+ * the latched base + r * stride (STE: plus linewidth and the extra
+ * hscroll word group). */
+static void cap_line(uint32_t line)
+{
+    if (line < DE_FIRST_LINE || line >= DE_FIRST_LINE + STBOX_CAP_ROWS)
+        return;
+    if (!stbox_shared.ram || !stbox_shared.ram_size)
+        return;
+    uint32_t row = line - DE_FIRST_LINE;
+    stbox_cap_t *c = &stbox_cap[g_cap_w];
+    uint32_t hs = g_ste ? (g_hscroll & 15u) : 0u;
+    uint32_t len = 160u + (hs ? (g_res == 0 ? 8u : 4u) : 0u);
+    uint32_t stride = len + (g_ste ? (uint32_t)g_linewidth * 2u : 0u);
+    if (row == 0) {
+        c->res = g_res;
+        c->hscroll = (uint8_t)hs;
+    }
+    uint32_t mask = stbox_shared.ram_size - 1u;       /* power of two */
+    uint32_t addr = (g_disp_base + row * stride) & mask;
+    uint8_t *d = c->pix + row * STBOX_CAP_PITCH;
+    if (addr + len <= stbox_shared.ram_size)
+        memcpy(d, stbox_shared.ram + addr, len);
+    else
+        for (uint32_t i = 0; i < len; i++)
+            d[i] = stbox_shared.ram[(addr + i) & mask];
+    memcpy(c->pal[row], g_pal, sizeof c->pal[row]);
+}
 
 /* STE DMA sound. Core 3 fetches samples in step with guest cycles and
  * pushes S16 stereo frames at the 50066 Hz master rate into the ring
@@ -1124,7 +1160,38 @@ static void mfp_write(uint32_t a, uint8_t v)
         case 0x03: mfp.aer  = v; break;
         case 0x05: mfp.ddr  = v; break;
         case 0x07: mfp.iera = v; mfp.ipra &= v; break;
-        case 0x09: mfp.ierb = v; mfp.iprb &= v; break;
+        case 0x09: {
+            /* ch6 (ACIA) switched ON while the ACIA already holds an
+             * unread byte and no ch6 interrupt is pending. Field case:
+             * the previous program disabled ch6 with the byte's interrupt
+             * pending (a 68901 drops it), the byte stayed unread, and the
+             * ACIA line - held low until RDR is read - never made another
+             * edge, so the next program's keyboard was dead for good
+             * (IERB=40 IPRB=00, RDRF set, 146 bytes queued behind it).
+             * Re-raise it here. Edge-exact 68901 behaviour would not, but
+             * nothing else in this model can ever recover that state,
+             * and a real IKBD, far slower than this one, rarely puts a
+             * byte into that window in the first place. */
+            uint8_t on = (uint8_t)(v & ~mfp.ierb);
+            if ((mfp.iprb & ~v) & (1u << MFP_CH_ACIA)) {
+                static int shown;
+                if (shown++ < 8)
+                    fprintf(stderr, "[STBOX] guest disabled MFP ch6 with its "
+                            "interrupt pending (IERB %02X->%02X) at pc=%06X\n",
+                            mfp.ierb, v,
+                            (unsigned)m68k_get_reg(NULL, M68K_REG_PPC));
+            }
+            mfp.ierb = v; mfp.iprb &= v;
+            if ((on & (1u << MFP_CH_ACIA)) && (acia.sr & 0x01)) {
+                static int shown2;
+                if (shown2++ < 8)
+                    fprintf(stderr, "[STBOX] ch6 enabled with an ACIA byte "
+                            "waiting - interrupt re-raised (pc=%06X)\n",
+                            (unsigned)m68k_get_reg(NULL, M68K_REG_PPC));
+                mfp_raise(MFP_CH_ACIA);
+            }
+            break;
+        }
         case 0x0B: mfp.ipra &= v; break;          /* write 0 to clear */
         case 0x0D: mfp.iprb &= v; break;
         case 0x0F: mfp.isra &= v; break;
@@ -1651,6 +1718,22 @@ static void in_push(uint32_t v)
     g_in_cnt[(v >> 24) & 3]++;
 }
 
+/* Diagnostic snapshot of the box's interrupt path, for the 5 s health
+ * line (stbox_host.c). Read from the health thread while core 3 runs the
+ * box - a torn value costs one misleading line, nothing else. out:
+ * [0] SR, [1] PC, [2] IERB<<24|IMRB<<16|IPRB<<8|ISRB,
+ * [3] VR<<24|ACIA SR<<16|ACIA CR<<8|GPIP, [4] IKBD fifo bytes waiting. */
+void stbox_core_irq_state(uint32_t out[5])
+{
+    out[0] = m68k_get_reg(NULL, M68K_REG_SR);
+    out[1] = m68k_get_reg(NULL, M68K_REG_PC);
+    out[2] = ((uint32_t)mfp.ierb << 24) | ((uint32_t)mfp.imrb << 16) |
+             ((uint32_t)mfp.iprb << 8) | mfp.isrb;
+    out[3] = ((uint32_t)mfp.vr << 24) | ((uint32_t)acia.sr << 16) |
+             ((uint32_t)acia.cr << 8) | mfp.gpip;
+    out[4] = (uint8_t)(acia.ft - acia.fh);
+}
+
 void stbox_input_stats(uint32_t out[6])
 {
     out[0] = g_in_cnt[0]; out[1] = g_in_cnt[1];
@@ -1808,6 +1891,9 @@ static void machine_cold_reset(void)
     g_hbl_pending = g_vbl_pending = 0;
     g_total_cyc = 0; g_mfp_fp = 0;
     stbox_shared.frame = 0;
+    stbox_shared.cap_idx = STBOX_CAP_NONE;
+    g_cap_w = 0;
+    g_disp_base = 0;
     stbox_shared.video_base = 0;
     stbox_shared.shift_res = 0;
     m68k_pulse_reset();
@@ -2035,6 +2121,7 @@ void stbox_slice(uint64_t now)
         g_frame_cyc += (uint32_t)ran;
         while (g_frame_cyc >= g_next_line_cyc) {
             g_next_line_cyc += CYC_PER_LINE;
+            cap_line(g_line);                   /* the line just finished */
             g_line++;
             mfp_timerb_event();
             if (g_line >= LINES_PER_VBL) {
@@ -2047,6 +2134,15 @@ void stbox_slice(uint64_t now)
                  * opening the border is back to 200 the very next frame,
                  * which is correct - the border is closed again. */
                 stbox_shared.vis_lines = g_bottom_open ? 232 : 200;
+                /* the finished frame goes to the renderer, and the next
+                 * one is shown from the base the guest holds NOW - a
+                 * write to $FF8201/03 during a frame takes effect at the
+                 * next one, as on the Shifter */
+                stbox_cap[g_cap_w].rows = stbox_shared.vis_lines;
+                __atomic_thread_fence(__ATOMIC_RELEASE);
+                stbox_shared.cap_idx = g_cap_w;
+                g_cap_w = (g_cap_w + 1u) % STBOX_CAP_BUFS;
+                g_disp_base = g_vid_base;
                 g_bottom_open = 0;
                 stbox_shared.frame++;
                 update_irq();

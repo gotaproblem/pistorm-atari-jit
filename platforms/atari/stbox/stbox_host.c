@@ -319,8 +319,74 @@ static const uint8_t lvl[8] = { 0, 36, 73, 109, 146, 182, 219, 255 };
  * wrap within the (power-of-two) RAM size, so a base near the top of RAM
  * or a transiently wrong one can never read outside the buffer (field
  * report: SIGSEGV loading Xenon 2). */
+/* Low/medium resolution from the scanline capture (stbox.h, SCANLINE
+ * CAPTURE): one consistent frame, each row in its own palette. Returns 0
+ * when there is no capture to use (none yet, or high resolution) and the
+ * live path below runs instead. */
+static int convert_cap(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
+{
+    uint32_t idx = stbox_shared.cap_idx;
+    if (idx >= STBOX_CAP_BUFS)
+        return 0;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    const stbox_cap_t *c = &stbox_cap[idx];
+    const int res = c->res;
+    if (res > 1)
+        return 0;
+    const int ste = stbox_shared.ste;
+    const int hs = ste ? (c->hscroll & 15) : 0;
+    int rows = res == 0 ? (int)c->rows : 200;
+    if (rows < 200) rows = 200;
+    if (rows > STBOX_CAP_ROWS) rows = STBOX_CAP_ROWS;
+
+    for (int y = 0; y < rows; y++) {
+        uint32_t pal[16];
+        for (int i = 0; i < 16; i++) {
+            uint16_t p = c->pal[y][i];
+            if (ste) {
+                #define STE_LVL(n) ((uint8_t)(((((n) & 7) << 1) | (((n) >> 3) & 1)) * 17))
+                pal[i] = 0xFF000000u | ((uint32_t)STE_LVL(p >> 8) << 16) |
+                         ((uint32_t)STE_LVL(p >> 4) << 8) | STE_LVL(p);
+                #undef STE_LVL
+            } else {
+                pal[i] = 0xFF000000u | ((uint32_t)lvl[(p >> 8) & 7] << 16) |
+                         ((uint32_t)lvl[(p >> 4) & 7] << 8) | lvl[p & 7];
+            }
+        }
+        const uint8_t *s = c->pix + (size_t)y * STBOX_CAP_PITCH;
+        uint32_t *d = (uint32_t *)(dst + (size_t)y * pitch);
+        uint8_t px[656];
+        uint8_t *o = px;
+        if (res == 0) {
+            const int groups = 20 + (hs ? 1 : 0);
+            for (int g = 0; g < groups; g++, s += 8) {
+                uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
+                uint16_t p2 = (s[4] << 8) | s[5], p3 = (s[6] << 8) | s[7];
+                for (int b = 15; b >= 0; b--)
+                    *o++ = (uint8_t)(((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) |
+                                     (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3));
+            }
+            for (int x = 0; x < 320; x++) *d++ = pal[px[hs + x]];
+        } else {
+            const int groups = 40 + (hs ? 1 : 0);
+            for (int g = 0; g < groups; g++, s += 4) {
+                uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
+                for (int b = 15; b >= 0; b--)
+                    *o++ = (uint8_t)(((p0 >> b) & 1) | (((p1 >> b) & 1) << 1));
+            }
+            for (int x = 0; x < 640; x++) *d++ = pal[px[hs + x]];
+        }
+    }
+    *out_w = res == 0 ? 320 : 640;
+    *out_h = rows;
+    return 1;
+}
+
 static void convert(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
 {
+    if (convert_cap(dst, pitch, out_w, out_h))
+        return;
+
     /* Low/med visible height: 200, or more when the guest opened the
      * bottom border this frame. Clamped so the linear read below cannot
      * leave the buffer whatever height was published. */
@@ -502,6 +568,18 @@ static void *render_main(void *arg)
                     g_focus, g_route,
                     in[0], in[1], in[2], in[3], in[4], in[5],
                     sc[0], sc[1], sc[2], sc[3], sc[4]);
+            {
+                extern void stbox_core_irq_state(uint32_t out[5]);
+                uint32_t is[5];
+                stbox_core_irq_state(is);
+                fprintf(stderr, "[STBOX]   irq: sr=%04X pc=%06X "
+                        "IERB=%02X IMRB=%02X IPRB=%02X ISRB=%02X VR=%02X "
+                        "acia sr=%02X cr=%02X gpip=%02X fifo=%u\n",
+                        is[0] & 0xFFFFu, is[1] & 0xFFFFFFu,
+                        is[2] >> 24, (is[2] >> 16) & 0xFF, (is[2] >> 8) & 0xFF,
+                        is[2] & 0xFF, is[3] >> 24, (is[3] >> 16) & 0xFF,
+                        (is[3] >> 8) & 0xFF, is[3] & 0xFF, is[4]);
+            }
             {
                 static unsigned last_tr;
                 unsigned tr = stbox_trace_count;
