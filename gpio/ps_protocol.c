@@ -119,11 +119,54 @@ static inline void ps_wait_idle(void)
  * Returns 1 with the bus held (caller MUST call ps_bus_unlock), or 0. */
 int ps_bus_trylock (void)
 {
+  /* Look before writing. atomic_flag_test_and_set is a store even when
+   * it fails - on the Pi 4's A72 (ARMv8.0, no LSE) an exclusive
+   * load/store pair writing 1 over the 1 already there - so every failed
+   * attempt pulled the lock's cache line over to core 3 in exclusive
+   * state, and the CPU thread paid a miss on its next ps_lock_bus/ps_unlock_bus to
+   * get it back. ipl_task retries every 1 us while the bus is busy, i.e.
+   * throughout the CPU thread's heaviest bus traffic. A plain load of
+   * ps_bus_active (raised by every lock holder) only shares the line.
+   * It is only a hint: a stale 0 just before a lock is taken falls
+   * through to the test-and-set, which still decides; a stale 1 just
+   * after a release costs one skipped sample, the same as a busy bus. */
+  if (ps_bus_active)
+    return 0;
   if (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     return 0;                       /* a transaction owns the bus */
   ps_bus_active = 1;
   asm volatile ("dmb sy" ::: "memory");
   return 1;
+}
+
+/* Take the bus for a thread that must not be starved of it, spinning
+ * for at most `ticks` of the arch timer. ps_bus_trylock looks once;
+ * against a thread that goes straight from one transaction to the next
+ * - or two threads handing the lock back and forth - "once" can fail
+ * for milliseconds: field-measured 2.56 ms with no successful sample,
+ * during which the keyboard ACIA rescue could not run either. Spinning
+ * on the flag here takes part in the hand-off instead of hoping to catch
+ * the bus idle. Returns 1 with the bus held (caller MUST ps_bus_unlock),
+ * 0 if it could not be had in time. */
+int ps_bus_lock_within (uint64_t ticks)
+{
+  uint64_t t0, t;
+
+  __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (t0));
+  for (;;)
+  {
+    if (!ps_bus_active &&
+        !atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
+    {
+      ps_bus_active = 1;
+      asm volatile ("dmb sy" ::: "memory");
+      return 1;
+    }
+    __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (t));
+    if (t - t0 >= ticks)
+      return 0;
+    asm volatile ("yield" ::: "memory");
+  }
 }
 
 void ps_bus_unlock (void)
@@ -663,6 +706,232 @@ inline uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
   if ((addr & 1) == 0)
     return (uint8_t)(ps_io.data >> 8);
   return (uint8_t)ps_io.data;
+}
+
+/* For threads other than the CPU thread (ipl_task, the stats thread).
+ * The function code is an argument - never the CPU thread's `fc` global,
+ * which says what the GUEST is doing at that moment and is user mode for
+ * most of a MiNT session - and a bus error is reported through berr_out
+ * ONLY. g_buserr is the CPU thread's sticky flag (clear, transact, check,
+ * raise a guest bus error); another thread setting it can land between
+ * that clear and that check. */
+uint8_t ps_read_8_quiet (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
+{
+  ps_io_t ps_io;
+
+  ps_io.data = 0;
+  ps_io.addr = addr;
+  ps_io.fc = fc_value;
+  ps_io.io_type = READ_BYTE;
+
+  ps_read (&ps_io);
+
+  if (berr_out)
+    *berr_out = ps_io.berr;
+
+  if ((addr & 1) == 0)
+    return (uint8_t)(ps_io.data >> 8);
+  return (uint8_t)ps_io.data;
+}
+
+void ps_write_8_quiet (uint32_t addr, uint8_t data, uint8_t fc_value, uint8_t *berr_out)
+{
+  ps_io_t ps_io;
+
+  ps_io.data = (addr & 0x01) ? data : (uint16_t)(data << 8);
+  ps_io.addr = addr;
+  ps_io.fc = fc_value;
+  ps_io.io_type = WRITE_BYTE;
+
+  ps_write (&ps_io);
+
+  if (berr_out)
+    *berr_out = ps_io.berr;
+}
+
+/* ---- keyboard ACIA receive rescue ----------------------------------
+ *
+ * The 6850 holds ONE received byte. The next byte completes 1.28 ms
+ * later (10 bits at 7812.5 baud) and, if the first is still unread, is
+ * lost as an overrun. The guest reads the ACIA from its level-6 handler,
+ * and the CPU thread can only take that interrupt between host calls: a
+ * long NatFeat (field case: FVDI BLIT_AREA while scrolling a picture,
+ * 1-8 ms) holds it off for longer than one character. A byte lost in a
+ * mouse packet turns the rest of the packet into key presses with no
+ * key release, and TOS key repeat then clicks until a key is released -
+ * the constant beeping.
+ *
+ * So once a level 6 has waited 250 us unmasked, ipl_task empties the
+ * receiver into this FIFO (ps_acia_kbd_rescue), and every guest read of
+ * $FFFC00/$FFFC02 goes through ps_acia_kbd_read8/16, which serve the
+ * FIFO before the chip: status shows RDRF|IRQ while it holds bytes, a
+ * data read pops it. Nothing is invented and nothing is reordered - the
+ * FIFO only ever holds bytes taken out of the chip, oldest first, and
+ * the chip cannot hold a newer one than the FIFO's last.
+ *
+ * Both sides run UNDER THE BUS LOCK. That is what makes the FIFO test
+ * and the chip access one step: a guest read cannot see "FIFO empty",
+ * lose the bus to a rescue, and then read the chip's data register
+ * again (which would return the byte just taken - a duplicate). It is
+ * also why a rescue is correct wherever the CPU thread happens to be,
+ * even between a guest's status read and its data read: the status
+ * said RDRF, and the data read then pops that same byte from the FIFO.
+ *
+ * The MFP needs nothing: the byte's arrival already latched channel 6
+ * pending (GPIP4 edge), so the interrupt still comes when the call
+ * returns, and the handler - TOS, EmuTOS and FreeMiNT all loop while
+ * GPIP4 is low - finds the bytes. pistorm_natmem.cpp's GPIP shim holds
+ * GPIP4 low while the FIFO is not empty (ps_acia_kbd_pending). */
+#define ACIA_KBD_CTRL  0x00FFFC00u
+#define ACIA_KBD_DATA  0x00FFFC02u
+/* Power of two. Sized for the longest host call seen, not the typical
+ * one: PSIMG.1 (decoding the APJ-OS wallpaper) held the CPU thread for
+ * 177 and 200 ms back to back at startup, and a moving mouse filled a
+ * 64-byte FIFO and lost 68 bytes. The IKBD link cannot deliver more than
+ * 781 bytes a second (7812.5 baud, 10 bits a byte), so 1024 bytes covers
+ * over a second of continuous traffic. */
+#define ACIA_KQ_SIZE   1024u
+static uint8_t           acia_kq[ACIA_KQ_SIZE];
+static volatile unsigned acia_kq_head;     /* next to pop (CPU thread)   */
+static volatile unsigned acia_kq_tail;     /* next to push (ipl_task)    */
+volatile unsigned ps_acia_kbd_rescued = 0; /* bytes taken by ipl_task    */
+volatile unsigned ps_acia_kbd_dropped = 0; /* FIFO full: byte lost       */
+
+int ps_acia_kbd_pending (void)
+{
+  return acia_kq_head != acia_kq_tail;
+}
+
+/* Guest byte read of $FFFC00 or $FFFC02 (any other address: a plain
+ * read). Same function-code and g_buserr behaviour as ps_read_8. */
+uint8_t ps_acia_kbd_read8 (uint32_t addr)
+{
+  ps_io_t ps_io;
+  uint32_t a = addr & 0x00FFFFFFu;
+  uint8_t v;
+
+  ps_lock_bus ();
+  if (a == ACIA_KBD_DATA && acia_kq_head != acia_kq_tail)
+  {
+    v = acia_kq[acia_kq_head & (ACIA_KQ_SIZE - 1u)];
+    acia_kq_head = acia_kq_head + 1u;
+    ps_unlock_bus ();
+    return v;
+  }
+  ps_io.data = 0;
+  ps_io.addr = addr;
+  ps_io.fc = fc;
+  ps_io.io_type = READ_BYTE;
+  ps_read_txn (&ps_io);
+  v = (addr & 1) ? (uint8_t)ps_io.data : (uint8_t)(ps_io.data >> 8);
+  if (a == ACIA_KBD_CTRL && acia_kq_head != acia_kq_tail)
+    v |= 0x81u;                            /* IRQ | RDRF                */
+  ps_unlock_bus ();
+
+  if (ps_io.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr;
+  }
+  return v;
+}
+
+/* Guest word read of $FFFC00 or $FFFC02: the 6850 is on D8-D15, so the
+ * register is the HIGH byte. */
+uint16_t ps_acia_kbd_read16 (uint32_t addr)
+{
+  ps_io_t ps_io;
+  uint32_t a = addr & 0x00FFFFFFu;
+  uint16_t v;
+
+  ps_lock_bus ();
+  if (a == ACIA_KBD_DATA && acia_kq_head != acia_kq_tail)
+  {
+    v = (uint16_t)((acia_kq[acia_kq_head & (ACIA_KQ_SIZE - 1u)] << 8) | 0xFFu);
+    acia_kq_head = acia_kq_head + 1u;
+    ps_unlock_bus ();
+    return v;
+  }
+  ps_io.data = 0;
+  ps_io.addr = addr;
+  ps_io.fc = fc;
+  ps_io.io_type = READ_WORD;
+  ps_read_txn (&ps_io);
+  v = ps_io.data;
+  if (a == ACIA_KBD_CTRL && acia_kq_head != acia_kq_tail)
+    v |= 0x8100u;                          /* IRQ | RDRF                */
+  ps_unlock_bus ();
+
+  if (ps_io.berr) {
+    g_buserr = 1;
+    g_buserr_addr = addr;
+  }
+  return v;
+}
+
+/* Guest wrote the keyboard ACIA's control register. A master reset
+ * (CR1:CR0 = 11) clears the chip's receiver; the FIFO holds bytes that
+ * were in that receiver, so it is cleared with it - otherwise bytes from
+ * before an IKBD/ACIA reset would reach the guest after it. */
+void ps_acia_kbd_ctrl_written (uint8_t cr)
+{
+  if ((cr & 0x03u) != 0x03u)
+    return;
+  ps_lock_bus ();
+  acia_kq_head = acia_kq_tail;
+  ps_unlock_bus ();
+}
+
+/* ipl_task: if the keyboard ACIA holds a byte, move it into the FIFO.
+ * Never waits for the bus. Supervisor function code, never touches
+ * g_buserr. Returns 1 if a byte was taken, 0 otherwise. */
+int ps_acia_kbd_rescue (void)
+{
+  ps_io_t ps_io;
+  int took = 0;
+
+  /* Up to 50 us for the bus: the rescue is only ever running because a
+   * byte is at risk, and a trylock that keeps losing the hand-off to a
+   * busy CPU thread would let it overrun. */
+  {
+    static uint64_t wait_ticks;
+    if (!wait_ticks)
+    {
+      uint64_t f;
+      __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
+      wait_ticks = (f ? f : 54000000ULL) / 20000u;
+    }
+    if (!ps_bus_lock_within (wait_ticks))
+      return 0;
+  }
+  {
+    ps_io.data = 0;
+    ps_io.addr = ACIA_KBD_CTRL;
+    ps_io.fc = 5;
+    ps_io.io_type = READ_BYTE;
+    ps_read_txn (&ps_io);
+    if (!ps_io.berr && ((ps_io.data >> 8) & 0x01u))       /* RDRF */
+    {
+      ps_io.data = 0;
+      ps_io.addr = ACIA_KBD_DATA;
+      ps_io.fc = 5;
+      ps_io.io_type = READ_BYTE;
+      ps_read_txn (&ps_io);
+      if (!ps_io.berr)
+      {
+        if (acia_kq_tail - acia_kq_head < ACIA_KQ_SIZE)
+        {
+          acia_kq[acia_kq_tail & (ACIA_KQ_SIZE - 1u)] = (uint8_t)(ps_io.data >> 8);
+          acia_kq_tail = acia_kq_tail + 1u;
+          ps_acia_kbd_rescued++;
+          took = 1;
+        }
+        else
+          ps_acia_kbd_dropped++;
+      }
+    }
+  }
+  ps_bus_unlock ();
+  return took;
 }
 
 inline uint32_t ps_read_32 (uint32_t addr) 

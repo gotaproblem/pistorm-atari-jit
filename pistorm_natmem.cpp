@@ -3095,6 +3095,8 @@ static inline void hw_blitter_bput(uaecptr a, uae_u32 v)
 extern "C" uint8_t IDE_intrq_pending(void);
 extern "C" uae_u32 pistorm_guest_pc(void);      /* cpu/newcpu.cpp */
 
+extern "C" int ps_acia_kbd_pending(void);   /* gpio/ps_protocol.c */
+
 static inline uae_u8 mfp_gpip_shim(uae_u8 v)
 {
     /* fdd_gpip carries BOTH the emulated-floppy INTRQ and the emulated
@@ -3106,6 +3108,11 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
         v = fdd_gpip(v);
     if (IDE_intrq_pending())
         v &= (uae_u8)~0x20;      /* GPIP5 low = disk interrupt (active low) */
+    /* bytes rescued from the keyboard ACIA are still waiting: its IRQ
+     * is, as far as the guest can tell, still asserted (GPIP4 low).
+     * Before the USB shim, whose quarantine hides the real ACIA. */
+    if (ps_acia_kbd_pending())
+        v &= (uae_u8)~0x10;
     if (KBD_USB_enabled)
         v = kbd_usb_gpip_shim(v);  /* GPIP4 low = keyboard irq (active low) */
     if (DMA_Sound_enabled)
@@ -3168,6 +3175,21 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
 #define KBD_ACIA_CTRL 0x00FFFC00u
 #define KBD_ACIA_DATA 0x00FFFC02u
 
+/* Every guest read of the keyboard ACIA goes through these (gpio/
+ * ps_protocol.c, "keyboard ACIA receive rescue"): they serve bytes
+ * ipl_task took out of the chip while the CPU thread was stuck in a long
+ * host call, before the chip itself. A plain bus read of $FFFC00/$FFFC02
+ * anywhere on the guest's path would skip them. */
+extern "C" uint8_t  ps_acia_kbd_read8(uint32_t addr);
+extern "C" uint16_t ps_acia_kbd_read16(uint32_t addr);
+/* a 6850 master reset (CR1:CR0 = 11) empties the receiver - the
+ * rescued bytes are part of it */
+extern "C" void     ps_acia_kbd_ctrl_written(uint8_t cr);
+static inline int kbd_acia_reg(uaecptr a)
+{
+    return a == KBD_ACIA_CTRL || a == KBD_ACIA_DATA;
+}
+
 static inline uae_u8 kbd_acia_status_merge(uae_u8 real)
 {
     return kbd_usb_acia_status_shim(real);
@@ -3180,7 +3202,7 @@ static inline uae_u8 kbd_acia_data_read(void)
     /* Native mouse threshold / STBOX divert with USB injection off: read
      * the byte once - reading $FFFC02 clears RDRF - and hand it to the
      * filter, which routes it into the sandbox while that is focused. */
-    return kbd_native_rx_filter(ps_read_8(KBD_ACIA_DATA));
+    return kbd_native_rx_filter(ps_acia_kbd_read8(KBD_ACIA_DATA));
 }
 
 /* The JIT/natmem banks are the path that actually runs; the equivalent
@@ -3426,11 +3448,24 @@ static uae_u32 hw_lget(uaecptr a)
                  * Only the USB path merges the status; the native mouse
                  * path takes it raw. */
                 uae_u8 s = KBD_USB_enabled
-                    ? kbd_acia_status_merge(ps_read_8(KBD_ACIA_CTRL))
-                    : ps_read_8(KBD_ACIA_CTRL);
+                    ? kbd_acia_status_merge(ps_acia_kbd_read8(KBD_ACIA_CTRL))
+                    : ps_acia_kbd_read8(KBD_ACIA_CTRL);
                 uae_u8 d = kbd_acia_data_read();
                 uae_u32 v = ((uae_u32)s << 24) | 0x00FF0000u |
                             ((uae_u32)d << 8) | 0xFFu;
+                pistorm_buserr(a, 0, true, sz_long);
+                acia_trace("R", a, v, 4);
+                return v;
+            }
+            if (kbd_acia_reg(a))
+            {
+                /* $FFFC00: status word + data word; $FFFC02: data word +
+                 * the MIDI ACIA's status word, which is not ours */
+                uae_u32 hi = ps_acia_kbd_read16(a);
+                uae_u32 lo = (a == KBD_ACIA_CTRL)
+                    ? ps_acia_kbd_read16(KBD_ACIA_DATA)
+                    : ps_read_16(a + 2);
+                uae_u32 v = (hi << 16) | (lo & 0xFFFFu);
                 pistorm_buserr(a, 0, true, sz_long);
                 acia_trace("R", a, v, 4);
                 return v;
@@ -3485,7 +3520,7 @@ static uae_u32 hw_wget(uaecptr a)
                 uae_u16 v;
                 if (a == KBD_ACIA_CTRL)
                 {
-                    v = (uae_u16)ps_read_16(a);
+                    v = (uae_u16)ps_acia_kbd_read16(a);
                     v = (uae_u16)((kbd_acia_status_merge((uae_u8)(v >> 8)) << 8) |
                                   (v & 0xFF));
                 }
@@ -3493,6 +3528,13 @@ static uae_u32 hw_wget(uaecptr a)
                 {
                     v = (uae_u16)((kbd_acia_data_read() << 8) | 0xFF);
                 }
+                pistorm_buserr(a, 0, true, sz_word);
+                acia_trace("R", a, v, 2);
+                return v;
+            }
+            if (kbd_acia_reg(a))
+            {
+                uae_u16 v = ps_acia_kbd_read16(a);
                 pistorm_buserr(a, 0, true, sz_word);
                 acia_trace("R", a, v, 2);
                 return v;
@@ -3553,8 +3595,15 @@ static uae_u32 hw_bget(uaecptr a)
             if (kbd_acia_shadowed(a))
             {
                 uae_u8 v = (a == KBD_ACIA_CTRL)
-                    ? kbd_acia_status_merge(ps_read_8(a))
+                    ? kbd_acia_status_merge(ps_acia_kbd_read8(a))
                     : kbd_acia_data_read();
+                pistorm_buserr(a, 0, true, sz_byte);
+                acia_trace("R", a, v, 1);
+                return v;
+            }
+            if (kbd_acia_reg(a))
+            {
+                uae_u8 v = ps_acia_kbd_read8(a);
                 pistorm_buserr(a, 0, true, sz_byte);
                 acia_trace("R", a, v, 1);
                 return v;
@@ -3640,6 +3689,8 @@ static void hw_lput(uaecptr a, uae_u32 v)
             }
             else if (a == KBD_ACIA_CTRL && kbd_native_mouse_enabled())
                 kbd_native_tx_snoop((uae_u8)(v >> 8));   /* $FFFC02      */
+            if (a == KBD_ACIA_CTRL)
+                ps_acia_kbd_ctrl_written((uint8_t)(v >> 24));
             hw_bus_lput(a, v);
             acia_trace("W", a, v, 4);
             break;
@@ -3721,6 +3772,8 @@ static void hw_wput(uaecptr a, uae_u32 v)
             }
             else if (a == KBD_ACIA_DATA && kbd_native_mouse_enabled())
                 kbd_native_tx_snoop((uae_u8)(v >> 8));
+            if (a == KBD_ACIA_CTRL)
+                ps_acia_kbd_ctrl_written((uint8_t)(v >> 8));
             hw_bus_wput(a, v);
             acia_trace("W", a, v, 2);
             break;
@@ -3800,6 +3853,8 @@ static void hw_bput(uaecptr a, uae_u32 v)
             }
             else if (a == KBD_ACIA_DATA && kbd_native_mouse_enabled())
                 kbd_native_tx_snoop((uae_u8)v);
+            if (a == KBD_ACIA_CTRL)
+                ps_acia_kbd_ctrl_written((uint8_t)v);
             hw_bus_bput(a, v);
             acia_trace("W", a, v, 1);
             break;

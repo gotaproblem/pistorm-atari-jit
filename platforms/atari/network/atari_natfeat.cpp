@@ -5772,6 +5772,8 @@ static uae_u32 nf_call_psweb(uae_u32 subid, uaecptr params)
   }
 }
 
+extern "C" volatile uint32_t pistorm_cpu_hostop;   /* emulator.c */
+
 static uae_u32 nf_call(uaecptr stack)
 {
   uae_u32 id = nf_read_long(stack + 4);
@@ -5781,6 +5783,11 @@ static uae_u32 nf_call(uaecptr stack)
 
   if (index >= NF_FEATURE_COUNT)
     return 0;
+
+  /* Tell ipl_task which host-side call is holding off interrupts
+   * (emulator.c, WHAT THE CPU THREAD IS DOING). Cleared by the caller,
+   * atari_natfeat_handle_opcode, once this returns. */
+  pistorm_cpu_hostop = 0x80000000u | (index << 8) | (subid & 0xFFu);
 
   switch (index) {
     case NF_FEATURE_NAME:
@@ -5828,6 +5835,7 @@ bool atari_natfeat_handle_opcode(uae_u32 opcode, uae_u32 *cycles)
 
   uaecptr stack = m68k_areg(regs, 7);
   uae_u32 result = opcode == NF_ID_OPCODE ? nf_get_id(stack) : nf_call(stack);
+  pistorm_cpu_hostop = 0;
   m68k_dreg(regs, 0) = result;
 
   m68k_incpc_normal(2);

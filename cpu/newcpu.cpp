@@ -2871,6 +2871,8 @@ extern volatile uint8_t g_irq_mask;
 extern volatile uint8_t g_irq;
 extern volatile uint8_t g_ipl;
 extern volatile uint8_t g_buserr;
+/* host-work marker sampled by ipl_task (emulator.c) */
+extern "C" volatile uint32_t pistorm_cpu_hostop;
 /* NOTE: the linked implementation (gpio/ps_protocol.c) takes a POINTER and
  * returns void - it waits for bus idle internally and stores the shifted
  * IPL value ((raw & 0x60) >> 4). The old zero-argument declaration here
@@ -2968,7 +2970,21 @@ static void MakeFromSR_x(int t0trace)
 				}
 #endif
 			}
-		
+#ifdef PISTORM_ATARI
+		/* The mask came DOWN past an interrupt that is already latched.
+		 * ipl_task latches g_irq only while it is unmasked; if the guest
+		 * raised its mask before taking it (ori #$0700,sr ... ), g_irq
+		 * stays set and ipl_task will not ask again - it only acts on a
+		 * level ABOVE g_irq. Nothing then broke the compiled chain when
+		 * the mask came back down (RTE, move to sr), so the interrupt
+		 * waited for the countdown to run out by itself: a whole
+		 * jit_power budget. Ask for the exit here. This is the CPU
+		 * thread, so the countdown store cannot race the block-end
+		 * load/sub/store, and it costs one byte load per mask change. */
+		if (newimask < regs.intmask && g_irq > newimask)
+			set_special(SPCFLAG_BRK);
+#endif
+
 		regs.intmask = newimask;
 		g_irq_mask = newimask;
 	}
@@ -5367,15 +5383,34 @@ interrupt_done:
 	/* Only clear the CPU-side latch after a completed acknowledge/exception or
 		* a stale request. A malformed IACK value is not a completed interrupt; keep
 		* the level pending so the next intlev() pass can retry the real bus ACK. */
+	/* g_irq is shared with ipl_task, which may have raised it to a HIGHER
+	 * level while this one was being delivered (it only ever raises it,
+	 * and only above the current value). A plain store here threw that
+	 * one away: a VBL latched during an HBL delivery was lost outright,
+	 * because av_held then stops ipl_task latching the same assertion
+	 * again. So clear only what we took, and never lower it.
+	 *
+	 * g_ipl is no longer touched here. It is ipl_task's own record of the
+	 * CONFIRMED line level, not a latch; zeroing it after every delivery
+	 * made ipl_task count the still-held line as a brand-new assertion on
+	 * its next pass, so the ep2/ep4/ep6 figures in the debug ipl stats
+	 * (and the level-4 gap/held histogram) gained one for every delivery
+	 * after which the line was still held - the very counters meant to
+	 * tell redelivery from a real extra VBL. */
 	if (clear_irq_latch)
 	{
-		g_irq = 0;
-		g_ipl = 0;
+		uae_u8 expect = (uae_u8)nr;
+		__atomic_compare_exchange_n(&g_irq, &expect, (uae_u8)0, false,
+		                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 		regs.ipl_pin = 0;
 	}
 	else
 	{
-		g_irq = nr;
+		uae_u8 cur = __atomic_load_n(&g_irq, __ATOMIC_SEQ_CST);
+		while (cur < (uae_u8)nr &&
+		       !__atomic_compare_exchange_n(&g_irq, &cur, (uae_u8)nr, false,
+		                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+			;
 		regs.ipl_pin = nr;
 		set_special(SPCFLAG_BRK);
 	}
@@ -5385,9 +5420,12 @@ interrupt_done:
 volatile uint8_t g_intmask = 0;
 /* ---- interrupt delivery latency instrumentation (measurement only) ----
  * Hypothesis under test (SB): heavy JIT/render load delays interrupt
- * servicing beyond the ACIA's ~2.56ms one-byte tolerance; lost input
- * bytes then cause the beeping/erratic symptoms. Requirement: level-6
- * latch->delivery under 1ms at all times. This measures exactly that. */
+ * servicing beyond the ACIA's one-byte tolerance; lost input bytes then
+ * cause the beeping/erratic symptoms. The tolerance is ONE character
+ * time, 10 bits at 7812.5 baud = 1.28 ms (the 6850 has one receive data
+ * register: the next byte completing while RDRF is still set is an
+ * overrun), not 2.56 ms - so the >2.5ms counter below undercounts.
+ * Requirement: level-6 latch->delivery under 1ms at all times. */
 volatile uint64_t g_irq_latch_us = 0;
 
 /* JIT stall attribution counters (all CPU-thread only, no races).
@@ -5645,7 +5683,9 @@ int intlev (void)
 #endif /* ATARI_LAT_DIAG */
 
 		//printf ("[INTLEV] got interrupt level %d, intmask %d\n", ipl, regs.intmask);
-		g_irq = ipl;
+		/* (no `g_irq = ipl` here: it stored back the value just read,
+		 * and in between ipl_task may have raised it - the store then
+		 * lowered it again, un-latching the higher level) */
 		g_intmask = regs.intmask;
 		//set_special (SPCFLAG_DOINT);
 		do_interrupt (ipl);
@@ -8244,7 +8284,12 @@ void execute_normal(void)
 #endif
 			psctrl_ctr_interp_cycles += (uae_u32)total_cycles;	/* PSCTRL statistics */
 			jit_in_interpreter = 0;
-			compile_block(pc_hist, blocklen, total_cycles);
+			{
+				/* ipl_task's stall profile (emulator.c) */
+				pistorm_cpu_hostop = 0x40000000u;
+				compile_block(pc_hist, blocklen, total_cycles);
+				pistorm_cpu_hostop = 0;
+			}
 			return; /* We will deal with the spcflags in the caller */
 		}
 		/* No need to check regs.spcflags, because if they were set,
@@ -8687,6 +8732,17 @@ static void m68k_run_jit(void)
 								(*cpufunctbl[r->opcode])(r->opcode);
 								count_instr(r->opcode);
 								do_cycles(4 * CYCLE_UNIT);
+#ifdef PISTORM_ATARI
+								/* Interrupts while T0/T1/M are set. The
+								 * Atari core delivers only through intlev()
+								 * (do_specialties' INT/DOINT branch is off),
+								 * and this loop never called it: with the
+								 * trace bit set (a debugger single-stepping,
+								 * a traced process under MiNT) nothing was
+								 * delivered at all until tracing stopped. */
+								if (g_irq > regs.intmask)
+									intlev();
+#endif
 								if (r->spcflags)
 								{
 									if (do_specialties(cpu_cycles))

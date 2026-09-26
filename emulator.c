@@ -158,6 +158,61 @@ volatile unsigned pistorm_ipl_hbl_skipped = 0;
 volatile unsigned pistorm_ipl_passes = 0;
 volatile unsigned pistorm_ipl_busy   = 0;
 volatile unsigned pistorm_ipl_txn    = 0;
+/* Longest run of consecutive failed trylocks (arch-timer ticks) since the
+ * stats reader last looked - how long the line went UNSAMPLED because
+ * the CPU thread held the bus. Single writer (ipl_task); the 1 Hz reader
+ * zeroes it and tolerates the tear. */
+volatile uint64_t pistorm_ipl_busy_run_max = 0;
+
+/* DELIVERY AGE. What the Atari cares about is not how fast we SAW the
+ * line but how long the guest then took to take the exception: the
+ * keyboard ACIA has one character time (10 bits at 7812.5 baud =
+ * 1.28 ms) between a byte landing in its receive register and the next
+ * one overrunning it. A lost byte in a mouse packet turns the rest of
+ * the packet into key make codes with no break codes, TOS's key repeat
+ * then runs forever, and every repeat plays the keyclick - the constant
+ * beeping.
+ *
+ * Measured entirely here on core 3, at zero cost to the CPU thread: the
+ * latch is stamped when ipl_task raises g_irq, and the age is taken on
+ * the first pass that finds it consumed or masked (the guest is not
+ * taking it either way). Resolution is one loop pass
+ * (~15 us), plenty against a 1.28 ms budget.
+ *   dlv_max    worst age since the reader last looked (ticks)
+ *   dlv_late   deliveries that took longer than 1 ms  (running total)
+ *   rekicks    CPU exits re-requested because an earlier request had
+ *              not been acted on (running total) - see ipl_kick below */
+volatile uint64_t pistorm_ipl_dlv_max = 0;
+volatile unsigned pistorm_ipl_dlv_late = 0;
+volatile unsigned pistorm_ipl_rekicks = 0;
+/* keyboard ACIA bytes rescued while the guest had level 6 masked */
+volatile unsigned pistorm_ipl_rescue_masked = 0;
+/* ...and while the CPU thread sat in one host call for over 250 us */
+volatile unsigned pistorm_ipl_rescue_incall = 0;
+/* longest single host call seen since the stats reader last looked, and
+ * which one it was (ticks; single writer ipl_task, reader zeroes it) */
+volatile uint64_t pistorm_ipl_call_max = 0;
+volatile uint32_t pistorm_ipl_call_max_op = 0;
+
+/* WHAT THE CPU THREAD IS DOING while an interrupt waits. The delivery
+ * figures above say THAT the guest took too long; this says where the
+ * CPU thread was instead. It publishes a code for the host-side work
+ * that cannot take an interrupt until it returns, and ipl_task samples
+ * it on every pass that finds a delivery already more than 1 ms late:
+ *   0                        none of the marked paths (compiled or
+ *                            interpreted guest code, a bus access, ...)
+ *   HOSTOP_NF | idx<<8 | sub a NatFeat call: feature index, sub-op
+ *   HOSTOP_JIT_COMPILE       compile_block()
+ *   0x20000000               flush_icache_hard/lazy (compemu_support_arm)
+ * One store on entry and one on exit, CPU thread only; nothing in
+ * compiled code. Each sample stands for one ipl_task pass (~15 us) of
+ * lateness, so the counts are a time profile of the stall. */
+#define HOSTOP_NF          0x80000000u
+#define HOSTOP_JIT_COMPILE 0x40000000u
+volatile uint32_t pistorm_cpu_hostop = 0;
+#define IPL_LATE_SLOTS 8
+volatile uint32_t pistorm_ipl_late_op[IPL_LATE_SLOTS];
+volatile unsigned pistorm_ipl_late_n[IPL_LATE_SLOTS];
 
 /* TRANSITION TRACE. The counters are rates; this is the sequence - every
  * confirmed change of the line and every decision taken about it, with a
@@ -248,6 +303,20 @@ extern "C"
   extern void *render_frame(void *);
   extern void pistorm_cpu_irqwatch_dump(uint32_t raw6, uint32_t latched6, uint32_t raw4, uint32_t latched4);
   extern void jit_request_cpu_exit(void);
+
+  /* Bus accesses for threads OTHER than the CPU thread (gpio/ps_protocol.c).
+   * They take the function code as an argument instead of the CPU thread's
+   * `fc` global, and they never touch g_buserr - which belongs to the CPU
+   * thread: it clears it, runs a transaction, and raises a guest bus error
+   * if it is set. Declared here rather than in ps_protocol.h so adding them
+   * does not rebuild every file that includes that header. */
+  extern uint8_t ps_read_8_quiet(uint32_t addr, uint8_t fc_value, uint8_t *berr_out);
+  extern void ps_write_8_quiet(uint32_t addr, uint8_t data, uint8_t fc_value, uint8_t *berr_out);
+  /* keyboard ACIA receive rescue (gpio/ps_protocol.c) */
+  extern int ps_acia_kbd_rescue(void);
+  extern int ps_bus_lock_within(uint64_t ticks);
+  extern volatile unsigned ps_acia_kbd_rescued;
+  extern volatile unsigned ps_acia_kbd_dropped;
 
 #ifdef __cplusplus
 }
@@ -531,6 +600,39 @@ static void mfp_diag_dump(const char *why)
  *   ep4 ~= 50, del4 higher - redelivery inside one blanking interval
  *   ep4 itself too high - the line is seen at level 4 more often than
  *                         the video hardware can possibly produce it */
+/* Human name for a pistorm_cpu_hostop code (see WHAT THE CPU THREAD IS
+ * DOING). Stats thread only. */
+static void hostop_name(uint32_t op, char *nm, size_t len)
+{
+  static const char *const nf_names[] = {
+    "NAME", "VERSION", "STDERR", "ETHERNET", "HOSTFS", "FVDI", "MP3",
+    "VIDEO", "PSCTRL", "PSIMG", "STBOX", "PSPDF", "PSWEB"
+  };
+  static const char *const fvdi_names[] = {
+    "GET_VERSION", "GET_PIXEL", "PUT_PIXEL", "MOUSE", "EXPAND_AREA",
+    "FILL_AREA", "BLIT_AREA", "LINE", "FILL_POLYGON", "GET_HWCOLOR",
+    "SET_COLOR", "GET_FBADDR", "SET_RESOLUTION", "GET_WIDTH",
+    "GET_HEIGHT", "OPENWK", "CLOSEWK", "GETBPP", "EVENT", "TEXT_AREA",
+    "GETCOMPONENT"
+  };
+  if (op & HOSTOP_NF)
+  {
+    unsigned idx = (op >> 8) & 0xFFu, sub = op & 0xFFu;
+    const char *fn = idx < sizeof nf_names / sizeof nf_names[0]
+                     ? nf_names[idx] : "?";
+    if (idx == 5 && sub < sizeof fvdi_names / sizeof fvdi_names[0])
+      snprintf(nm, len, "NF %s.%s", fn, fvdi_names[sub]);
+    else
+      snprintf(nm, len, "NF %s.%u", fn, sub);
+  }
+  else if (op & HOSTOP_JIT_COMPILE)
+    snprintf(nm, len, "JIT compile");
+  else if (op & 0x20000000u)
+    snprintf(nm, len, "JIT flush");
+  else
+    snprintf(nm, len, "other");
+}
+
 static void *ipl_stats_task(void *)
 {
   unsigned p2 = 0, p4 = 0, p6 = 0, q2 = 0, q4 = 0, q6 = 0;
@@ -559,6 +661,62 @@ static void *ipl_stats_task(void *)
                                  " round, every count above is a loop pass"
                                : "");
       pp = np; pb = nb; pt = nt;
+    }
+    {
+      /* Delivery age (see DELIVERY AGE above) and the longest unsampled
+       * stretch. 54 ticks = 1 us on the Pi 4 arch timer; divided here, on
+       * the thread that is allowed to. */
+      static unsigned pl, pk, pr, pd, pm, pc;
+      uint64_t f = psctrl_cntfrq ? psctrl_cntfrq : 54000000ULL;
+      uint64_t dmax = pistorm_ipl_dlv_max;
+      uint64_t bmax = pistorm_ipl_busy_run_max;
+      unsigned nl = pistorm_ipl_dlv_late, nk = pistorm_ipl_rekicks;
+      unsigned nr = ps_acia_kbd_rescued, nd = ps_acia_kbd_dropped;
+      unsigned nm = pistorm_ipl_rescue_masked;
+      unsigned nc = pistorm_ipl_rescue_incall;
+      pistorm_ipl_dlv_max = 0;
+      pistorm_ipl_busy_run_max = 0;
+      fprintf(stderr,
+              "[ipl]   delivery: max=%lluus >1ms=%u rekicks=%u "
+              "acia-rescued=%u (masked %u, in-call %u) dropped=%u | "
+              "longest unsampled=%lluus%s\n",
+              (unsigned long long)(dmax * 1000000ULL / f), nl - pl, nk - pk,
+              nr - pr, nm - pm, nc - pc, nd - pd,
+              (unsigned long long)(bmax * 1000000ULL / f),
+              (dmax * 1000000ULL / f) > 1280
+                  ? "   <- LONGER THAN ONE ACIA CHARACTER (1.28ms)" : "");
+      pl = nl; pk = nk; pr = nr; pd = nd; pm = nm; pc = nc;
+      {
+        uint64_t cmax = pistorm_ipl_call_max;
+        uint32_t cop  = pistorm_ipl_call_max_op;
+        pistorm_ipl_call_max = 0;
+        if (cmax * 1000000ULL / f >= 500)
+        {
+          char nm2[48];
+          hostop_name(cop, nm2, sizeof nm2);
+          fprintf(stderr, "[ipl]   longest host call (or back-to-back run of one): %lluus in %s\n",
+                  (unsigned long long)(cmax * 1000000ULL / f), nm2);
+        }
+      }
+    }
+    {
+      /* Where the late time went (WHAT THE CPU THREAD IS DOING). */
+      char lb[400];
+      int ll = 0;
+      for (int ls = 0; ls < IPL_LATE_SLOTS; ls++)
+      {
+        unsigned n = pistorm_ipl_late_n[ls];
+        if (!n)
+          continue;
+        char nm[48];
+        hostop_name(pistorm_ipl_late_op[ls], nm, sizeof nm);
+        if (ll < (int)sizeof lb - 64)
+          ll += snprintf(lb + ll, sizeof lb - (size_t)ll, " %s=%u", nm, n);
+      }
+      for (int ls = 0; ls < IPL_LATE_SLOTS; ls++)
+        pistorm_ipl_late_n[ls] = 0;
+      if (ll)
+        fprintf(stderr, "[ipl]   late in (x ~15us):%s\n", lb);
     }
     {
       static unsigned pg[4], pl[4];
@@ -595,8 +753,8 @@ static void *ipl_stats_task(void *)
      * thread's shared fc global, and only once a second. */
     {
       uint8_t berr = 0;
-      uint8_t rez  = ps_read_8_fc (0x00FF8260u, 5, &berr) & 0x03u;
-      uint8_t sync = ps_read_8_fc (0x00FF820Au, 5, &berr) & 0x03u;
+      uint8_t rez  = ps_read_8_quiet (0x00FF8260u, 5, &berr) & 0x03u;
+      uint8_t sync = ps_read_8_quiet (0x00FF820Au, 5, &berr) & 0x03u;
       /* The bus read above is one sample of a register over the wire.
        * rtg.hw_rez and pistorm_guest_hz are the SNOOPED truth - the last
        * value the guest actually wrote to $FF8260/$FF820A, captured in
@@ -694,6 +852,92 @@ static void *ipl_task(void *)
     psctrl_cntfrq = f;                  /* the setter needs it too */
     psctrl_tunables_ipl_recalc();
   }
+
+  /* CPU-EXIT REQUESTS THAT GET LOST.
+   *
+   * jit_request_cpu_exit() does two things: it ORs SPCFLAG_BRK into
+   * regs.spcflags (atomic) and stores -1 into the JIT's countdown
+   * (pissoff). Only the SECOND one stops compiled code: a translated
+   * block ends with
+   *     ldr w, [countdown]; sub w, w, #cycles; str w, [countdown];
+   *     tbnz w, #31, popall_do_nothing
+   * and never looks at spcflags (only a call-out to an interpreted
+   * opcode inside a block checks them, and most blocks have none).
+   * That load/sub/store is not atomic with respect to this thread. If
+   * our -1 lands between the CPU thread's ldr and its str, the str
+   * writes back (old - cycles) - positive unless the budget was nearly
+   * spent anyway - and the request is gone: compiled code keeps
+   * chaining until the countdown runs out ON ITS OWN, one whole
+   * jit_power budget. That fits what PERF-TUNING.md
+   * records - a bigger jit_power makes the keyboard beep - when with a
+   * reliable exit request the budget would have nothing to do with
+   * interrupt latency at all.
+   *
+   * So a request is not fire-and-forget. From the latch until the CPU
+   * thread consumes g_irq, it is re-issued once per loop pass, no more
+   * often than kick_retry_ticks (10 us) - in practice every ~15 us, the
+   * pass period: a lost one now costs one pass, not a chain budget. The compiled code is untouched - no extra load per block,
+   * nothing added on the CPU thread's side. While nothing is pending
+   * this is one untaken branch per pass.
+   *
+   * If the guest raises its mask above the pending level before taking
+   * it, the follow-up stops here; MakeFromSR (newcpu.cpp) requests the
+   * exit itself, on its own thread, when the mask comes back down. */
+  const uint64_t kick_retry_ticks = psctrl_cntfrq / 100000u;      /* 10 us */
+  const uint64_t dlv_late_ticks   = psctrl_cntfrq / 1000u;        /* 1 ms  */
+  /* KEYBOARD ACIA RESCUE. A level 6 pending and unmasked this long has
+   * not been taken because the CPU thread is somewhere it cannot take
+   * one, however often we ask: field-measured, FVDI BLIT_AREA while
+   * scrolling a picture held it off for up to 6.5 ms, 78 times in one
+   * second, and a 6 ms stall outside every marked host call followed.
+   * The keyboard ACIA overruns 1.28 ms after a byte arrives. So from
+   * here on each pass empties the ACIA's receiver into the FIFO in
+   * ps_protocol.c (see "keyboard ACIA receive rescue" there), which the
+   * guest's own reads then serve first. No condition on WHERE the CPU
+   * thread is: every guest read of the ACIA takes the FIFO and the chip
+   * together under the bus lock, so a rescue is correct at any point.
+   * 250 us leaves a full character of margin and is ten times the
+   * normal delivery time, so a healthy system never gets here. */
+  const uint64_t acia_rescue_ticks = psctrl_cntfrq / 4000u;       /* 250 us */
+  /* ...and the same rescue when the level is MASKED. The follow-up above
+   * only exists for a latch, and nothing is latched while the guest's
+   * mask is at 6 or 7 - so a host call made with interrupts masked, or a
+   * guest that keeps them masked, left the ACIA with no one to empty it.
+   * Here the trigger is the confirmed LINE: level 6 held for 250 us means
+   * nothing has acknowledged it, whatever the mask. Polled at most every
+   * 60 us (a status read, plus a data read if a byte is waiting), so a
+   * guest that runs masked for good costs about one bus access in sixty
+   * microseconds, and still has most of a character time of margin. */
+  const uint64_t acia_poll_ticks   = psctrl_cntfrq / 16667u;      /* 60 us */
+  uint64_t l6_since = 0;                /* confirmed line entered 6    */
+  /* THIRD TRIGGER: the CPU thread inside one host call for 250 us. A
+   * byte arriving while the guest is already INSIDE its keyboard
+   * interrupt raises nothing at all: channel 6 is in service, so the MFP
+   * holds IRQ back and the IPL line never shows it - and a mouse packet
+   * completing inside that handler calls the mouse vector, which draws
+   * the pointer through fVDI, i.e. through a NatFeat. Neither trigger
+   * above can see that case; this one does not look at the line. */
+  uint64_t call_since = 0;              /* hostop seen non-zero since  */
+  uint32_t call_op = 0;                 /* ...and which call it was    */
+  uint64_t call_polled = 0;
+  uint64_t l6_polled = 0;               /* last line-based rescue poll */
+  uint8_t  kick_armed = 0;              /* a latch is waiting on the CPU  */
+  uint64_t kick_latch_tick = 0;         /* when g_irq was raised          */
+  uint64_t kick_last_tick = 0;          /* when the exit was last asked   */
+  uint64_t busy_run_start = 0;          /* first failed trylock of a run  */
+  const uint64_t busy_spin_after = psctrl_cntfrq / 10000u;        /* 100 us */
+  const uint64_t busy_spin_ticks = psctrl_cntfrq / 20000u;        /* 50 us  */
+#define IPL_KICK()                                                     \
+  do {                                                                 \
+    uint64_t kt_;                                                      \
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(kt_));                \
+    if (!kick_armed) {             /* age runs from the OLDEST latch */\
+      kick_armed = 1;                                                  \
+      kick_latch_tick = kt_;                                           \
+    }                                                                  \
+    kick_last_tick = kt_;                                              \
+    jit_request_cpu_exit();                                            \
+  } while (0)
   bool seen_ipl6 = false;
   unsigned no_ipl6_seconds = 0;
 #ifdef ATARI_IRQ_RATE_PROFILE
@@ -730,6 +974,96 @@ static void *ipl_task(void *)
 
   while (cpu_emulation_running)
   {
+    /* Pending-interrupt follow-up (see CPU-EXIT REQUESTS above). First in
+     * the pass, ahead of every `continue`, so a busy bus cannot hold it
+     * off. Reads g_irq/g_irq_mask only while a latch is outstanding. */
+    if (kick_armed)
+    {
+      uint64_t kn;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(kn));
+      const uint8_t pend = g_irq;
+      if (pend == 0 || pend <= g_irq_mask)
+      {
+        /* Taken (g_irq consumed), or now masked - either by the guest,
+         * after which MakeFromSR asks for the exit when the mask comes
+         * back down, or by do_interrupt() itself, which raises the mask
+         * before it clears g_irq. Both end the wait this latch put on
+         * the line, so both are timed: a late delivery must not escape
+         * the figure by being observed inside that window. */
+        uint64_t age = kn - kick_latch_tick;
+        if (age > pistorm_ipl_dlv_max)
+          pistorm_ipl_dlv_max = age;
+        if (age > dlv_late_ticks)
+          pistorm_ipl_dlv_late++;
+        kick_armed = 0;
+      }
+      else
+      {
+        if (pend == 6 && kn - kick_latch_tick > acia_rescue_ticks)
+          (void)ps_acia_kbd_rescue();
+      }
+      if (kick_armed && kn - kick_last_tick >= kick_retry_ticks)
+      {
+        if (kn - kick_latch_tick > dlv_late_ticks)
+        {
+          /* already late: note what the CPU thread is inside (see
+           * WHAT THE CPU THREAD IS DOING). A full table drops the
+           * sample; the reader empties it once a second. */
+          const uint32_t op = pistorm_cpu_hostop;
+          for (int ls = 0; ls < IPL_LATE_SLOTS; ls++)
+          {
+            if (pistorm_ipl_late_n[ls] == 0)
+            {
+              pistorm_ipl_late_op[ls] = op;
+              pistorm_ipl_late_n[ls] = 1;
+              break;
+            }
+            if (pistorm_ipl_late_op[ls] == op)
+            {
+              pistorm_ipl_late_n[ls]++;
+              break;
+            }
+          }
+        }
+        kick_last_tick = kn;
+        pistorm_ipl_rekicks++;
+        jit_request_cpu_exit();
+      }
+    }
+
+    /* Host-call rescue and profile (see THIRD TRIGGER). One load per
+     * pass; the timer is read only while a call is in progress. */
+    {
+      const uint32_t ho = pistorm_cpu_hostop;
+      if (ho)
+      {
+        uint64_t cn;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cn));
+        if (!call_since || ho != call_op)
+        {
+          call_since = cn;
+          call_op = ho;
+        }
+        else
+        {
+          if (cn - call_since > pistorm_ipl_call_max)
+          {
+            pistorm_ipl_call_max = cn - call_since;
+            pistorm_ipl_call_max_op = ho;
+          }
+          if (cn - call_since > acia_rescue_ticks &&
+              cn - call_polled >= acia_poll_ticks)
+          {
+            call_polled = cn;
+            if (ps_acia_kbd_rescue())
+              pistorm_ipl_rescue_incall++;
+          }
+        }
+      }
+      else
+        call_since = 0;
+    }
+
     /* Housekeeping slot, checked before the bus-busy branch so a busy
      * stretch cannot stall it. fdd_vbl() is pure memory work (motor
      * timeout counters - no syscalls, no locks, tens of ns) and its timing
@@ -772,10 +1106,24 @@ static void *ipl_task(void *)
       static uint16_t wd_prev;
       if (!(++wd_stride & 0xFFFFu))          /* ~every second at 15us/pass */
       {
-        uint16_t isr = ((uint16_t)ps_read_8(0x00FFFA0Fu) << 8) |
-                        ps_read_8(0x00FFFA11u);
-        uint16_t ipr = ((uint16_t)ps_read_8(0x00FFFA0Bu) << 8) |
-                        ps_read_8(0x00FFFA0Du);
+        /* FC=5 explicitly, and never through g_buserr. These used to go
+         * through ps_read_8/ps_write_8, which drive the CPU thread's
+         * CURRENT function code: whenever the guest was in user mode
+         * (every MiNT/TOS application) the reads went out at FC 1/2,
+         * the GLUE bus-errored them - the ST's I/O page is supervisor
+         * only - and ps_protocol then set g_buserr, the CPU thread's
+         * sticky flag. Landing between the CPU thread's clear and its
+         * check, that is a bus error delivered to the guest for an
+         * access it never made. A bus-errored sample is discarded. */
+        uint8_t wb = 0, eb = 0;
+        uint16_t isr = ((uint16_t)ps_read_8_quiet(0x00FFFA0Fu, 5, &eb) << 8);
+        wb |= eb;
+        isr |= ps_read_8_quiet(0x00FFFA11u, 5, &eb);
+        wb |= eb;
+        uint16_t ipr = ((uint16_t)ps_read_8_quiet(0x00FFFA0Bu, 5, &eb) << 8);
+        wb |= eb;
+        ipr |= ps_read_8_quiet(0x00FFFA0Du, 5, &eb);
+        wb |= eb;
         uint16_t orph = isr & ipr;           /* in-service + re-pending  */
 
         /* Sanity gate. A genuine orphaned-IACK wedge is ONE channel (the
@@ -788,7 +1136,7 @@ static void *ipl_task(void *)
          * orphaned channel) and drop the persistence chain so a bad read
          * cannot combine with the next sample to trigger a recovery. */
         int orph_n = __builtin_popcount((unsigned)orph);
-        if (isr == 0xFFFFu || ipr == 0xFFFFu ||
+        if (wb || isr == 0xFFFFu || ipr == 0xFFFFu ||
             (isr & 0x00FFu) == 0x00FFu || (isr & 0xFF00u) == 0xFF00u ||
             orph_n > 1)
         {
@@ -806,7 +1154,7 @@ static void *ipl_task(void *)
               if (fire & (1u << ch))
               {
                 uint32_t reg = (ch >= 8) ? 0x00FFFA0Fu : 0x00FFFA11u;
-                ps_write_8(reg, (uint8_t)~(1u << (ch & 7)));
+                ps_write_8_quiet(reg, (uint8_t)~(1u << (ch & 7)), 5, &eb);
                 fprintf(stderr, "[MFP-WD] orphaned in-service ch%d cleared "
                         "(isr=%04X ipr=%04X) - garbled-IACK wedge recovered\n",
                         ch, isr, ipr);
@@ -867,7 +1215,21 @@ static void *ipl_task(void *)
      * pass is 15 us away and every real IPL source (VBL, HBL, MFP) is
      * level-held until serviced. Held for two instructions, so the CPU
      * thread's worst case is a few ns in ps_lock_bus(). */
-    if (!ps_bus_trylock ())
+    /* STARVATION. One look per pass is enough while the bus has gaps;
+     * it is not when the CPU thread (or two bus users trading the lock)
+     * leaves none - measured, 2.56 ms without a single sample, and the
+     * ACIA rescue needs the same lock. Once a busy run passes 100 us,
+     * spin for the lock (up to 50 us) and take part in the hand-off. */
+    int got_bus;
+    {
+      uint64_t bn = 0;
+      if (busy_run_start)
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(bn));
+      got_bus = (busy_run_start && bn - busy_run_start > busy_spin_after)
+                  ? ps_bus_lock_within (busy_spin_ticks)
+                  : ps_bus_trylock ();
+    }
+    if (!got_bus)
     {
       /* Back off instead of spinning. MEASURED: ~139,000 of ~205,000
        * passes a second find the bus busy, and `continue` skips the
@@ -877,12 +1239,24 @@ static void *ipl_task(void *)
        * keeps the sampling cadence well inside the 15 us the loop
        * targets while leaving the cacheline alone. */
       pistorm_ipl_busy++;
+      if (!busy_run_start)
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(busy_run_start));
       asm volatile("yield" ::: "memory");
       wait_ns (1000);
       continue;                         /* a transaction owns the bus */
     }
     status = *ioread;
     ps_bus_unlock ();
+    if (busy_run_start)
+    {
+      /* a run of failed trylocks just ended: how long was the line
+       * unsampled? (only pays the timer read when there WAS a run) */
+      uint64_t be;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(be));
+      if (be - busy_run_start > pistorm_ipl_busy_run_max)
+        pistorm_ipl_busy_run_max = be - busy_run_start;
+      busy_run_start = 0;
+    }
     if (status & 0x01)
     {
       pistorm_ipl_txn++;
@@ -969,6 +1343,24 @@ static void *ipl_task(void *)
       g_ipl = ipl;
     }
 
+    /* Line-based keyboard ACIA rescue (see acia_poll_ticks above). */
+    if (ipl == 6)
+    {
+      uint64_t ln;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ln));
+      if (!l6_since)
+        l6_since = ln;
+      else if (ln - l6_since > acia_rescue_ticks &&
+               ln - l6_polled >= acia_poll_ticks)
+      {
+        l6_polled = ln;
+        if (ps_acia_kbd_rescue() && g_irq_mask >= 6)
+          pistorm_ipl_rescue_masked++;
+      }
+    }
+    else
+      l6_since = 0;
+
     /* Autovector edge semantics: one latch per ASSERTION EPISODE for the
      * GLUE-driven levels 2/4. On real hardware the CPU's IACK (a 6800-
      * style VPA/VMA handshake for autovectors) clears the GLUE's pending
@@ -1039,7 +1431,7 @@ static void *ipl_task(void *)
       if (ipl == 2)      pistorm_ipl_lat2++;
       else if (ipl == 4) pistorm_ipl_lat4++;
       else               pistorm_ipl_lat6++;
-      jit_request_cpu_exit();
+      IPL_KICK();
     }
 
     /* Virtual MFP channels (mfp_hub): keyboard injection (GPIP4 ch6),
@@ -1058,7 +1450,7 @@ static void *ipl_task(void *)
         mfp_hub_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
     {
       g_irq = 6;
-      jit_request_cpu_exit();
+      IPL_KICK();
     }
 
 #ifdef ATARI_LAT_DIAG

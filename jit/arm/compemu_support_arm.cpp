@@ -3632,9 +3632,17 @@ static void flush_icache_none(int v)
     /* Nothing to do.  */
 }
 
+/* ipl_task's stall profile (emulator.c, WHAT THE CPU THREAD IS DOING).
+ * Saved and restored rather than cleared: a flush can run inside a
+ * compile_block() that is itself marked. */
+extern "C" volatile uint32_t pistorm_cpu_hostop;
+#define HOSTOP_JIT_FLUSH 0x20000000u
+
 void flush_icache_hard(int n)
 {
     blockinfo* bi, * dbi;
+    const uint32_t hostop_saved = pistorm_cpu_hostop;
+    pistorm_cpu_hostop = HOSTOP_JIT_FLUSH;
 #ifdef ATARI_LAT_DIAG
     g_jp_hard++;
 #endif
@@ -3659,7 +3667,10 @@ void flush_icache_hard(int n)
 
     reset_lists();
     if (!compiled_code)
+    {
+        pistorm_cpu_hostop = hostop_saved;
         return;
+    }
 
 #if defined(USE_DATA_BUFFER)
     reset_data_buffer();
@@ -3667,6 +3678,7 @@ void flush_icache_hard(int n)
 
     current_compile_p = compiled_code;
     set_special(0); /* To get out of compiled code */
+    pistorm_cpu_hostop = hostop_saved;
 }
 
 /* "Soft flushing" --- instead of actually throwing everything away,
@@ -3680,6 +3692,8 @@ static inline void flush_icache_lazy(int v)
 
     if (!active)
         return;
+    const uint32_t hostop_saved = pistorm_cpu_hostop;
+    pistorm_cpu_hostop = HOSTOP_JIT_FLUSH;
 #ifdef ATARI_LAT_DIAG
     const uint64_t _lz_t0 = get_time_us();
 #endif
@@ -3719,6 +3733,7 @@ static inline void flush_icache_lazy(int v)
         if (_d > g_jp_lazy_maxus) g_jp_lazy_maxus = _d;
     }
 #endif
+    pistorm_cpu_hostop = hostop_saved;
 }
 
 int failure;

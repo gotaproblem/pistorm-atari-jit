@@ -115,6 +115,9 @@ static _Atomic int      in_packet;       /* mid-injected-packet flag     */
 /* ------------------------------------------------------------------ */
 
 extern uint8_t ps_read_8(uint32_t address);   /* gpio/ps_protocol.h      */
+/* guest-side keyboard ACIA reads: serve bytes ipl_task rescued from the
+ * chip during a long host call first (gpio/ps_protocol.c) */
+extern uint8_t ps_acia_kbd_read8(uint32_t address);
 
 #define KBD_ACIA_CTRL_ADDR 0x00FFFC00u
 #define KBD_ACIA_DATA_ADDR 0x00FFFC02u
@@ -588,7 +591,7 @@ static void mouse_thresh_arm(uint64_t delay_us)
 /* Shared tail: emit one queued byte if the transmitter will take it. */
 static void mouse_thresh_tx_one(void)
 {
-    uint8_t st = ps_read_8(KBD_ACIA_CTRL_ADDR);
+    uint8_t st = ps_acia_kbd_read8(KBD_ACIA_CTRL_ADDR);
 
     if (!(st & ACIA_TDRE))
         return;                         /* transmitter still busy       */
@@ -1231,7 +1234,7 @@ static void real_drain(uint8_t rs)
 {
     if (!(rs & (ACIA_RDRF | ACIA_ERRS)))
         return;
-    (void)ps_read_8(KBD_ACIA_DATA_ADDR);
+    (void)ps_acia_kbd_read8(KBD_ACIA_DATA_ADDR);
     atomic_fetch_add(&real_drained, 1);
     real_byte_consumed(rs);
 }
@@ -1294,7 +1297,7 @@ static uint8_t status_shim_inner(uint8_t real)
      * screen's threshold/scale tuning must not touch them. */
     if ((real & ACIA_RDRF) && stbox_divert_next())
     {
-        uint8_t v = ps_read_8(KBD_ACIA_DATA_ADDR);
+        uint8_t v = ps_acia_kbd_read8(KBD_ACIA_DATA_ADDR);
         real_byte_consumed(real);
         kbd_usb_note_real_rx();
         (void)stbox_divert_real_byte(v);     /* always taken: see _next */
@@ -1367,7 +1370,7 @@ static uint8_t data_shim_inner(int *fresh)
     if (kbd_usb_rx_priority())
         return kbd_usb_rx_read();
 
-    uint8_t rs = ps_read_8(KBD_ACIA_CTRL_ADDR);
+    uint8_t rs = ps_acia_kbd_read8(KBD_ACIA_CTRL_ADDR);
     real_observe_status(rs);
 
     if (quarantined())
@@ -1382,7 +1385,7 @@ static uint8_t data_shim_inner(int *fresh)
     /* fresh real status decides whose byte the guest gets */
     if (rs & ACIA_RDRF)
     {
-        uint8_t v = ps_read_8(KBD_ACIA_DATA_ADDR);
+        uint8_t v = ps_acia_kbd_read8(KBD_ACIA_DATA_ADDR);
         atomic_fetch_add(&real_rx_passed, 1);
         real_byte_consumed(rs);
         kbd_usb_note_real_rx();
