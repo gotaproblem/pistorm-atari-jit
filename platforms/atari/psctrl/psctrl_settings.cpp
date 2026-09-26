@@ -508,8 +508,6 @@ extern "C" int  fdd_query(int drive, char *path, int pathlen, int *wp, int *busy
 extern "C" void fdd_pulse_media(int drive);
 
 static char g_fddir[PATH_MAX] = "";
-static char g_fdlist[128][64];
-static int  g_fdlist_n = -1;
 
 static void fddir_default(void)
 {
@@ -530,45 +528,6 @@ static void fddir_default(void)
   }
   if (!g_fddir[0])
     snprintf(g_fddir, sizeof(g_fddir), "%s", "floppies");
-}
-
-/* Only images fdd_insert_disk() can actually open: raw .ST/.IMG plus the
- * .MSA it decodes itself. Listing an .STX we cannot mount would produce a
- * confusing failure two clicks later. */
-static int fd_is_image(const char *n)
-{
-  const char *dot = strrchr(n, '.');
-
-  if (!dot)
-    return 0;
-  return !strcasecmp(dot, ".st") || !strcasecmp(dot, ".img") ||
-         !strcasecmp(dot, ".msa");
-}
-
-static int fdlist_scan(void)
-{
-  DIR *d;
-  struct dirent *e;
-
-  fddir_default();
-  g_fdlist_n = 0;
-  d = opendir(g_fddir);
-  if (!d)
-    return 0;
-  while ((e = readdir(d)) != NULL && g_fdlist_n < 128) {
-    if (e->d_name[0] == '.' || !fd_is_image(e->d_name))
-      continue;
-    {
-      size_t len = strlen(e->d_name);
-
-      if (len >= sizeof(g_fdlist[0]))
-        continue;               /* a name we could not hand back intact */
-      memcpy(g_fdlist[g_fdlist_n], e->d_name, len + 1);
-    }
-    g_fdlist_n++;
-  }
-  closedir(d);
-  return g_fdlist_n;
 }
 
 static int fg_wp_a(const struct ps_item *it)
@@ -1045,7 +1004,10 @@ static int item_setstr(const struct ps_item *it, const char *s)
     fdd_query(drive, NULL, 0, &wp, &busy);
     if (busy)
       return PS_R_BUSY;
-    if (strchr(s, '/'))
+    if (emulator_gemdos_to_host(s, path, sizeof(path))) {
+      /* the file selector's Z:\game.st -> real host path */
+    }
+    else if (strchr(s, '/'))
       snprintf(path, sizeof(path), "%s", s);
     else {
       size_t dl, sl;
@@ -1298,34 +1260,14 @@ uint32_t psctrl_settings_call(uint32_t subop, uint32_t p0, uint32_t p1,
       return PS_R_OK;
     }
 
-    case PSCTRL_LIST: {
-      char (*list)[64];
-      int *count;
-      uint32_t n;
-
-      /* Floppy drives browse disk images, rescanned on the count query
-       * (p1 < 0) so a freshly copied image shows up.
-       * PS_LIST_TOS deliberately serves NOTHING: an empty list sends the
-       * accessory to the native GEM file selector for the ROM/box-TOS
-       * fields, instead of the old three-at-a-time form_alert. The picked
-       * path is mapped back to a host path in item_setstr(). */
-      if (p0 == PS_LIST_FLOPPY) {
-        if ((int32_t)p1 < 0 || g_fdlist_n < 0)
-          fdlist_scan();
-        list = g_fdlist; count = &g_fdlist_n;
-      } else {
-        return 0;
-      }
-      if ((int32_t)p1 < 0)
-        return (uint32_t)*count;
-      if ((int32_t)p1 >= *count || !p2 || !p3)
-        return 0;
-      n = (uint32_t)strlen(list[p1]) + 1;
-      if (n > p3)
-        n = p3;
-      psctrl_guest_write(p2, list[p1], n);
-      return n - 1;
-    }
+    case PSCTRL_LIST:
+      /* No host-served list for any field. An empty list sends the
+       * accessory to the native GEM file selector - ROM/box-TOS open on
+       * the share at S:\apj-os\stbox\roms, floppies at Z:\ - instead of
+       * the old three-at-a-time form_alert. The picked GEMDOS path is
+       * mapped back to a host path in item_setstr(). */
+      (void)p1; (void)p2; (void)p3;
+      return 0;
   }
 
   return (uint32_t)-1;

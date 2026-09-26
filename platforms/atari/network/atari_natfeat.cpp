@@ -49,7 +49,13 @@
 #define FVDIDRV_NFAPI_VERSION 0x14000960u
 #define HOSTFS_MINT_DEV_BASE 50u
 #define HOSTFS_COOKIE_SIZE 12u
-#define HOSTFS_MAX_NODES 1024u
+/* Path nodes are never freed (see hostfs_alloc_path_node), so this bounds the
+ * number of DISTINCT paths the guest may touch in one emulator run. At 1024 a
+ * session that browsed the shares with a file selector exhausted it and every
+ * subsequent new path failed with EINVFN (TOS ERROR #32). The node is ~528
+ * bytes, so 8192 costs ~4.3MB of static data - nothing on a Pi 4 - and the
+ * scans over this array are bounded by g_hostfs_nodes_used, not by this. */
+#define HOSTFS_MAX_NODES 8192u
 #define HOSTFS_MAX_DIRS 64u
 #define HOSTFS_MAX_FILES 64u
 #define HOSTFS_HOST_PATH_MAX 512u
@@ -343,12 +349,27 @@ static uint32_t g_hostfs_next_cookie = 1;
 typedef struct hostfs_node {
   bool used;
   uint32_t cookie;
+  uint32_t path_hash;   /* FNV-1a of path; cheap reject before strcmp */
   uint16_t dev;
   int mount_index;
   char path[HOSTFS_HOST_PATH_MAX];
 } hostfs_node_t;
 
 static hostfs_node_t g_hostfs_nodes[HOSTFS_MAX_NODES];
+/* High-water mark. Nodes are allocated front-to-back and never freed, so slots
+ * [0, g_hostfs_nodes_used) are exactly the live ones and every scan below stops
+ * there instead of walking all HOSTFS_MAX_NODES entries. */
+static unsigned g_hostfs_nodes_used;
+
+static uint32_t hostfs_path_hash(const char *s)
+{
+  uint32_t h = 2166136261u;
+  for (; *s; s++) {
+    h ^= (unsigned char)*s;
+    h *= 16777619u;
+  }
+  return h;
+}
 
 typedef struct hostfs_dir {
   bool used;
@@ -671,7 +692,7 @@ static int hostfs_mounted_index_from_cookie(uaecptr cookie)
     if (g_hostfs_mounts[i].mounted && g_hostfs_mounts[i].root_cookie == index)
       return (int)i;
   }
-  for (unsigned i = 0; i < HOSTFS_MAX_NODES; i++) {
+  for (unsigned i = 0; i < g_hostfs_nodes_used; i++) {
     if (g_hostfs_nodes[i].used && g_hostfs_nodes[i].cookie == index)
       return g_hostfs_nodes[i].mount_index;
   }
@@ -680,7 +701,7 @@ static int hostfs_mounted_index_from_cookie(uaecptr cookie)
 
 static hostfs_node_t *hostfs_node_from_cookie_index(uae_u32 index)
 {
-  for (unsigned i = 0; i < HOSTFS_MAX_NODES; i++) {
+  for (unsigned i = 0; i < g_hostfs_nodes_used; i++) {
     if (g_hostfs_nodes[i].used && g_hostfs_nodes[i].cookie == index)
       return &g_hostfs_nodes[i];
   }
@@ -807,6 +828,8 @@ static hostfs_node_t *hostfs_alloc_node(void)
       memset(&g_hostfs_nodes[i], 0, sizeof(g_hostfs_nodes[i]));
       g_hostfs_nodes[i].used = true;
       g_hostfs_nodes[i].cookie = g_hostfs_next_cookie++;
+      if (i + 1 > g_hostfs_nodes_used)
+        g_hostfs_nodes_used = i + 1;
       return &g_hostfs_nodes[i];
     }
   }
@@ -894,10 +917,11 @@ static hostfs_node_t *hostfs_find_path_node(int mount_index, uae_u16 dev, const 
 {
   if (!hostfs_dedup_enabled())
     return NULL;
-  for (unsigned i = 0; i < HOSTFS_MAX_NODES; i++) {
+  uint32_t want = hostfs_path_hash(path);
+  for (unsigned i = 0; i < g_hostfs_nodes_used; i++) {
     hostfs_node_t *n = &g_hostfs_nodes[i];
-    if (n->used && n->mount_index == mount_index && n->dev == dev &&
-        strcmp(n->path, path) == 0)
+    if (n->used && n->path_hash == want && n->mount_index == mount_index &&
+        n->dev == dev && strcmp(n->path, path) == 0)
       return n;
   }
   return NULL;
@@ -909,12 +933,26 @@ static hostfs_node_t *hostfs_alloc_path_node(int mount_index, uae_u16 dev, const
   if (node)
     return node;
   node = hostfs_alloc_node();
-  if (!node)
+  if (!node) {
+    /* Unconditional and once only: this is the sole cause of a folder or file
+     * on a HOSTFS drive failing to open with TOS ERROR #32 (EINVFN), and it
+     * used to happen with no trace at all. Only a restart clears it. */
+    static bool warned;
+    if (!warned) {
+      warned = true;
+      fprintf(stderr,
+              "[NF] HOSTFS: path node table full (%u entries) - new paths will "
+              "fail with EINVFN (TOS ERROR #32) until restart. First failure: "
+              "'%s'\n",
+              HOSTFS_MAX_NODES, path);
+    }
     return NULL;
+  }
   node->dev = dev;
   node->mount_index = mount_index;
   strncpy(node->path, path, sizeof(node->path) - 1);
   node->path[sizeof(node->path) - 1] = '\0';
+  node->path_hash = hostfs_path_hash(node->path);
   return node;
 }
 
@@ -1222,6 +1260,7 @@ extern "C" void atari_natfeat_set_config(const atari_natfeat_config_t *config)
   memset(&g_nf_config, 0, sizeof(g_nf_config));
   memset(g_hostfs_mounts, 0, sizeof(g_hostfs_mounts));
   memset(g_hostfs_nodes, 0, sizeof(g_hostfs_nodes));
+  g_hostfs_nodes_used = 0;
   memset(g_hostfs_dirs, 0, sizeof(g_hostfs_dirs));
   memset(g_hostfs_files, 0, sizeof(g_hostfs_files));
   g_hostfs_next_cookie = 1;
