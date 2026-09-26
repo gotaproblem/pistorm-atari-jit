@@ -36,7 +36,21 @@ static uint64_t g_lag_ns = 30000000ull;
 static int32_t  g_dc_acc;
 static uint64_t g_tick_num, g_tick_den;   /* ticks -> ns conversion    */
 
-static uint64_t ticks_to_ns(uint64_t t) { return t * g_tick_num / g_tick_den; }
+/* Arch-timer ticks to ns WITHOUT overflowing. The plain t * 1e9 / freq
+ * wraps 2^64 once t passes 1.8e10 ticks - 341 s after the Pi boots at
+ * 54 MHz, i.e. always in practice - so "now" was a sawtooth with a 341 s
+ * period. At each wrap the render clock was reset to near zero while the
+ * queued register writes still carried pre-wrap times; the renderer
+ * waits for the oldest one before it applies anything newer, so it
+ * waited ~5.7 minutes, the 1024-entry ring filled, and every later write
+ * was dropped: silence, or the last note held - the box's sound died a
+ * few minutes into any game, over and over. Whole seconds and the
+ * remainder separately keep every intermediate below 2^64. */
+static uint64_t ticks_to_ns(uint64_t t)
+{
+    return (t / g_tick_den) * g_tick_num +
+           (t % g_tick_den) * g_tick_num / g_tick_den;
+}
 
 static uint64_t now_ns(void)
 {
