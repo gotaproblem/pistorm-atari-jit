@@ -17,6 +17,8 @@ Then add-ons can be developed, such as
 - [x] Host MP3 playback via NatFeats (mixed with ST sound, SDL3) [implemented]
 - [x] A/V screen recording (hardware H.264 + sound, see capmux.sh) [implemented]
 - [x] Host VIDEO playback via NatFeats - MP4/MKV/AVI, hardware H.264, own DRM overlay plane (see VIDEO.md) [implemented]
+- [x] Falcon Videl + SuperVidel on HDMI - Falcon/SV modes, video RAM, SuperBlitter, XBIOS TSR (see PSVIDEL.md) [implemented]
+- [x] Falcon DSP56001 + sound matrix/DMA on HDMI - clean-room 56001 core, host port, SSI, CODEC (see FALCON-DSP.md) [implemented]
 - [ ] Additional SVGA Cards
 ## Requirements
 This is not for newbies, a good amount of linux development knowledge is needed.

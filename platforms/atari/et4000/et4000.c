@@ -37,6 +37,7 @@
 
 #include "et4000.h"
 #include "../video/vidplay.h"
+#include "../psvidel/psvidel.h"
 #include "../../../config_file/config_file.h"
 
 #include <stdio.h>
@@ -205,6 +206,10 @@ static uint32_t g_fvdi_up_y1 = 0;
 static uint32_t g_fvdi_up_x0 = 0;      /* column extent (pixels), 16px aligned */
 static uint32_t g_fvdi_up_x1 = 0;
 static int g_fvdi_up_partial = 0;
+/* PSVIDEL just handed the HDMI back: whichever source draws next must
+ * redraw and present its whole frame - the staging buffer and every DRM
+ * buffer still hold the PSVIDEL picture (see blit_psvidel). */
+static int g_src_force_full = 0;
 static int g_sdl_tex_valid = 0;
 
 /* Native-resolution staging: the blits decode 1:1 into g_logical at the
@@ -2598,12 +2603,14 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
     const bool pal_changed = (bpp == 8 && pal_gen != last_pal_gen);
 
     write_count = pistorm_fvdi_write_count();
+    const bool forced = g_src_force_full != 0;
+    g_src_force_full = 0;
     if (write_count == last_write_count && w == last_w && h == last_h &&
-        bpp == last_bpp && !pal_changed)
+        bpp == last_bpp && !pal_changed && !forced)
         return true;
 
     bool mode_changed = (w != last_w || h != last_h || bpp != last_bpp) ||
-                        pal_changed;
+                        pal_changed || forced;
     last_pal_gen = pal_gen;
     last_write_count = write_count;
     last_w = w;
@@ -2680,6 +2687,51 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
                                src + ((size_t)y * w + px0) * 2, pw);
     }
 
+    return true;
+}
+
+/* PSVIDEL (Falcon Videl / SuperVidel on HDMI): highest-priority source
+ * while a Falcon or SV mode is on. The first frame after taking the
+ * screen, and the first frame of whoever takes it back, are full. */
+static bool blit_psvidel(ET4000State *s, bool *updated)
+{
+    static int was_active = 0;
+    psvidel_frame_t f;
+
+    if (updated)
+        *updated = false;
+    if (!psvidel_frame_begin(&f))
+    {
+        if (was_active)
+        {
+            was_active = 0;
+            g_src_force_full = 1;
+        }
+        return false;
+    }
+    if (f.w > ET4K_MAX_LW || f.h > ET4K_MAX_LH)
+        return false;
+
+    sdl_set_logical(s, f.w, f.h, f.w, f.h);
+    if (!s->fb_mem || !s->fb_stride)
+        return true;
+
+    uint32_t y0 = 0, y1 = 0;
+    int full = 0;
+    const int force = !was_active;
+    was_active = 1;
+    if (!psvidel_frame_draw(&f, (uint32_t *)s->fb_mem,
+                            (uint32_t)(s->fb_stride / 4), force,
+                            &y0, &y1, &full))
+        return true;
+
+    g_fvdi_up_y0 = y0;
+    g_fvdi_up_y1 = y1;
+    g_fvdi_up_x0 = 0;
+    g_fvdi_up_x1 = f.w - 1;
+    g_fvdi_up_partial = !full;
+    if (updated)
+        *updated = true;
     return true;
 }
 
@@ -2815,7 +2867,17 @@ void *render_frame(void *vptr)
             }
 
             bool fvdi_updated = false;
-            if (blit_fvdi_linear(g_et4000, &fvdi_updated)) {
+            bool psv_updated = false;
+            if (blit_psvidel(g_et4000, &psv_updated)) {
+                source_active = true;
+                if (psv_updated) {
+                    g_sdl_tex_has_frame = 0;
+                    render_source = "psvidel";
+                    rendered = true;
+                }
+            }
+
+            else if (blit_fvdi_linear(g_et4000, &fvdi_updated)) {
                 source_active = true;
                 /* fVDI dirty gate: blit_fvdi_linear already reports whether the
                  * framebuffer changed (write-count). Only copy+flip when it did;
@@ -2836,7 +2898,9 @@ void *render_frame(void *vptr)
                 /* Stage 1 dirty gate: only redraw+present when the engine says
                  * the picture changed (this or last frame). Unchanged -> skip
                  * both, the current front buffer keeps showing. */
-                if (!et4000_dirty_gate_enabled() || et4000_take_dirty()) {
+                if (!et4000_dirty_gate_enabled() || et4000_take_dirty() ||
+                    g_src_force_full) {
+                    g_src_force_full = 0;
                     g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
                     et4000_update_display (g_et4000); /* aperture has pixels -> show RTG */
                     render_source = "et4000";
@@ -2850,6 +2914,7 @@ void *render_frame(void *vptr)
             {
                 g_sdl_tex_has_frame = 0;
                 g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
+                g_src_force_full = 0;   /* this path always draws it all */
                 /* the frame as it stood at the last real VBL (see ST
                  * NATIVE SNAPSHOT); the live read only until the first */
                 if (!blit_st_native_snapshot(g_et4000))

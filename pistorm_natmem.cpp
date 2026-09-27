@@ -39,6 +39,8 @@
 #include "platforms/atari/st_blitter.h"
 #include "platforms/atari/kbd_usb.h"
 #include "platforms/atari/joy_usb.h"
+#include "platforms/atari/psvidel/psvidel.h"
+#include "platforms/atari/falcon/falcon.h"
 
 extern "C"
 {
@@ -3436,6 +3438,10 @@ static inline void hw_fdd_bput(uaecptr a, uae_u32 v)
         dma_snoop_write(a, v, 1);
 }
 
+/* the long handlers split PSVIDEL-touching accesses into word ones */
+static uae_u32 hw_wget(uaecptr a);
+static void hw_wput(uaecptr a, uae_u32 v);
+
 static uae_u32 hw_lget(uaecptr a)
 {
     PROF_IO_R(a);
@@ -3448,6 +3454,14 @@ static uae_u32 hw_lget(uaecptr a)
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return 0;
+    /* PSVIDEL owns the Falcon-only video registers once armed; a long
+     * that touches one is taken as two words so each half goes where it
+     * belongs (bus or register file) */
+    if (psvidel_hw_owns(a) || psvidel_hw_owns(a + 2))
+        return (hw_wget(a) << 16) | (hw_wget(a + 2) & 0xFFFFu);
+    /* Falcon DSP host port / sound matrix (cfg falcon_dsp, once armed) */
+    if (falcon_hw_owns(a))
+        return falcon_hw_read(a, 4);
 
     switch (hw_page_addr(a))
     {
@@ -3524,6 +3538,10 @@ static uae_u32 hw_wget(uaecptr a)
         return et4000_io_read8(g_et4000, nova_io_alias_card_addr(a));
     if (hw_mfp_addr(a))
         return hw_mfp_wget(a);
+    if (psvidel_hw_owns(a))
+        return psvidel_hw_read(a, 2);
+    if (falcon_hw_owns(a))
+        return falcon_hw_read(a, 2);
 
     switch (hw_page_addr(a))
     {
@@ -3593,6 +3611,10 @@ static uae_u32 hw_bget(uaecptr a)
         return et4000_io_read8(g_et4000, nova_io_alias_card_addr(a));
     if (hw_mfp_addr(a))
         return hw_mfp_bget(a);
+    if (psvidel_hw_owns(a))
+        return psvidel_hw_read(a, 1);
+    if (falcon_hw_owns(a))
+        return falcon_hw_read(a, 1);
     {   /* $FF8001 and the video base: the guest reads back what IT
          * wrote, not what the chip holds - see pistorm_stram_phys_init()
          * and the shadow frame buffer */
@@ -3664,6 +3686,17 @@ static void hw_lput(uaecptr a, uae_u32 v)
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return;
+    if (psvidel_hw_owns(a) || psvidel_hw_owns(a + 2))
+    {
+        /* see hw_lget: split so each word goes where it belongs */
+        hw_wput(a, v >> 16);
+        hw_wput(a + 2, v & 0xFFFFu);
+        return;
+    }
+    if (falcon_hw_owns(a)) {
+        falcon_hw_write(a, v, 4);
+        return;
+    }
 
     switch (hw_page_addr(a))
     {
@@ -3674,6 +3707,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
              * race the beam need single-shot writes - the shifter output is
              * the reference display for those. */
             st_video_snoop32(a, (uint32_t)v);
+            psvidel_video_snoop(a, (uint32_t)v, 4);
             hw_bus_lput(a, v);
             stram_shadow_video_after(a, 4);
             break;
@@ -3682,6 +3716,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
             break;
         case HW_PAGE_PSG:
             ym2149_snoop32(a, (uint32_t)v);  /* shadow YM2149 -> HDMI */
+            falcon_psg_snoop(a, (uint32_t)v, 4);   /* port A bit 4: DSP reset */
             hw_fdd_lput(a, v);
             break;
         case HW_PAGE_DMASND:
@@ -3747,11 +3782,19 @@ static void hw_wput(uaecptr a, uae_u32 v)
         et4000_io_write8(g_et4000, nova_io_alias_card_addr(a), (uae_u8)v);
         return;
     }
+    /* PSVIDEL register: absorbed, unless it is one the STE also has */
+    if (psvidel_hw_owns(a) && !psvidel_hw_write(a, v & 0xFFFFu, 2))
+        return;
+    if (falcon_hw_owns(a)) {
+        falcon_hw_write(a, v & 0xFFFFu, 2);
+        return;
+    }
 
     switch (hw_page_addr(a))
     {
         case HW_PAGE_VIDEO:
             st_video_snoop16(a, (uint16_t)v);
+            psvidel_video_snoop(a, v & 0xFFFFu, 2);
             hw_bus_wput(a, v);
             stram_shadow_video_after(a, 2);
             break;
@@ -3760,6 +3803,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
             break;
         case HW_PAGE_PSG:
             ym2149_snoop16(a, (uint16_t)v);  /* shadow YM2149 -> HDMI */
+            falcon_psg_snoop(a, v & 0xFFFFu, 2);
             hw_fdd_wput(a, v);
             break;
         case HW_PAGE_DMASND:
@@ -3830,11 +3874,18 @@ static void hw_bput(uaecptr a, uae_u32 v)
         et4000_io_write8(g_et4000, nova_io_alias_card_addr(a), (uae_u8)v);
         return;
     }
+    if (psvidel_hw_owns(a) && !psvidel_hw_write(a, v & 0xFFu, 1))
+        return;
+    if (falcon_hw_owns(a)) {
+        falcon_hw_write(a, v & 0xFFu, 1);
+        return;
+    }
 
     switch (hw_page_addr(a))
     {
         case HW_PAGE_VIDEO:
             st_video_snoop8(a, (uint8_t)v);
+            psvidel_video_snoop(a, v & 0xFFu, 1);
             hw_bus_bput(a, v);
             stram_shadow_video_after(a, 1);
             break;
@@ -3843,6 +3894,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
             break;
         case HW_PAGE_PSG:
             ym2149_snoop8(a, (uint8_t)v);    /* shadow YM2149 -> HDMI */
+            falcon_psg_snoop(a, v & 0xFFu, 1);
             hw_fdd_bput(a, v);
             break;
         case HW_PAGE_DMASND:
@@ -4419,6 +4471,132 @@ static addrbank pistorm_fvdi_bank = {
     fvdi_lget, fvdi_wget,
     ABFLAG_IO | ABFLAG_INDIRECT,
     S_READ, S_WRITE};
+
+
+/* ================================================================== */
+/* PSVIDEL banks (32-bit machines, cfg `psvidel`) - see PSVIDEL.md      */
+/*   0xA0000000  16MB  alias of the low 16MB: SuperVidel software draws  */
+/*                     into Mxalloc(ST)|0xA0000000 and shows it via the  */
+/*                     24-bit base registers - the same bytes            */
+/*   0xA1000000 112MB  video RAM (ct60_vmalloc / VsetScreen), host RAM   */
+/*                     with a page dirty map for the renderer            */
+/*   0x80010000  64KB  SuperBlitter + firmware version                   */
+/* ================================================================== */
+static uint8_t *psv_vram_ptr;
+
+static uae_u32 psvlo_lget(uaecptr a) { a &= 0x00FFFFFFu; return get_mem_bank(a).lget(a); }
+static uae_u32 psvlo_wget(uaecptr a) { a &= 0x00FFFFFFu; return get_mem_bank(a).wget(a); }
+static uae_u32 psvlo_bget(uaecptr a) { a &= 0x00FFFFFFu; return get_mem_bank(a).bget(a); }
+static void psvlo_lput(uaecptr a, uae_u32 v) { a &= 0x00FFFFFFu; get_mem_bank(a).lput(a, v); }
+static void psvlo_wput(uaecptr a, uae_u32 v) { a &= 0x00FFFFFFu; get_mem_bank(a).wput(a, v); }
+static void psvlo_bput(uaecptr a, uae_u32 v) { a &= 0x00FFFFFFu; get_mem_bank(a).bput(a, v); }
+static uae_u8 *psvlo_xlate(uaecptr a)
+{
+    a &= 0x00FFFFFFu;
+    return get_mem_bank(a).xlateaddr(a);
+}
+static int psvlo_check(uaecptr a, uae_u32 sz)
+{
+    a &= 0x00FFFFFFu;
+    return get_mem_bank(a).check(a, sz);
+}
+
+static addrbank pistorm_psvlo_bank = {
+    psvlo_lget, psvlo_wget, psvlo_bget,
+    psvlo_lput, psvlo_wput, psvlo_bput,
+    psvlo_xlate, psvlo_check, NULL, "PSVIDEL ST alias", "PSVIDEL ST alias",
+    psvlo_lget, psvlo_wget,
+    ABFLAG_IO | ABFLAG_INDIRECT,
+    S_READ, S_WRITE};
+
+static inline uint32_t psvv_off(uaecptr a) { return (uint32_t)(a - PSV_VRAM_BASE); }
+
+static uae_u32 psvv_lget(uaecptr a)
+{
+    uint32_t o = psvv_off(a);
+    if (o > PSV_VRAM_SIZE - 4) return 0;
+    const uint8_t *p = psv_vram_ptr + o;
+    return ((uae_u32)p[0] << 24) | ((uae_u32)p[1] << 16) |
+           ((uae_u32)p[2] << 8) | p[3];
+}
+static uae_u32 psvv_wget(uaecptr a)
+{
+    uint32_t o = psvv_off(a);
+    if (o > PSV_VRAM_SIZE - 2) return 0;
+    return ((uae_u32)psv_vram_ptr[o] << 8) | psv_vram_ptr[o + 1];
+}
+static uae_u32 psvv_bget(uaecptr a)
+{
+    uint32_t o = psvv_off(a);
+    if (o >= PSV_VRAM_SIZE) return 0;
+    return psv_vram_ptr[o];
+}
+static void psvv_lput(uaecptr a, uae_u32 v)
+{
+    uint32_t o = psvv_off(a);
+    if (o > PSV_VRAM_SIZE - 4) return;
+    uint8_t *p = psv_vram_ptr + o;
+    p[0] = (uae_u8)(v >> 24); p[1] = (uae_u8)(v >> 16);
+    p[2] = (uae_u8)(v >> 8);  p[3] = (uae_u8)v;
+    psvidel_vram_dirty(o, 4);
+}
+static void psvv_wput(uaecptr a, uae_u32 v)
+{
+    uint32_t o = psvv_off(a);
+    if (o > PSV_VRAM_SIZE - 2) return;
+    psv_vram_ptr[o] = (uae_u8)(v >> 8);
+    psv_vram_ptr[o + 1] = (uae_u8)v;
+    psvidel_vram_dirty(o, 2);
+}
+static void psvv_bput(uaecptr a, uae_u32 v)
+{
+    uint32_t o = psvv_off(a);
+    if (o >= PSV_VRAM_SIZE) return;
+    psv_vram_ptr[o] = (uae_u8)v;
+    psvidel_vram_dirty(o, 1);
+}
+static uae_u8 *psvv_xlate(uaecptr a) { return psv_vram_ptr + psvv_off(a); }
+/* A direct pointer handed out (Fread into video RAM, NatFeat buffers)
+ * bypasses the put handlers, so the range is marked dirty up front. */
+static int psvv_check(uaecptr a, uae_u32 sz)
+{
+    uint32_t o = psvv_off(a);
+    if (!psv_vram_ptr || a < PSV_VRAM_BASE || sz > PSV_VRAM_SIZE ||
+        o > PSV_VRAM_SIZE - sz)
+        return 0;
+    psvidel_vram_dirty(o, sz);
+    return 1;
+}
+
+static addrbank pistorm_psvram_bank = {
+    psvv_lget, psvv_wget, psvv_bget,
+    psvv_lput, psvv_wput, psvv_bput,
+    psvv_xlate, psvv_check, NULL, "PSVIDEL VRAM", "PSVIDEL VRAM",
+    psvv_lget, psvv_wget,
+    ABFLAG_IO | ABFLAG_INDIRECT,
+    S_READ, S_WRITE};
+
+static uae_u8 psv_reg_scratch[0x10000];
+static uae_u32 psvr_lget(uaecptr a) { return psvidel_svreg_read(a, 4); }
+static uae_u32 psvr_wget(uaecptr a) { return psvidel_svreg_read(a, 2); }
+static uae_u32 psvr_bget(uaecptr a) { return psvidel_svreg_read(a, 1); }
+static void psvr_lput(uaecptr a, uae_u32 v) { psvidel_svreg_write(a, v, 4); }
+static void psvr_wput(uaecptr a, uae_u32 v) { psvidel_svreg_write(a, v & 0xFFFFu, 2); }
+static void psvr_bput(uaecptr a, uae_u32 v) { psvidel_svreg_write(a, v & 0xFFu, 1); }
+static uae_u8 *psvr_xlate(uaecptr a) { return psv_reg_scratch + (a & 0xFFFFu); }
+static int psvr_check(uaecptr a, uae_u32 sz) { (void)a; (void)sz; return 0; }
+
+static addrbank pistorm_psvreg_bank = {
+    psvr_lget, psvr_wget, psvr_bget,
+    psvr_lput, psvr_wput, psvr_bput,
+    psvr_xlate, psvr_check, NULL, "PSVIDEL SV regs", "PSVIDEL SV regs",
+    psvr_lget, psvr_wget,
+    ABFLAG_IO | ABFLAG_INDIRECT,
+    S_READ, S_WRITE};
+
+/* the SuperBlitter's way into the low 16MB: the real banks, SMC and all */
+static uint32_t psv_mem_rd8(uint32_t a) { return get_mem_bank(a).bget(a); }
+static void psv_mem_wr8(uint32_t a, uint32_t v) { get_mem_bank(a).bput(a, v); }
 
 #if (1)
 /* ================================================================== */
@@ -5110,6 +5288,20 @@ extern "C" void jit_mem_init(void)
     }
 
     map_region(FVDI_FB_BASE, FVDI_FB_MAX_BYTES, &pistorm_fvdi_bank);
+
+    /* PSVIDEL (cfg `psvidel`): the Videl registers are always emulated;
+     * the 0xA0000000 window needs a 32-bit bus */
+    if (emulator_config_psvidel_enabled())
+    {
+        if (psvidel_init(natmem_offset, GUEST_RESERVE, !pistorm_addr24))
+        {
+            psv_vram_ptr = psvidel_vram();
+            psvidel_set_mem_hooks(psv_mem_rd8, psv_mem_wr8);
+            map_region(PSV_LO_BASE, PSV_LO_SIZE, &pistorm_psvlo_bank);
+            map_region(PSV_VRAM_BASE, PSV_VRAM_SIZE, &pistorm_psvram_bank);
+            map_region(PSV_SVREG_BASE, PSV_SVREG_SIZE, &pistorm_psvreg_bank);
+        }
+    }
 
     map_region(pistorm_rom_start, pistorm_rom_size, &pistorm_rom_bank);
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases

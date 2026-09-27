@@ -45,6 +45,10 @@ CFILES = config_file/config_file.c \
          platforms/atari/audio/emu2149.c \
          platforms/atari/audio/ym2149.c \
          platforms/atari/st_blitter.c \
+         platforms/atari/psvidel/psvidel.c \
+         platforms/atari/falcon/dsp56k.c \
+         platforms/atari/falcon/falcon_hw.c \
+         platforms/atari/falcon/falcon_audio.c \
          platforms/atari/avrecord.c \
          platforms/atari/video/vidplane.c \
          platforms/atari/video/vidplay.c \
@@ -413,6 +417,10 @@ platforms/atari/audio/ym2149.o: platforms/atari/audio/ym2149.c
 # Host video player: SDL3 (audio stream on the shared device) + FFmpeg libs.
 platforms/atari/video/vidplay.o: platforms/atari/video/vidplay.c
 	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) $(AV_CFLAGS) -MMD -MP -c -o $@ $<
+
+# The Falcon DAC binds a stream to the same SDL3 device as ym2149.c.
+platforms/atari/falcon/falcon_audio.o: platforms/atari/falcon/falcon_audio.c
+	$(CC) $(CFLAGS) -DPISTORM_REAL_SDL3 $(SDL3_CFLAGS) -MMD -MP -c -o $@ $<
 
 # The sandbox PSG binds a stream to the same SDL3 device as ym2149.c.
 platforms/atari/stbox/stbox_psg.o: platforms/atari/stbox/stbox_psg.c

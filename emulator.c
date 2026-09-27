@@ -34,6 +34,8 @@
 #include "platforms/atari/stbox/stbox.h"
 #include "platforms/atari/audio/ym2149.h"
 #include "platforms/atari/st_blitter.h"
+#include "platforms/atari/psvidel/psvidel.h"
+#include "platforms/atari/falcon/falcon.h"
 #include "sysdeps.h"
 #include "threaddep/thread.h"
 
@@ -609,7 +611,8 @@ static void hostop_name(uint32_t op, char *nm, size_t len)
 {
   static const char *const nf_names[] = {
     "NAME", "VERSION", "STDERR", "ETHERNET", "HOSTFS", "FVDI", "MP3",
-    "VIDEO", "PSCTRL", "PSIMG", "STBOX", "PSPDF", "PSWEB"
+    "VIDEO", "PSCTRL", "PSIMG", "STBOX", "PSPDF", "PSWEB", "FVDICON",
+    "PSVIDEL"
   };
   static const char *const fvdi_names[] = {
     "GET_VERSION", "GET_PIXEL", "PUT_PIXEL", "MOUSE", "EXPAND_AREA",
@@ -2377,7 +2380,8 @@ int main (int argc, char *argv[])
     else if (want_dmasnd)
       PS_INFO ("[CFG] machine STE-class: DMA sound ON\n");
   }
-  if (want_dmasnd || config->ym2149) {
+  /* the Falcon DAC (falcon_dsp) plays through the same SDL device */
+  if (want_dmasnd || config->ym2149 || config->falcon_dsp) {
     if (dmasnd_init (NULL) == 0) {
       if (want_dmasnd) {
         if (dmasnd_capture_start() == 0) {
@@ -2405,6 +2409,15 @@ int main (int argc, char *argv[])
   } else {
     PS_INFO ("[INIT] DMA Sound disabled\n");
     PS_INFO ("[INIT] YM2149 emulation disabled\n");
+  }
+
+  /* Falcon DSP56001 + sound matrix (FALCON-DSP.md): its engine thread
+   * is created here, on the main thread, with explicit scheduling -
+   * never from the CPU thread (VIDEO.md, "scheduling inheritance") */
+  if (config->falcon_dsp) {
+    uint32_t gsz = 0x01000000u + (tt_ram_available ? tt_ram_size : 0u);
+    if (falcon_init (natmem_offset, gsz) != 0)
+      fprintf (stderr, "[INIT] Falcon DSP failed to start\n");
   }
 
   /* start threads */
@@ -2618,6 +2631,8 @@ void cpu_pulse_reset(void)
     dmasnd_capture_reset();
   ym2149_reset();
   st_blitter_reset();
+  psvidel_reset();   /* the Videl disarms: the ST shifter is back on HDMI */
+  falcon_reset();    /* DSP held in reset, sound DMA stopped */
 
   pulse_reset_inprogress = 0;
 }
@@ -2638,6 +2653,8 @@ void atari_hard_reset(void)
     dmasnd_capture_reset();
   ym2149_reset();
   st_blitter_reset();
+  psvidel_reset();
+  falcon_reset();
   pistorm_net_reset();
 
   jit_cpu_reset(); /* drop stale translations before re-fetch */

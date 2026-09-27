@@ -143,6 +143,8 @@ struct emulator_config {
   char stbox_tos[256];   /* TOS ROM for the sandboxed ST (STBOX)        */
   bool stbox_ste;        /* default sandbox machine: false ST, true STE */
   int  stbox_plane;      /* force a DRM overlay plane id (0 = auto)     */
+  bool psvidel;          /* Falcon Videl + SuperVidel on HDMI (PSVIDEL) */
+  bool falcon_dsp;       /* Falcon DSP56001 + sound matrix (FALCON-DSP) */
 };
 
 
@@ -175,6 +177,8 @@ int  emulator_config_blitter_mode(void);  /* 0=off 1=real 2=emulated */
 bool emulator_config_stram_cache_enabled(void);
 bool emulator_config_stram_direct_enabled(void);
 bool emulator_config_native_hdmi_enabled(void);
+bool emulator_config_psvidel_enabled(void);
+bool emulator_config_falcon_dsp_enabled(void);
 bool emulator_config_display_enabled(void);
 bool emulator_config_et4k_enabled(void);
 bool emulator_config_fvdi_enabled(void);

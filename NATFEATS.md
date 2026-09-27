@@ -315,6 +315,33 @@ Results: -1 error, -3 busy (ask again next tick), -4 psweb not connected.
 - Frames arrive whole in v1 (one damage rectangle covering the view); the
   guest blits the rectangles FETCH returns.
 
+### PSVIDEL
+The XBIOS half of the emulated Falcon Videl / SuperVidel (`PSVIDEL.md`)
+and of the Falcon DSP + sound matrix (`FALCON-DSP.md`).
+`PSVIDEL.PRG` (`atari-tools/psvidel/`, AUTO folder) turns the video, DSP
+lock and sound XBIOS calls into these. GET_ID answers 0 unless the cfg has
+`psvidel` or `falcon_dsp`.
+Implementation: `platforms/atari/psvidel/psvidel.c`, `nf_call_psvidel()`.
+
+| Sub-op | Name         | Arguments / result                                   |
+|--------|--------------|------------------------------------------------------|
+| 0      | VERSION      | -> 0x00010000                                         |
+| 1      | ENABLE       | p0 = the current mode (VsetMode format) -> bit0 armed, bit1 video RAM at $A1000000, bit2 Falcon DSP + sound (cfg falcon_dsp), bit3 Videl video (cfg psvidel) |
+| 2      | DISABLE      |                                                       |
+| 3      | SETMODE      | p0 mode (-1 inquire) -> old mode; bit16 new mode is ST compatible (bits 17-18 the ST rez), bit20 rejected |
+| 4      | FIXMODE      | p0 mode -> Vfixmode                                   |
+| 5      | GETSIZE      | p0 mode -> bytes                                      |
+| 6      | SETRGB       | p0 index, p1 count, p2 ptr to 0x00RRGGBB longs, p3 ptr to a word buffer -> STE words written there (modes on the STE palette) |
+| 7      | GETRGB       | p0 index, p1 count, p2 ptr                            |
+| 8      | SETPHYS      | p0 display address (32-bit)                           |
+| 9      | GETPHYS      | -> display address                                    |
+| 10     | ACTIVE       | -> 1 while a Falcon or SuperVidel mode owns the HDMI  |
+| 11     | VMALLOC      | p0 mode, p1 value: ct60_vmalloc (0 alloc, -1 = largest free; 1 free) |
+| 12     | SCREEN_ALLOC | p0 bytes -> cleared video RAM for VsetScreen(0,0,3,mode); frees the previous one |
+| 13     | INFO         | p0 0 w, 1 h, 2 bpp, 3 base, 4 mode, 5 source, 6 free VRAM |
+| 14     | SNDX         | p0 XBIOS opcode (104/105 Dsp_Lock/Unlock, 128-141 the sound calls), p1 ptr to its arguments -> the XBIOS result (FALCON-DSP.md) |
+| 15     | FALCON_INFO  | p0 0 DSP state (0 reset 1 boot 2 run), 1 frames, 2 idle skips, 3 kcycles, 4 illegal count, 5 boot words, 6 rate Hz, 7 DSP PC |
+
 ## Audio architecture (context for MP3PLAY and VIDPLAY)
 
 ST/STE DMA sound is captured by register snooping (`dmasnd_capture.c`) and

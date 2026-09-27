@@ -12,6 +12,8 @@
 #include "platforms/atari/pdf/pspdf.h"
 #include "platforms/atari/web/psweb_proto.h"
 #include "platforms/atari/web/psweb_client.h"
+#include "platforms/atari/psvidel/psvidel.h"
+#include "platforms/atari/falcon/falcon.h"
 
 #include "options.h"
 #include "memory.h"
@@ -113,6 +115,7 @@ enum nf_feature_index {
   NF_FEATURE_PSPDF,
   NF_FEATURE_PSWEB,
   NF_FEATURE_FVDICON,
+  NF_FEATURE_PSVIDEL,
   NF_FEATURE_COUNT
 };
 
@@ -289,7 +292,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "STBOX",
   "PSPDF",
   "PSWEB",
-  "FVDICON"
+  "FVDICON",
+  "PSVIDEL"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -1194,6 +1198,9 @@ static uae_u32 nf_get_id(uaecptr stack)
         fprintf(stderr, "[NF] GET_ID(\"%s\") -> 0 (network disabled)\n", name);
         return 0;
       }
+      if (i == NF_FEATURE_PSVIDEL && !psvidel_configured() &&
+          !falcon_configured())
+        return 0;                  /* neither psvidel nor falcon_dsp */
       if (i == NF_FEATURE_HOSTFS && !hostfs_is_enabled()) {
         HOSTFS_LOG("[NF] GET_ID(\"%s\") -> 0 (hostfs disabled)\n", name);
         return 0;
@@ -6231,6 +6238,151 @@ static uae_u32 nf_call_fvdicon(uae_u32 subid, uaecptr params)
   return 0;
 }
 
+/* PSVIDEL: the XBIOS half of the Falcon Videl / SuperVidel (PSVIDEL.PRG
+ * turns the video XBIOS calls into these). platforms/atari/psvidel/. */
+enum nf_psvidel_ops {
+  PSVIDEL_VERSION = 0,  /* -> 0x00010000                                  */
+  PSVIDEL_ENABLE,       /* p0 = VsetMode(-1) the TSR computed -> bit0 armed,
+                           bit1 video RAM window, bit2 Falcon DSP + sound,
+                           bit3 Videl/SuperVidel video                     */
+  PSVIDEL_DISABLE,
+  PSVIDEL_SETMODE,      /* p0 = mode -> old mode | PSV_SM_* flags          */
+  PSVIDEL_FIXMODE,      /* p0 = mode -> Vfixmode                           */
+  PSVIDEL_GETSIZE,      /* p0 = mode -> bytes                              */
+  PSVIDEL_SETRGB,       /* p0 = index, p1 = count, p2 = ptr to longs
+                           0x00RRGGBB, p3 = ptr to a word buffer: when the
+                           mode uses the STE registers the STE values land
+                           there -> how many (0 = none)                    */
+  PSVIDEL_GETRGB,       /* p0 = index, p1 = count, p2 = ptr                */
+  PSVIDEL_SETPHYS,      /* p0 = address                                    */
+  PSVIDEL_GETPHYS,
+  PSVIDEL_ACTIVE,       /* -> 1 while a Falcon/SV mode owns the HDMI       */
+  PSVIDEL_VMALLOC,      /* p0 = mode, p1 = value: ct60_vmalloc semantics   */
+  PSVIDEL_SCREEN_ALLOC, /* p0 = bytes -> cleared video RAM (frees the last)*/
+  PSVIDEL_INFO,         /* p0 = 0 w 1 h 2 bpp 3 base 4 mode 5 src 6 free   */
+  PSVIDEL_SNDX,         /* p0 = XBIOS opcode (104/105, 128-141), p1 = ptr
+                           to its arguments -> the XBIOS result            */
+  PSVIDEL_FALCON_INFO   /* p0 = falcon_info() selector                     */
+};
+
+static uae_u32 nf_call_psvidel(uae_u32 subid, uaecptr params)
+{
+  switch (subid) {
+    case PSVIDEL_VERSION:
+      return 0x00010000u;
+    case PSVIDEL_ENABLE:
+    {
+      uae_u32 flags = 0;
+      if (psvidel_configured()) {
+        uae_u32 v = psvidel_enable(nf_get_param(params, 0) & 0xFFFFu);
+        if (v & 1)
+          flags |= v | 8u;
+      }
+      if (falcon_configured()) {
+        falcon_arm();
+        flags |= 1u | 4u;
+      }
+      return flags;
+    }
+    case PSVIDEL_DISABLE:
+      psvidel_disable();
+      return 0;
+    case PSVIDEL_SETMODE:
+      return psvidel_setmode(nf_get_param(params, 0) & 0xFFFFu);
+    case PSVIDEL_FIXMODE:
+      return psvidel_fixmode(nf_get_param(params, 0) & 0xFFFFu);
+    case PSVIDEL_GETSIZE:
+      return psvidel_getsize(nf_get_param(params, 0) & 0xFFFFu);
+    case PSVIDEL_SETRGB:
+    {
+      uae_u32 idx = nf_get_param(params, 0) & 0xFFFFu;
+      uae_u32 cnt = nf_get_param(params, 1) & 0xFFFFu;
+      uaecptr src = nf_get_param(params, 2);
+      uaecptr ste = nf_get_param(params, 3);
+      const int use_ste = psvidel_ste_palette_mode();
+      uae_u32 n_ste = 0;
+      if (idx > 255)
+        return 0;
+      if (cnt > 256 - idx)
+        cnt = 256 - idx;
+      for (uae_u32 i = 0; i < cnt; i++) {
+        uae_u32 rgb = nf_read_long(src + i * 4u);
+        psvidel_set_rgb(idx + i, rgb);
+        if (use_ste && ste && idx + i < 16)
+          nf_write_word(ste + 2u * n_ste++, psvidel_rgb_to_ste(rgb));
+      }
+      return n_ste;
+    }
+    case PSVIDEL_GETRGB:
+    {
+      uae_u32 idx = nf_get_param(params, 0) & 0xFFFFu;
+      uae_u32 cnt = nf_get_param(params, 1) & 0xFFFFu;
+      uaecptr dst = nf_get_param(params, 2);
+      if (idx > 255)
+        return 0;
+      if (cnt > 256 - idx)
+        cnt = 256 - idx;
+      for (uae_u32 i = 0; i < cnt; i++)
+        nf_write_long(dst + i * 4u, psvidel_get_rgb(idx + i));
+      return 0;
+    }
+    case PSVIDEL_SETPHYS:
+      psvidel_setphys(nf_get_param(params, 0));
+      return 0;
+    case PSVIDEL_GETPHYS:
+      return psvidel_getphys();
+    case PSVIDEL_ACTIVE:
+      return psvidel_active() ? 1u : 0u;
+    case PSVIDEL_VMALLOC:
+      return psvidel_vmalloc(nf_get_param(params, 0) & 0xFFFFu,
+                             nf_get_param(params, 1));
+    case PSVIDEL_SCREEN_ALLOC:
+      return psvidel_screen_alloc(nf_get_param(params, 0));
+    case PSVIDEL_INFO:
+      return psvidel_info(nf_get_param(params, 0));
+    case PSVIDEL_SNDX:
+    {
+      /* the Falcon sound XBIOS: arguments are words except setbuffer's
+       * two addresses and buffptr's pointer */
+      int op = (int)(nf_get_param(params, 0) & 0xFFFFu);
+      uaecptr ap = nf_get_param(params, 1);
+      int32_t a[5] = { 0, 0, 0, 0, 0 };
+      uint32_t out4[4] = { 0, 0, 0, 0 };
+      switch (op) {
+        case 130: case 133: case 135: case 137: case 138:
+          a[0] = (int16_t)nf_read_word(ap);
+          a[1] = (int16_t)nf_read_word(ap + 2);
+          break;
+        case 132: case 134: case 136: case 140:
+          a[0] = (int16_t)nf_read_word(ap);
+          break;
+        case 131:
+          a[0] = (int16_t)nf_read_word(ap);
+          a[1] = (int32_t)nf_read_long(ap + 2);
+          a[2] = (int32_t)nf_read_long(ap + 6);
+          break;
+        case 139:
+          for (int i = 0; i < 5; i++)
+            a[i] = (int16_t)nf_read_word(ap + 2u * (uae_u32)i);
+          break;
+        default:
+          break;
+      }
+      int32_t r = falcon_sound_xbios(op, a, out4);
+      if (op == 141) {
+        uaecptr p = nf_read_long(ap);
+        if (p)
+          for (int i = 0; i < 4; i++)
+            nf_write_long(p + 4u * (uae_u32)i, out4[i]);
+      }
+      return (uae_u32)r;
+    }
+    case PSVIDEL_FALCON_INFO:
+      return falcon_info(nf_get_param(params, 0));
+  }
+  return 0;
+}
+
 extern "C" volatile uint32_t pistorm_cpu_hostop;   /* emulator.c */
 
 static uae_u32 nf_call(uaecptr stack)
@@ -6277,6 +6429,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_psweb(subid, params);
     case NF_FEATURE_FVDICON:
       return nf_call_fvdicon(subid, params);
+    case NF_FEATURE_PSVIDEL:
+      return nf_call_psvidel(subid, params);
   }
 
   return 0;

@@ -48,6 +48,8 @@ typedef enum {
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
   CONFITEM_NATIVE_HDMI,
+  CONFITEM_PSVIDEL,
+  CONFITEM_FALCON_DSP,
   CONFITEM_CPU_CLOCK_MULTIPLIER,
   CONFITEM_M68K_SPEED,
   CONFITEM_JIT_CACHE,
@@ -111,6 +113,8 @@ static const config_switch_def config_switches[] = {
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
   { "native_hdmi", CONFITEM_NATIVE_HDMI },
+  { "psvidel", CONFITEM_PSVIDEL },
+  { "falcon_dsp", CONFITEM_FALCON_DSP },
   { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
   { "m68k_speed", CONFITEM_M68K_SPEED },
   { "jit_cache", CONFITEM_JIT_CACHE },
@@ -295,6 +299,16 @@ bool emulator_config_stram_direct_enabled(void)
 bool emulator_config_native_hdmi_enabled(void)
 {
   return current_config ? current_config->native_hdmi : true;
+}
+
+bool emulator_config_psvidel_enabled(void)
+{
+  return current_config ? current_config->psvidel : false;
+}
+
+bool emulator_config_falcon_dsp_enabled(void)
+{
+  return current_config ? current_config->falcon_dsp : false;
 }
 
 bool emulator_config_display_enabled(void)
@@ -1257,6 +1271,23 @@ struct emulator_config *load_config_file_section(char *filename,
       case CONFITEM_NATIVE_HDMI:
         cfg->native_hdmi = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] Native HDMI %s\n", cfg->native_hdmi ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_PSVIDEL:
+        /* Falcon Videl + SuperVidel, HDMI only (PSVIDEL.md). Needs
+         * PSVIDEL.PRG in AUTO to arm it; the 0xA0000000 video RAM window
+         * needs a 32-bit bus (ttram or addr32). */
+        cfg->psvidel = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] PSVIDEL (Falcon/SuperVidel on HDMI) %s\n",
+                cfg->psvidel ? "enabled" : "disabled");
+        break;
+
+      case CONFITEM_FALCON_DSP:
+        /* Falcon DSP56001 + sound matrix/DMA, audio on HDMI
+         * (FALCON-DSP.md). Armed by PSVIDEL.PRG like PSVIDEL. */
+        cfg->falcon_dsp = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] Falcon DSP + sound %s\n",
+                cfg->falcon_dsp ? "enabled" : "disabled");
         break;
 
       case CONFITEM_CPU_CLOCK_MULTIPLIER:
