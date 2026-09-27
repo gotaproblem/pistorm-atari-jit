@@ -3438,6 +3438,25 @@ static inline void hw_fdd_bput(uaecptr a, uae_u32 v)
         dma_snoop_write(a, v, 1);
 }
 
+/* An STE shifter register PSVIDEL also owns: keep the HDMI mirror and
+ * the real chip in step, but swallow a BERR - on a plain ST (or a
+ * `shifter ste` mirror over one) the register does not exist, and a
+ * Falcon program writing it must not take exception 2 for our copy. */
+static void psvidel_ste_mirror(uaecptr a, uae_u32 v, int size)
+{
+    if (size == 2) {
+        st_video_snoop16(a, (uint16_t)v);
+        g_buserr = 0;
+        ps_write_16(a, (uae_u16)v);
+    } else {
+        st_video_snoop8(a, (uint8_t)v);
+        g_buserr = 0;
+        ps_write_8(a, (uae_u8)v);
+    }
+    g_buserr = 0;
+    stram_shadow_video_after(a, size);
+}
+
 /* the long handlers split PSVIDEL-touching accesses into word ones */
 static uae_u32 hw_wget(uaecptr a);
 static void hw_wput(uaecptr a, uae_u32 v);
@@ -3782,9 +3801,14 @@ static void hw_wput(uaecptr a, uae_u32 v)
         et4000_io_write8(g_et4000, nova_io_alias_card_addr(a), (uae_u8)v);
         return;
     }
-    /* PSVIDEL register: absorbed, unless it is one the STE also has */
-    if (psvidel_hw_owns(a) && !psvidel_hw_write(a, v & 0xFFFFu, 2))
+    /* PSVIDEL register: absorbed; one the STE also has ($FF820E,
+     * $FF8264) is mirrored to the chip best-effort - a plain ST
+     * bus-errors there and the guest must not see that */
+    if (psvidel_hw_owns(a)) {
+        if (psvidel_hw_write(a, v & 0xFFFFu, 2))
+            psvidel_ste_mirror(a, v & 0xFFFFu, 2);
         return;
+    }
     if (falcon_hw_owns(a)) {
         falcon_hw_write(a, v & 0xFFFFu, 2);
         return;
@@ -3874,8 +3898,11 @@ static void hw_bput(uaecptr a, uae_u32 v)
         et4000_io_write8(g_et4000, nova_io_alias_card_addr(a), (uae_u8)v);
         return;
     }
-    if (psvidel_hw_owns(a) && !psvidel_hw_write(a, v & 0xFFu, 1))
+    if (psvidel_hw_owns(a)) {
+        if (psvidel_hw_write(a, v & 0xFFu, 1))
+            psvidel_ste_mirror(a, v & 0xFFu, 1);
         return;
+    }
     if (falcon_hw_owns(a)) {
         falcon_hw_write(a, v & 0xFFu, 1);
         return;
