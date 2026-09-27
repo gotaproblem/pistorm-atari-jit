@@ -102,6 +102,8 @@ typedef struct {
 #define PSV_FMT_ARGB32  3   /* SuperVidel 32-bit, big endian A,R,G,B  */
 
 /* 0 = PSVIDEL is not showing anything this frame */
+/* ipl_task: the real VBL - latch the display for the next frame */
+void psvidel_vbl(void);
 int psvidel_frame_begin(psvidel_frame_t *f);
 /* Convert into an XRGB8888 staging buffer. force_full redraws every row.
  * Returns 0 when nothing changed; else the drawn row range and whether it

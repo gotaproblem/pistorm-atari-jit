@@ -87,6 +87,16 @@ static volatile uint32_t g_seq;
 static psvidel_frame_t   g_pub;
 static int               g_pub_active;
 
+/* ...and as it stood at the last real VBL (psvidel_vbl, ipl_task): what
+ * the Videl shows, since it takes a new base or mode only at the start
+ * of a frame. BOR's VBL handler writes $FF8201/03 (which clear the low
+ * byte) and then $FF820D; a renderer reading the live registers between
+ * the two showed the screen 64 pixels off. */
+static volatile uint32_t g_vseq;
+static psvidel_frame_t   g_vpub;
+static int               g_vpub_active;
+static volatile uint64_t g_vbl_ns;
+
 /* the palette as the renderer wants it */
 static uint32_t          g_pal_xrgb[256];
 static volatile uint32_t g_pal_gen;
@@ -1010,18 +1020,50 @@ void psvidel_reset(void)
 /* ------------------------------------------------------------------ */
 /* Render thread                                                        */
 /* ------------------------------------------------------------------ */
-int psvidel_frame_begin(psvidel_frame_t *f)
+static int pub_read(psvidel_frame_t *f)
 {
     uint32_t s;
     int act;
-    if (!S.configured)
-        return 0;
     do {
         s = __atomic_load_n(&g_seq, __ATOMIC_ACQUIRE);
         *f = g_pub;
         act = g_pub_active;
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
     } while ((s & 1) || s != __atomic_load_n(&g_seq, __ATOMIC_RELAXED));
+    return act;
+}
+
+/* ipl_task, at the real VBL: latch the display for the frame starting */
+void psvidel_vbl(void)
+{
+    psvidel_frame_t f;
+    if (!S.configured)
+        return;
+    int act = pub_read(&f);
+    __atomic_add_fetch(&g_vseq, 1, __ATOMIC_ACQ_REL);
+    g_vpub = f;
+    g_vpub_active = act;
+    __atomic_add_fetch(&g_vseq, 1, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_vbl_ns, now_ns(), __ATOMIC_RELEASE);
+}
+
+int psvidel_frame_begin(psvidel_frame_t *f)
+{
+    if (!S.configured)
+        return 0;
+    /* no VBL seen lately (masked, or a machine without one reaching
+     * ipl_task): fall back to the live registers */
+    uint64_t v = __atomic_load_n(&g_vbl_ns, __ATOMIC_ACQUIRE);
+    if (!v || now_ns() - v > 100000000ull)
+        return pub_read(f);
+    uint32_t s;
+    int act;
+    do {
+        s = __atomic_load_n(&g_vseq, __ATOMIC_ACQUIRE);
+        *f = g_vpub;
+        act = g_vpub_active;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    } while ((s & 1) || s != __atomic_load_n(&g_vseq, __ATOMIC_RELAXED));
     return act;
 }
 

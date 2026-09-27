@@ -35,7 +35,15 @@
 /* ------------------------------------------------------------------ */
 /* Host port FIFOs (single producer, single consumer)                  */
 /* ------------------------------------------------------------------ */
-#define HF_SIZE 1024u
+/* Deep, because the 68k does not handshake each word: DSPMOD waits for
+ * TXDE once and then writes a voice's whole block (up to ~1000 words)
+ * back to back, relying on a real 56001 emptying HTX between two 68030
+ * bus cycles. Here the DSP drains in sample-clock steps, so a VBL's
+ * worth of every voice (8 x 1000+ words at high pitches) must fit. TXDE
+ * is only reported while a whole block still fits (HF_TXDE_ROOM), so a
+ * 68k that does check waits instead of overflowing. */
+#define HF_SIZE      32768u
+#define HF_TXDE_ROOM  8192u
 typedef struct {
     uint32_t w[HF_SIZE];
     _Atomic uint32_t head;          /* producer */
@@ -762,11 +770,11 @@ static uint8_t host_read8(uint32_t o)
         uint8_t isr = 0;
         uint32_t txn = hf_count(&F.tx);
         if (have) isr |= 0x01;                               /* RXDF */
-        if (txn < HF_SIZE) isr |= 0x02;                      /* TXDE */
+        if (txn <= HF_SIZE - HF_TXDE_ROOM) isr |= 0x02;      /* TXDE */
         if (txn == 0) isr |= 0x04;                           /* TRDY */
         isr |= (uint8_t)(((atomic_load(&F.hcr) >> 3) & 3) << 3); /* HF2 HF3 */
         uint8_t icr = atomic_load(&F.icr);
-        if (((icr & 1) && have) || ((icr & 2) && txn < HF_SIZE))
+        if (((icr & 1) && have) || ((icr & 2) && txn <= HF_SIZE - HF_TXDE_ROOM))
             isr |= 0x80;                                     /* HREQ */
         return isr;
     }
@@ -797,8 +805,11 @@ static void host_write8(uint32_t o, uint8_t v)
     case 6: F.txb[1] = v; break;
     case 7:
         F.txb[2] = v;
-        if (!hf_push(&F.tx, ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v))
-            F.dropped_tx++;
+        if (!hf_push(&F.tx, ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v)) {
+            if (F.dropped_tx++ < 4)
+                fprintf(stderr, "[FALCON] host port overflow: 68k word dropped "
+                        "(DSP %u words behind)\n", hf_count(&F.tx));
+        }
         break;
     default: return;
     }
