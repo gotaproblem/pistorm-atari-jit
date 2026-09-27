@@ -102,6 +102,7 @@ struct dsp56k {
     uint16_t  irq_ret_pc;
     uint16_t  irq_end_pc;
     uint32_t  illegal_count;
+    uint16_t  illegal_pc;        /* pc after the last illegal opcode      */
     int       idle_hint;         /* polling a peripheral in place         */
     uint64_t  idle_skips;
 };

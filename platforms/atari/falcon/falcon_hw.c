@@ -132,9 +132,12 @@ static struct {
     double       frame_hz;
     double       cyc_per_frame, cyc_acc;
     uint64_t     frames;
-    /* wall-clock sample clock (engine): frames due since t0_ns */
-    uint64_t     t0_ns, emitted, trim_hold_ns;
+    /* wall-clock sample clock (engine): see clock_due() */
+    uint64_t     last_ns, emitted;
+    double       clk, fill_avg, adj_i;
     unsigned     resyncs;
+    /* stall watchdog: the 68k's ISR polls vs host port movement */
+    _Atomic uint32_t isr_polls;
     uint64_t     dropped_tx;
 } F;
 
@@ -609,33 +612,107 @@ static uint64_t eng_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* t0 = now; the first clock_due() then asks for the whole lead at once,
- * priming the ring so the device never starts dry */
-static void clock_restart(void)
+/* the first clock_due() asks for the whole lead at once, priming the
+ * ring so the device never starts dry */
+static void clock_restart(double hz)
 {
-    F.t0_ns = eng_now_ns();
+    F.last_ns = eng_now_ns();
+    F.clk = 0.0;
     F.emitted = 0;
-    F.trim_hold_ns = F.t0_ns + 500000000ull;
+    F.fill_avg = hz * ENGINE_LEAD_MS / 1000.0 + 1024.0;
+    F.adj_i = 0.0;
 }
 
-/* frames the wall clock says are due now (may be <= 0) */
+/* Frames due now (may be <= 0). The clock runs at the nominal rate
+ * warped by a few % at most to hold the ring's AVERAGE fill on target: the
+ * device reads in periods (1-4K frames on the Pi's HDMI), so the fill
+ * swings by a period every read and only its average says anything
+ * about drift. A hard jump is kept for gross upsets only (device
+ * stalled or restarted) - an earlier version jumped on the momentary
+ * fill, and each jump stopped the DSP for ~50 ms. */
 static int64_t clock_due(double hz)
 {
     uint64_t now = eng_now_ns();
-    int64_t lead = (int64_t)(hz * ENGINE_LEAD_MS / 1000.0);
-    int64_t fill = (int64_t)falcon_audio_fill();
-    /* drift trim: a ring far off its target means the device clock and
-     * CLOCK_MONOTONIC disagree (or the device stalled) - slide t0 */
-    if (now >= F.trim_hold_ns && (fill > 3 * lead || fill < lead / 4)) {
-        int64_t err = fill - lead;                      /* frames */
-        int64_t ns = (int64_t)((double)err * 1e9 / hz);
-        F.t0_ns = (uint64_t)((int64_t)F.t0_ns + ns);
-        F.trim_hold_ns = now + 250000000ull;            /* let it settle */
+    double dt = (double)(int64_t)(now - F.last_ns) * 1e-9;
+    F.last_ns = now;
+    if (dt < 0.0) dt = 0.0;
+    if (dt > 0.25) dt = 0.25;                /* descheduled: no avalanche */
+
+    double lead = hz * ENGINE_LEAD_MS / 1000.0;
+    double target = lead + 1024.0;
+    double fill = (double)falcon_audio_fill();
+    double k = dt / 0.5;                        /* 0.5 s average */
+    F.fill_avg += (fill - F.fill_avg) * (k > 1.0 ? 1.0 : k);
+
+    /* PI: the integral learns the crystal difference, so the average
+     * fill settles on target instead of beside it */
+    double e = (F.fill_avg - target) / lead;
+    F.adj_i -= 0.01 * e * dt;
+    if (F.adj_i > 0.02) F.adj_i = 0.02;
+    if (F.adj_i < -0.02) F.adj_i = -0.02;
+    double adj = F.adj_i - 0.02 * e;
+    if (adj > 0.03) adj = 0.03;
+    if (adj < -0.03) adj = -0.03;
+    F.clk += dt * hz * (1.0 + adj);
+
+    if (fill > 8.0 * lead + 8192.0 ||
+        (F.emitted > (uint64_t)(8.0 * lead) && fill < 16.0 && F.fill_avg < lead / 2.0)) {
+        F.clk += target - fill;
+        F.fill_avg = target;
         F.resyncs++;
     }
-    double el = (double)(int64_t)(now - F.t0_ns);
-    int64_t want = (int64_t)(el * hz / 1e9) + lead;
-    return want - (int64_t)F.emitted;
+    return (int64_t)F.clk + (int64_t)lead - (int64_t)F.emitted;
+}
+
+/* Why a Falcon program is stuck, for the log: the 68k has been polling
+ * the host port's status for a while and nothing has moved either way. */
+static void watchdog(void)
+{
+    static uint64_t since_ns;
+    static uint32_t polls0, txt0, rxh0, ill0;
+    static int reported;
+    uint64_t now = eng_now_ns();
+    dsp56k_t *d = F.dsp;
+
+    if (d->illegal_count != ill0) {
+        static int shown;
+        if (shown < 4) {
+            shown++;
+            fprintf(stderr, "[FALCON] DSP illegal instruction near p:$%04X (%u so far)\n",
+                    d->illegal_pc, d->illegal_count);
+        }
+        ill0 = d->illegal_count;
+    }
+    if (now - since_ns < 300000000ull)
+        return;
+    uint32_t polls = atomic_load(&F.isr_polls);
+    uint32_t txt = atomic_load(&F.tx.tail), rxh = atomic_load(&F.rx.head);
+    int moved = txt != txt0 || rxh != rxh0;
+    int polling = polls - polls0 > 1000;
+    if (moved || !polling) {
+        reported = 0;
+    } else if (!reported) {
+        reported = 1;
+        uint16_t pcs[12];
+        for (int i = 0; i < 12; i++) {
+            dsp_run(3);
+            pcs[i] = d->pc;
+        }
+        fprintf(stderr, "[FALCON] stall: 68k polling the host port, nothing moving for 0.3 s - "
+                "host tx %u rx %u, DSP pc $%04X sr $%04X sp %u la $%04X lc %u, "
+                "SSI cra $%04X crb $%04X sr $%02X, hcr $%02X ipr $%06X, irq %llx\n",
+                hf_count(&F.tx), hf_count(&F.rx), d->pc, d->sr, d->sp & 15, d->la, d->lc,
+                F.cra, F.crb, F.ssisr, atomic_load(&F.hcr), F.ipr,
+                (unsigned long long)d->irq_pending);
+        fprintf(stderr, "[FALCON] stall: DSP pcs");
+        for (int i = 0; i < 12; i++)
+            fprintf(stderr, " %04X", pcs[i]);
+        fprintf(stderr, "\n");
+    }
+    since_ns = now;
+    polls0 = polls;
+    txt0 = txt;
+    rxh0 = rxh;
 }
 
 static int host_pending(void)
@@ -685,9 +762,11 @@ static void *engine(void *arg)
             F.cyc_per_frame = DSP_HZ / hz;
             F.cyc_acc = 0.0;
             falcon_audio_rate((unsigned)(hz + 0.5));
-            clock_restart();
+            clock_restart(hz);
             stat_ns = 0;               /* new baseline for the stats */
         }
+        if (st == DSP_RUN)
+            watchdog();
         int64_t due = clock_due(hz);
         if (due <= 0) {
             /* nothing due: the DSP waits with the sample clock. It is
@@ -709,9 +788,9 @@ static void *engine(void *arg)
         if (now - stat_ns > 10000000000ull) {
             unsigned u = falcon_audio_underruns(), r = F.resyncs;
             if (stat_ns && (u != stat_under || r != stat_resync))
-                fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock trims "
-                        "in 10 s (ring %u frames)\n", hz, u - stat_under,
-                        r - stat_resync, falcon_audio_fill());
+                fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock resyncs "
+                        "in 10 s (ring %u frames, average %.0f)\n", hz, u - stat_under,
+                        r - stat_resync, falcon_audio_fill(), F.fill_avg);
             stat_ns = now;
             stat_under = u;
             stat_resync = r;
@@ -769,6 +848,7 @@ static uint8_t host_read8(uint32_t o)
     case 2: {
         uint8_t isr = 0;
         uint32_t txn = hf_count(&F.tx);
+        atomic_fetch_add_explicit(&F.isr_polls, 1, memory_order_relaxed);
         if (have) isr |= 0x01;                               /* RXDF */
         if (txn <= HF_SIZE - HF_TXDE_ROOM) isr |= 0x02;      /* TXDE */
         if (txn == 0) isr |= 0x04;                           /* TRDY */

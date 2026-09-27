@@ -1011,6 +1011,7 @@ static uint32_t bitop(dsp56k_t *d, uint32_t v, int b, int kind)
 static void illegal(dsp56k_t *d)
 {
     d->illegal_count++;
+    d->illegal_pc = d->pc;
     dsp56k_irq_raise(d, DSP_VEC_ILLEGAL, 3);
 }
 
