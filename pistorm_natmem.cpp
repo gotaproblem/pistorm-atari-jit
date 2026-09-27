@@ -2889,12 +2889,31 @@ static inline uae_u32 hw_bus_bget(uaecptr a)
  * set, nothing is merged and the guest gets its bus error exactly as
  * without us: no machine-type switch needed. The rest of the page
  * ($FF9204+, paddles/lightpen) is untouched. */
+/* $FF92xx on a plain ST under the Falcon personality (falcon_dsp armed):
+ * a Falcon always has the extended joystick ports and its software reads
+ * them unguarded (Beats of Rage polls $FF9202 every frame). When the real
+ * bus errors, answer as idle ports - pads/fire active low ($FF9200-3 all
+ * ones), paddles and light pen zero - and let USB pads merge in below. */
+static inline uae_u32 hw_joypad_idle(uaecptr a, int size)
+{
+    uae_u32 v = 0;
+    for (int i = 0; i < size; i++) {
+        uae_u32 o = (a + (uae_u32)i) & 0xFFu;
+        v = (v << 8) | (o < 4 ? 0xFFu : 0x00u);
+    }
+    return v;
+}
+
 static inline uae_u32 hw_joypad_get(uaecptr a, int size)
 {
     uae_u32 v;
     if (size == 4)      v = ps_bus_lget(a);
     else if (size == 2) v = ps_read_16(a);
     else                v = ps_read_8(a);
+    if (g_buserr && falcon_armed()) {
+        g_buserr = 0;
+        v = hw_joypad_idle(a, size);
+    }
     if (JOY_USB_enabled && !g_buserr && joy_usb_ste_addr(a))
         v = joy_usb_ste_read(a, size, v);
     pistorm_buserr(a, 0, true, size == 4 ? sz_long : size == 2 ? sz_word : sz_byte);
@@ -3759,6 +3778,13 @@ static void hw_lput(uaecptr a, uae_u32 v)
         case HW_PAGE_JOYPAD:
             if (JOY_USB_enabled && joy_usb_ste_addr(a))
                 joy_usb_ste_write(a, 4, v);   /* column select shadow */
+            if (falcon_armed()) {
+                /* see hw_joypad_idle: absent ports take the write */
+                g_buserr = 0;
+                ps_bus_lput(a, v);
+                g_buserr = 0;
+                break;
+            }
             hw_bus_lput(a, v);
             break;
         case HW_PAGE_ACIA:
@@ -3851,6 +3877,13 @@ static void hw_wput(uaecptr a, uae_u32 v)
         case HW_PAGE_JOYPAD:
             if (JOY_USB_enabled && joy_usb_ste_addr(a))
                 joy_usb_ste_write(a, 2, v);   /* column select shadow */
+            if (falcon_armed()) {
+                /* see hw_joypad_idle: absent ports take the write */
+                g_buserr = 0;
+                ps_write_16(a, (uae_u16)v);
+                g_buserr = 0;
+                break;
+            }
             hw_bus_wput(a, v);
             break;
         case HW_PAGE_ACIA:
@@ -3945,6 +3978,13 @@ static void hw_bput(uaecptr a, uae_u32 v)
         case HW_PAGE_JOYPAD:
             if (JOY_USB_enabled && joy_usb_ste_addr(a))
                 joy_usb_ste_write(a, 1, v);   /* column select shadow */
+            if (falcon_armed()) {
+                /* see hw_joypad_idle: absent ports take the write */
+                g_buserr = 0;
+                ps_write_8(a, (uae_u8)v);
+                g_buserr = 0;
+                break;
+            }
             hw_bus_bput(a, v);
             break;
         case HW_PAGE_ACIA:
