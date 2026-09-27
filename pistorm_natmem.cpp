@@ -897,6 +897,8 @@ extern "C" int pistorm_stram_memcfg_read_shim(unsigned int a, int size,
 static uint32_t g_shadow_base = 0;     /* 0 = not engaged             */
 static uint32_t g_shadow_src  = 0;     /* the guest base it mirrors   */
 static int      g_shadow_have_base = 0;/* the guest has programmed it */
+static int      g_shadow_ste_reg = 0;  /* the REAL Shifter has $FF820D -
+                                        * probed, never taken from cfg */
 
 static inline int stram_shadow_on(void) { return g_shadow_base != 0; }
 
@@ -944,7 +946,7 @@ static void stram_shadow_program_base(void)
         return;                        /* nothing sane to mirror yet */
     ps_write_8(0x00FF8201u, (uae_u8)(g_shadow_base >> 16));
     ps_write_8(0x00FF8203u, (uae_u8)(g_shadow_base >> 8));
-    if (emulator_machine_is_ste())    /* $FF820D is STE-only - see the
+    if (g_shadow_ste_reg)             /* $FF820D is STE-only - see the
                                          detection note below */
         ps_write_8(0x00FF820Du, (uae_u8)(g_shadow_base & 0xFEu));
 }
@@ -1038,7 +1040,7 @@ extern "C" int pistorm_video_base_read_shim(unsigned int a, int size,
     case 0x00FF8201u: *out = rtg.high; return 1;
     case 0x00FF8203u: *out = rtg.mid;  return 1;
     case 0x00FF820Du:
-        if (!emulator_machine_is_ste())
+        if (!g_shadow_ste_reg)
             return 0;                  /* let the real bus answer */
         *out = rtg.low;
         return 1;
@@ -1069,6 +1071,32 @@ static void stram_shadow_init(uint32_t phys_top, int mirrors)
                     "board's %uK) - the Shifter scans this, the guest keeps "
                     "its own screen address\n",
             g_shadow_base, phys_top >> 10);
+
+    /* Does the REAL Shifter have $FF820D? The cfg `machine` key cannot
+     * say: 'machine ste' on an ST board is a supported setup (the HDMI
+     * mirror plays the STE shifter), and answering $FF820D from the
+     * shadow there hands EmuTOS's STE probe (write 90, read 90, write 0,
+     * read 0) a pass - it then clears $FF820F, which the board does not
+     * decode: Panic: Bus Error, addr=00ff820f. Same test EmuTOS runs,
+     * once, before the guest exists. */
+    {
+        uint8_t old_fc = fc, save, r1, r2;
+        fc = 0x5;                              /* supervisor data     */
+        save = ps_read_8(0x00FF820Du);
+        ps_write_8(0x00FF820Du, 0x5A);
+        (void)ps_read_8(0x00FF8203u);
+        r1 = ps_read_8(0x00FF820Du);
+        ps_write_8(0x00FF820Du, 0x00);
+        (void)ps_read_16(0x00FF8240u);
+        r2 = ps_read_8(0x00FF820Du);
+        ps_write_8(0x00FF820Du, save);
+        fc = old_fc;
+        g_buserr = 0;                          /* absent reg: no latch */
+        g_shadow_ste_reg = (r1 == 0x5A && r2 == 0x00);
+        fprintf(stderr, "[STRAM] shadow: board Shifter %s $FF820D "
+                        "(probe %02X/%02X)\n",
+                g_shadow_ste_reg ? "HAS" : "has no", r1, r2);
+    }
 }
 
 static inline uae_u32 stram_be32(uaecptr a)
@@ -4139,6 +4167,13 @@ static volatile uint64_t pistorm_fvdi_write_bytes_state;
 static uint32_t pistorm_fvdi_first_write_state = 0xffffffffu;
 static uint32_t pistorm_fvdi_last_write_state;
 
+/* 8bpp (indexed) fVDI mode: the hardware palette the guest driver programs
+ * through FVDI_SET_COLOR, as host XRGB8888. The render thread converts the
+ * chunky index framebuffer through it; the generation count tells it a
+ * palette change needs a full-frame re-render even when no pixel moved. */
+static uint32_t pistorm_fvdi_pal[256];
+static volatile uint32_t pistorm_fvdi_pal_gen_state;
+
 extern "C" uint32_t pistorm_fvdi_fb_base(void)
 {
     return FVDI_FB_BASE;
@@ -4174,6 +4209,26 @@ extern "C" int pistorm_fvdi_is_active(void)
     return pistorm_fvdi_active;
 }
 
+extern "C" void pistorm_fvdi_set_palette(uint32_t idx, uint32_t r,
+                                         uint32_t g, uint32_t b)
+{
+    if (idx > 255u)
+        return;
+    pistorm_fvdi_pal[idx] = 0xff000000u | ((r & 0xffu) << 16) |
+                            ((g & 0xffu) << 8) | (b & 0xffu);
+    __atomic_add_fetch(&pistorm_fvdi_pal_gen_state, 1u, __ATOMIC_RELEASE);
+}
+
+extern "C" const uint32_t *pistorm_fvdi_palette(void)
+{
+    return pistorm_fvdi_pal;
+}
+
+extern "C" uint32_t pistorm_fvdi_palette_gen(void)
+{
+    return __atomic_load_n(&pistorm_fvdi_pal_gen_state, __ATOMIC_ACQUIRE);
+}
+
 extern "C" uint64_t pistorm_fvdi_write_count(void)
 {
     return pistorm_fvdi_write_count_state;
@@ -4200,7 +4255,7 @@ extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t b
 
     if (!pistorm_fvdi_fb || width == 0 || height == 0)
         return 0;
-    if (bpp != 16 && bpp != 32)
+    if (bpp != 8 && bpp != 16 && bpp != 32)
         return 0;
 
     bytes = (uint64_t)width * height * (bpp / 8);

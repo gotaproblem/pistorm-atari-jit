@@ -77,6 +77,8 @@ uint8_t *pistorm_fvdi_fb_ptr(void);
 uint32_t pistorm_fvdi_width(void);
 uint32_t pistorm_fvdi_height(void);
 uint32_t pistorm_fvdi_bpp(void);
+const uint32_t *pistorm_fvdi_palette(void);
+uint32_t pistorm_fvdi_palette_gen(void);
 int pistorm_fvdi_is_active(void);
 uint64_t pistorm_fvdi_write_count(void);
 void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx);
@@ -2113,11 +2115,11 @@ static void st_load_palette (uint32_t pal[16])
  *   Green : bits  7..4  (bit  7 = LSB)
  *   Blue  : bits  3..0  (bit  3 = LSB)
  */
-static void ste_load_palette (uint32_t pal[16])
+static void ste_load_palette_from (uint32_t pal[16], const volatile uint16_t *src)
 {
     for (int i = 0; i < 16; i++)
     {
-        uint16_t w = st_palette[i];
+        uint16_t w = src[i];
 
         /* rebuild each 4-bit gun: high 3 bits from ST position, LSB from extra bit */
         uint8_t r4 = (((w >> 8) & 7) << 1) | ((w >> 11) & 1);
@@ -2303,8 +2305,13 @@ static void st_decode_row(const uint8_t *row, uint32_t src_w,
     }
 }
 
-/* st_mode & 3:  0=LOW 320x200x4   1=MED 640x200x2   2=HIGH 640x400 mono */
-static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
+/* st_mode & 3:  0=LOW 320x200x4   1=MED 640x200x2   2=HIGH 640x400 mono.
+ * palw/lw/hs_raw: the palette and STE linewidth/fine scroll to draw with -
+ * the live shifter snoops, or a VBL snapshot's copies (see ST NATIVE
+ * SNAPSHOT below). */
+static void blit_st_native_ex(ET4000State *s, const uint8_t *st_ram, int st_mode,
+                              const volatile uint16_t *palw,
+                              uint8_t lw, uint8_t hs_raw)
 {
     uint32_t src_w, src_h, planes, stride;
     switch (st_mode & 3)
@@ -2338,14 +2345,13 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
      * software's registers then do whatever they do on the real shifter. */
     uint32_t hs = 0;
     {
-        extern rtg_s rtg;            /* lives in emulator.c */
         extern bool emulator_config_shifter_ste(void);
         /* $FF820F linewidth and $FF8265 fine scroll are STE-only: an ST
          * host's real shifter ignores both, so the mirror must too (cfg
          * "shifter ste" restores them for STE hosts). */
         if (emulator_config_shifter_ste()) {
-            stride += (uint32_t)rtg.linewidth * 2u;
-            hs = rtg.hscroll & 15u;
+            stride += (uint32_t)lw * 2u;
+            hs = hs_raw & 15u;
             if (hs)
                 stride += planes * 2u;   /* prefetched extra group */
         }
@@ -2366,7 +2372,7 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
     }
     else
         //st_load_palette (pal);
-        ste_load_palette (pal);
+        ste_load_palette_from (pal, palw);
 
     uint8_t idx[640 + 16];           /* +16: hscroll prefetch group */
 
@@ -2390,6 +2396,99 @@ static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
                 o[x] = pal[idx[x + hs]];
         }
     }
+}
+
+/* the live path: everything read from the shifter snoops as they are now */
+static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
+{
+    extern rtg_s rtg;                /* lives in emulator.c */
+    blit_st_native_ex(s, st_ram, st_mode, st_palette, rtg.linewidth, rtg.hscroll);
+}
+
+/* ST NATIVE SNAPSHOT.
+ *
+ * The HDMI mirror of the ST screen used to be drawn by this render thread
+ * at its own frame rate, straight out of the host copy of ST-RAM, with
+ * whatever video base, palette and fine scroll the snoops held at that
+ * moment - so it showed frames the game was half-way through drawing, the
+ * back buffer of any game that writes its next screen address before the
+ * VBL (the Shifter only takes a new base at the next frame), and flicker.
+ * The RGB monitor never did: the real Shifter drives that.
+ *
+ * Now ipl_task calls et4000_native_vbl_snapshot() when it sees the REAL
+ * VBL (the GLUE's level-4 line) and copies the frame as it stands then -
+ * base, rows, palette, resolution, STE linewidth and fine scroll - into
+ * one of three buffers; the renderer draws the newest complete one. A
+ * buffer is not reused until two VBLs after it was published.
+ *
+ * Cost on core 3, once per VBL: one memcpy of rows x stride bytes (32000
+ * for an ordinary screen, a few microseconds), and nothing else. */
+#define ST_SNAP_BYTES (200u * (160u + 510u + 8u) + 400u * 2u)  /* worst STE low */
+#define ST_SNAP_BUFS  3u
+#define ST_SNAP_NONE  0xFFFFFFFFu
+typedef struct {
+    uint8_t  pix[ST_SNAP_BYTES > 400u * (80u + 510u + 2u)
+                 ? ST_SNAP_BYTES : 400u * (80u + 510u + 2u)];
+    uint16_t pal[16];
+    uint8_t  rez, lw, hs;
+} st_snap_t;
+static st_snap_t         g_snap[ST_SNAP_BUFS];
+static unsigned          g_snap_w;               /* ipl_task only         */
+static volatile uint32_t g_snap_pub = ST_SNAP_NONE;
+
+void et4000_native_vbl_snapshot(void)
+{
+    extern rtg_s rtg;
+    extern bool emulator_config_shifter_ste(void);
+
+    if (!emulator_config_native_hdmi_enabled() || !rtg.natmem)
+        return;
+
+    /* the base the render loop would use: the snooped shifter registers
+     * (low byte only on an STE shifter), else the logbase sysvar */
+    const int ste = emulator_config_shifter_ste() ? 1 : 0;
+    uint32_t base = ((uint32_t)rtg.high << 16) | ((uint32_t)rtg.mid << 8) |
+                    (ste ? ((uint32_t)rtg.low & 0xFEu) : 0u);
+    if (!base)
+        base = st_native_physbase_from_mirror(rtg.natmem);
+    if (!base)
+        return;
+
+    st_snap_t *sn = &g_snap[g_snap_w];
+    sn->rez = rtg.hw_rez & 3u;
+    sn->lw  = ste ? rtg.linewidth : 0u;
+    sn->hs  = ste ? (rtg.hscroll & 15u) : 0u;
+
+    const uint32_t planes = sn->rez == 0 ? 4u : sn->rez == 1 ? 2u : 1u;
+    const uint32_t rows   = sn->rez == 2 ? 400u : 200u;
+    uint32_t stride = (sn->rez == 2 ? 80u : 160u) + (uint32_t)sn->lw * 2u +
+                      (sn->hs ? planes * 2u : 0u);
+    uint32_t bytes = rows * stride;
+    if (bytes > sizeof sn->pix)
+        bytes = sizeof sn->pix;
+    /* same bound the render loop applies before reading the mirror */
+    if (et4000_addr_is_vram_aperture(base) || base + bytes >= 0x00E00000u)
+        return;
+
+    memcpy(sn->pix, rtg.natmem + base, bytes);
+    for (int i = 0; i < 16; i++)
+        sn->pal[i] = st_palette[i];
+
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    g_snap_pub = g_snap_w;
+    g_snap_w = (g_snap_w + 1u) % ST_SNAP_BUFS;
+}
+
+/* Render-thread side: draw the newest VBL snapshot. 0 if none yet. */
+static int blit_st_native_snapshot(ET4000State *s)
+{
+    uint32_t i = g_snap_pub;
+    if (i >= ST_SNAP_BUFS)
+        return 0;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    const st_snap_t *sn = &g_snap[i];
+    blit_st_native_ex(s, sn->pix, sn->rez, sn->pal, sn->lw, sn->hs);
+    return 1;
 }
 
 #if defined(__aarch64__)
@@ -2460,12 +2559,22 @@ static void fvdi_swizzle_row16(uint32_t *out, const uint8_t *row, uint32_t w)
     }
 }
 
+/* 8bpp fvdi row conversion: chunky palette index -> host XRGB8888 through
+ * the palette the guest programmed (FVDI_SET_COLOR). */
+static void fvdi_swizzle_row8(uint32_t *out, const uint8_t *row, uint32_t w,
+                              const uint32_t *pal)
+{
+    for (uint32_t x = 0; x < w; x++)
+        out[x] = pal[row[x]];
+}
+
 static bool blit_fvdi_linear(ET4000State *s, bool *updated)
 {
     static uint64_t last_write_count = UINT64_MAX;
     static uint32_t last_w;
     static uint32_t last_h;
     static uint32_t last_bpp;
+    static uint32_t last_pal_gen;
     uint8_t *src = pistorm_fvdi_fb_ptr();
     uint32_t w = pistorm_fvdi_width();
     uint32_t h = pistorm_fvdi_height();
@@ -2479,16 +2588,23 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
         return false;
     if (w > ET4K_MAX_LW || h > ET4K_MAX_LH)
         return false;
-    if (bpp != 16 && bpp != 32)
+    if (bpp != 8 && bpp != 16 && bpp != 32)
         return false;
 
     sdl_set_logical(s, w, h, w, h);
 
+    /* 8bpp: a palette write changes every pixel without writing one */
+    const uint32_t pal_gen = (bpp == 8) ? pistorm_fvdi_palette_gen() : 0;
+    const bool pal_changed = (bpp == 8 && pal_gen != last_pal_gen);
+
     write_count = pistorm_fvdi_write_count();
-    if (write_count == last_write_count && w == last_w && h == last_h && bpp == last_bpp)
+    if (write_count == last_write_count && w == last_w && h == last_h &&
+        bpp == last_bpp && !pal_changed)
         return true;
 
-    bool mode_changed = (w != last_w || h != last_h || bpp != last_bpp);
+    bool mode_changed = (w != last_w || h != last_h || bpp != last_bpp) ||
+                        pal_changed;
+    last_pal_gen = pal_gen;
     last_write_count = write_count;
     last_w = w;
     last_h = h;
@@ -2506,7 +2622,7 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
     uint32_t px1 = w - 1;
     {
         uint32_t dmin, dmax, xmin, xmax;
-        uint32_t bytespp  = (bpp == 32) ? 4u : 2u;
+        uint32_t bytespp  = (bpp == 32) ? 4u : (bpp == 16) ? 2u : 1u;
         uint32_t rowbytes = w * bytespp;
         pistorm_fvdi_fetch_dirty_rect(&dmin, &dmax, &xmin, &xmax);
         if (!mode_changed && dmin < dmax && rowbytes) {
@@ -2549,6 +2665,13 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
         for (uint32_t y = y0; y <= y1; y++)
             fvdi_swizzle_row32(dst + (size_t)y * dst_pitch + px0,
                                src + ((size_t)y * w + px0) * 4, pw);
+    }
+    else if (bpp == 8)
+    {
+        const uint32_t *pal = pistorm_fvdi_palette();
+        for (uint32_t y = y0; y <= y1; y++)
+            fvdi_swizzle_row8(dst + (size_t)y * dst_pitch + px0,
+                              src + (size_t)y * w + px0, pw, pal);
     }
     else
     {
@@ -2727,6 +2850,9 @@ void *render_frame(void *vptr)
             {
                 g_sdl_tex_has_frame = 0;
                 g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
+                /* the frame as it stood at the last real VBL (see ST
+                 * NATIVE SNAPSHOT); the live read only until the first */
+                if (!blit_st_native_snapshot(g_et4000))
                 blit_st_native(g_et4000,
                                st_native_frame_source(rtg.vram_base, rtg.natmem + rtg.vram_base),
                                rtg.hw_rez);  /* the Shifter's ACTUAL mode ($FF8260

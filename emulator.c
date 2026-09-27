@@ -315,6 +315,9 @@ extern "C"
   /* keyboard ACIA receive rescue (gpio/ps_protocol.c) */
   extern int ps_acia_kbd_rescue(void);
   extern int ps_bus_lock_within(uint64_t ticks);
+  /* HDMI mirror of the ST screen: copy the frame at the real VBL
+   * (platforms/atari/et4000/et4000.c, ST NATIVE SNAPSHOT) */
+  extern void et4000_native_vbl_snapshot(void);
   extern volatile unsigned ps_acia_kbd_rescued;
   extern volatile unsigned ps_acia_kbd_dropped;
 
@@ -1341,6 +1344,23 @@ static void *ipl_task(void *)
         }
       }
       g_ipl = ipl;
+
+      /* The real VBL: the GLUE's level-4 line has just come on. Copy the
+       * ST screen for the HDMI mirror as it stands now (see ST NATIVE
+       * SNAPSHOT in et4000.c). The same refractory as VBL delivery keeps
+       * a 4->6->4 interleave inside one blanking interval, or a phantom
+       * level 4, from taking a second copy mid-frame. */
+      if (ipl == 4)
+      {
+        static uint64_t snap_last;
+        uint64_t sn;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(sn));
+        if (!av4_refract_ticks || sn - snap_last >= av4_refract_ticks)
+        {
+          snap_last = sn;
+          et4000_native_vbl_snapshot();
+        }
+      }
     }
 
     /* Line-based keyboard ACIA rescue (see acia_poll_ticks above). */

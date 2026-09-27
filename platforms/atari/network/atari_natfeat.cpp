@@ -112,6 +112,7 @@ enum nf_feature_index {
   NF_FEATURE_STBOX,
   NF_FEATURE_PSPDF,
   NF_FEATURE_PSWEB,
+  NF_FEATURE_FVDICON,
   NF_FEATURE_COUNT
 };
 
@@ -287,7 +288,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "PSIMG",
   "STBOX",
   "PSPDF",
-  "PSWEB"
+  "PSWEB",
+  "FVDICON"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -296,6 +298,7 @@ extern "C" uint32_t pistorm_fvdi_width(void);
 extern "C" uint32_t pistorm_fvdi_height(void);
 extern "C" uint32_t pistorm_fvdi_bpp(void);
 extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t bpp);
+extern "C" void pistorm_fvdi_set_palette(uint32_t idx, uint32_t r, uint32_t g, uint32_t b);
 
 extern "C" uint64_t pistorm_fvdi_write_count(void);
 extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes);
@@ -1447,6 +1450,8 @@ static uae_u32 fvdi_rgb_to_pixel(uae_u32 red, uae_u32 green, uae_u32 blue)
 static uint32_t fvdi_bytes_per_pixel(void)
 {
   uint32_t bpp = pistorm_fvdi_bpp();
+  if (bpp == 8)
+    return 1;
   if (bpp == 16)
     return 2;
   if (bpp == 24)
@@ -1486,6 +1491,7 @@ typedef struct fvdi_mfdb_info {
   uint32_t row_bytes;
   bool screen;
   bool addressable;
+  bool planar;        /* 8bpp screen mode: interleaved 8-plane memory MFDB */
 } fvdi_mfdb_info_t;
 
 #define FVDI_MFDB_CACHE_SLOTS 4
@@ -1517,11 +1523,40 @@ static void fvdi_mfdb_parse(uaecptr mfdb, fvdi_mfdb_info_t *out)
   out->row_bytes = out->wdwidth * 2u * bpp;
   out->screen = (out->base == 0 || out->base == pistorm_fvdi_fb_base());
 
+  /* 8bpp: the SCREEN is host chunky (one index byte per pixel), but a
+   * device-format memory MFDB is Atari interleaved bitplanes - aranym.sys
+   * declares its 8-bit mode "interleaved" (format 0), and ARAnyM converts
+   * bitplane<->chunky on every screen<->memory transfer. Such an MFDB has no
+   * pixel_bytes (every byte-row fast path declines) and is served per pixel
+   * by the planar accessors in fvdi_mfdb_get/put_pixel. */
+  out->planar = false;
+  if (bpp == 8) {
+    if (out->screen)
+      out->pixel_bytes = 1u;
+    else if (pistorm_fvdi_bpp() == 8 && out->standard == 0) {
+      /* The device format follows the guest driver's 8-bit mode entry:
+       * stock aranym.sys says interleaved, the patched one (flags CHUNKY,
+       * format 2 - so vq_scrninfo reports 8-bit packed) says chunky.
+       * Chunky is the default; PISTORM_FVDI8_PLANAR=1 for a stock driver. */
+      static int planar_env = -1;
+      if (planar_env < 0) {
+        const char *e = getenv("PISTORM_FVDI8_PLANAR");
+        planar_env = (e && *e == '1');
+      }
+      if (planar_env)
+        out->planar = true;
+      else
+        out->pixel_bytes = 1u;
+    }
+  }
+
   out->addressable =
       out->screen ||
       (out->base && out->width && out->height && out->wdwidth &&
-       out->pixel_bytes && (bpp == 16 || bpp == 24 || bpp == 32) &&
-       out->row_bytes >= out->width * out->pixel_bytes);
+       out->pixel_bytes && (bpp == 8 || bpp == 16 || bpp == 24 || bpp == 32) &&
+       out->row_bytes >= out->width * out->pixel_bytes) ||
+      (out->planar && out->base && out->width && out->height &&
+       out->wdwidth * 16u >= out->width);
 }
 
 /* NULL for the screen (mfdb == 0); never NULL otherwise. */
@@ -1592,8 +1627,7 @@ static uint32_t fvdi_mfdb_pixel_bytes(uaecptr mfdb)
   const fvdi_mfdb_info_t *info = fvdi_mfdb_info(mfdb);
   if (info)
     return info->pixel_bytes;
-  uint32_t bpp = pistorm_fvdi_bpp();
-  return (bpp == 16) ? 2u : (bpp == 24) ? 3u : (bpp == 32) ? 4u : 0u;
+  return fvdi_bytes_per_pixel();
 }
 
 static bool fvdi_mfdb_supported_direct(uaecptr mfdb)
@@ -1632,16 +1666,66 @@ static uaecptr fvdi_mfdb_pixel_addr(uaecptr mfdb, int32_t x, int32_t y)
   return row + (uaecptr)x * info->pixel_bytes;
 }
 
+/* Interleaved 8-plane MFDB pixel (8bpp mode only - see fvdi_mfdb_parse):
+ * each 16-pixel group of a row is 8 consecutive words, plane 0 first, the
+ * leftmost pixel in bit 15. Same layout ARAnyM's bitplaneToChunky reads. */
+static uaecptr fvdi_planar_group(const fvdi_mfdb_info_t *info,
+                                 int32_t x, int32_t y)
+{
+  if (x < 0 || y < 0 || (uint32_t)x >= info->width ||
+      (uint32_t)y >= info->height)
+    return 0;
+  return info->base + (uaecptr)y * info->row_bytes +
+         (uaecptr)((uint32_t)x >> 4) * 16u;
+}
+
+static uint32_t fvdi_planar_get(const fvdi_mfdb_info_t *info,
+                                int32_t x, int32_t y)
+{
+  const uaecptr g = fvdi_planar_group(info, x, y);
+  if (!g)
+    return 0;
+  const unsigned bit = 15u - ((unsigned)x & 15u);
+  uint32_t v = 0;
+  for (unsigned p = 0; p < 8; p++)
+    v |= (uint32_t)((nf_read_word(g + p * 2u) >> bit) & 1u) << p;
+  return v;
+}
+
+static bool fvdi_planar_put(const fvdi_mfdb_info_t *info,
+                            int32_t x, int32_t y, uint32_t colour)
+{
+  const uaecptr g = fvdi_planar_group(info, x, y);
+  if (!g)
+    return false;
+  const uint16_t m = (uint16_t)(0x8000u >> ((unsigned)x & 15u));
+  for (unsigned p = 0; p < 8; p++) {
+    const uint16_t w = (uint16_t)nf_read_word(g + p * 2u);
+    const uint16_t n = ((colour >> p) & 1u) ? (uint16_t)(w | m)
+                                            : (uint16_t)(w & ~m);
+    if (n != w)
+      nf_write_word(g + p * 2u, n);
+  }
+  return true;
+}
+
 static uint32_t fvdi_mfdb_get_pixel(uaecptr mfdb, int32_t x, int32_t y)
 {
   if (!fvdi_mfdb_supported_direct(mfdb))
     return 0;
+  {
+    const fvdi_mfdb_info_t *pi = fvdi_mfdb_info(mfdb);
+    if (pi && pi->planar)
+      return fvdi_planar_get(pi, x, y);
+  }
 
   uaecptr addr = fvdi_mfdb_pixel_addr(mfdb, x, y);
   uint32_t bytes = fvdi_mfdb_pixel_bytes(mfdb);
 
   if (!addr)
     return 0;
+  if (bytes == 1)
+    return nf_read_byte(addr);
   if (bytes == 2)
     return nf_read_word(addr);
   if (bytes == 3)
@@ -1664,11 +1748,20 @@ static bool fvdi_mfdb_put_pixel(uaecptr mfdb, int32_t x, int32_t y, uint32_t col
 {
   if (!fvdi_mfdb_supported_direct(mfdb))
     return false;
+  {
+    const fvdi_mfdb_info_t *pi = fvdi_mfdb_info(mfdb);
+    if (pi && pi->planar)
+      return fvdi_planar_put(pi, x, y, colour);
+  }
   uaecptr addr = fvdi_mfdb_pixel_addr(mfdb, x, y);
   uint32_t bytes = fvdi_mfdb_pixel_bytes(mfdb);
 
   if (!addr)
     return false;
+  if (bytes == 1) {
+    nf_write_byte(addr, (uae_u8)colour);
+    return true;
+  }
   if (bytes == 2) {
     nf_write_word(addr, (uae_u16)colour);
     return true;
@@ -1766,7 +1859,7 @@ static uint8_t *fvdi_dest_span_ptr(int32_t x, int32_t y, int32_t w,
   if (!g_fvdi_dest_mfdb) {
     uint32_t bytes = fvdi_bytes_per_pixel();
     uint8_t *p = fvdi_screen_span_ptr(x, y, w);
-    if (!p || (bytes != 2 && bytes != 4))
+    if (!p || (bytes != 1 && bytes != 2 && bytes != 4))
       return NULL;
     if (bytes_out)
       *bytes_out = bytes;
@@ -1774,7 +1867,8 @@ static uint8_t *fvdi_dest_span_ptr(int32_t x, int32_t y, int32_t w,
   }
 
   const uint32_t mb = fvdi_mfdb_pixel_bytes(g_fvdi_dest_mfdb);
-  if ((mb != 2 && mb != 4) || !fvdi_mfdb_supported_direct(g_fvdi_dest_mfdb))
+  if ((mb != 1 && mb != 2 && mb != 4) ||
+      !fvdi_mfdb_supported_direct(g_fvdi_dest_mfdb))
     return NULL;
 
   const uaecptr a0 = fvdi_mfdb_pixel_addr(g_fvdi_dest_mfdb, x, y);
@@ -1854,7 +1948,9 @@ static void fvdi_put_raw_pixel_marked(int32_t x, int32_t y, uint32_t colour, boo
   if (!p)
     return;
 
-  if (bytes == 2) {
+  if (bytes == 1) {
+    p[0] = (uint8_t)colour;
+  } else if (bytes == 2) {
     p[0] = (uint8_t)(colour >> 8);
     p[1] = (uint8_t)colour;
   } else {
@@ -1895,7 +1991,9 @@ typedef uint32_t fvdi_u32_una __attribute__((aligned(1), may_alias));
 
 static inline void fvdi_store_px(uint8_t *p, uint32_t bytes, uint32_t colour)
 {
-  if (bytes == 2)
+  if (bytes == 1)
+    *p = (uint8_t)colour;
+  else if (bytes == 2)
     *(fvdi_u16_una *)p = (uint16_t)__builtin_bswap16((uint16_t)colour);
   else
     *(fvdi_u32_una *)p = __builtin_bswap32(colour);
@@ -1903,6 +2001,8 @@ static inline void fvdi_store_px(uint8_t *p, uint32_t bytes, uint32_t colour)
 
 static inline uint32_t fvdi_load_px(const uint8_t *p, uint32_t bytes)
 {
+  if (bytes == 1)
+    return *p;
   if (bytes == 2)
     return __builtin_bswap16(*(const fvdi_u16_una *)p);
   return __builtin_bswap32(*(const fvdi_u32_una *)p);
@@ -1915,7 +2015,9 @@ static inline uint32_t fvdi_load_px(const uint8_t *p, uint32_t bytes)
 static void fvdi_fill_solid_span_ptr(uint8_t *p, uint32_t bytes, int32_t w,
                                      uint32_t colour)
 {
-  if (bytes == 2) {
+  if (bytes == 1) {
+    memset(p, (int)(colour & 0xffu), (size_t)w);
+  } else if (bytes == 2) {
     fvdi_u16_una *q = (fvdi_u16_una *)p;
     const uint16_t v = (uint16_t)__builtin_bswap16((uint16_t)colour);
     for (int32_t i = 0; i < w; i++)
@@ -1962,6 +2064,8 @@ static uint32_t fvdi_get_raw_pixel(int32_t x, int32_t y)
   if (!p)
     return 0;
 
+  if (pistorm_fvdi_bpp() == 8)
+    return p[0];
   if (pistorm_fvdi_bpp() == 16)
     return ((uint32_t)p[0] << 8) | p[1];
 
@@ -2168,6 +2272,10 @@ static inline uint32_t fvdi_blend_px(uint32_t dst, uint32_t src, uint32_t a,
   if (a >= 255)
     return src;
 
+  /* 8bpp: a palette index cannot be mixed - coverage picks a side */
+  if (bytes == 1)
+    return (a >= 128u) ? src : dst;
+
   if (bytes == 2) {
     return (fvdi_blend_ch((dst >> 11) & 0x1fu, (src >> 11) & 0x1fu, a) << 11) |
            (fvdi_blend_ch((dst >> 5) & 0x3fu, (src >> 5) & 0x3fu, a) << 5) |
@@ -2190,7 +2298,7 @@ static uint8_t *fvdi_expand_dst_row(uaecptr dst_mfdb, bool dst_screen,
     return fvdi_screen_span_ptr(dst_x, row_y, w);
 
   const uint32_t mb = fvdi_mfdb_pixel_bytes(dst_mfdb);
-  if ((mb != 2 && mb != 4) || !fvdi_mfdb_supported_direct(dst_mfdb))
+  if ((mb != 1 && mb != 2 && mb != 4) || !fvdi_mfdb_supported_direct(dst_mfdb))
     return NULL;
 
   const uaecptr da = fvdi_mfdb_pixel_addr(dst_mfdb, dst_x, row_y);
@@ -2226,7 +2334,7 @@ static uae_u32 fvdi_expand_chunky_rows(uaecptr dst_mfdb, bool dst_screen,
     if (nf_host_ram_ptr(srow, (uint32_t)w, &sq))
       sp = sq;
 
-    if (rp && (rb == 2 || rb == 4)) {
+    if (rp && (rb == 1 || rb == 2 || rb == 4)) {
       for (int32_t xx = 0; xx < w; xx++) {
         const uint32_t a = sp ? sp[xx] : nf_read_byte(srow + (uaecptr)xx);
         uint8_t *pp = rp + (size_t)xx * rb;
@@ -2241,7 +2349,8 @@ static uae_u32 fvdi_expand_chunky_rows(uaecptr dst_mfdb, bool dst_screen,
               continue;
             {
               const uint32_t d = fvdi_load_px(pp, rb);
-              const uint32_t inv = (rb == 2) ? (~d & 0xffffu) : (~d & 0xffffffu);
+              const uint32_t inv = (rb == 1) ? (~d & 0xffu)
+                                 : (rb == 2) ? (~d & 0xffffu) : (~d & 0xffffffu);
               out = fvdi_blend_px(d, inv, a, rb);
             }
             break;
@@ -2276,7 +2385,8 @@ static uae_u32 fvdi_expand_chunky_rows(uaecptr dst_mfdb, bool dst_screen,
             {
               const uint32_t d = fvdi_target_get_pixel(dst_mfdb, px, py);
               const uint32_t inv =
-                  (dst_bytes == 2) ? (~d & 0xffffu) : (~d & 0xffffffu);
+                  (dst_bytes == 1) ? (~d & 0xffu)
+                  : (dst_bytes == 2) ? (~d & 0xffffu) : (~d & 0xffffffu);
               out = fvdi_blend_px(d, inv, a, dst_bytes);
             }
             break;
@@ -2413,7 +2523,7 @@ static uae_u32 fvdi_expand_mono(uaecptr src, uaecptr dst_mfdb,
     uint32_t rb = exp_bytes;
     uint8_t *rp = fvdi_expand_dst_row(dst_mfdb, exp_dst_screen, dst_x,
                                       dst_y + yy, w, &rb);
-    if (rp && (rb == 2 || rb == 4)) {
+    if (rp && (rb == 1 || rb == 2 || rb == 4)) {
       /* Walk the row a source word at a time instead of a pixel at a time.
        * Two things fall out of that:
        *
@@ -3465,7 +3575,7 @@ static void fvdi_mouse_hide(void)
 
   for (int32_t yy = 0; yy < g_fvdi_mouse.backup_h; yy++) {
     uint8_t *rp = g_fvdi_dest_mfdb ? NULL : fvdi_screen_span_ptr(bx, by + yy, bw);
-    if (rp && (bytes == 2 || bytes == 4)) {
+    if (rp && (bytes == 1 || bytes == 2 || bytes == 4)) {
       for (int32_t xx = 0; xx < bw; xx++)
         fvdi_store_px(rp + (size_t)xx * bytes, bytes,
                       g_fvdi_mouse.backup[yy * 16 + xx]);
@@ -3519,7 +3629,7 @@ static void fvdi_mouse_show(int32_t x, int32_t y)
     uint16_t data = g_fvdi_mouse.data[sy + yy] << sx;
     uint8_t *rp = g_fvdi_dest_mfdb ? NULL : fvdi_screen_span_ptr(dx, dy + yy, w);
 
-    if (rp && (bytes == 2 || bytes == 4)) {
+    if (rp && (bytes == 1 || bytes == 2 || bytes == 4)) {
       bool touched = false;
       for (int32_t xx = 0; xx < w; xx++) {
         uint8_t *pp = rp + (size_t)xx * bytes;
@@ -3778,7 +3888,11 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       uae_u32 red = nf_get_param(params, 1);
       uae_u32 green = nf_get_param(params, 2);
       uae_u32 blue = nf_get_param(params, 3);
-      uae_u32 pixel = fvdi_rgb_to_pixel(red, green, blue);
+      /* 8bpp: the hardware value IS the palette index (ARAnyM
+       * SoftVdiDriver::getHwColor) */
+      uae_u32 pixel = (pistorm_fvdi_bpp() == 8)
+                          ? (nf_get_param(params, 0) & 0xffu)
+                          : fvdi_rgb_to_pixel(red, green, blue);
       uaecptr out = nf_get_param(params, 4);
       if (out)
         nf_write_long(out, pixel);
@@ -3786,7 +3900,26 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
     }
 
     case FVDI_SET_COLOR:
+    {
+      /* index, red, green, blue (VDI 0..1000), vwk. Only the 8bpp mode has
+       * a palette; the index is a VDI pen, stored at its hardware slot -
+       * the same VDI->TOS mapping aranym.sys's c_get_colour_8 applies when
+       * it draws (ARAnyM SoftVdiDriver::setColor / toTosColors). */
+      static const uint8_t tos_colours[16] =
+          { 0, 255, 1, 2, 4, 6, 3, 5, 7, 8, 9, 10, 12, 14, 11, 13 };
+      if (pistorm_fvdi_bpp() != 8)
+        return 1;
+      uint32_t idx = nf_get_param(params, 0);
+      uint32_t c[3];
+      for (int i = 0; i < 3; i++) {
+        c[i] = (nf_get_param(params, 1 + i) * 255u + 500u) / 1000u;
+        if (c[i] > 255u)
+          c[i] = 255u;
+      }
+      idx = (idx < 16u) ? tos_colours[idx] : (idx == 255u ? 15u : idx);
+      pistorm_fvdi_set_palette(idx, c[0], c[1], c[2]);
       return 1;
+    }
 
     case FVDI_EVENT:
     {
@@ -5772,6 +5905,332 @@ static uae_u32 nf_call_psweb(uae_u32 subid, uaecptr params)
   }
 }
 
+/* -----------------------------------------------------------------------
+ * FVDICON: the TOS text console on the fVDI screen.
+ *
+ * With fVDI the screen is a host framebuffer the ROM knows nothing about,
+ * so EmuTOS's VT52 console (Bconout CON, the text of every TOS program,
+ * EmuCON included) keeps drawing into the native ST screen. FVDICON.PRG
+ * (atari-tools/fvdicon) hooks the BIOS console vectors (xconout CON at
+ * $586, RAWCON at $592) and hands each character here; this is the VT52
+ * terminal that draws it into the fVDI framebuffer, in whatever depth the
+ * mode is. When fVDI has not set a mode yet (boot, AUTO folder) or no font
+ * was given, a call answers 0 and the hook passes the character on to the
+ * ROM console as before.
+ *
+ * Glyphs come from the guest's own 8x16 system font (Line-A font ring,
+ * handed over once with FVDICON_FONT), so the console looks like the ROM's.
+ * Colours are VT52 colour registers 0..15 (ESC b / ESC c): at 8 bpp the
+ * register is the hardware palette index, as on a real ST; at 16/32 bpp
+ * they map to fVDI's default VDI colours for the pen that owns that
+ * register. The text cursor (ESC e / ESC f) is an inverted cell.
+ * ----------------------------------------------------------------------- */
+extern "C" int pistorm_fvdi_is_active(void);
+
+enum fvdicon_ops {
+  FVDICON_VERSION = 0,   /* -> 1                                           */
+  FVDICON_PUTC,          /* p0 = char, VT52 console -> 1 drawn, 0 pass on  */
+  FVDICON_RAWC,          /* p0 = char, raw console (no controls/escapes)   */
+  FVDICON_FONT           /* p0 = Line-A font header (8 wide) -> 1 ok       */
+};
+
+static struct {
+  bool     have_font;
+  int      ch;                 /* cell height (font height, <= 16) */
+  uint8_t  glyph[256][16];
+  uint32_t mode_key;
+  int      cols, rows;
+  int      col, row, save_col, save_row;
+  int      fg, bg;
+  bool     reverse, wrap, cursor_on;
+  int      esc, esc_row;
+} g_con = { false, 16, {{0}}, 0, 0, 0, 0, 0, 0, 0, 15, 0,
+            false, true, false, 0, 0 };
+
+static uint32_t fvdicon_pixel(int reg)
+{
+  /* hardware register -> RGB of the VDI pen fVDI maps onto it
+   * (tos_colours inverse; fVDI drivers/common/colours.c defaults) */
+  static const uint8_t rgb[16][3] = {
+    {255,255,255}, {255,  0,  0}, {  0,255,  0}, {255,255,  0},
+    {  0,  0,255}, {255,  0,255}, {  0,255,255}, {187,187,187},
+    {136,136,136}, {170,  0,  0}, {  0,170,  0}, {170,170,  0},
+    {  0,  0,170}, {170,  0,170}, {  0,170,170}, {  0,  0,  0}
+  };
+  reg &= 15;
+  const uint32_t bpp = pistorm_fvdi_bpp();
+  if (bpp == 8)
+    return (uint32_t)reg;
+  const uint32_t r = rgb[reg][0], g = rgb[reg][1], b = rgb[reg][2];
+  if (bpp == 16)
+    return ((r & 0xf8u) << 8) | ((g & 0xfcu) << 3) | (b >> 3);
+  return (r << 16) | (g << 8) | b;
+}
+
+static void fvdicon_fill(int x, int y, int w, int h, uint32_t px)
+{
+  for (int yy = 0; yy < h; yy++)
+    fvdi_fill_solid_span(x, y + yy, w, px);
+}
+
+static void fvdicon_clear_cells(int c0, int r0, int c1, int r1)  /* incl. */
+{
+  if (c1 < c0 || r1 < r0)
+    return;
+  fvdicon_fill(c0 * 8, r0 * g_con.ch, (c1 - c0 + 1) * 8,
+               (r1 - r0 + 1) * g_con.ch, fvdicon_pixel(g_con.bg));
+}
+
+static void fvdicon_cursor_xor(void)
+{
+  const uint32_t bytes = fvdi_bytes_per_pixel();
+  const uint32_t mask = bytes == 1 ? 0xffu : bytes == 2 ? 0xffffu : 0xffffffu;
+  const int x = g_con.col * 8, y = g_con.row * g_con.ch;
+  for (int r = 0; r < g_con.ch; r++) {
+    uint8_t *p = fvdi_screen_span_ptr(x, y + r, 8);
+    if (!p)
+      continue;
+    for (int i = 0; i < 8; i++)
+      fvdi_store_px(p + i * bytes, bytes,
+                    ~fvdi_load_px(p + i * bytes, bytes) & mask);
+    fvdi_note_screen_span(x, y + r, 8);
+  }
+}
+
+static void fvdicon_glyph(uint8_t c)
+{
+  const uint32_t bytes = fvdi_bytes_per_pixel();
+  uint32_t fg = fvdicon_pixel(g_con.fg), bg = fvdicon_pixel(g_con.bg);
+  if (g_con.reverse) {
+    const uint32_t t = fg; fg = bg; bg = t;
+  }
+  const int x = g_con.col * 8, y = g_con.row * g_con.ch;
+  for (int r = 0; r < g_con.ch; r++) {
+    uint8_t *p = fvdi_screen_span_ptr(x, y + r, 8);
+    if (!p)
+      continue;
+    const uint8_t bits = g_con.glyph[c][r];
+    for (int i = 0; i < 8; i++)
+      fvdi_store_px(p + i * bytes, bytes, (bits & (0x80u >> i)) ? fg : bg);
+    fvdi_note_screen_span(x, y + r, 8);
+  }
+}
+
+/* rows [r0, r1] move up one line; r1 is cleared */
+static void fvdicon_scroll_up(int r0, int r1)
+{
+  if (r1 > r0)
+    fvdi_screen_copy_rows(0, (r0 + 1) * g_con.ch, 0, r0 * g_con.ch,
+                          g_con.cols * 8, (r1 - r0) * g_con.ch);
+  fvdicon_clear_cells(0, r1, g_con.cols - 1, r1);
+}
+
+/* rows [r0, r1] move down one line; r0 is cleared */
+static void fvdicon_scroll_down(int r0, int r1)
+{
+  if (r1 > r0)
+    fvdi_screen_copy_rows(0, r0 * g_con.ch, 0, (r0 + 1) * g_con.ch,
+                          g_con.cols * 8, (r1 - r0) * g_con.ch);
+  fvdicon_clear_cells(0, r0, g_con.cols - 1, r0);
+}
+
+static void fvdicon_linefeed(void)
+{
+  if (g_con.row < g_con.rows - 1)
+    g_con.row++;
+  else
+    fvdicon_scroll_up(0, g_con.rows - 1);
+}
+
+static void fvdicon_printable(uint8_t c)
+{
+  fvdicon_glyph(c);
+  if (g_con.col < g_con.cols - 1) {
+    g_con.col++;
+  } else if (g_con.wrap) {
+    g_con.col = 0;
+    fvdicon_linefeed();
+  }
+}
+
+static int fvdicon_clamp(int v, int lo, int hi)
+{
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+static void fvdicon_escape(uint8_t c)
+{
+  const int last_c = g_con.cols - 1, last_r = g_con.rows - 1;
+
+  switch (g_con.esc) {
+    case 2:                                  /* ESC Y <row> */
+      g_con.esc_row = (int)c - 32;
+      g_con.esc = 3;
+      return;
+    case 3:                                  /* ESC Y row <col> */
+      g_con.row = fvdicon_clamp(g_con.esc_row, 0, last_r);
+      g_con.col = fvdicon_clamp((int)c - 32, 0, last_c);
+      g_con.esc = 0;
+      return;
+    case 4: g_con.fg = c & 15; g_con.esc = 0; return;   /* ESC b n */
+    case 5: g_con.bg = c & 15; g_con.esc = 0; return;   /* ESC c n */
+  }
+
+  g_con.esc = 0;
+  switch (c) {
+    case 'A': if (g_con.row > 0) g_con.row--; break;
+    case 'B': if (g_con.row < last_r) g_con.row++; break;
+    case 'C': if (g_con.col < last_c) g_con.col++; break;
+    case 'D': if (g_con.col > 0) g_con.col--; break;
+    case 'E':
+      fvdicon_clear_cells(0, 0, last_c, last_r);
+      g_con.col = g_con.row = 0;
+      break;
+    case 'H': g_con.col = g_con.row = 0; break;
+    case 'I':
+      if (g_con.row > 0) g_con.row--;
+      else fvdicon_scroll_down(0, last_r);
+      break;
+    case 'J':
+      fvdicon_clear_cells(g_con.col, g_con.row, last_c, g_con.row);
+      fvdicon_clear_cells(0, g_con.row + 1, last_c, last_r);
+      break;
+    case 'K': fvdicon_clear_cells(g_con.col, g_con.row, last_c, g_con.row); break;
+    case 'L': fvdicon_scroll_down(g_con.row, last_r); g_con.col = 0; break;
+    case 'M': fvdicon_scroll_up(g_con.row, last_r); g_con.col = 0; break;
+    case 'Y': g_con.esc = 2; break;
+    case 'b': g_con.esc = 4; break;
+    case 'c': g_con.esc = 5; break;
+    case 'd':
+      fvdicon_clear_cells(0, 0, last_c, g_con.row - 1);
+      fvdicon_clear_cells(0, g_con.row, g_con.col, g_con.row);
+      break;
+    case 'e': g_con.cursor_on = true; break;
+    case 'f': g_con.cursor_on = false; break;
+    case 'j': g_con.save_col = g_con.col; g_con.save_row = g_con.row; break;
+    case 'k':
+      g_con.col = fvdicon_clamp(g_con.save_col, 0, last_c);
+      g_con.row = fvdicon_clamp(g_con.save_row, 0, last_r);
+      break;
+    case 'l':
+      fvdicon_clear_cells(0, g_con.row, last_c, g_con.row);
+      g_con.col = 0;
+      break;
+    case 'o': fvdicon_clear_cells(0, g_con.row, g_con.col, g_con.row); break;
+    case 'p': g_con.reverse = true; break;
+    case 'q': g_con.reverse = false; break;
+    case 'v': g_con.wrap = true; break;
+    case 'w': g_con.wrap = false; break;
+    default: break;                          /* unknown: swallowed, as TOS */
+  }
+}
+
+/* false = not ours (fVDI screen not up, no font, or BEL) */
+static bool fvdicon_char(uint8_t c, bool raw)
+{
+  if (!g_con.have_font || !pistorm_fvdi_is_active() ||
+      !fvdi_bytes_per_pixel() || !pistorm_fvdi_fb_ptr())
+    return false;
+  if (!raw && c == 7 && !g_con.esc)
+    return false;                            /* the ROM rings the bell */
+
+  const uint32_t w = pistorm_fvdi_width(), h = pistorm_fvdi_height();
+  const uint32_t key = (w << 16) ^ (h << 4) ^ pistorm_fvdi_bpp();
+  if (key != g_con.mode_key) {               /* new mode: fresh geometry */
+    g_con.mode_key = key;
+    g_con.cols = (int)(w / 8);
+    g_con.rows = (int)(h / (uint32_t)g_con.ch);
+    g_con.col = g_con.row = g_con.save_col = g_con.save_row = 0;
+    g_con.esc = 0;
+  }
+  if (g_con.cols <= 0 || g_con.rows <= 0)
+    return false;
+  g_con.col = fvdicon_clamp(g_con.col, 0, g_con.cols - 1);
+  g_con.row = fvdicon_clamp(g_con.row, 0, g_con.rows - 1);
+
+  fvdi_mfdb_cache_reset();
+  const bool m = fvdi_mouse_obscure_all();
+  if (g_con.cursor_on)
+    fvdicon_cursor_xor();                    /* lift the cursor */
+
+  if (raw) {
+    fvdicon_printable(c);
+  } else if (g_con.esc) {
+    fvdicon_escape(c);
+  } else {
+    switch (c) {
+      case 7:  break;
+      case 8:  if (g_con.col > 0) g_con.col--; break;
+      case 9:
+        g_con.col = (g_con.col + 8) & ~7;
+        if (g_con.col > g_con.cols - 1) g_con.col = g_con.cols - 1;
+        break;
+      case 10: case 11: case 12: fvdicon_linefeed(); break;
+      case 13: g_con.col = 0; break;
+      case 27: g_con.esc = 1; break;
+      default:
+        if (c >= 32)
+          fvdicon_printable(c);
+        break;                               /* other controls ignored */
+    }
+  }
+
+  if (g_con.cursor_on)
+    fvdicon_cursor_xor();                    /* and put it back */
+  fvdi_mouse_unobscure(m);
+  return true;
+}
+
+static uae_u32 fvdicon_font(uaecptr hdr)
+{
+  if (!hdr)
+    return 0;
+  const uint32_t first = nf_read_word(hdr + 36);
+  const uint32_t last  = nf_read_word(hdr + 38);
+  const uint32_t cellw = nf_read_word(hdr + 52);
+  const uaecptr  offt  = nf_read_long(hdr + 72);
+  const uaecptr  dat   = nf_read_long(hdr + 76);
+  const uint32_t fw    = nf_read_word(hdr + 80);
+  const uint32_t fh    = nf_read_word(hdr + 82);
+  if (cellw != 8 || !offt || !dat || !fw || fh == 0 || fh > 16 ||
+      last < first || last > 255)
+    return 0;
+
+  memset(g_con.glyph, 0, sizeof g_con.glyph);
+  for (uint32_t c = first; c <= last; c++) {
+    const uint32_t bit = nf_read_word(offt + (c - first) * 2u);
+    for (uint32_t r = 0; r < fh; r++) {
+      uint8_t v = 0;
+      for (uint32_t i = 0; i < 8; i++) {
+        const uint32_t b = bit + i;
+        if (nf_read_byte(dat + r * fw + (b >> 3)) & (0x80u >> (b & 7u)))
+          v |= (uint8_t)(0x80u >> i);
+      }
+      g_con.glyph[c][r] = v;
+    }
+  }
+  g_con.ch = (int)fh;
+  g_con.mode_key = 0;                        /* geometry follows the font */
+  g_con.have_font = true;
+  PS_INFO("[FVDICON] console font %ux%u, chars %u-%u\n",
+          (unsigned)cellw, (unsigned)fh, (unsigned)first, (unsigned)last);
+  return 1;
+}
+
+static uae_u32 nf_call_fvdicon(uae_u32 subid, uaecptr params)
+{
+  switch (subid) {
+    case FVDICON_VERSION: return 1;
+    case FVDICON_PUTC:
+      return fvdicon_char((uint8_t)nf_get_param(params, 0), false) ? 1 : 0;
+    case FVDICON_RAWC:
+      return fvdicon_char((uint8_t)nf_get_param(params, 0), true) ? 1 : 0;
+    case FVDICON_FONT:
+      return fvdicon_font(nf_get_param(params, 0));
+  }
+  return 0;
+}
+
 extern "C" volatile uint32_t pistorm_cpu_hostop;   /* emulator.c */
 
 static uae_u32 nf_call(uaecptr stack)
@@ -5816,6 +6275,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_pspdf(subid, params);
     case NF_FEATURE_PSWEB:
       return nf_call_psweb(subid, params);
+    case NF_FEATURE_FVDICON:
+      return nf_call_fvdicon(subid, params);
   }
 
   return 0;
