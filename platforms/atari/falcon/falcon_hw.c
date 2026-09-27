@@ -124,6 +124,9 @@ static struct {
     double       frame_hz;
     double       cyc_per_frame, cyc_acc;
     uint64_t     frames;
+    /* wall-clock sample clock (engine): frames due since t0_ns */
+    uint64_t     t0_ns, emitted, trim_hold_ns;
+    unsigned     resyncs;
     uint64_t     dropped_tx;
 } F;
 
@@ -514,8 +517,11 @@ static void frame(void)
         const int16_t *rxsrc = dst_src(1) == 0 ? dma : zero;
         for (int s = 0; s < 8; s++) {
             F.cyc_acc += slot;
-            uint32_t run = (uint32_t)F.cyc_acc;
-            F.cyc_acc -= run;
+            uint32_t run = 0;
+            if (F.cyc_acc >= 1.0) {
+                run = (uint32_t)F.cyc_acc;
+                F.cyc_acc -= run;
+            }
             if (s < n) {
                 int v;
                 uint32_t w = ssi_slot(s, (uint32_t)(uint16_t)rxsrc[s] << 8, &v);
@@ -577,12 +583,67 @@ static void out_flush(void)
 /* ------------------------------------------------------------------ */
 /* The engine thread                                                   */
 /* ------------------------------------------------------------------ */
+/* The sample clock follows CLOCK_MONOTONIC, a few dozen frames at a
+ * time, so DSP time advances smoothly with the 68k's. Filling the audio
+ * ring in big lumps instead (as the SDL device takes its periods) made
+ * DSP time jump 20 ms at once: DSPMOD, which refills the DSP's buffer
+ * once a VBL, then found it drained and played in bursts, and its VBL
+ * sat polling the host port for a reply that waited on the next lump.
+ * The ring only absorbs the device's lumpy reads; its fill level trims
+ * the clock when the device's crystal and ours drift apart. */
+#define ENGINE_LEAD_MS  30u     /* audio queued ahead of the device */
+#define ENGINE_CHUNK    48u     /* frames per step (~1 ms at 49 kHz) */
+
+static uint64_t eng_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* t0 = now; the first clock_due() then asks for the whole lead at once,
+ * priming the ring so the device never starts dry */
+static void clock_restart(void)
+{
+    F.t0_ns = eng_now_ns();
+    F.emitted = 0;
+    F.trim_hold_ns = F.t0_ns + 500000000ull;
+}
+
+/* frames the wall clock says are due now (may be <= 0) */
+static int64_t clock_due(double hz)
+{
+    uint64_t now = eng_now_ns();
+    int64_t lead = (int64_t)(hz * ENGINE_LEAD_MS / 1000.0);
+    int64_t fill = (int64_t)falcon_audio_fill();
+    /* drift trim: a ring far off its target means the device clock and
+     * CLOCK_MONOTONIC disagree (or the device stalled) - slide t0 */
+    if (now >= F.trim_hold_ns && (fill > 3 * lead || fill < lead / 4)) {
+        int64_t err = fill - lead;                      /* frames */
+        int64_t ns = (int64_t)((double)err * 1e9 / hz);
+        F.t0_ns = (uint64_t)((int64_t)F.t0_ns + ns);
+        F.trim_hold_ns = now + 250000000ull;            /* let it settle */
+        F.resyncs++;
+    }
+    double el = (double)(int64_t)(now - F.t0_ns);
+    int64_t want = (int64_t)(el * hz / 1e9) + lead;
+    return want - (int64_t)F.emitted;
+}
+
+static int host_pending(void)
+{
+    return hf_count(&F.tx) || (atomic_load(&F.cvr) & 0x80);
+}
+
 static void *engine(void *arg)
 {
     (void)arg;
     double last_hz = 0.0;
+    uint64_t stat_ns = 0;
+    unsigned stat_under = 0, stat_resync = 0;
     while (!atomic_load(&F.stop)) {
         if (!atomic_load(&F.armed)) {
+            last_hz = 0.0;
             usleep(5000);
             continue;
         }
@@ -596,11 +657,12 @@ static void *engine(void *arg)
         }
         if (!matrix_active()) {
             out_flush();
+            last_hz = 0.0;
             if (st == DSP_RUN) {
                 /* nothing clocks the DSP: run it at its own speed, 1 ms
                  * at a time, sooner when the host has sent something */
                 dsp_run(32000);
-                if (!hf_count(&F.tx) && !(atomic_load(&F.cvr) & 0x80))
+                if (!host_pending())
                     falcon_audio_wait(1000);
             } else {
                 falcon_audio_wait(2000);
@@ -613,23 +675,39 @@ static void *engine(void *arg)
             last_hz = hz;
             F.frame_hz = hz;
             F.cyc_per_frame = DSP_HZ / hz;
+            F.cyc_acc = 0.0;
             falcon_audio_rate((unsigned)(hz + 0.5));
+            clock_restart();
+            stat_ns = 0;               /* new baseline for the stats */
         }
-        unsigned room = falcon_audio_room();
-        if (room < 128) {
+        int64_t due = clock_due(hz);
+        if (due <= 0) {
+            /* nothing due: the DSP waits with the sample clock. It is
+             * not run ahead to answer the host - cycles taken early are
+             * missing between later SSI slots, and a program that misses
+             * its transmit slot takes the underrun vector instead */
             out_flush();
-            if (st == DSP_RUN && (hf_count(&F.tx) || (atomic_load(&F.cvr) & 0x80))) {
-                dsp_run(256);                  /* answer the host now */
-                continue;
-            }
-            falcon_audio_wait(1000);
+            falcon_audio_wait(500);
             continue;
         }
-        if (room > 1024)
-            room = 1024;
-        for (unsigned i = 0; i < room && !atomic_load(&F.stop); i++)
+        unsigned n = due > (int64_t)(4 * ENGINE_CHUNK) ? 4 * ENGINE_CHUNK
+                                                       : (unsigned)due;
+        for (unsigned i = 0; i < n && !atomic_load(&F.stop); i++)
             frame();
+        F.emitted += n;
         out_flush();
+
+        uint64_t now = eng_now_ns();
+        if (now - stat_ns > 10000000000ull) {
+            unsigned u = falcon_audio_underruns(), r = F.resyncs;
+            if (stat_ns && (u != stat_under || r != stat_resync))
+                fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock trims "
+                        "in 10 s (ring %u frames)\n", hz, u - stat_under,
+                        r - stat_resync, falcon_audio_fill());
+            stat_ns = now;
+            stat_under = u;
+            stat_resync = r;
+        }
     }
     return NULL;
 }

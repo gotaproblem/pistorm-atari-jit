@@ -55,16 +55,25 @@ before, so boot probes are unaffected.
 ## How it runs
 
 One engine thread (`falcon-dsp`, core 1, SCHED_OTHER, created on the
-main thread) is the Falcon's sample clock. Per sample period it fetches
-the playback DMA's words, runs the DSP through the period with the SSI
-slots placed 1/8 frame apart, routes the matrix, writes the record DMA
-and hands the DAC's pair to an SDL3 stream on the HDMI device (the same
-device as the STE DMA sound and the YM2149). The stream's fill level
-paces it: it renders 40 ms ahead and sleeps otherwise.
+main thread) is the Falcon's sample clock. It follows CLOCK_MONOTONIC a
+millisecond at a time: per sample period it fetches the playback DMA's
+words, runs the DSP through the period with the SSI slots placed 1/8
+frame apart, routes the matrix, writes the record DMA and hands the DAC's
+pair to an SDL3 stream on the HDMI device (the same device as the STE DMA
+sound and the YM2149). A 30 ms ring in front of the device absorbs its
+lumpy reads; the ring's fill level only trims the clock when the device's
+crystal drifts from the Pi's.
 
-The 68k and the DSP meet in lock-free FIFOs in the host port. When the
-engine is ahead on audio and the host has sent words, it runs the DSP
-anyway so the 68k is answered promptly.
+DSP time therefore moves smoothly with the 68k's, as on the Falcon.
+DSPMOD depends on that: it refills the DSP's buffer once a VBL and waits
+in the VBL for the DSP's answer. The DSP is never run ahead of the sample
+clock to answer sooner - cycles taken early are missing between later SSI
+slots, and a program that misses its transmit slot takes the underrun
+vector.
+
+The 68k and the DSP meet in lock-free FIFOs in the host port. A
+`[FALCON] ... device underruns, ... clock trims` line appears every 10 s
+while either is happening.
 
 A DSP that polls a peripheral in place (`jclr #n,x:<<$ffe9,*` and the
 like) is skipped forward to its next event, so waiting costs nothing.

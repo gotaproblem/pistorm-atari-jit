@@ -64,6 +64,7 @@ unsigned falcon_audio_fill(void);            /* frames queued            */
 void     falcon_audio_push(const int16_t *lr, unsigned frames);
 void     falcon_audio_kick(void);            /* wake the engine (callback) */
 void     falcon_audio_wait(unsigned us);     /* engine: sleep until kicked */
+unsigned falcon_audio_underruns(void);      /* device reads that found the ring short */
 
 #ifdef __cplusplus
 }

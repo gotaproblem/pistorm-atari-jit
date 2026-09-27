@@ -45,6 +45,11 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+unsigned falcon_audio_underruns(void)
+{
+    return atomic_load(&g_underruns);
+}
+
 void falcon_audio_kick(void)
 {
     if (!atomic_exchange(&g_kicked, 1)) {
