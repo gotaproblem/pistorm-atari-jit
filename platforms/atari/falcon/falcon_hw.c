@@ -604,6 +604,7 @@ static void out_flush(void)
  * the clock when the device's crystal and ours drift apart. */
 #define ENGINE_LEAD_MS  30u     /* audio queued ahead of the device */
 #define ENGINE_CHUNK    48u     /* frames per step (~1 ms at 49 kHz) */
+#define ENGINE_AHEAD  1024u     /* frames the host may pull DSP time ahead */
 
 static uint64_t eng_now_ns(void)
 {
@@ -720,6 +721,17 @@ static int host_pending(void)
     return hf_count(&F.tx) || (atomic_load(&F.cvr) & 0x80);
 }
 
+/* The 68k is waiting on the DSP: it has sent something the DSP has not
+ * taken, or it keeps polling ISR with nothing to read. */
+static int host_waiting(void)
+{
+    static uint32_t polls0;
+    uint32_t p = atomic_load_explicit(&F.isr_polls, memory_order_relaxed);
+    int polling = p != polls0;
+    polls0 = p;
+    return host_pending() || (polling && !hf_count(&F.rx));
+}
+
 static void *engine(void *arg)
 {
     (void)arg;
@@ -769,10 +781,21 @@ static void *engine(void *arg)
             watchdog();
         int64_t due = clock_due(hz);
         if (due <= 0) {
-            /* nothing due: the DSP waits with the sample clock. It is
-             * not run ahead to answer the host - cycles taken early are
-             * missing between later SSI slots, and a program that misses
-             * its transmit slot takes the underrun vector instead */
+            /* Nothing due - but if the 68k is waiting on the DSP, run
+             * whole sample periods early (up to ENGINE_AHEAD): DSP time
+             * then moves ahead of the wall clock a little, SSI slots and
+             * all, and the ring's average absorbs it. Answering only on
+             * the next due step made DSPMOD's VBL wait milliseconds for
+             * each reply; BOR's VBL (game logic too) then overran, the
+             * next VBL asked again at once, the DSP answered "0 samples
+             * wanted", and DSPMOD passed 0 on as a DO count - 65536
+             * iterations, a stall and a trashed mix buffer. */
+            if (st == DSP_RUN && due > -(int64_t)ENGINE_AHEAD && host_waiting()) {
+                for (unsigned i = 0; i < 8; i++)
+                    frame();
+                F.emitted += 8;
+                continue;
+            }
             out_flush();
             falcon_audio_wait(500);
             continue;
@@ -849,6 +872,8 @@ static uint8_t host_read8(uint32_t o)
         uint8_t isr = 0;
         uint32_t txn = hf_count(&F.tx);
         atomic_fetch_add_explicit(&F.isr_polls, 1, memory_order_relaxed);
+        if (!have)
+            falcon_audio_kick();                 /* waiting on the DSP */
         if (have) isr |= 0x01;                               /* RXDF */
         if (txn <= HF_SIZE - HF_TXDE_ROOM) isr |= 0x02;      /* TXDE */
         if (txn == 0) isr |= 0x04;                           /* TRDY */
@@ -1184,6 +1209,8 @@ uint32_t falcon_info(uint32_t what)
     case 5: return F.boot_count;
     case 6: return (uint32_t)F.frame_hz;
     case 7: return F.dsp ? F.dsp->pc : 0;
+    case 8: return hf_count(&F.tx);
+    case 9: return hf_count(&F.rx);
     }
     return 0;
 }

@@ -64,16 +64,24 @@ sound and the YM2149). A 30 ms ring in front of the device absorbs its
 lumpy reads; the ring's fill level only trims the clock when the device's
 crystal drifts from the Pi's.
 
-DSP time therefore moves smoothly with the 68k's, as on the Falcon.
-DSPMOD depends on that: it refills the DSP's buffer once a VBL and waits
-in the VBL for the DSP's answer. The DSP is never run ahead of the sample
-clock to answer sooner - cycles taken early are missing between later SSI
-slots, and a program that misses its transmit slot takes the underrun
+DSP time therefore moves smoothly with the 68k's, as on the Falcon. The
+exception is when the 68k is waiting on the DSP (it has sent words not
+yet taken, or keeps polling ISR with nothing to read): then whole sample
+periods run early, up to 1024 frames ahead, so the DSP answers within
+microseconds as a real 56001 would. DSPMOD needs that: it asks the DSP
+from BOR's VBL, which also runs the game logic, and waits for the reply.
+A slow answer made the VBL overrun, the next VBL asked again at once,
+the DSP answered "0 samples wanted", and DSPMOD passed 0 on as a loop
+count - 65536 iterations. Cycles are never borrowed from later SSI
+slots: a program that misses its transmit slot takes the underrun
 vector.
 
 The 68k and the DSP meet in lock-free FIFOs in the host port. A
-`[FALCON] ... device underruns, ... clock trims` line appears every 10 s
-while either is happening.
+`[FALCON] ... device underruns, ... clock resyncs` line appears every
+10 s while either is happening; `[FALCON] stall: ...` when the 68k has
+polled the host port for 0.3 s with nothing moving (with the DSP's state
+and a few of its PCs); `[FALCON] DSP illegal instruction ...` when the
+DSP program goes astray.
 
 A DSP that polls a peripheral in place (`jclr #n,x:<<$ffe9,*` and the
 like) is skipped forward to its next event, so waiting costs nothing.

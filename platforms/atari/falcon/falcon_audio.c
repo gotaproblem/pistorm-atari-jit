@@ -52,6 +52,9 @@ unsigned falcon_audio_underruns(void)
 
 void falcon_audio_kick(void)
 {
+    /* cheap when already kicked: the 68k calls this on every ISR poll */
+    if (atomic_load_explicit(&g_kicked, memory_order_relaxed))
+        return;
     if (!atomic_exchange(&g_kicked, 1)) {
         pthread_mutex_lock(&g_mx);
         pthread_cond_signal(&g_cv);
