@@ -4646,8 +4646,49 @@ void pistorm_exc_ring_dump(void)
 	pistorm_snap_print();
 }
 
+/* An illegal / Line A / Line F exception names a PC that is running
+ * something that is not code. Say what is there - 32 bytes either side and
+ * the top of the stack, read from the host mirror so it cannot fault -
+ * the first 8 times, without PISTORM_CPU_DIAG: a TOS/MiNT panic shows
+ * the registers only, and by then the evidence is gone. */
+static void pistorm_bad_opcode_dump(int nr)
+{
+	static int shown;
+	extern uae_u8 *natmem_offset;
+	if (shown >= 8 || !natmem_offset)
+		return;
+	shown++;
+	extern uint32_t tt_ram_size;
+	const uae_u32 top = 0x01000000u + tt_ram_size - 0x40u;   /* mirrored */
+	uaecptr pc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
+	uaecptr sp = m68k_areg(regs, 7);
+	fprintf(stderr, "[CPU] %s at %08X (sr %04X sp %08X):\n",
+		nr == 4 ? "illegal instruction" : nr == 10 ? "Line A" : "Line F",
+		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp);
+	if (pc >= 0x20u && pc < top && !(pc >= 0x00E00000u && pc < 0x01000000u)) {
+		uaecptr a0 = (pc - 0x20u) & ~1u;
+		for (int row = 0; row < 4; row++) {
+			fprintf(stderr, "[CPU]   %08X:", (unsigned)(a0 + row * 16));
+			for (int b = 0; b < 16; b += 2)
+				fprintf(stderr, " %02X%02X", natmem_offset[a0 + row * 16 + b],
+					natmem_offset[a0 + row * 16 + b + 1]);
+			fprintf(stderr, "%s\n", (pc >= a0 + row * 16 && pc < a0 + row * 16 + 16) ? "  <" : "");
+		}
+	}
+	if (sp >= 0x400u && sp < top && !(sp >= 0x00E00000u && sp < 0x01000000u)) {
+		fprintf(stderr, "[CPU]   stack:");
+		for (int i = 0; i < 12; i++) {
+			uae_u8 *p = natmem_offset + sp + i * 4;
+			fprintf(stderr, " %02X%02X%02X%02X", p[0], p[1], p[2], p[3]);
+		}
+		fprintf(stderr, "\n");
+	}
+}
+
 void REGPARAM2 Exception(int nr)
 {
+	if (nr == 4 || nr == 10 || nr == 11)
+		pistorm_bad_opcode_dump(nr);
 #if CPU_EXCEPTION_TRACE
 	extern volatile uint8_t g_buserr;
 	extern volatile uint32_t g_buserr_addr; /* your ps_protocol fault address */
