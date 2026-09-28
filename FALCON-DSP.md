@@ -64,23 +64,25 @@ sound and the YM2149). A 30 ms ring in front of the device absorbs its
 lumpy reads; the ring's fill level only trims the clock when the device's
 crystal drifts from the Pi's.
 
-DSP time therefore moves smoothly with the 68k's, as on the Falcon. The
-exception is when the 68k is waiting on the DSP (it has sent words not
-yet taken, or keeps polling ISR with nothing to read): then whole sample
-periods run early, up to 1024 frames ahead, so the DSP answers within
-microseconds as a real 56001 would. DSPMOD needs that: it asks the DSP
-from BOR's VBL, which also runs the game logic, and waits for the reply.
-A slow answer made the VBL overrun, the next VBL asked again at once,
-the DSP answered "0 samples wanted", and DSPMOD passed 0 on as a loop
-count - 65536 iterations. Cycles are never borrowed from later SSI
-slots: a program that misses its transmit slot takes the underrun
-vector.
+DSP time therefore moves smoothly with the 68k's, as on the Falcon, and
+if the engine is held off it catches up rather than skipping. DSPMOD
+needs both: it asks the DSP from BOR's VBL (which also runs the game
+logic) how many samples it has played since the last VBL, waits for the
+answer, and uses it as the next mix-loop count. A DSP that stood still,
+or had banked time ahead of the wall clock, answers a handful - and an
+answer of 0 is a 65536-pass loop, a stall and a trashed mix buffer. So
+the DSP is never run ahead of the sample clock to answer sooner;
+instead the 68k's polling of the host port wakes the engine at once. The
+engine runs at nice -10 on core 1, where the other normal-class helpers
+live.
 
 The 68k and the DSP meet in lock-free FIFOs in the host port. A
-`[FALCON] ... device underruns, ... clock resyncs` line appears every
-10 s while either is happening; `[FALCON] stall: ...` when the 68k has
-polled the host port for 0.3 s with nothing moving (with the DSP's state
-and a few of its PCs); `[FALCON] DSP illegal instruction ...` when the
+`[FALCON] ... device underruns, ... clock resyncs, ... engine hiccups`
+line (with the DSP's share of its core) appears every 10 s while any of
+them is happening; `[FALCON] stall: ...` when the 68k has polled the host
+port for 0.3 s with nothing moving (with the DSP's state, a few of its
+PCs and the last words it sent the 68k, with the sample periods and
+milliseconds between them); `[FALCON] DSP illegal instruction ...` when the
 DSP program goes astray.
 
 A DSP that polls a peripheral in place (`jclr #n,x:<<$ffe9,*` and the

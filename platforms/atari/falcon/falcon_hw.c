@@ -29,6 +29,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#endif
 
 #define DSP_HZ 32000000.0
 
@@ -135,7 +139,7 @@ static struct {
     /* wall-clock sample clock (engine): see clock_due() */
     uint64_t     last_ns, emitted;
     double       clk, fill_avg, adj_i;
-    unsigned     resyncs;
+    unsigned     resyncs, hiccups;
     /* stall watchdog: the 68k's ISR polls vs host port movement */
     _Atomic uint32_t isr_polls;
     uint64_t     dropped_tx;
@@ -194,6 +198,24 @@ static void ssi_irqs(void)
         dsp56k_irq_raise(d, (F.ssisr & SSI_ROE) ? DSP_VEC_SSI_RXE : DSP_VEC_SSI_RX, lvl);
     if ((F.crb & 0x4000) && (F.ssisr & SSI_TDE))
         dsp56k_irq_raise(d, (F.ssisr & SSI_TUE) ? DSP_VEC_SSI_TXE : DSP_VEC_SSI_TX, lvl);
+}
+
+/* the last words the DSP sent the 68k, for the stall report */
+#define RXLOG 8
+static struct { uint32_t v; uint64_t frames, ns; } g_rxlog[RXLOG];
+static unsigned g_rxlog_n;
+static uint64_t rxlog_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static void rxlog_add(uint32_t v)
+{
+    unsigned i = g_rxlog_n++ % RXLOG;
+    g_rxlog[i].v = v & 0xFFFFFF;
+    g_rxlog[i].frames = F.frames;
+    g_rxlog[i].ns = rxlog_now();
 }
 
 static uint32_t periph_read(void *ctx, int space, uint16_t a)
@@ -255,6 +277,7 @@ static void periph_write(void *ctx, int space, uint16_t a, uint32_t v)
     case 0xFFE5: F.pcd = v; return;
     case 0xFFE8: atomic_store(&F.hcr, (uint8_t)(v & 0x1F)); host_irqs(); return;
     case 0xFFEB:                                                 /* HTX */
+        rxlog_add(v);
         hf_push(&F.rx, v);
         host_irqs();
         return;
@@ -604,7 +627,7 @@ static void out_flush(void)
  * the clock when the device's crystal and ours drift apart. */
 #define ENGINE_LEAD_MS  30u     /* audio queued ahead of the device */
 #define ENGINE_CHUNK    48u     /* frames per step (~1 ms at 49 kHz) */
-#define ENGINE_AHEAD  1024u     /* frames the host may pull DSP time ahead */
+#define ENGINE_HICCUP_S 0.010   /* longer gaps are counted as hiccups */
 
 static uint64_t eng_now_ns(void)
 {
@@ -637,7 +660,17 @@ static int64_t clock_due(double hz)
     double dt = (double)(int64_t)(now - F.last_ns) * 1e-9;
     F.last_ns = now;
     if (dt < 0.0) dt = 0.0;
-    if (dt > 0.25) dt = 0.25;                /* descheduled: no avalanche */
+    /* The engine was held off (descheduled, or starved of CPU): the time
+     * is caught up, so DSP time never falls behind the 68k's for long -
+     * DSPMOD asks the DSP once a VBL how many samples it played since
+     * the last time, and a DSP that stood still answers 0, which DSPMOD
+     * passes on as a mix-loop count: 65536 passes, a stall and a trashed
+     * buffer. Beyond a quarter second it is a real stop (the guest
+     * paused), not a hiccup. */
+    if (dt > ENGINE_HICCUP_S)
+        F.hiccups++;
+    if (dt > 0.25)
+        dt = 0.25;
 
     double lead = hz * ENGINE_LEAD_MS / 1000.0;
     double target = lead + 1024.0;
@@ -708,6 +741,16 @@ static void watchdog(void)
         fprintf(stderr, "[FALCON] stall: DSP pcs");
         for (int i = 0; i < 12; i++)
             fprintf(stderr, " %04X", pcs[i]);
+        fprintf(stderr, "\n[FALCON] stall: last DSP->68k words (value, +frames, +ms):");
+        unsigned n = g_rxlog_n < RXLOG ? g_rxlog_n : RXLOG;
+        for (unsigned k = 0; k < n; k++) {
+            unsigned i = (g_rxlog_n - n + k) % RXLOG;
+            unsigned p = (i + RXLOG - 1) % RXLOG;
+            int first = k == 0;
+            fprintf(stderr, " $%06X(+%llu,+%.1f)", g_rxlog[i].v,
+                    first ? 0ull : (unsigned long long)(g_rxlog[i].frames - g_rxlog[p].frames),
+                    first ? 0.0 : (double)(g_rxlog[i].ns - g_rxlog[p].ns) / 1e6);
+        }
         fprintf(stderr, "\n");
     }
     since_ns = now;
@@ -721,23 +764,22 @@ static int host_pending(void)
     return hf_count(&F.tx) || (atomic_load(&F.cvr) & 0x80);
 }
 
-/* The 68k is waiting on the DSP: it has sent something the DSP has not
- * taken, or it keeps polling ISR with nothing to read. */
-static int host_waiting(void)
-{
-    static uint32_t polls0;
-    uint32_t p = atomic_load_explicit(&F.isr_polls, memory_order_relaxed);
-    int polling = p != polls0;
-    polls0 = p;
-    return host_pending() || (polling && !hf_count(&F.rx));
-}
 
 static void *engine(void *arg)
 {
     (void)arg;
+#ifdef __linux__
+    /* Core 1 is where every normal-class helper lands (mp3 length probes,
+     * web, audio feeders ...). The DSP must not wait behind them: when it
+     * stands still while the 68k waits on it, BOR's VBL overruns and
+     * DSPMOD's next question gets a 0 answer (see clock_due). Still
+     * SCHED_OTHER - only a larger share of the core. */
+    if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -10) != 0)
+        fprintf(stderr, "[FALCON] engine: could not raise priority (nice -10)\n");
+#endif
     double last_hz = 0.0;
-    uint64_t stat_ns = 0;
-    unsigned stat_under = 0, stat_resync = 0;
+    uint64_t stat_ns = 0, busy_ns = 0, stat_busy = 0;
+    unsigned stat_under = 0, stat_resync = 0, stat_hiccup = 0;
     while (!atomic_load(&F.stop)) {
         if (!atomic_load(&F.armed)) {
             last_hz = 0.0;
@@ -781,42 +823,41 @@ static void *engine(void *arg)
             watchdog();
         int64_t due = clock_due(hz);
         if (due <= 0) {
-            /* Nothing due - but if the 68k is waiting on the DSP, run
-             * whole sample periods early (up to ENGINE_AHEAD): DSP time
-             * then moves ahead of the wall clock a little, SSI slots and
-             * all, and the ring's average absorbs it. Answering only on
-             * the next due step made DSPMOD's VBL wait milliseconds for
-             * each reply; BOR's VBL (game logic too) then overran, the
-             * next VBL asked again at once, the DSP answered "0 samples
-             * wanted", and DSPMOD passed 0 on as a DO count - 65536
-             * iterations, a stall and a trashed mix buffer. */
-            if (st == DSP_RUN && due > -(int64_t)ENGINE_AHEAD && host_waiting()) {
-                for (unsigned i = 0; i < 8; i++)
-                    frame();
-                F.emitted += 8;
-                continue;
-            }
+            /* Nothing due: the DSP waits with the sample clock. It is
+             * not run ahead to answer the host sooner: DSP time banked
+             * ahead of the wall clock is missing from the next VBL's
+             * interval, and DSPMOD's answer for that VBL shrinks towards
+             * the fatal 0 (see clock_due). The 68k's polling wakes this
+             * thread instead (falcon_audio_kick in host_read8), so an
+             * answer waits a sample period or two, not a sleep. */
             out_flush();
             falcon_audio_wait(500);
             continue;
         }
         unsigned n = due > (int64_t)(4 * ENGINE_CHUNK) ? 4 * ENGINE_CHUNK
                                                        : (unsigned)due;
+        uint64_t t_run = eng_now_ns();
         for (unsigned i = 0; i < n && !atomic_load(&F.stop); i++)
             frame();
         F.emitted += n;
         out_flush();
 
         uint64_t now = eng_now_ns();
+        busy_ns += now - t_run;
         if (now - stat_ns > 10000000000ull) {
-            unsigned u = falcon_audio_underruns(), r = F.resyncs;
-            if (stat_ns && (u != stat_under || r != stat_resync))
-                fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock resyncs "
-                        "in 10 s (ring %u frames, average %.0f)\n", hz, u - stat_under,
-                        r - stat_resync, falcon_audio_fill(), F.fill_avg);
+            unsigned u = falcon_audio_underruns(), r = F.resyncs, h = F.hiccups;
+            if (stat_ns && (u != stat_under || r != stat_resync || h != stat_hiccup))
+                fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock resyncs, "
+                        "%u engine hiccups in 10 s (ring %u frames, average %.0f, "
+                        "DSP load %.0f%%)\n", hz,
+                        u - stat_under, r - stat_resync, h - stat_hiccup,
+                        falcon_audio_fill(), F.fill_avg,
+                        100.0 * (double)(busy_ns - stat_busy) / (double)(now - stat_ns));
+            stat_busy = busy_ns;
             stat_ns = now;
             stat_under = u;
             stat_resync = r;
+            stat_hiccup = h;
         }
     }
     return NULL;
