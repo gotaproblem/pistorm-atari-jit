@@ -704,6 +704,43 @@ static int64_t clock_due(double hz)
 static uint32_t g_txlog[TXLOG];
 static _Atomic uint32_t g_txlog_n;
 
+/* Timing seen from the 68k side, for the 10 s status line:
+ *  - the real VBL (ipl_task, falcon_vbl): longest gap, gaps > 25 ms
+ *  - how long the 68k waits for the DSP: from its first poll of ISR that
+ *    finds nothing to read (after its last write) to the word it reads */
+static _Atomic uint64_t g_vbl_last_ns;
+static _Atomic uint32_t g_vbl_maxgap_us, g_vbl_late;
+static uint64_t         g_req_ns;            /* CPU thread only */
+static _Atomic uint32_t g_wait_max_us, g_wait_sum_us, g_wait_n;
+
+static uint64_t mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void atomic_max_u32(_Atomic uint32_t *p, uint32_t v)
+{
+    uint32_t o = atomic_load_explicit(p, memory_order_relaxed);
+    while (v > o && !atomic_compare_exchange_weak(p, &o, v))
+        ;
+}
+
+void falcon_vbl(void)
+{
+    if (!atomic_load_explicit(&F.armed, memory_order_relaxed))
+        return;
+    uint64_t now = mono_ns();
+    uint64_t last = atomic_exchange(&g_vbl_last_ns, now);
+    if (!last)
+        return;
+    uint32_t us = (uint32_t)((now - last) / 1000u);
+    atomic_max_u32(&g_vbl_maxgap_us, us);
+    if (us > 25000u)
+        atomic_fetch_add_explicit(&g_vbl_late, 1, memory_order_relaxed);
+}
+
 /* Why a Falcon program is stuck, for the log: the 68k has been polling
  * the host port's status for a while and nothing has moved either way. */
 static void watchdog(void)
@@ -869,6 +906,17 @@ static void *engine(void *arg)
         busy_ns += now - t_run;
         if (now - stat_ns > 10000000000ull) {
             unsigned u = falcon_audio_underruns(), r = F.resyncs, h = F.hiccups;
+            {
+                uint32_t gap = atomic_exchange(&g_vbl_maxgap_us, 0);
+                uint32_t late = atomic_exchange(&g_vbl_late, 0);
+                uint32_t wmax = atomic_exchange(&g_wait_max_us, 0);
+                uint32_t wsum = atomic_exchange(&g_wait_sum_us, 0);
+                uint32_t wn = atomic_exchange(&g_wait_n, 0);
+                if (stat_ns && wn)
+                    fprintf(stderr, "[FALCON] 68k: VBL gap max %.1f ms, %u VBLs later than "
+                            "25 ms; waits on the DSP avg %.2f ms max %.2f ms (%u)\n",
+                            gap / 1000.0, late, wsum / 1000.0 / wn, wmax / 1000.0, wn);
+            }
             if (stat_ns && (u != stat_under || r != stat_resync || h != stat_hiccup))
                 fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock resyncs, "
                         "%u engine hiccups in 10 s (ring %u frames, average %.0f, "
@@ -936,8 +984,11 @@ static uint8_t host_read8(uint32_t o)
         uint8_t isr = 0;
         uint32_t txn = hf_count(&F.tx);
         atomic_fetch_add_explicit(&F.isr_polls, 1, memory_order_relaxed);
-        if (!have)
+        if (!have) {
             falcon_audio_kick();                 /* waiting on the DSP */
+            if (!g_req_ns)
+                g_req_ns = mono_ns();
+        }
         if (have) isr |= 0x01;                               /* RXDF */
         if (txn <= HF_SIZE - HF_TXDE_ROOM) isr |= 0x02;      /* TXDE */
         if (txn == 0) isr |= 0x04;                           /* TRDY */
@@ -951,7 +1002,17 @@ static uint8_t host_read8(uint32_t o)
     case 5: return (uint8_t)(v >> 16);
     case 6: return (uint8_t)(v >> 8);
     case 7:
-        if (have) { hf_pop(&F.rx); F.rx_last = v; }
+        if (have) {
+            hf_pop(&F.rx);
+            F.rx_last = v;
+            if (g_req_ns) {
+                uint32_t us = (uint32_t)((mono_ns() - g_req_ns) / 1000u);
+                atomic_max_u32(&g_wait_max_us, us);
+                atomic_fetch_add_explicit(&g_wait_sum_us, us, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_wait_n, 1, memory_order_relaxed);
+                g_req_ns = 0;
+            }
+        }
         return (uint8_t)v;
     }
     return 0;
@@ -974,6 +1035,7 @@ static void host_write8(uint32_t o, uint8_t v)
     case 6: F.txb[1] = v; break;
     case 7:
         F.txb[2] = v;
+        g_req_ns = 0;                        /* still talking, not waiting */
         {
             uint32_t n = atomic_fetch_add_explicit(&g_txlog_n, 1, memory_order_relaxed);
             g_txlog[n % TXLOG] = ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v;

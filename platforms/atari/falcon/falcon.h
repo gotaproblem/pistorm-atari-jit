@@ -44,6 +44,9 @@ void     falcon_hw_write(uint32_t a, uint32_t v, int size);
 /* every $FF88xx write: PSG port A bit 4 is the DSP reset line */
 void     falcon_psg_snoop(uint32_t a, uint32_t v, int size);
 
+/* ipl_task, at the real VBL: timing statistics only */
+void     falcon_vbl(void);
+
 /* test harnesses only: run the Falcon side synchronously */
 void     falcon_step(unsigned frames);
 

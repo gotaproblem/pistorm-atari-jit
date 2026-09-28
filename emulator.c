@@ -1363,6 +1363,7 @@ static void *ipl_task(void *)
           snap_last = sn;
           et4000_native_vbl_snapshot();
           psvidel_vbl();
+          falcon_vbl();
         }
       }
     }
