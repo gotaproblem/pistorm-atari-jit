@@ -110,7 +110,13 @@ _start:
         bsr     print
 4:
 
-        move.l  #0x100,d0               | Ptermres(basepage + text + data + bss)
+        | Ptermres(basepage + text + data + bss + a 64K guard). The guard is
+        | for whoever allocates next: Beats of Rage draws sprites a little
+        | way above the start of its Mxalloc'd screen block, and a block
+        | that followed this TSR directly had its XBIOS hook painted over
+        | with pixels - the next XBIOS call took a Line F. On a Falcon that
+        | overdraw lands in something that does not matter; here it does.
+        move.l  #0x100+0x10000,d0
         add.l   12(a5),d0
         add.l   20(a5),d0
         add.l   28(a5),d0
