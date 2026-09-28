@@ -698,6 +698,12 @@ static int64_t clock_due(double hz)
     return (int64_t)F.clk + (int64_t)lead - (int64_t)F.emitted;
 }
 
+/* the last words the 68k sent the DSP (CPU thread writes, the stall
+ * report reads them racily - fine for a log) */
+#define TXLOG 128u
+static uint32_t g_txlog[TXLOG];
+static _Atomic uint32_t g_txlog_n;
+
 /* Why a Falcon program is stuck, for the log: the 68k has been polling
  * the host port's status for a while and nothing has moved either way. */
 static void watchdog(void)
@@ -750,6 +756,23 @@ static void watchdog(void)
             fprintf(stderr, " $%06X(+%llu,+%.1f)", g_rxlog[i].v,
                     first ? 0ull : (unsigned long long)(g_rxlog[i].frames - g_rxlog[p].frames),
                     first ? 0.0 : (double)(g_rxlog[i].ns - g_rxlog[p].ns) / 1e6);
+        }
+        fprintf(stderr, "\n[FALCON] stall: DSP r0-r7");
+        for (int i = 0; i < 8; i++)
+            fprintf(stderr, " %04X", d->r[i]);
+        fprintf(stderr, " n0-n7");
+        for (int i = 0; i < 8; i++)
+            fprintf(stderr, " %04X", d->n[i]);
+        fprintf(stderr, "\n[FALCON] stall: DSP x:$0000-$001F");
+        for (int i = 0; i < 32; i++)
+            fprintf(stderr, " %06X", dsp56k_mem_read(d, DSP_SPACE_X, (uint16_t)i));
+        uint32_t tn = atomic_load(&g_txlog_n);
+        uint32_t cnt = tn < TXLOG ? tn : TXLOG;
+        fprintf(stderr, "\n[FALCON] stall: last %u 68k->DSP words:", cnt);
+        for (uint32_t k = 0; k < cnt; k++) {
+            if (k % 16 == 0)
+                fprintf(stderr, "\n[FALCON]   ");
+            fprintf(stderr, " %06X", g_txlog[(tn - cnt + k) % TXLOG]);
         }
         fprintf(stderr, "\n");
     }
@@ -951,6 +974,10 @@ static void host_write8(uint32_t o, uint8_t v)
     case 6: F.txb[1] = v; break;
     case 7:
         F.txb[2] = v;
+        {
+            uint32_t n = atomic_fetch_add_explicit(&g_txlog_n, 1, memory_order_relaxed);
+            g_txlog[n % TXLOG] = ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v;
+        }
         if (!hf_push(&F.tx, ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v)) {
             if (F.dropped_tx++ < 4)
                 fprintf(stderr, "[FALCON] host port overflow: 68k word dropped "
