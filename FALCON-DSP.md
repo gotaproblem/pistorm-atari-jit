@@ -41,7 +41,7 @@ before, so boot probes are unaffected.
 
 | | |
 |---|---|
-| DSP | DSP56001 at 32 MHz: full instruction set, 56-bit accumulators with limiting and scaling, modulo and reverse-carry addressing, DO/REP, the 15-level stack, fast and long interrupts, X/Y data ROMs (sine, mu-law, A-law) |
+| DSP | DSP56001 at 64 MHz by default (2 x the Falcon's 32 MHz; `PISTORM_DSP_TURBO=1..8` sets the factor - see below): full instruction set, 56-bit accumulators with limiting and scaling, modulo and reverse-carry addressing, DO/REP, the 15-level stack, fast and long interrupts, X/Y data ROMs (sine, mu-law, A-law) |
 | DSP memory | the Falcon's 32K words: P:$0000-$7FFF, Y:$0000-$3FFF = P:$0000-$3FFF, X:$0000-$3FFF = P:$4000-$7FFF (Falcon spec table 6.1), internal P/X/Y RAM |
 | DSP reset | PSG port A bit 4 (high = reset), then the 512-word bootstrap through the host port, as on the Falcon |
 | Host port | `$FFA200-$FFA207`: ICR, CVR (host commands), ISR, IVR, TX/RX H/M/L; DSP side HCR/HSR/HRX/HTX with their interrupts |
@@ -75,6 +75,15 @@ the DSP is never run ahead of the sample clock to answer sooner;
 instead the 68k's polling of the host port wakes the engine at once. The
 engine runs at nice -10 on core 1, where the other normal-class helpers
 live.
+
+The DSP runs twice as fast as a Falcon's by default. Programs pace
+themselves on the SSI and the host port, not on cycle counts, so this only
+makes the DSP finish its work sooner - which DSPMOD needs on the PiStorm:
+BOR's VBL waits for the DSP's answer, and once one VBL runs late the next
+one comes early and finds the DSP still mixing. That wait makes it late in
+turn, the sample counts grow with the gaps, and a count far beyond a VBL's
+worth ends in a 65536-pass mix loop. `PISTORM_DSP_TURBO=1` gives the
+Falcon's speed; idle polling costs nothing at any setting.
 
 The 68k and the DSP meet in lock-free FIFOs in the host port. A
 `[FALCON] ... device underruns, ... clock resyncs, ... engine hiccups`

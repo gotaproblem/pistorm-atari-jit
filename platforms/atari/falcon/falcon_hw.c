@@ -34,7 +34,17 @@
 #include <sys/syscall.h>
 #endif
 
-#define DSP_HZ 32000000.0
+#define DSP_HZ_REAL 32000000.0
+/* The DSP runs faster than the Falcon's by this factor (PISTORM_DSP_TURBO,
+ * 1-8, default 2). Programs pace themselves on the SSI and the host port,
+ * not on cycle counts, so a faster 56001 only finishes its work sooner.
+ * DSPMOD needs that here: BOR's VBL waits for the DSP's answer, and when
+ * a late VBL is followed by an early one the DSP is still mixing the
+ * last one - the wait makes the next VBL late too, the sample counts
+ * grow, and a count far beyond a VBL's worth ends in a 65536-pass loop.
+ * Costs nothing extra while the DSP idles (idle polls are skipped). */
+static double g_dsp_hz = DSP_HZ_REAL * 2.0;
+#define DSP_HZ g_dsp_hz
 
 /* ------------------------------------------------------------------ */
 /* Host port FIFOs (single producer, single consumer)                  */
@@ -896,7 +906,7 @@ static void *engine(void *arg)
             if (st == DSP_RUN) {
                 /* nothing clocks the DSP: run it at its own speed, 1 ms
                  * at a time, sooner when the host has sent something */
-                dsp_run(32000);
+                dsp_run((uint32_t)(DSP_HZ / 1000.0));
                 if (!host_pending())
                     falcon_audio_wait(1000);
             } else {
@@ -994,7 +1004,7 @@ void falcon_step(unsigned frames)
     }
     if (!matrix_active()) {
         if (st == DSP_RUN)
-            dsp_run(frames * 651u);
+            dsp_run((uint32_t)(frames * (DSP_HZ / 49170.0)));
         return;
     }
     double hz = master_rate();
@@ -1430,6 +1440,15 @@ void falcon_reset(void)
 int falcon_init(uint8_t *guest, uint32_t guest_size)
 {
     memset(&F, 0, sizeof F);
+    {
+        const char *e = getenv("PISTORM_DSP_TURBO");
+        int t = e ? atoi(e) : 2;
+        if (t < 1) t = 1;
+        if (t > 8) t = 8;
+        g_dsp_hz = DSP_HZ_REAL * t;
+        if (t != 2)
+            fprintf(stderr, "[FALCON] DSP at %d x 32 MHz (PISTORM_DSP_TURBO)\n", t);
+    }
     F.dsp = (dsp56k_t *)calloc(1, sizeof(dsp56k_t));
     if (!F.dsp)
         return -1;
