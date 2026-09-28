@@ -64,17 +64,24 @@ sound and the YM2149). A 30 ms ring in front of the device absorbs its
 lumpy reads; the ring's fill level only trims the clock when the device's
 crystal drifts from the Pi's.
 
-DSP time therefore moves smoothly with the 68k's, as on the Falcon, and
-if the engine is held off it catches up rather than skipping. DSPMOD
-needs both: it asks the DSP from BOR's VBL (which also runs the game
-logic) how many samples it has played since the last VBL, waits for the
-answer, and uses it as the next mix-loop count. A DSP that stood still,
-or had banked time ahead of the wall clock, answers a handful - and an
-answer of 0 is a 65536-pass loop, a stall and a trashed mix buffer. So
-the DSP is never run ahead of the sample clock to answer sooner;
-instead the 68k's polling of the host port wakes the engine at once. The
-engine runs at nice -10 on core 1, where the other normal-class helpers
-live.
+**Lockstep with the 68k.** While the DSP answers the 68k about once a
+VBL (70% of VBLs to engage, 40% to let go), the sample clock is not the
+wall clock: each answer buys exactly one VBL of sample periods (the VBL
+period as ipl_task measures it), played at once, and nothing the 68k sends
+after an answer reaches the DSP until they have played. Between those
+bursts the DSP gets instruction cycles whenever the 68k waits on it, so it
+reads, mixes and answers at once. The ring's fill trims the samples per
+VBL by up to 15%, which is all the audio device needs.
+
+This is for DSPMOD (BOR's music), which asks the DSP once a VBL how many
+samples it played and mixes that many. On the wall clock the answer
+follows when in its VBL the 68k happened to ask; BOR's VBL work on the
+PiStorm varies enough that answers swung from a handful to twice a VBL's
+worth, DSPMOD's buffers do not hold that, and the DSP ran off into garbage
+(an answer of 0 is a 65536-pass mix loop). Locked, every answer is one
+VBL's samples, as on a Falcon whose VBL is never late. A VBL the 68k
+misses is a short gap in the sound instead. `PISTORM_FALCON_VBLSYNC=0`
+keeps the wall clock throughout. The status line says which is in use.
 
 The DSP runs twice as fast as a Falcon's by default. Programs pace
 themselves on the SSI and the host port, not on cycle counts, so this only

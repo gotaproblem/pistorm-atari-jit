@@ -93,6 +93,12 @@ static inline void hf_pop(hfifo_t *f)
         atomic_store_explicit(&f->tail, t + 1, memory_order_release);
 }
 
+/* DSP side of the 68k->DSP FIFO: during a VBL-locked burst the words the
+ * 68k writes after the burst began stay out of sight until it ends (see
+ * the VBL lock in the engine). g_tx_vis_on / g_tx_vis_head: engine only. */
+static int      g_tx_vis_on;
+static uint32_t g_tx_vis_head;
+
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
@@ -150,12 +156,31 @@ static struct {
     uint64_t     last_ns, emitted;
     double       clk, fill_avg, adj_i;
     unsigned     resyncs, hiccups;
+    int          vbl_locked;           /* lockstep with the 68k's answers */
+    /* lockstep: a program that answers the 68k about once a VBL (DSPMOD)
+     * gets one VBL of samples per answer */
+    uint32_t     answers;               /* answers to the 68k (engine)   */
+    uint32_t     answers_at_win;
+    uint64_t     talk_win_ns;
+    int          answer_armed;          /* read a host word since the last */
+    uint32_t     answers_paid;          /* answers already turned into samples */
+    unsigned     vbl_skipped;
     /* stall watchdog: the 68k's ISR polls vs host port movement */
     _Atomic uint32_t isr_polls;
     uint64_t     dropped_tx;
 } F;
 
 static inline uint16_t rw16(int o) { return (uint16_t)((F.reg[o] << 8) | F.reg[o + 1]); }
+
+/* engine: words the DSP may see */
+static inline uint32_t tx_visible(void)
+{
+    uint32_t t = atomic_load_explicit(&F.tx.tail, memory_order_relaxed);
+    uint32_t h = atomic_load_explicit(&F.tx.head, memory_order_acquire);
+    if (g_tx_vis_on && (int32_t)(h - g_tx_vis_head) > 0)
+        h = g_tx_vis_head;
+    return (int32_t)(h - t) > 0 ? h - t : 0;
+}
 
 int falcon_configured(void) { return F.configured; }
 int falcon_armed(void) { return atomic_load(&F.armed); }
@@ -179,7 +204,7 @@ static void host_irqs(void)
     dsp56k_t *d = F.dsp;
     int lvl = (int)((F.ipr >> 10) & 3);
     uint8_t hcr = atomic_load(&F.hcr);
-    if (lvl && (hcr & HCR_HRIE) && hf_count(&F.tx))
+    if (lvl && (hcr & HCR_HRIE) && tx_visible())
         dsp56k_irq_raise(d, DSP_VEC_HOST_RX, lvl);
     else
         dsp56k_irq_clear(d, DSP_VEC_HOST_RX);
@@ -263,7 +288,7 @@ static uint32_t periph_read(void *ctx, int space, uint16_t a)
     case 0xFFE8: return atomic_load(&F.hcr);
     case 0xFFE9: {
         uint32_t v = 0;
-        if (hf_count(&F.tx)) v |= 0x01;                          /* HRDF */
+        if (tx_visible()) v |= 0x01;                             /* HRDF */
         if (hf_count(&F.rx) < HF_SIZE) v |= 0x02;                 /* HTDE */
         if (atomic_load(&F.cvr) & 0x80) v |= 0x04;               /* HCP  */
         v |= (uint32_t)((atomic_load(&F.icr) >> 3) & 3) << 3;   /* HF0/HF1 */
@@ -271,9 +296,10 @@ static uint32_t periph_read(void *ctx, int space, uint16_t a)
     }
     case 0xFFEB: {                                               /* HRX */
         uint32_t v;
-        if (hf_peek(&F.tx, &v)) {
+        if (tx_visible() && hf_peek(&F.tx, &v)) {
             hf_pop(&F.tx);
             F.hrx_last = v;
+            F.answer_armed = 1;
             uint64_t t = atomic_exchange(&g_tx_idle_ns, 0);
             if (t) {
                 uint64_t now = rxlog_now();
@@ -316,6 +342,19 @@ static void periph_write(void *ctx, int space, uint16_t a, uint32_t v)
     case 0xFFE5: F.pcd = v; return;
     case 0xFFE8: atomic_store(&F.hcr, (uint8_t)(v & 0x1F)); host_irqs(); return;
     case 0xFFEB:                                                 /* HTX */
+        if (F.answer_armed) {                /* the reply to what it read */
+            F.answer_armed = 0;
+            F.answers++;
+            /* lockstep: nothing the 68k sends from here on is seen until
+             * the VBL of samples this answer pays for has played (it plays
+             * at once, as a burst), so even a question asked straight after
+             * is answered with a VBL's samples, never "0" - which DSPMOD
+             * would pass on as a 65536-pass loop */
+            if (F.vbl_locked && !g_tx_vis_on) {
+                g_tx_vis_head = atomic_load(&F.tx.head);
+                g_tx_vis_on = 1;
+            }
+        }
         rxlog_add(v);
         if (g_pick_ns) {
             /* the word the DSP answers is the last one it picked up from an
@@ -397,6 +436,8 @@ static void dsp_power_state(void)
         F.ssisr = SSI_TDE;
         atomic_store(&F.hcr, 0);
         F.boot_count = 0;
+        g_tx_vis_on = 0;
+        F.answer_armed = 0;
         atomic_store(&F.dsp_state, DSP_BOOT);
     }
     if (atomic_load(&F.reset_held))
@@ -671,9 +712,34 @@ static void out_flush(void)
  * sat polling the host port for a reply that waited on the next lump.
  * The ring only absorbs the device's lumpy reads; its fill level trims
  * the clock when the device's crystal and ours drift apart. */
-#define ENGINE_LEAD_MS  30u     /* audio queued ahead of the device */
+#define ENGINE_LEAD_MS  50u     /* audio queued ahead of the device */
 #define ENGINE_CHUNK    48u     /* frames per step (~1 ms at 49 kHz) */
 #define ENGINE_HICCUP_S 0.010   /* longer gaps are counted as hiccups */
+
+/* Lockstep with the 68k (default; PISTORM_FALCON_VBLSYNC=0 turns it off).
+ *
+ * DSPMOD asks the DSP once a VBL how many samples it played since the
+ * last time and mixes that many. On the wall clock the answer follows
+ * when in its VBL the 68k happened to ask - 3 ms after the last time, or
+ * 33 - and BOR's VBL work on the PiStorm varies enough that the answers
+ * swung from a handful to twice a VBL's worth; DSPMOD's buffers do not
+ * hold that, the DSP ran off into garbage, and an answer of 0 is a
+ * 65536-pass mix loop.
+ *
+ * So while the DSP answers the 68k about once a VBL (70% of VBLs to
+ * engage, 40% to let go), sample periods are paid per answer: exactly one
+ * VBL's worth (VBL period measured by ipl_task) for each answer, played at
+ * once as a burst, and nothing the 68k sends after an answer reaches the
+ * DSP until that burst is done. Every answer is then one VBL of samples,
+ * as on a Falcon whose VBL is never late. Between bursts the DSP gets
+ * instruction cycles while the 68k waits on it, so it reads, mixes and
+ * answers at once. The ring's fill trims the samples per VBL (PI, +-3%),
+ * which is all the audio device needs; two answers are the most one
+ * burst will pay for. */
+static _Atomic uint32_t g_vbl_edges;
+static _Atomic uint32_t g_vbl_period_us = 20000;   /* ipl_task writes */
+static _Atomic uint64_t g_vbl_seen_ns;
+static int              g_vbl_sync = 1;
 
 static uint64_t eng_now_ns(void)
 {
@@ -691,6 +757,11 @@ static void clock_restart(double hz)
     F.emitted = 0;
     F.fill_avg = hz * ENGINE_LEAD_MS / 1000.0 + 1024.0;
     F.adj_i = 0.0;
+    F.talk_win_ns = F.last_ns;
+    F.answers_at_win = F.answers;
+    F.answers_paid = F.answers;
+    F.vbl_locked = 0;
+    g_tx_vis_on = 0;
 }
 
 /* Frames due now (may be <= 0). The clock runs at the nominal rate
@@ -727,13 +798,55 @@ static int64_t clock_due(double hz)
     /* PI: the integral learns the crystal difference, so the average
      * fill settles on target instead of beside it */
     double e = (F.fill_avg - target) / lead;
-    F.adj_i -= 0.01 * e * dt;
-    if (F.adj_i > 0.02) F.adj_i = 0.02;
-    if (F.adj_i < -0.02) F.adj_i = -0.02;
+    /* lockstep pays per answer, and a 68k that misses the odd VBL answers
+     * less often than the VBL rate: allow more trim there (+-15%, which
+     * only moves each answer by as much) than on the wall clock (+-3%) */
+    double lim = F.vbl_locked ? 0.15 : 0.03;
+    F.adj_i -= (F.vbl_locked ? 0.03 : 0.01) * e * dt;
+    if (F.adj_i > lim * 0.8) F.adj_i = lim * 0.8;
+    if (F.adj_i < -lim * 0.8) F.adj_i = -lim * 0.8;
     double adj = F.adj_i - 0.02 * e;
-    if (adj > 0.03) adj = 0.03;
-    if (adj < -0.03) adj = -0.03;
-    F.clk += dt * hz * (1.0 + adj);
+    if (adj > lim) adj = lim;
+    if (adj < -lim) adj = -lim;
+
+    /* Lockstep with the 68k (see the note above g_vbl_edges): while the
+     * DSP answers the 68k about once a VBL, each answer buys exactly one
+     * VBL of sample periods; otherwise the wall clock drives. */
+    if (now - F.talk_win_ns >= 250000000ull) {
+        double vbls = (double)(now - F.talk_win_ns) * 1e-3 /
+                      (double)atomic_load(&g_vbl_period_us);
+        uint32_t a = F.answers - F.answers_at_win;
+        F.talk_win_ns = now;
+        F.answers_at_win = F.answers;
+        /* on at 70% of a VBL's answers, off below 40% */
+        double r = vbls > 0.0 ? (double)a / vbls : 0.0;
+        int want = F.vbl_locked ? r >= 0.4 : r >= 0.7;
+        if (!g_vbl_sync)
+            want = 0;
+        if (want != F.vbl_locked) {
+            F.vbl_locked = want;
+            F.clk = (double)F.emitted - lead;       /* carry on from here */
+            F.answers_paid = F.answers;
+            if (!want)
+                g_tx_vis_on = 0;
+        }
+    }
+    if (F.vbl_locked) {
+        uint32_t n = F.answers - F.answers_paid;
+        F.answers_paid = F.answers;
+        if (n > 2) {
+            n = 2;
+            F.vbl_skipped++;
+        }
+        double fpv = hz * (double)atomic_load(&g_vbl_period_us) * 1e-6 * (1.0 + adj);
+        F.clk += (double)n * fpv;
+        /* the 68k went quiet mid-lockstep: do not let owed time pile up */
+        double floor_clk = (double)F.emitted - lead - fpv;
+        if (F.clk < floor_clk)
+            F.clk = floor_clk;
+    } else {
+        F.clk += dt * hz * (1.0 + adj);
+    }
 
     if (fill > 8.0 * lead + 8192.0 ||
         (F.emitted > (uint64_t)(8.0 * lead) && fill < 16.0 && F.fill_avg < lead / 2.0)) {
@@ -785,6 +898,16 @@ void falcon_vbl(void)
     atomic_max_u32(&g_vbl_maxgap_us, us);
     if (us > 25000u)
         atomic_fetch_add_explicit(&g_vbl_late, 1, memory_order_relaxed);
+    /* the VBL period (50 / 60 / 71 Hz), from ordinary intervals only */
+    if (us >= 10000u && us <= 22000u) {
+        uint32_t p = atomic_load_explicit(&g_vbl_period_us, memory_order_relaxed);
+        atomic_store_explicit(&g_vbl_period_us, p + (uint32_t)(((int32_t)us - (int32_t)p) / 16),
+                              memory_order_relaxed);
+    }
+    atomic_store_explicit(&g_vbl_seen_ns, now, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_vbl_edges, 1, memory_order_release);
+    /* no kick from here: ipl_task must not touch a mutex. The engine
+     * looks at least every 0.5 ms. */
 }
 
 /* Why a Falcon program is stuck, for the log: the 68k has been polling
@@ -870,6 +993,17 @@ static int host_pending(void)
     return hf_count(&F.tx) || (atomic_load(&F.cvr) & 0x80);
 }
 
+/* The 68k is waiting on the DSP: it has sent something the DSP has not
+ * taken, or keeps polling ISR with nothing to read. */
+static int host_waiting(void)
+{
+    static uint32_t polls0;
+    uint32_t p = atomic_load_explicit(&F.isr_polls, memory_order_relaxed);
+    int polling = p != polls0;
+    polls0 = p;
+    return host_pending() || (polling && !hf_count(&F.rx));
+}
+
 
 static void *engine(void *arg)
 {
@@ -885,7 +1019,7 @@ static void *engine(void *arg)
 #endif
     double last_hz = 0.0;
     uint64_t stat_ns = 0, busy_ns = 0, stat_busy = 0;
-    unsigned stat_under = 0, stat_resync = 0, stat_hiccup = 0;
+    unsigned stat_under = 0, stat_resync = 0, stat_hiccup = 0, stat_skip = 0;
     while (!atomic_load(&F.stop)) {
         if (!atomic_load(&F.armed)) {
             last_hz = 0.0;
@@ -928,6 +1062,15 @@ static void *engine(void *arg)
         if (st == DSP_RUN)
             watchdog();
         int64_t due = clock_due(hz);
+        if (due <= 0 && F.vbl_locked && st == DSP_RUN && host_waiting()) {
+            /* VBL-locked, this VBL's sample periods all played, and the 68k
+             * asking: give the DSP instruction cycles without sample periods
+             * so it answers now. Nothing is borrowed - later SSI slots keep
+             * their full share - so this is simply a faster 56001 between
+             * two VBLs, and DSP time (in samples) stays one VBL per VBL. */
+            dsp_run(1024);
+            continue;
+        }
         if (due <= 0) {
             /* Nothing due: the DSP waits with the sample clock. It is
              * not run ahead to answer the host sooner: DSP time banked
@@ -943,8 +1086,27 @@ static void *engine(void *arg)
         unsigned n = due > (int64_t)(4 * ENGINE_CHUNK) ? 4 * ENGINE_CHUNK
                                                        : (unsigned)due;
         uint64_t t_run = eng_now_ns();
-        for (unsigned i = 0; i < n && !atomic_load(&F.stop); i++)
-            frame();
+        if (F.vbl_locked) {
+            /* A VBL's worth, all of it, before the DSP sees anything the
+             * 68k sends from now on: a request made during this VBL is
+             * answered from the end of it, so each answer is one VBL's
+             * samples however early or late in its VBL the 68k asked. */
+            if (!g_tx_vis_on) {               /* else: held since the answer */
+                g_tx_vis_head = atomic_load(&F.tx.head);
+                g_tx_vis_on = 1;
+            }
+            n = (unsigned)due;
+            for (unsigned i = 0; i < n && !atomic_load(&F.stop); i++) {
+                frame();
+                if ((i & 511) == 511)
+                    out_flush();
+            }
+            g_tx_vis_on = 0;
+            host_irqs();
+        } else {
+            for (unsigned i = 0; i < n && !atomic_load(&F.stop); i++)
+                frame();
+        }
         F.emitted += n;
         out_flush();
 
@@ -952,6 +1114,7 @@ static void *engine(void *arg)
         busy_ns += now - t_run;
         if (now - stat_ns > 10000000000ull) {
             unsigned u = falcon_audio_underruns(), r = F.resyncs, h = F.hiccups;
+            unsigned sk = F.vbl_skipped;
             {
                 uint32_t gap = atomic_exchange(&g_vbl_maxgap_us, 0);
                 uint32_t late = atomic_exchange(&g_vbl_late, 0);
@@ -972,11 +1135,13 @@ static void *engine(void *arg)
                             pn ? ps / 1000.0 / pn : 0.0, pm / 1000.0,
                             an ? as / 1000.0 / an : 0.0, am / 1000.0);
             }
-            if (stat_ns && (u != stat_under || r != stat_resync || h != stat_hiccup))
-                fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock resyncs, "
-                        "%u engine hiccups in 10 s (ring %u frames, average %.0f, "
-                        "DSP load %.0f%%)\n", hz,
-                        u - stat_under, r - stat_resync, h - stat_hiccup,
+            if (stat_ns && (u != stat_under || r != stat_resync || h != stat_hiccup ||
+                            sk != stat_skip))
+                fprintf(stderr, "[FALCON] %.0f Hz (%s): %u device underruns, %u clock resyncs, "
+                        "%u engine hiccups, %u answers merged in 10 s (ring %u frames, "
+                        "average %.0f, DSP load %.0f%%)\n", hz,
+                        F.vbl_locked ? "lockstep with the 68k" : "wall clock",
+                        u - stat_under, r - stat_resync, h - stat_hiccup, sk - stat_skip,
                         falcon_audio_fill(), F.fill_avg,
                         100.0 * (double)(busy_ns - stat_busy) / (double)(now - stat_ns));
             stat_busy = busy_ns;
@@ -984,6 +1149,7 @@ static void *engine(void *arg)
             stat_under = u;
             stat_resync = r;
             stat_hiccup = h;
+            stat_skip = sk;
         }
     }
     return NULL;
@@ -1446,6 +1612,10 @@ int falcon_init(uint8_t *guest, uint32_t guest_size)
         if (t < 1) t = 1;
         if (t > 8) t = 8;
         g_dsp_hz = DSP_HZ_REAL * t;
+        const char *vs = getenv("PISTORM_FALCON_VBLSYNC");
+        g_vbl_sync = !(vs && *vs == '0');
+        if (!g_vbl_sync)
+            fprintf(stderr, "[FALCON] sample clock on the wall clock (PISTORM_FALCON_VBLSYNC=0)\n");
         if (t != 2)
             fprintf(stderr, "[FALCON] DSP at %d x 32 MHz (PISTORM_DSP_TURBO)\n", t);
     }
