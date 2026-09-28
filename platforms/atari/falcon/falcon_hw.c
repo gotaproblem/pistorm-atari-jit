@@ -210,6 +210,26 @@ static uint64_t rxlog_now(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+/* host -> DSP -> host latency, split in two (status line):
+ *  pickup: the 68k writes a request into an empty port .. the DSP reads it
+ *          (long when the DSP is still busy with the last VBL's work)
+ *  answer: that read .. the DSP's reply */
+static _Atomic uint64_t g_tx_idle_ns;          /* CPU sets, engine clears */
+static uint64_t         g_pick_ns, g_pick_lat; /* engine only */
+static _Atomic uint32_t g_pick_max_us, g_pick_sum_us, g_pick_n;
+static _Atomic uint32_t g_ans_max_us, g_ans_sum_us, g_ans_n;
+
+static void lat_add(_Atomic uint32_t *mx, _Atomic uint32_t *sum, _Atomic uint32_t *n,
+                    uint64_t ns)
+{
+    uint32_t us = (uint32_t)(ns / 1000u);
+    uint32_t o = atomic_load_explicit(mx, memory_order_relaxed);
+    while (us > o && !atomic_compare_exchange_weak(mx, &o, us))
+        ;
+    atomic_fetch_add_explicit(sum, us, memory_order_relaxed);
+    atomic_fetch_add_explicit(n, 1, memory_order_relaxed);
+}
+
 static void rxlog_add(uint32_t v)
 {
     unsigned i = g_rxlog_n++ % RXLOG;
@@ -241,7 +261,16 @@ static uint32_t periph_read(void *ctx, int space, uint16_t a)
     }
     case 0xFFEB: {                                               /* HRX */
         uint32_t v;
-        if (hf_peek(&F.tx, &v)) { hf_pop(&F.tx); F.hrx_last = v; }
+        if (hf_peek(&F.tx, &v)) {
+            hf_pop(&F.tx);
+            F.hrx_last = v;
+            uint64_t t = atomic_exchange(&g_tx_idle_ns, 0);
+            if (t) {
+                uint64_t now = rxlog_now();
+                g_pick_lat = now - t;
+                g_pick_ns = now;
+            }
+        }
         host_irqs();
         return F.hrx_last;
     }
@@ -278,6 +307,13 @@ static void periph_write(void *ctx, int space, uint16_t a, uint32_t v)
     case 0xFFE8: atomic_store(&F.hcr, (uint8_t)(v & 0x1F)); host_irqs(); return;
     case 0xFFEB:                                                 /* HTX */
         rxlog_add(v);
+        if (g_pick_ns) {
+            /* the word the DSP answers is the last one it picked up from an
+             * idle port - the request; data blocks follow the answer */
+            lat_add(&g_pick_max_us, &g_pick_sum_us, &g_pick_n, g_pick_lat);
+            lat_add(&g_ans_max_us, &g_ans_sum_us, &g_ans_n, rxlog_now() - g_pick_ns);
+            g_pick_ns = 0;
+        }
         hf_push(&F.rx, v);
         host_irqs();
         return;
@@ -912,10 +948,19 @@ static void *engine(void *arg)
                 uint32_t wmax = atomic_exchange(&g_wait_max_us, 0);
                 uint32_t wsum = atomic_exchange(&g_wait_sum_us, 0);
                 uint32_t wn = atomic_exchange(&g_wait_n, 0);
+                uint32_t pm = atomic_exchange(&g_pick_max_us, 0);
+                uint32_t ps = atomic_exchange(&g_pick_sum_us, 0);
+                uint32_t pn = atomic_exchange(&g_pick_n, 0);
+                uint32_t am = atomic_exchange(&g_ans_max_us, 0);
+                uint32_t as = atomic_exchange(&g_ans_sum_us, 0);
+                uint32_t an = atomic_exchange(&g_ans_n, 0);
                 if (stat_ns && wn)
                     fprintf(stderr, "[FALCON] 68k: VBL gap max %.1f ms, %u VBLs later than "
-                            "25 ms; waits on the DSP avg %.2f ms max %.2f ms (%u)\n",
-                            gap / 1000.0, late, wsum / 1000.0 / wn, wmax / 1000.0, wn);
+                            "25 ms; waits on the DSP avg %.2f ms max %.2f ms (%u); "
+                            "request picked up by the DSP after avg %.2f max %.2f ms, answered after avg %.2f max %.2f ms\n",
+                            gap / 1000.0, late, wsum / 1000.0 / wn, wmax / 1000.0, wn,
+                            pn ? ps / 1000.0 / pn : 0.0, pm / 1000.0,
+                            an ? as / 1000.0 / an : 0.0, am / 1000.0);
             }
             if (stat_ns && (u != stat_under || r != stat_resync || h != stat_hiccup))
                 fprintf(stderr, "[FALCON] %.0f Hz: %u device underruns, %u clock resyncs, "
@@ -1040,6 +1085,8 @@ static void host_write8(uint32_t o, uint8_t v)
             uint32_t n = atomic_fetch_add_explicit(&g_txlog_n, 1, memory_order_relaxed);
             g_txlog[n % TXLOG] = ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v;
         }
+        if (!hf_count(&F.tx) && !atomic_load_explicit(&g_tx_idle_ns, memory_order_relaxed))
+            atomic_store(&g_tx_idle_ns, mono_ns());
         if (!hf_push(&F.tx, ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v)) {
             if (F.dropped_tx++ < 4)
                 fprintf(stderr, "[FALCON] host port overflow: 68k word dropped "
