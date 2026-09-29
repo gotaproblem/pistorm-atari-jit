@@ -4597,21 +4597,42 @@ extern "C" uae_u32 pistorm_guest_pc(void)
 	return m68k_getpc();
 }
 
+/* Twelve longs from a guest stack, off the host mirror (cannot fault). */
+static void pistorm_dump_stack_longs(const char *tag, uae_u32 sp)
+{
+	extern uae_u8 *natmem_offset;
+	extern uint32_t tt_ram_size;
+	const uae_u32 top = 0x01000000u + tt_ram_size - 0x40u;
+	if (!natmem_offset || sp < 0x400u || sp >= top || (sp & 1u) ||
+	    (sp >= 0x00E00000u && sp < 0x01000000u))
+		return;
+	fprintf(stderr, "[RESET]   %s %08X:", tag, sp);
+	for (int i = 0; i < 12; i++) {
+		const uae_u8 *q = natmem_offset + sp + i * 4;
+		fprintf(stderr, " %02X%02X%02X%02X", q[0], q[1], q[2], q[3]);
+	}
+	fprintf(stderr, "\n");
+}
+
+/* Always on: a RESET is rare, and TOS issues one first thing after a
+ * restart - so on a silent reboot this is the only record of who jumped
+ * into the ROM. The stacks are still the jumper's at that point (TOS has
+ * not moved them yet), so their return addresses name the caller. */
 extern "C" void pistorm_reset_state_dump(void)
 {
-	write_info("[RESET] soft CPU RST at pc=%08X sr=%04X (%s) "
+	fprintf(stderr, "[RESET] RESET instruction at pc=%08X sr=%04X (%s) "
 			"usp=%08X isp=%08X\n",
 			m68k_getpc(), regs.sr, regs.s ? "SUP" : "usr",
 			regs.usp, regs.isp);
-	if (getenv("PISTORM_RESET_DEBUG")) {
-		fprintf(stderr, "[RESET]   D:");
-		for (int i = 0; i < 8; i++)
-			fprintf(stderr, " %08X", m68k_dreg(regs, i));
-		fprintf(stderr, "\n[RESET]   A:");
-		for (int i = 0; i < 8; i++)
-			fprintf(stderr, " %08X", m68k_areg(regs, i));
-		fprintf(stderr, "\n");
-	}
+	fprintf(stderr, "[RESET]   D:");
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, " %08X", m68k_dreg(regs, i));
+	fprintf(stderr, "\n[RESET]   A:");
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, " %08X", m68k_areg(regs, i));
+	fprintf(stderr, "\n");
+	pistorm_dump_stack_longs("ssp", regs.s ? m68k_areg(regs, 7) : regs.isp);
+	pistorm_dump_stack_longs("usp", regs.s ? regs.usp : m68k_areg(regs, 7));
 	fflush(stderr);
 }
 
