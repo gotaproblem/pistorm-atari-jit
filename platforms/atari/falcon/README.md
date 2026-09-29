@@ -79,7 +79,7 @@ sound and the YM2149, so `ym2149` or `dma_sound` may be on as well.
 
 ## Reading the log
 
-Every 10 seconds, while the DSP is running:
+With `PISTORM_FALCON_STATS=1`, every 10 seconds while the DSP is running:
 
 ```
 [FALCON] 68k: VBL gap max 20.0 ms, 0 VBLs later than 25 ms; waits on the DSP avg 0.02 ms max 0.61 ms (500); request picked up by the DSP after avg 0.01 max 0.61 ms, answered after avg 0.01 max 0.02 ms
@@ -124,6 +124,7 @@ Environment variables, read at start-up:
 |---|---|
 | `PISTORM_DSP_TURBO=1..8` | the DSP's speed as a multiple of 32 MHz. Default 2. Programs pace themselves on the SSI and the host port, not on cycle counts, so a faster DSP only finishes its work sooner; 1 is a real Falcon's speed |
 | `PISTORM_FALCON_VBLSYNC=0` | keep DSP time on the wall clock even for a program that talks to the DSP once a VBL (the default locks the two together, which is what such programs need on a PiSTorm) |
+| `PISTORM_FALCON_STATS=1` | the `[FALCON] 68k:` timing line every 10 s (off by default) |
 
 ## Software that checks for a Falcon
 

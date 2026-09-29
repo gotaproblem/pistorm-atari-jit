@@ -1166,7 +1166,14 @@ static void *engine(void *arg)
                 uint32_t am = atomic_exchange(&g_ans_max_us, 0);
                 uint32_t as = atomic_exchange(&g_ans_sum_us, 0);
                 uint32_t an = atomic_exchange(&g_ans_n, 0);
-                if (stat_ns && wn)
+                /* PISTORM_FALCON_STATS=1: the 68k timing line every 10 s
+                 * (the counters above are reset either way) */
+                static int stats_env = -1;
+                if (stats_env < 0) {
+                    const char *e = getenv("PISTORM_FALCON_STATS");
+                    stats_env = (e && *e == '1');
+                }
+                if (stats_env && stat_ns && wn)
                     fprintf(stderr, "[FALCON] 68k: VBL gap max %.1f ms, %u VBLs later than "
                             "25 ms; waits on the DSP avg %.2f ms max %.2f ms (%u); "
                             "request picked up by the DSP after avg %.2f max %.2f ms, answered after avg %.2f max %.2f ms\n",
