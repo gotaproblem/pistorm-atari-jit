@@ -4633,6 +4633,17 @@ extern "C" void pistorm_reset_state_dump(void)
 	fprintf(stderr, "\n");
 	pistorm_dump_stack_longs("ssp", regs.s ? m68k_areg(regs, 7) : regs.isp);
 	pistorm_dump_stack_longs("usp", regs.s ? regs.usp : m68k_areg(regs, 7));
+#if CPU_PC_RING
+	if (pistorm_cpu_diag()) {
+		/* the last 256 instruction PCs, oldest first (interpreter loops
+		 * only) - the transition out of RAM into the ROM is the jump */
+		fprintf(stderr, "[PCRING] last 256 pcs, oldest first:");
+		for (unsigned k = 0; k < 256; k++)
+			fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[PCRING] ",
+				pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255]);
+		fprintf(stderr, "\n");
+	}
+#endif
 	fflush(stderr);
 }
 
@@ -9972,6 +9983,12 @@ static void m68k_run_2_020()
 					}
 #endif
 					r->instruction_pc = m68k_getpc();
+#if CPU_PC_RING
+					/* same ring as the 68000 loop: with jit off and
+					 * PISTORM_CPU_DIAG=1 the RESET dump prints the last
+					 * 256 PCs - the jump into the ROM among them */
+					pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = r->instruction_pc;
+#endif
 
 					r->opcode = x_get_iword(0);
 					count_instr(r->opcode);
@@ -11748,21 +11765,6 @@ bool cpureset(void)
 	if (ab->check(pc, 2))
 	{
 		write_info(_T("CPU reset PC=%x (%s)..\n"), pc - 2, ab->name);
-#if CPU_PC_RING
-		if (pistorm_cpu_diag())
-		{
-			/* the last 256 instruction PCs, oldest first - the transition
-			 * out of application RAM into ROM is the jump we're hunting */
-			unsigned k;
-			write_log(_T("[PCRING] last 256 pcs, oldest first:\n"));
-			for (k = 0; k < 256; k++)
-			{
-				uae_u32 v = pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255];
-				write_log(_T("%s%08X"), (k & 7) ? _T(" ") : _T("\n[PCRING] "), v);
-			}
-			write_log(_T("\n"));
-		}
-#endif
 #if CPU_PC_RING
 		if (pistorm_cpu_diag())
 		{
