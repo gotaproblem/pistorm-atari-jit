@@ -112,7 +112,7 @@ All HDMI sound shares one audio device; any one of these brings it up.
 |---|---|---|
 | `ym2149` | boolean | the PSG on HDMI: shadows the register writes the real chip still gets, so chip music, key clicks and effects play on HDMI too. Any machine |
 | `dma_sound` | boolean | the STE DMA sound on HDMI. STE machines. Tuned for MOD and MP3 playback; system sounds may lag |
-| `falcon_dsp` | boolean | the Falcon's DSP56001, host port, SSI, sound matrix, 16-bit sound DMA and CODEC, sound on HDMI. Armed by the same `PSVIDEL.PRG`. See `platforms/atari/falcon/README.md`. Env: `PISTORM_DSP_TURBO`, `PISTORM_FALCON_VBLSYNC` |
+| `falcon_dsp` | boolean | the Falcon's DSP56001, host port, SSI, sound matrix, 16-bit sound DMA and CODEC, sound on HDMI. Armed by the same `PSVIDEL.PRG`. See `platforms/atari/falcon/README.md`. Env: `PISTORM_DSP_TURBO`, `PISTORM_FALCON_VBLSYNC`, `PISTORM_FALCON_STATS` |
 
 ## Input
 
@@ -184,7 +184,9 @@ acsi disabled
 network disabled
 ```
 
-with `PSVIDEL.PRG` in the image's AUTO folder.
+with `PSVIDEL.PRG` in the image's AUTO folder. Beats of Rage does not
+check the machine; a game that does (Sonic Falcon, dino) also needs
+`machine falcon`, which brings the blitter with it.
 
 ## Environment variables
 
@@ -200,6 +202,13 @@ set them in `run-pistorm.sh` or with `sudo env VAR=... sh run-pistorm.sh`.
 | `PISTORM_CPU_COMPAT=1` | see `cpu_compatible` |
 | `PISTORM_VID_FOLLOW=1` | HDMI follows the guest's refresh rate (50 Hz for a 50 Hz screen) |
 | `PISTORM_DSP_TURBO=1..8`, `PISTORM_FALCON_VBLSYNC=0` | see `falcon_dsp` |
+| `PISTORM_FALCON_STATS=1` | the `[FALCON] 68k:` timing line every 10 s while the DSP runs |
+| `PISTORM_FVDI_BLIT_TRACE=1` | fVDI: log the first 400 raster copies (path taken, MFDB headers, screen notes) and what each frame converts |
+| `PISTORM_FVDI_FULLRENDER=1` | fVDI: convert the whole frame every time instead of the dirty rect (A/B for a stale-screen report) |
+| `PISTORM_FVDI8_PLANAR=1` | fVDI 8-bit: take a memory MFDB in device format as interleaved planes (stock aranym.sys) instead of chunky (the patched driver) |
+| `PISTORM_DRM_DIRTYBAND=0` | HDMI: copy the whole frame to the DRM buffer every present instead of the dirty band (A/B) |
+| `PISTORM_ET4000_DIRTY=0` | HDMI: render and present every frame even when nothing changed |
+| `PISTORM_DMASND_GPIP7=0/1` | STE DMA sound: withhold / force the GPIP7 frame pulses (default: only to a handler in RAM) |
 | `PISTORM_STBOX_TOS`, `PISTORM_STBOX_PLANE` | see `stbox_*` |
 | `PISTORM_DUMP_ADDR=addr[,addr]` | dump guest memory at these addresses when the guest dies |
 
