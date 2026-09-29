@@ -97,6 +97,23 @@ static psvidel_frame_t   g_vpub;
 static int               g_vpub_active;
 static volatile uint64_t g_vbl_ns;
 
+/* ...and its ST-RAM CONTENT as it stood at that VBL. The render thread
+ * runs at its own rate and read the guest's screen live, so a game that
+ * erases and redraws its sprites right after the VBL was sampled mid-
+ * draw: two or three hedgehogs. The VBL copies the visible bytes (76 KB
+ * for 320x240x8, ipl_task, ~20 us) into one of three buffers and the
+ * renderer converts from that. Three, so the writer never touches the
+ * one the renderer is reading. VRAM sources have dirty pages and are
+ * left alone. */
+#define PSV_SNAP_MAX (512u * 1024u)
+typedef struct {
+    uint8_t *buf;
+    uint32_t base, bytes;               /* what the copy is of */
+} psv_snap_t;
+static psv_snap_t        g_snap[3];
+static volatile int      g_snap_pub = -1;   /* last complete copy */
+static volatile int      g_snap_busy = -1;  /* the renderer is reading it */
+
 /* the palette as the renderer wants it */
 static uint32_t          g_pal_xrgb[256];
 static volatile uint32_t g_pal_gen;
@@ -1052,6 +1069,31 @@ void psvidel_vbl(void)
     g_vpub_active = act;
     __atomic_add_fetch(&g_vseq, 1, __ATOMIC_ACQ_REL);
     __atomic_store_n(&g_vbl_ns, now_ns(), __ATOMIC_RELEASE);
+
+    /* snapshot an ST-RAM frame (see g_snap) */
+    if (act && S.st_ram) {
+        uint32_t a = f.base;
+        uint64_t bytes = (uint64_t)f.pitch * f.h + 64u;
+        if (a >= PSV_LO_BASE && a < PSV_LO_BASE + PSV_LO_SIZE)
+            a -= PSV_LO_BASE;
+        if (a < PSV_VRAM_BASE && a < S.st_limit && bytes <= S.st_limit - a &&
+            bytes <= PSV_SNAP_MAX) {
+            int busy = __atomic_load_n(&g_snap_busy, __ATOMIC_ACQUIRE);
+            int pub  = __atomic_load_n(&g_snap_pub, __ATOMIC_ACQUIRE);
+            int i = 0;
+            while (i == busy || i == pub)
+                i++;
+            psv_snap_t *sn = &g_snap[i];
+            if (!sn->buf)
+                sn->buf = (uint8_t *)malloc(PSV_SNAP_MAX);
+            if (sn->buf) {
+                memcpy(sn->buf, S.st_ram + a, (size_t)bytes);
+                sn->base = f.base;
+                sn->bytes = (uint32_t)bytes;
+                __atomic_store_n(&g_snap_pub, i, __ATOMIC_RELEASE);
+            }
+        }
+    }
 }
 
 int psvidel_frame_begin(psvidel_frame_t *f)
@@ -1091,8 +1133,16 @@ static const uint8_t *frame_source(const psvidel_frame_t *f, int *in_vram,
         *vram_off = off;
         return g_vram + off;
     }
-    if (S.st_ram && a < S.st_limit && bytes <= S.st_limit - a)
+    if (S.st_ram && a < S.st_limit && bytes <= S.st_limit - a) {
+        /* the VBL's copy of this frame, if there is one (render thread:
+         * mark it busy so the next VBL writes elsewhere) */
+        int i = __atomic_load_n(&g_snap_pub, __ATOMIC_ACQUIRE);
+        if (i >= 0 && g_snap[i].base == f->base && g_snap[i].bytes == bytes) {
+            __atomic_store_n(&g_snap_busy, i, __ATOMIC_RELEASE);
+            return g_snap[i].buf;
+        }
         return S.st_ram + a;
+    }
     return NULL;
 }
 
