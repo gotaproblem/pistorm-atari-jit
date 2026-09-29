@@ -1340,7 +1340,10 @@ static uint8_t snd_read8(uint32_t o)
 
 static void set_addr_byte(uint32_t *a, int shift, uint8_t v)
 {
-    *a = (*a & ~(0xFFu << shift)) | ((uint32_t)v << shift);
+    uint32_t keep = ~(0xFFu << shift);
+    if (shift == 16)
+        keep &= 0x00FFFFFFu;        /* a register write means a 24-bit address */
+    *a = (*a & keep) | ((uint32_t)v << shift);
 }
 
 static void snd_write8(uint32_t o, uint8_t v)
@@ -1489,7 +1492,13 @@ int32_t falcon_sound_xbios(int op, const int32_t *a, uint32_t *out4)
         return 0;
     }
     case 131: {                                              /* setbuffer  */
-        uint32_t beg = (uint32_t)a[1] & 0xFFFFFE, end = (uint32_t)a[2] & 0xFFFFFE;
+        /* The full 32-bit address, not the chip's 24 bits: a program
+         * loaded into TT-RAM (Sonic Falcon, load-to-TT flag set, its
+         * stream ring in BSS) hands the XBIOS a TT-RAM buffer. A real
+         * Falcon would play garbage from the ST-RAM alias; the DMA here
+         * reads TT-RAM fine, so let it. Direct register writes still
+         * address 24 bits (set_addr_byte). */
+        uint32_t beg = (uint32_t)a[1] & 0xFFFFFFFEu, end = (uint32_t)a[2] & 0xFFFFFFFEu;
         if (a[0]) { F.rec_start = beg; F.rec_end = end; }
         else      { F.play_start = beg; F.play_end = end; }
         return 0;
