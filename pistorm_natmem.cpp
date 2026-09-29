@@ -4410,19 +4410,34 @@ extern "C" int pistorm_fvdi_set_mode(uint32_t width, uint32_t height, uint32_t b
     return 1;
 }
 
-/* Dirty byte extent since the render thread last fetched it. Single writer
- * (CPU thread), single reader (render thread, fetch-and-reset). A torn
- * min/max pair across the two exchanges is detected by the reader
- * (max <= min) and answered with a full-frame render, so no update can be
- * lost - at worst one frame renders more rows than needed. */
-static uint32_t pistorm_fvdi_dirty_min = 0xffffffffu;
-static uint32_t pistorm_fvdi_dirty_max = 0;
-/* Column extent (byte-offset-within-row units). A note that stays inside one
- * row yields an exact column span; one that crosses rows means full width.
- * Lets the render convert/copy a dirty RECT instead of full-width bands -
- * dragging a 640px window on a 1920px screen is 3x less traffic. */
-static uint32_t pistorm_fvdi_dirty_xmin = 0xffffffffu;
-static uint32_t pistorm_fvdi_dirty_xmax = 0;
+/* Dirty rectangle since the render thread last fetched it. Single writer
+ * (CPU thread), single reader (render thread, fetch-and-reset).
+ *
+ * The whole rect - first and last dirty row, first and one-past-last dirty
+ * byte within a row - is ONE 64-bit word (16 bits each), merged with a
+ * compare-and-swap and taken with an exchange, so a note and a fetch can
+ * never tear: a fetch that lands between the writer's read and its CAS
+ * makes the CAS fail, and the retry merges the note into the fresh (empty)
+ * rect. The old scheme kept four plain words: the reader took the old max,
+ * the writer's compare had already seen that old max and skipped, and the
+ * next note then rebuilt a "valid" extent that did not cover the first one
+ * - a row lost for good. Four separate atomics would still let the rows of
+ * one note pair with the columns of another. Hence one word.
+ *
+ * A note that stays inside one row yields an exact column span; one that
+ * crosses rows means full width. That lets the render convert/copy a dirty
+ * RECT instead of full-width bands - dragging a 640px window on a 1920px
+ * screen is 3x less traffic. */
+#define FVDI_DIRTY_EMPTY 0xffff0000ffff0000ull   /* rmin=ffff rmax=0 xmin=ffff xmax=0 */
+
+static uint64_t pistorm_fvdi_dirty_rect = FVDI_DIRTY_EMPTY;
+
+static inline uint64_t fvdi_dirty_pack(uint32_t rmin, uint32_t rmax,
+                                       uint32_t xmin, uint32_t xmax)
+{
+    return ((uint64_t)rmin << 48) | ((uint64_t)rmax << 32) |
+           ((uint64_t)xmin << 16) | (uint64_t)xmax;
+}
 
 static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
 {
@@ -4431,40 +4446,80 @@ static inline void fvdi_note_write(uint32_t o, uint32_t bytes)
     if (o < pistorm_fvdi_first_write_state)
         pistorm_fvdi_first_write_state = o;
     pistorm_fvdi_last_write_state = o;
-    if (o < pistorm_fvdi_dirty_min)
-        pistorm_fvdi_dirty_min = o;
-    if (o + bytes > pistorm_fvdi_dirty_max)
-        pistorm_fvdi_dirty_max = o + bytes;
 
     uint32_t rb = pistorm_fvdi_mode_width * (pistorm_fvdi_mode_bpp / 8);
-    if (rb && bytes) {
-        uint32_t x0, x1e;                      /* [x0, x1e) within a row */
-        uint32_t r0 = o / rb, r1 = (o + bytes - 1) / rb;
-        if (r0 == r1) { x0 = o - r0 * rb; x1e = x0 + bytes; }
-        else          { x0 = 0;           x1e = rb; }
-        if (x0 < pistorm_fvdi_dirty_xmin)
-            pistorm_fvdi_dirty_xmin = x0;
-        if (x1e > pistorm_fvdi_dirty_xmax)
-            pistorm_fvdi_dirty_xmax = x1e;
+    if (!rb || !bytes)
+        return;
+    uint32_t r0 = o / rb, r1 = (o + bytes - 1) / rb;
+    uint32_t x0, x1e;                          /* [x0, x1e) within a row */
+    if (r0 == r1) { x0 = o - r0 * rb; x1e = x0 + bytes; }
+    else          { x0 = 0;           x1e = rb; }
+    if (r1 > 0xfffeu) r1 = 0xfffeu;            /* 16-bit fields (no mode is */
+    if (r0 > r1) r0 = r1;                      /* anywhere near) */
+    if (x1e > 0xffffu) { x0 = 0; x1e = 0xffffu; }
+
+    uint64_t old = __atomic_load_n(&pistorm_fvdi_dirty_rect, __ATOMIC_RELAXED);
+    for (;;) {
+        uint32_t rmin = (uint32_t)(old >> 48), rmax = (uint32_t)(old >> 32) & 0xffffu;
+        uint32_t xmin = (uint32_t)(old >> 16) & 0xffffu, xmax = (uint32_t)old & 0xffffu;
+        if (r0 < rmin) rmin = r0;
+        if (r1 > rmax) rmax = r1;
+        if (x0 < xmin) xmin = x0;
+        if (x1e > xmax) xmax = x1e;
+        uint64_t nw = fvdi_dirty_pack(rmin, rmax, xmin, xmax);
+        if (nw == old)
+            return;
+        if (__atomic_compare_exchange_n(&pistorm_fvdi_dirty_rect, &old, nw, true,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+        /* old now holds the current word (the reader reset it): retry */
     }
+}
+
+/* Unpack a rect word into the byte extents the render works in:
+ * [mn, mx) row bytes, [xmn, xmx) bytes within a row. Empty -> mx <= mn. */
+static inline void fvdi_dirty_unpack(uint64_t e, uint32_t *mn, uint32_t *mx,
+                                     uint32_t *xmn, uint32_t *xmx)
+{
+    uint32_t rb = pistorm_fvdi_mode_width * (pistorm_fvdi_mode_bpp / 8);
+    uint32_t rmin = (uint32_t)(e >> 48), rmax = (uint32_t)(e >> 32) & 0xffffu;
+    if (rmin > rmax || !rb) {
+        *mn = 0xffffffffu; *mx = 0;
+    } else {
+        *mn = rmin * rb; *mx = (rmax + 1u) * rb;
+    }
+    *xmn = (uint32_t)(e >> 16) & 0xffffu;
+    *xmx = (uint32_t)e & 0xffffu;
 }
 
 extern "C" void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx)
 {
-    *mn = __atomic_exchange_n(&pistorm_fvdi_dirty_min, 0xffffffffu, __ATOMIC_ACQ_REL);
-    *mx = __atomic_exchange_n(&pistorm_fvdi_dirty_max, 0u, __ATOMIC_ACQ_REL);
+    uint32_t xmn, xmx;
+    uint64_t e = __atomic_exchange_n(&pistorm_fvdi_dirty_rect, FVDI_DIRTY_EMPTY, __ATOMIC_ACQ_REL);
+    fvdi_dirty_unpack(e, mn, mx, &xmn, &xmx);
 }
 
 /* Fetch-and-reset the dirty rect: row byte extent + column byte extent.
- * Same single-writer/single-reader torn-pair contract as fetch_dirty:
- * the reader treats (max <= min) as "unknown -> full". */
+ * Taken whole, so (mx <= mn) only ever means "nothing noted" - which the
+ * reader still answers with a full render whenever the write count moved. */
 extern "C" void pistorm_fvdi_fetch_dirty_rect(uint32_t *mn, uint32_t *mx,
                                               uint32_t *xmn, uint32_t *xmx)
 {
-    *mn  = __atomic_exchange_n(&pistorm_fvdi_dirty_min, 0xffffffffu, __ATOMIC_ACQ_REL);
-    *mx  = __atomic_exchange_n(&pistorm_fvdi_dirty_max, 0u, __ATOMIC_ACQ_REL);
-    *xmn = __atomic_exchange_n(&pistorm_fvdi_dirty_xmin, 0xffffffffu, __ATOMIC_ACQ_REL);
-    *xmx = __atomic_exchange_n(&pistorm_fvdi_dirty_xmax, 0u, __ATOMIC_ACQ_REL);
+    uint64_t e = __atomic_exchange_n(&pistorm_fvdi_dirty_rect, FVDI_DIRTY_EMPTY, __ATOMIC_ACQ_REL);
+    fvdi_dirty_unpack(e, mn, mx, xmn, xmx);
+}
+
+/* The rect as it stands, in rows and pixels, without taking it (trace). */
+extern "C" void pistorm_fvdi_peek_dirty(uint32_t *r0, uint32_t *r1,
+                                        uint32_t *px0, uint32_t *px1)
+{
+    uint64_t e = __atomic_load_n(&pistorm_fvdi_dirty_rect, __ATOMIC_ACQUIRE);
+    uint32_t bpp = pistorm_fvdi_mode_bpp / 8;
+    if (!bpp) bpp = 1;
+    *r0 = (uint32_t)(e >> 48);
+    *r1 = (uint32_t)(e >> 32) & 0xffffu;
+    *px0 = ((uint32_t)(e >> 16) & 0xffffu) / bpp;
+    *px1 = ((uint32_t)e & 0xffffu) / bpp;      /* one past */
 }
 
 extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes)

@@ -2632,6 +2632,16 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
         uint32_t bytespp  = (bpp == 32) ? 4u : (bpp == 16) ? 2u : 1u;
         uint32_t rowbytes = w * bytespp;
         pistorm_fvdi_fetch_dirty_rect(&dmin, &dmax, &xmin, &xmax);
+        /* PISTORM_FVDI_FULLRENDER=1: ignore the rect, convert the whole
+         * frame every time (A/B: a remnant that survives this is in the
+         * framebuffer itself, not in the dirty tracking). */
+        static int full_env = -1;
+        if (full_env < 0) {
+            const char *e = getenv("PISTORM_FVDI_FULLRENDER");
+            full_env = (e && *e == '1');
+        }
+        if (full_env)
+            mode_changed = true;
         if (!mode_changed && dmin < dmax && rowbytes) {
             y0 = dmin / rowbytes;
             y1 = (dmax - 1) / rowbytes;

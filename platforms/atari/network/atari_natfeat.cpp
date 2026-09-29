@@ -306,6 +306,7 @@ extern "C" void pistorm_fvdi_set_palette(uint32_t idx, uint32_t r, uint32_t g, u
 
 extern "C" uint64_t pistorm_fvdi_write_count(void);
 extern "C" void pistorm_fvdi_note_host_write(uint32_t o, uint32_t bytes);
+extern "C" void pistorm_fvdi_peek_dirty(uint32_t *r0, uint32_t *r1, uint32_t *px0, uint32_t *px1);
 extern "C" void pistorm_dma_to_stram(uaecptr addr, const uint8_t *src, uint32_t n);
 extern "C" int  dmasnd_mp3_play(const char *host_path);
 extern "C" void dmasnd_mp3_stop(void);
@@ -3440,14 +3441,19 @@ static bool fvdi_blit_rows_rop(uaecptr src_mfdb, uaecptr dst_mfdb,
   return true;
 }
 
+/* Which path the last fvdi_blit_area took (PISTORM_FVDI_BLIT_TRACE). */
+static const char *g_fvdi_blit_path = "-";
+
 static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
                               int32_t src_x, int32_t src_y,
                               int32_t dst_x, int32_t dst_y,
                               int32_t w, int32_t h, unsigned op)
 {
+  g_fvdi_blit_path = "empty";
   if (w <= 0 || h <= 0)
     return 1;
 
+  g_fvdi_blit_path = "too-big";
   if ((int64_t)w * (int64_t)h > FVDI_MAX_ACCEL_PIXELS)
     return 1;
   if (w > FVDI_MAX_ACCEL_SPAN || h > FVDI_MAX_ACCEL_SPAN)
@@ -3457,9 +3463,15 @@ static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
   int32_t src_h;
   int32_t dst_w;
   int32_t dst_h;
+  /* An MFDB this backend cannot address (odd format, planar, bad header)
+   * is fVDI's to blit through the bus: DECLINE it. Claiming it done left
+   * the destination untouched - a GEM menu whose saved background lived
+   * in such an MFDB never came back. */
+  g_fvdi_blit_path = "declined-mfdb";
   if (!fvdi_target_bounds(src_mfdb, &src_w, &src_h) ||
       !fvdi_target_bounds(dst_mfdb, &dst_w, &dst_h))
-    return 1;
+    return 0;
+  g_fvdi_blit_path = "clipped-away";
 
   if (src_x < 0) {
     dst_x -= src_x;
@@ -3496,20 +3508,24 @@ static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
   if (w <= 0 || h <= 0)
     return 1;
 
+  g_fvdi_blit_path = "screen-rows";
   if (op == 3 && fvdi_mfdb_is_screen(src_mfdb) && fvdi_mfdb_is_screen(dst_mfdb) &&
       fvdi_screen_copy_rows(src_x, src_y, dst_x, dst_y, w, h))
     return 1;
 
   /* Fast path for plain copies between any direct surfaces (see above). */
+  g_fvdi_blit_path = "copy-rows";
   if (op == 3 &&
       fvdi_copy_rows_generic(src_mfdb, dst_mfdb, src_x, src_y,
                              dst_x, dst_y, w, h))
     return 1;
 
+  g_fvdi_blit_path = "rop-rows";
   if (fvdi_blit_rows_rop(src_mfdb, dst_mfdb, src_x, src_y,
                          dst_x, dst_y, w, h, op))
     return 1;
 
+  g_fvdi_blit_path = "per-pixel";
   if ((int64_t)w * (int64_t)h >= 4096)
     fvdi_dump_mfdb_miss("blit", op, src_mfdb, dst_mfdb, w, h);
 
@@ -4050,35 +4066,52 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       int32_t h = (int32_t)nf_get_param(params, 8);
       unsigned op = nf_get_param(params, 9);
       bool blit_m = false;
+      static int trace = -1, shown;
+      if (trace < 0) {
+        const char *e = getenv("PISTORM_FVDI_BLIT_TRACE");
+        trace = (e && *e == '1');
+      }
+      const uint64_t wc0 = trace ? pistorm_fvdi_write_count() : 0;
       if (fvdi_mfdb_is_screen(src))
         blit_m |= fvdi_mouse_obscure_rect(src_x, src_y, w, h);
       if (fvdi_mfdb_is_screen(dst))
         blit_m |= fvdi_mouse_obscure_rect(dst_x, dst_y, w, h);
+      const uint64_t wc1 = trace ? pistorm_fvdi_write_count() : 0;
       uae_u32 blit_r = fvdi_blit_area(src, dst, src_x, src_y, dst_x, dst_y,
                                       w, h, op);
+      const uint64_t wc2 = trace ? pistorm_fvdi_write_count() : 0;
       fvdi_mouse_unobscure(blit_m);
       /* PISTORM_FVDI_BLIT_TRACE=1: every raster copy, with what each side
-       * was taken for - for a GEM menu whose background never comes back
-       * (a save/restore aimed at an MFDB this backend does not see as
-       * the screen leaves the menu on it). The first 400 only. */
-      {
-        static int trace = -1, shown;
-        if (trace < 0) {
-          const char *e = getenv("PISTORM_FVDI_BLIT_TRACE");
-          trace = (e && *e == '1');
-        }
-        if (trace && shown < 400) {
-          shown++;
-          const fvdi_mfdb_info_t *si = fvdi_mfdb_info(src);
-          const fvdi_mfdb_info_t *di = fvdi_mfdb_info(dst);
-          fprintf(stderr, "[FVDI] blit op %u %dx%d: src %s @%08X (%d,%d) -> dst %s @%08X (%d,%d)%s\n",
-                  op, w, h,
-                  !si ? "screen" : si->screen ? "screen*" : si->planar ? "mem-planar" : "mem",
-                  si ? si->base : 0u, src_x, src_y,
-                  !di ? "screen" : di->screen ? "screen*" : di->planar ? "mem-planar" : "mem",
-                  di ? di->base : 0u, dst_x, dst_y,
-                  blit_r ? "" : "  NOT DONE");
-        }
+       * was taken for, the path that did it, how many screen notes it
+       * made (mouse hide / blit / mouse show) and the dirty rect as it
+       * stands for the render afterwards - for a GEM menu whose
+       * background never comes back. The first 400 only. */
+      if (trace && shown < 400) {
+        shown++;
+        const fvdi_mfdb_info_t *si = fvdi_mfdb_info(src);
+        const fvdi_mfdb_info_t *di = fvdi_mfdb_info(dst);
+        uint32_t r0, r1, px0, px1;
+        pistorm_fvdi_peek_dirty(&r0, &r1, &px0, &px1);
+        fprintf(stderr, "[FVDI] blit op %u %dx%d: src %s @%08X (%d,%d) -> dst %s @%08X (%d,%d)%s"
+                        " via %s, notes +%llu/+%llu/+%llu, dirty rows %u-%u cols %u-%u (writes %llu)\n",
+                op, w, h,
+                !si ? "screen" : si->screen ? "screen*" : si->planar ? "mem-planar" : "mem",
+                si ? si->base : 0u, src_x, src_y,
+                !di ? "screen" : di->screen ? "screen*" : di->planar ? "mem-planar" : "mem",
+                di ? di->base : 0u, dst_x, dst_y,
+                blit_r ? "" : "  NOT DONE",
+                g_fvdi_blit_path,
+                (unsigned long long)(wc1 - wc0), (unsigned long long)(wc2 - wc1),
+                (unsigned long long)(pistorm_fvdi_write_count() - wc2),
+                r0, r1, px0, px1 ? px1 - 1 : 0,
+                (unsigned long long)pistorm_fvdi_write_count());
+        const fvdi_mfdb_info_t *mi = si && !si->screen ? si : di && !di->screen ? di : NULL;
+        if (mi)
+          fprintf(stderr, "[FVDI]   mem MFDB @%08X: %ux%u wdwidth %u standard %u planes %u -> %s, %u byte/px, row %u bytes\n",
+                  mi->base, mi->width, mi->height, mi->wdwidth, mi->standard, mi->bpp,
+                  !mi->addressable ? "NOT addressable" :
+                  mi->standard ? "standard format (declined)" : "direct",
+                  mi->pixel_bytes, mi->row_bytes);
       }
       return blit_r;
     }
