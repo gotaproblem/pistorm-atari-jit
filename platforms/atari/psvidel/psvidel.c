@@ -284,6 +284,13 @@ static void recompute(void)
         f.fmt = bpp == 16 ? PSV_FMT_RGB565 : PSV_FMT_PLANAR;
         f.w = vwrap * 16u / bpp;
         f.pitch = (vwrap + off) * 2u;
+        /* With HSCROLL set the Videl fetches one more 16-pixel group per
+         * line (bpp words), exactly like the STE shifter; software that
+         * scrolls sets the line offset for that and expects the stride to
+         * grow by the group. Without it every row started 16 bytes early
+         * and the picture sheared as soon as a game scrolled. */
+        if (f.hscroll)
+            f.pitch += bpp * 2u;
         f.h = lines;
         f.ste_pal = (bpp == 2);
         if (f.fmt == PSV_FMT_PLANAR)
