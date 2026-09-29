@@ -4633,6 +4633,10 @@ extern "C" void pistorm_reset_state_dump(void)
 	fprintf(stderr, "\n");
 	pistorm_dump_stack_longs("ssp", regs.s ? m68k_areg(regs, 7) : regs.isp);
 	pistorm_dump_stack_longs("usp", regs.s ? regs.usp : m68k_areg(regs, 7));
+	if (pistorm_cpu_diag()) {
+		void pistorm_exc_ring_dump(void);
+		pistorm_exc_ring_dump();     /* the last 64 exceptions and traps */
+	}
 #if CPU_PC_RING
 	if (pistorm_cpu_diag()) {
 		/* the last 256 instruction PCs, oldest first (interpreter loops
@@ -9012,6 +9016,9 @@ static void m68k_run_mmu060()
 #endif
 				f.x = regflags.x;
 				regs.instruction_pc = m68k_getpc();
+#if CPU_PC_RING
+				pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = regs.instruction_pc;
+#endif
 
 				do_cycles(cpu_cycles);
 
@@ -9712,6 +9719,9 @@ static void m68k_run_2p()
 			while (!exit)
 			{
 				r->instruction_pc = m68k_getpc();
+#if CPU_PC_RING
+				pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = regs.instruction_pc;
+#endif
 				r->opcode = regs.irc;
 
 #if DEBUG_CD32CDTVIO
