@@ -66,8 +66,9 @@ crystal drifts from the Pi's.
 
 **Lockstep with the 68k.** While the DSP answers the 68k about once a
 VBL (70% of VBLs to engage, 40% to let go), the sample clock is not the
-wall clock: each answer buys exactly one VBL of sample periods (the VBL
-period as ipl_task measures it), played at once, and nothing the 68k sends
+wall clock: each answer buys one answer's worth of sample periods (the
+answers' own average spacing - BOR answers 50 times a second on a 60 Hz
+VGA VBL), played at once, and nothing the 68k sends
 after an answer reaches the DSP until they have played. Between those
 bursts the DSP gets instruction cycles whenever the 68k waits on it, so it
 reads, mixes and answers at once. The ring's fill trims the samples per
@@ -105,6 +106,13 @@ A DSP that polls a peripheral in place (`jclr #n,x:<<$ffe9,*` and the
 like) is skipped forward to its next event, so waiting costs nothing.
 BOR's music loop spends most of its time there; the harness runs 20 s of
 it (68k emulation included) in 1.7 s on one x86 core.
+
+While a Falcon or SV mode is on, the guest's ST-RAM screen is no longer
+written through to the real ST bus, and the 32 KB Shifter shadow is not
+refilled on a screen flip: the HDMI shows the host copy, the real Shifter
+shows nothing anyone looks at, and that bus traffic was most of a Falcon
+game's frame time. A plain ST's missing joypad port is answered as idle
+without a bus cycle, for the same reason.
 
 ## Differences from the hardware
 

@@ -1014,6 +1014,9 @@ static void stram_shadow_video_after(uaecptr a, int size)
 
     if (!stram_shadow_on())
         return;
+    if (psvidel_active())
+        return;                         /* HDMI shows it: no 32 KB copy per
+                                         * screen flip (see stram_needs_bus_write) */
     a &= 0x00FFFFFFu;
     if (size == 1)
         hit = (a == 0x00FF8201u || a == 0x00FF8203u || a == 0x00FF820Du);
@@ -1484,8 +1487,14 @@ static inline int stram_needs_bus_write(uaecptr a, int sz)
         return 1;
 
     uae_u32 screen = stram_screen_base();
-    if (screen && stram_range_overlaps(a, sz, screen, STRAM_SCREEN_WRITE_THROUGH_SIZE))
-        return 1;
+    if (screen && stram_range_overlaps(a, sz, screen, STRAM_SCREEN_WRITE_THROUGH_SIZE)) {
+        /* The screen is written through so the real Shifter can show it.
+         * While PSVIDEL has the display (a Falcon or SV mode on HDMI) the
+         * real Shifter shows nothing anyone looks at, and the write-through
+         * was most of a Falcon game's frame time: Beats of Rage draws a
+         * 150 KB screen a frame, and each of those words crossed the bus. */
+        return !psvidel_active();
+    }
 
     return 0;
 }
@@ -2907,12 +2916,18 @@ static inline uae_u32 hw_joypad_idle(uaecptr a, int size)
 static inline uae_u32 hw_joypad_get(uaecptr a, int size)
 {
     uae_u32 v;
-    if (size == 4)      v = ps_bus_lget(a);
-    else if (size == 2) v = ps_read_16(a);
-    else                v = ps_read_8(a);
-    if (g_buserr && falcon_armed()) {
-        g_buserr = 0;
+    if (falcon_armed() && !emulator_machine_is_ste()) {
+        /* a plain ST has no port there: the read would only bus-error,
+         * and a BERR cycle is a bus timeout every time a game polls */
         v = hw_joypad_idle(a, size);
+    } else {
+        if (size == 4)      v = ps_bus_lget(a);
+        else if (size == 2) v = ps_read_16(a);
+        else                v = ps_read_8(a);
+        if (g_buserr && falcon_armed()) {
+            g_buserr = 0;
+            v = hw_joypad_idle(a, size);
+        }
     }
     if (JOY_USB_enabled && !g_buserr && joy_usb_ste_addr(a))
         v = joy_usb_ste_read(a, size, v);

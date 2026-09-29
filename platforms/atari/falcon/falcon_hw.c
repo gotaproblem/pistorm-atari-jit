@@ -163,6 +163,8 @@ static struct {
     uint32_t     answers;               /* answers to the 68k (engine)   */
     uint32_t     answers_at_win;
     uint64_t     talk_win_ns;
+    uint64_t     answer_ns;             /* wall clock of the last answer  */
+    double       answer_gap;            /* their average spacing, seconds */
     int          answer_armed;          /* read a host word since the last */
     uint32_t     answers_paid;          /* answers already turned into samples */
     unsigned     vbl_skipped;
@@ -346,6 +348,17 @@ static void periph_write(void *ctx, int space, uint16_t a, uint32_t v)
         if (F.answer_armed) {                /* the reply to what it read */
             F.answer_armed = 0;
             F.answers++;
+            uint64_t now = rxlog_now();
+            if (F.answer_ns) {
+                double g = (double)(now - F.answer_ns) * 1e-9;
+                if (g > 0.040) g = 0.040;
+                if (g < 0.010) g = 0.010;
+                if (F.answer_gap == 0.0)
+                    F.answer_gap = g;
+                else
+                    F.answer_gap += (g - F.answer_gap) / 16.0;
+            }
+            F.answer_ns = now;
             /* lockstep: nothing the 68k sends from here on is seen until
              * the VBL of samples this answer pays for has played (it plays
              * at once, as a burst), so even a question asked straight after
@@ -826,8 +839,12 @@ static int64_t clock_due(double hz)
             want = 0;
         if (want != F.vbl_locked) {
             F.vbl_locked = want;
-            F.clk = (double)F.emitted - lead;       /* carry on from here */
+            /* carry on from here, topping the ring up to its target so the
+             * switch itself is not heard */
+            F.clk = (double)F.emitted - lead + (fill < target ? target - fill : 0.0);
             F.answers_paid = F.answers;
+            F.answer_gap = 0.0;
+            F.answer_ns = 0;
             if (!want)
                 g_tx_vis_on = 0;
         }
@@ -839,7 +856,13 @@ static int64_t clock_due(double hz)
             n = 2;
             F.vbl_skipped++;
         }
-        double fpv = hz * (double)atomic_load(&g_vbl_period_us) * 1e-6 * (1.0 + adj);
+        /* one answer's worth: the answers' own average spacing, not the
+         * VBL period - Beats of Rage answers 50 times a second on a 60 Hz
+         * VGA VBL (its handler overruns the frame), and paying a VBL per
+         * answer left the ring 17% short */
+        double gap = F.answer_gap > 0.0 ? F.answer_gap
+                   : (double)atomic_load(&g_vbl_period_us) * 1e-6;
+        double fpv = hz * gap * (1.0 + adj);
         F.clk += (double)n * fpv;
         /* the 68k went quiet mid-lockstep: do not let owed time pile up */
         double floor_clk = (double)F.emitted - lead - fpv;
