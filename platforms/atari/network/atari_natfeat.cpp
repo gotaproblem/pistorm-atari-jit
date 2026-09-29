@@ -4057,6 +4057,29 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       uae_u32 blit_r = fvdi_blit_area(src, dst, src_x, src_y, dst_x, dst_y,
                                       w, h, op);
       fvdi_mouse_unobscure(blit_m);
+      /* PISTORM_FVDI_BLIT_TRACE=1: every raster copy, with what each side
+       * was taken for - for a GEM menu whose background never comes back
+       * (a save/restore aimed at an MFDB this backend does not see as
+       * the screen leaves the menu on it). The first 400 only. */
+      {
+        static int trace = -1, shown;
+        if (trace < 0) {
+          const char *e = getenv("PISTORM_FVDI_BLIT_TRACE");
+          trace = (e && *e == '1');
+        }
+        if (trace && shown < 400) {
+          shown++;
+          const fvdi_mfdb_info_t *si = fvdi_mfdb_info(src);
+          const fvdi_mfdb_info_t *di = fvdi_mfdb_info(dst);
+          fprintf(stderr, "[FVDI] blit op %u %dx%d: src %s @%08X (%d,%d) -> dst %s @%08X (%d,%d)%s\n",
+                  op, w, h,
+                  !si ? "screen" : si->screen ? "screen*" : si->planar ? "mem-planar" : "mem",
+                  si ? si->base : 0u, src_x, src_y,
+                  !di ? "screen" : di->screen ? "screen*" : di->planar ? "mem-planar" : "mem",
+                  di ? di->base : 0u, dst_x, dst_y,
+                  blit_r ? "" : "  NOT DONE");
+        }
+      }
       return blit_r;
     }
 
