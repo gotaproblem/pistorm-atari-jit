@@ -18,7 +18,7 @@ Then add-ons can be developed, such as
 - [x] A/V screen recording (hardware H.264 + sound, see capmux.sh) [implemented]
 - [x] Host VIDEO playback via NatFeats - MP4/MKV/AVI, hardware H.264, own DRM overlay plane (see VIDEO.md) [implemented]
 - [x] Falcon Videl + SuperVidel on HDMI - Falcon/SV modes, video RAM, SuperBlitter, XBIOS TSR (see PSVIDEL.md) [implemented]
-- [x] Falcon DSP56001 + sound matrix/DMA on HDMI - clean-room 56001 core, host port, SSI, CODEC (see FALCON-DSP.md) [implemented]
+- [x] Falcon DSP56001 + sound matrix/DMA on HDMI - clean-room 56001 core, host port, SSI, CODEC (see platforms/atari/falcon/README.md) [implemented]
 - [ ] Additional SVGA Cards
 ## Requirements
 This is not for newbies, a good amount of linux development knowledge is needed.
@@ -92,7 +92,7 @@ If the tests fail then there is no point in continuing until the hardware issues
 ### Step 2
 The configuration is one file, **../configs/psctrl.cfg** (the installer puts it there from `configs/psctrl.cfg.default`). It holds a `[psctrl]` block and one `[section]` per **build** - a build is a complete machine. Two come ready: `[gem]` (a plain TOS/EmuTOS desktop on the ST video) and `[apj-os]` (FreeMiNT + XaAES + fVDI on HDMI). The file is annotated.
 
-You do not have to edit it by hand: the **setup page** does that (Step 3), and shows every key the emulator accepts with its choices and ranges.
+You do not have to edit it by hand: the **setup page** does that (Step 3), and shows every key the emulator accepts with its choices and ranges. **PSCTRL-CFG.md** documents every key.
 
 ### Step 3
 So the tests pass, run the emulator through its launcher (it asks for sudo itself and relaunches on a Restart from the taskbar)

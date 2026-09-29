@@ -268,11 +268,11 @@ say "Installing default configs / EmuTOS / blank floppy (existing files kept)"
 # psctrl.cfg is the one config the emulator and the pre-boot setup page
 # both use ([psctrl] plus a [section] per build - gem and apj-os to start
 # with; the page's N key makes more). copy_once, so your own file is
-# never overwritten. atari.cfg / master.cfg are the old flat single-
-# machine files; still shipped for anyone who runs --config with one.
+# never overwritten. atari.cfg is the old flat single-machine file,
+# still shipped for anyone who runs --config with one; the annotated
+# master.cfg is retired - PSCTRL-CFG.md documents every key.
 copy_once "$HERE/configs/psctrl.cfg.default" "$ROOT/configs/psctrl.cfg"
 copy_once "$HERE/configs/atari.cfg"         "$ROOT/configs/atari.cfg"
-copy_once "$HERE/configs/master.cfg"        "$ROOT/configs/master.cfg"
 copy_once "$HERE/configs/emutos-aranym.rom" "$ROOT/roms/emutos-aranym.rom"
 copy_once "$HERE/configs/720k.st"           "$ROOT/dkimages/fdd/720k.st"
 

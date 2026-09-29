@@ -1,6 +1,8 @@
 # FALCON-DSP - the Falcon's DSP56001 and sound matrix, on HDMI
 
-The companion to PSVIDEL (`PSVIDEL.md`). PSVIDEL gives the guest the
+The design note; `platforms/atari/falcon/README.md` is the user side
+(setting it up, reading the log, tuning). The companion to PSVIDEL
+(`PSVIDEL.md`). PSVIDEL gives the guest the
 Falcon's video chip; this gives it the rest of what Falcon software leans
 on: the Motorola DSP56001, its host port, the SSI serial port, the 4x4
 sound switching matrix, the 16-bit sound DMA (play and record) and the

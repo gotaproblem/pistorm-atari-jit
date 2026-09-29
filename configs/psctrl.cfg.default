@@ -26,6 +26,7 @@
 # the lines it owns and copies everything else through byte for byte.
 #
 # Replaces the old atari.cfg / apj-os.cfg / master.cfg / autoboot.cfg.
+# PSCTRL-CFG.md in the source tree documents every key.
 
 [psctrl]
 # Seconds the setup page waits before booting the last choice. 0 boots
@@ -92,3 +93,21 @@ network_irq 4
 network_host_ip 192.168.50.1
 network_atari_ip 192.168.50.2
 network_netmask 255.255.255.0
+
+# A Falcon-game build (Beats of Rage and friends) for an ST with a
+# PiSTorm: the Falcon's video chip and DSP on HDMI, armed by PSVIDEL.PRG
+# in the image's AUTO folder. Uncomment to have it on the setup page.
+#[falcon]
+#cpu 68040
+#fpu
+#ttram 128M
+#psvidel true
+#falcon_dsp true
+#ym2149
+#kbd usb
+#usb gamepad
+#rom emutos-aranym.rom
+#ide
+#hdd 0:games.img
+#acsi disabled
+#network disabled

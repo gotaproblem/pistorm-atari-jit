@@ -133,7 +133,7 @@ Created next to the repo (won't overwrite anything that already exists):
 <parent>/
 ├── roms/            EmuTOS is installed here; add your own TOS ROM here too
 ├── configs/         psctrl.cfg - the one config: [psctrl] + a section per build
-│                    (atari.cfg / master.cfg: the old flat single-machine files)
+│                    (PSCTRL-CFG.md documents every key; atari.cfg is the old flat file)
 ├── dkimages/
 │   └── fdd/         720k.st blank floppy; put disk/game images here
 ├── atari-share/     point a HOSTFS drive here. The GEM programs
