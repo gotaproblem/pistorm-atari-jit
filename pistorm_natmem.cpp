@@ -3183,6 +3183,19 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
         v = kbd_usb_gpip_shim(v);  /* GPIP4 low = keyboard irq (active low) */
     if (DMA_Sound_enabled)
         v = dmasnd_gpip_shim(v);   /* GPIP7 ^= virtual XSINT frame parity   */
+    /* The Falcon sound DMA (falcon_dsp, once armed it owns $FF8900-43 and
+     * the STE shim above sees nothing): same physics as the STE, GPIP7
+     * reads inverted for as long as the DMA is playing. EmuTOS's VBL
+     * monitor-change check reads $FF8901 bit 0 and NEGATES the GPIP byte
+     * to compensate; a DMA that says "playing" while the line stays put
+     * therefore reads as a monitor swap and (*swv_vec)() warm-boots the
+     * machine one VBL after the first Buffoper(1) - Sonic Falcon's SEGA
+     * jingle. Same 0x00 fixed point of NEG as in dmasnd_gpip_shim. */
+    if (falcon_dma_playing()) {
+        v ^= 0x80u;
+        if (v == 0x00u)
+            v = 0x40u;
+    }
 
     /* Monitor-type override (cfg `monitor mono|colour`).
      *

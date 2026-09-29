@@ -36,6 +36,7 @@ void     falcon_reset(void);                 /* guest RESET */
 void     falcon_arm(void);
 void     falcon_disarm(void);
 int      falcon_armed(void);
+int      falcon_dma_playing(void);           /* $FF8901 bit 0: play on */
 
 /* CPU thread: $FFA200-$FFA207 and $FF8900-$FF8943 once armed */
 int      falcon_hw_owns(uint32_t a);

@@ -187,6 +187,13 @@ static inline uint32_t tx_visible(void)
 
 int falcon_configured(void) { return F.configured; }
 int falcon_armed(void) { return atomic_load(&F.armed); }
+/* The sound DMA is playing ($FF8901 bit 0 reads 1). On the STE and the
+ * Falcon that state is XORed onto MFP GPIP7 by the hardware; the GPIP
+ * shim needs it to present the same line. */
+int falcon_dma_playing(void)
+{
+    return atomic_load(&F.armed) && atomic_load(&F.play_on);
+}
 
 /* ------------------------------------------------------------------ */
 /* DSP side peripherals (engine thread)                                */
