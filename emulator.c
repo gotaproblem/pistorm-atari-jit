@@ -2375,7 +2375,8 @@ int main (int argc, char *argv[])
   bool want_dmasnd = false;
   {
     extern int emulator_config_machine_kind(void);
-    want_dmasnd = (emulator_config_machine_kind() == 1);   /* STE only */
+    want_dmasnd = (emulator_config_machine_kind() == 1 ||
+                   emulator_config_machine_kind() == 3);  /* STE, Falcon */
     if (config->dma_sound && !want_dmasnd)
       printf ("[CFG] dma_sound line IGNORED - STE hardware needs "
               "`machine ste` (default machine is a plain ST)\n");

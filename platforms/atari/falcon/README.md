@@ -125,6 +125,16 @@ Environment variables, read at start-up:
 | `PISTORM_DSP_TURBO=1..8` | the DSP's speed as a multiple of 32 MHz. Default 2. Programs pace themselves on the SSI and the host port, not on cycle counts, so a faster DSP only finishes its work sooner; 1 is a real Falcon's speed |
 | `PISTORM_FALCON_VBLSYNC=0` | keep DSP time on the wall clock even for a program that talks to the DSP once a VBL (the default locks the two together, which is what such programs need on a PiSTorm) |
 
+## Software that checks for a Falcon
+
+Beats of Rage does not care what machine it is on; it just uses the
+hardware. Others check the `_MCH` cookie and quit with "Falcon required"
+when it is not `$00030000` - and under MiNT/fVDI that message goes to a
+console nobody sees, so the program appears to do nothing. For those,
+the build's `machine falcon` gives the Falcon's `_MCH` (on the STE
+hardware personality otherwise). TOS, MiNT and everything else will then
+also take the machine for a Falcon, so keep it to a build for such games.
+
 ## Beats of Rage
 
 Both `falcon_dsp` and `psvidel` on, `PSVIDEL.PRG` in AUTO. Then:

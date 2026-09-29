@@ -564,7 +564,7 @@ static int sg_running(const struct ps_item *it) { (void)it; return stbox_running
 #define L_OFFON      "off\0on\0"
 #define L_NOYES      "no\0yes\0"
 
-static const char L_machine[]  = "st\0ste\0megast\0";
+static const char L_machine[]  = "st\0ste\0megast\0falcon\0";
 static const char L_cpu[]      = "68000\0" "68010\0" "68020\0" "68030\0" "68040\0" "68060\0";
 static const char L_blitter[]  = "off\0real chip\0emulated\0";
 static const char L_shifter[]  = "st\0ste\0";
@@ -683,7 +683,7 @@ ITEM("jit_flush", "Flush cache now", PS_TAB_JIT, PS_K_ACTION, PS_C_DEFER,
 
 /* --------------------------------------------------------- CPU/RAM --- */
 ITEM("machine", "Machine", PS_TAB_CPU, PS_K_ENUM, PS_C_BOOT, PS_U_NONE,
-     0, 2, 1, L_machine, 3, 0, NULL, bg_machine_kind, bs_machine_kind, NULL),
+     0, 3, 1, L_machine, 4, 0, NULL, bg_machine_kind, bs_machine_kind, NULL),
 ITEM("cpu", "CPU", PS_TAB_CPU, PS_K_ENUM, PS_C_BOOT, PS_U_NONE,
      0, 5, 1, L_cpu, 6, 0, NULL, bg_cpu, bs_cpu, NULL),
 BOOT_B("fpu", "FPU", PS_TAB_CPU, fpu),

@@ -69,11 +69,11 @@ static int render_boot_key(const char *key, const struct emulator_config *c,
                            char *out, unsigned long n)
 {
   if (!strcmp(key, "machine")) {
-    static const char *m[] = { "st", "ste", "megast" };
+    static const char *m[] = { "st", "ste", "megast", "falcon" };
     if (!c->machine_set)
       return 0;
     snprintf(out, n, "machine %s",
-             (c->machine_kind >= 0 && c->machine_kind < 3) ? m[c->machine_kind] : "st");
+             (c->machine_kind >= 0 && c->machine_kind < 4) ? m[c->machine_kind] : "st");
     return 1;
   }
   if (!strcmp(key, "cpu")) {

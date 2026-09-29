@@ -10,8 +10,10 @@
 /* cpu_types[] in config_file.c, without NONE */
 static const char *cpu[]     = { "68000", "68010", "68020", "68030",
                                  "68040", "68060" };
-/* CONFITEM_MACHINE: st / ste / megast are the only hosts for the board */
-static const char *machine[] = { "st", "ste", "megast" };
+/* CONFITEM_MACHINE: st / ste / megast are the only hosts for the board;
+ * falcon is the Falcon's _MCH on the STE hardware, for software that
+ * insists on a Falcon (with psvidel + falcon_dsp) */
+static const char *machine[] = { "st", "ste", "megast", "falcon" };
 /* CONFITEM_SHIFTER: strncasecmp(arg, "ste") decides, so two values */
 static const char *shifter[] = { "st", "ste" };
 /* CONFITEM_BLITTER: "real" = pass-through, else a boolean */

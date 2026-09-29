@@ -1200,14 +1200,22 @@ struct emulator_config *load_config_file_section(char *filename,
           char *arg = parse_line + str_pos;
           while (*arg == ' ' || *arg == '\t')
             arg++;
-          /* Only machines that can physically host the PiStorm exist
-           * here: ST, STE, Mega ST. (TT/Falcon are 68030 machines - no
-           * socket for the board; megaste dropped for the same product
-           * reason.) Mega ST reports the SAME _MCH as a plain ST on real
-           * hardware - the kind field is what carries the difference
-           * (blitter fitted, no STE hardware). */
+          /* Machines that can physically host the PiStorm: ST, STE,
+           * Mega ST. (TT/Falcon are 68030 machines - no socket for the
+           * board; megaste dropped for the same product reason.) Mega ST
+           * reports the SAME _MCH as a plain ST on real hardware - the
+           * kind field is what carries the difference (blitter fitted,
+           * no STE hardware).
+           * `falcon` is the exception: the _MCH of a Falcon030 for
+           * software that insists on one (with psvidel and falcon_dsp
+           * giving it the Falcon's video and DSP), on the STE hardware
+           * personality otherwise. The OS and everything after it then
+           * believe they are on a Falcon - an experiment per build, not
+           * a default. */
           cfg->machine_set = true;
-          if (strncasecmp(arg, "megast", 6) == 0 ||
+          if (strncasecmp(arg, "falcon", 6) == 0)
+            { cfg->machine_mch = 0x00030000u; cfg->machine_kind = 3; }
+          else if (strncasecmp(arg, "megast", 6) == 0 ||
               strncasecmp(arg, "mst", 3) == 0)
             { cfg->machine_mch = 0x00000000u; cfg->machine_kind = 2; }
           else if (strncasecmp(arg, "ste", 3) == 0)
@@ -1215,12 +1223,14 @@ struct emulator_config *load_config_file_section(char *filename,
           else if (strncasecmp(arg, "st", 2) == 0)
             { cfg->machine_mch = 0x00000000u; cfg->machine_kind = 0; }
           else { cfg->machine_set = false;
-                 printf ("[CFG] machine: unknown '%s' (st / ste / megast)\n", arg); break; }
-          /* STE implies the STE shifter personality for the native
-           * mirror unless the cfg set shifter explicitly */
-          if (!cfg->shifter_set && cfg->machine_kind == 1)
+                 printf ("[CFG] machine: unknown '%s' (st / ste / megast / falcon)\n", arg); break; }
+          /* STE (and the Falcon, whose shifter registers are the STE's)
+           * imply the STE shifter personality for the native mirror
+           * unless the cfg set shifter explicitly */
+          if (!cfg->shifter_set && (cfg->machine_kind == 1 || cfg->machine_kind == 3))
             cfg->shifter_ste = true;
           printf ("[CFG] Machine: %s - _MCH forced to 0x%08X%s\n",
+                  cfg->machine_kind == 3 ? "Falcon (_MCH only)" :
                   cfg->machine_kind == 2 ? "Mega ST" :
                   cfg->machine_kind == 1 ? "STE" : "ST",
                   cfg->machine_mch,

@@ -324,6 +324,7 @@ extern volatile uint8_t g_buserr;      /* ps_protocol's sticky BERR latch */
 extern "C" int emulator_machine_is_ste(void);   /* emulator.c (built as
                                         * C++, but exported with C
                                         * linkage like its neighbours) */
+extern "C" int emulator_config_machine_kind(void);   /* config_file.c */
 
 static int      g_stram_alias = 0;
 static int      g_stram_fd = -1;
@@ -2916,9 +2917,10 @@ static inline uae_u32 hw_joypad_idle(uaecptr a, int size)
 static inline uae_u32 hw_joypad_get(uaecptr a, int size)
 {
     uae_u32 v;
-    if (falcon_armed() && !emulator_machine_is_ste()) {
-        /* a plain ST has no port there: the read would only bus-error,
-         * and a BERR cycle is a bus timeout every time a game polls */
+    if (falcon_armed() && emulator_config_machine_kind() != 1) {
+        /* the build does not claim an STE, so the board has no port there:
+         * the read would only bus-error, and a BERR cycle is a bus timeout
+         * every time a game polls (`machine falcon` on an ST included) */
         v = hw_joypad_idle(a, size);
     } else {
         if (size == 4)      v = ps_bus_lget(a);
