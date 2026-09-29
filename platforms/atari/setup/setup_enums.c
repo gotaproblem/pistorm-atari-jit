@@ -253,6 +253,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "vga",            SE_TAB_VIDEO,   SE_K_LIST,   "ET4000AX FVDI" },
     { "fps",            SE_TAB_VIDEO,   SE_K_INT,    "60"      },
     { "native_hdmi",    SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
+    { "psvidel",        SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
     { "monitor",        SE_TAB_VIDEO,   SE_K_LIST,   "auto"    },
     { "shifter",        SE_TAB_VIDEO,   SE_K_LIST,   "st"      },
     { "stbox_plane",    SE_TAB_VIDEO,   SE_K_INT,    "0"       },
@@ -262,6 +263,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     /* Sound */
     { "ym2149",         SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
     { "dma_sound",      SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
+    { "falcon_dsp",     SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },
     { "ym_gain",        SE_TAB_SOUND,   SE_K_INT,    "100"     },
     { "ym_lag_ms",      SE_TAB_SOUND,   SE_K_INT,    "100"     },
     { "lmc",            SE_TAB_SOUND,   SE_K_SWITCH, "1"       },

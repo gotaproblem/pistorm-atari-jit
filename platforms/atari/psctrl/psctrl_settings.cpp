@@ -184,6 +184,8 @@ BOOT_BOOL(addr32)
 BOOT_BOOL(stram_cache)
 BOOT_BOOL(stram_direct)
 BOOT_BOOL(native_hdmi)
+BOOT_BOOL(psvidel)
+BOOT_BOOL(falcon_dsp)
 BOOT_BOOL(ym2149)
 BOOT_BOOL(dma_sound)
 /* shifter: the writer only renders it when the cfg set it explicitly, so
@@ -727,6 +729,7 @@ LIVE_BOOL("drm_dirtyband", "DRM dirty band", PS_TAB_VIDEO, &pst_drm_dirtyband, N
 ITEM("drm_async", "DRM async page flip", PS_TAB_VIDEO, PS_K_BOOL, PS_C_BOOT,
      PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_drm_async, gen_get, gen_set, NULL),
 BOOT_B("native_hdmi", "Native HDMI", PS_TAB_VIDEO, native_hdmi),
+BOOT_B("psvidel", "Falcon Videl/SuperVidel", PS_TAB_VIDEO, psvidel),
 ITEM("vga_card", "Graphics card", PS_TAB_VIDEO, PS_K_ENUM, PS_C_BOOT,
      PS_U_NONE, 0, 3, 1, L_card, 4, PS_F_NEWLINE, NULL, vg_card, vs_card, NULL),
 ITEM("vga_driver", "Graphics driver", PS_TAB_VIDEO, PS_K_ENUM, PS_C_BOOT,
@@ -735,6 +738,7 @@ ITEM("vga_driver", "Graphics driver", PS_TAB_VIDEO, PS_K_ENUM, PS_C_BOOT,
 /* ----------------------------------------------------------- Audio --- */
 BOOT_B("ym2149", "YM2149", PS_TAB_AUDIO, ym2149),
 BOOT_B("dma_sound", "STE DMA sound", PS_TAB_AUDIO, dma_sound),
+BOOT_B("falcon_dsp", "Falcon DSP + sound", PS_TAB_AUDIO, falcon_dsp),
 LIVE_INT("ym_gain", "YM gain", PS_TAB_AUDIO, PS_U_X100, 0, 400, 5,
          &pst_ym_gain_x100, apply_ym),
 LIVE_INT("ym_lag_ms", "YM lag", PS_TAB_AUDIO, PS_U_MS, 5, 200, 5,
@@ -1292,7 +1296,7 @@ uint32_t psctrl_settings_call(uint32_t subop, uint32_t p0, uint32_t p1,
 static const char *const g_bootkeys[] = {
   "machine", "cpu", "fpu", "mmu", "cpu_compatible", "shifter", "blitter",
   "stram_size", "ttram", "addr32", "stram_cache", "stram_direct",
-  "native_hdmi", "vga", "monitor", "ym2149", "dma_sound",
+  "native_hdmi", "psvidel", "vga", "monitor", "ym2149", "dma_sound", "falcon_dsp",
   "ide", "kbd", "network", "network_irq", "fps", "rom", "stbox_tos",
   "stbox_plane", "jit_cache", "m68k_speed", "cpu_clock_multiplier"
 };
