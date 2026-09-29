@@ -2655,6 +2655,22 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
          * change: render the full frame */
     }
 
+    /* PISTORM_FVDI_BLIT_TRACE=1 (see atari_natfeat.cpp): what this frame
+     * converts, so a lost update can be told from a lost blit */
+    {
+        static int trace = -1, shown;
+        if (trace < 0) {
+            const char *e = getenv("PISTORM_FVDI_BLIT_TRACE");
+            trace = (e && *e == '1');
+        }
+        if (trace && shown < 400) {
+            shown++;
+            fprintf(stderr, "[FVDI] render rows %u-%u cols %u-%u%s (writes %llu)\n",
+                    y0, y1, px0, px1, mode_changed ? " FULL" : "",
+                    (unsigned long long)write_count);
+        }
+    }
+
     /* Publish the rect for the present stage. A full extent or mode change
      * is equivalent to a full upload. */
     g_fvdi_up_y0 = y0;
