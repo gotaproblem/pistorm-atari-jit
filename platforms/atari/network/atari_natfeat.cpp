@@ -1500,6 +1500,10 @@ typedef struct fvdi_mfdb_info {
   bool screen;
   bool addressable;
   bool planar;        /* 8bpp screen mode: interleaved 8-plane memory MFDB */
+  bool stdfmt;        /* VDI standard format (fd_stand != 0): one plane after
+                       * another, each wdwidth words wide, leftmost pixel in
+                       * bit 15; 1-8 planes on an 8bpp screen */
+  uint32_t plane_bytes;   /* stdfmt: bytes from one plane to the next */
 } fvdi_mfdb_info_t;
 
 #define FVDI_MFDB_CACHE_SLOTS 4
@@ -1558,8 +1562,26 @@ static void fvdi_mfdb_parse(uaecptr mfdb, fvdi_mfdb_info_t *out)
     }
   }
 
+  /* VDI standard format (fd_stand != 0). The EmuTOS AES saves the screen
+   * under a drop-down menu into one of these (8 planes, one after another)
+   * and restores it when the menu closes. Served plane-row-wise by
+   * fvdi_std_rows() and per pixel by fvdi_std_get/put. Only meaningful on
+   * a palette (8bpp) screen, where a pixel is its index. */
+  out->stdfmt = false;
+  out->plane_bytes = 0;
+  if (!out->screen && out->standard != 0 && pistorm_fvdi_bpp() == 8 &&
+      bpp >= 1 && bpp <= 8) {
+    out->stdfmt = true;
+    out->planar = false;
+    out->pixel_bytes = 0;
+    out->row_bytes = out->wdwidth * 2u;              /* one plane's row */
+    out->plane_bytes = out->row_bytes * out->height;
+  }
+
   out->addressable =
       out->screen ||
+      (out->stdfmt && out->base && out->width && out->height &&
+       out->wdwidth * 16u >= out->width) ||
       (out->base && out->width && out->height && out->wdwidth &&
        out->pixel_bytes && (bpp == 8 || bpp == 16 || bpp == 24 || bpp == 32) &&
        out->row_bytes >= out->width * out->pixel_bytes) ||
@@ -1647,7 +1669,7 @@ static bool fvdi_mfdb_supported_direct(uaecptr mfdb)
     return false;
   if (info->screen)
     return true;
-  return info->standard == 0;
+  return info->standard == 0 || info->stdfmt;
 }
 
 /* Row base address for a directly addressable MFDB, or 0. Callers that walk
@@ -1717,6 +1739,48 @@ static bool fvdi_planar_put(const fvdi_mfdb_info_t *info,
   return true;
 }
 
+/* Standard-format MFDB pixel: plane p of pixel (x, y) is bit (15 - x%16)
+ * of word x/16 in row y of plane p. */
+static uaecptr fvdi_std_word(const fvdi_mfdb_info_t *info, unsigned p,
+                             int32_t x, int32_t y)
+{
+  if (x < 0 || y < 0 || (uint32_t)x >= info->width ||
+      (uint32_t)y >= info->height)
+    return 0;
+  return info->base + (uaecptr)p * info->plane_bytes +
+         (uaecptr)y * info->row_bytes + (uaecptr)((uint32_t)x >> 4) * 2u;
+}
+
+static uint32_t fvdi_std_get(const fvdi_mfdb_info_t *info, int32_t x, int32_t y)
+{
+  const unsigned bit = 15u - ((unsigned)x & 15u);
+  uint32_t v = 0;
+  for (unsigned p = 0; p < info->bpp; p++) {
+    const uaecptr a = fvdi_std_word(info, p, x, y);
+    if (!a)
+      return 0;
+    v |= (uint32_t)((nf_read_word(a) >> bit) & 1u) << p;
+  }
+  return v;
+}
+
+static bool fvdi_std_put(const fvdi_mfdb_info_t *info, int32_t x, int32_t y,
+                         uint32_t colour)
+{
+  const uint16_t m = (uint16_t)(0x8000u >> ((unsigned)x & 15u));
+  for (unsigned p = 0; p < info->bpp; p++) {
+    const uaecptr a = fvdi_std_word(info, p, x, y);
+    if (!a)
+      return false;
+    const uint16_t w = (uint16_t)nf_read_word(a);
+    const uint16_t n = ((colour >> p) & 1u) ? (uint16_t)(w | m)
+                                            : (uint16_t)(w & ~m);
+    if (n != w)
+      nf_write_word(a, n);
+  }
+  return true;
+}
+
 static uint32_t fvdi_mfdb_get_pixel(uaecptr mfdb, int32_t x, int32_t y)
 {
   if (!fvdi_mfdb_supported_direct(mfdb))
@@ -1725,6 +1789,8 @@ static uint32_t fvdi_mfdb_get_pixel(uaecptr mfdb, int32_t x, int32_t y)
     const fvdi_mfdb_info_t *pi = fvdi_mfdb_info(mfdb);
     if (pi && pi->planar)
       return fvdi_planar_get(pi, x, y);
+    if (pi && pi->stdfmt)
+      return fvdi_std_get(pi, x, y);
   }
 
   uaecptr addr = fvdi_mfdb_pixel_addr(mfdb, x, y);
@@ -1760,6 +1826,8 @@ static bool fvdi_mfdb_put_pixel(uaecptr mfdb, int32_t x, int32_t y, uint32_t col
     const fvdi_mfdb_info_t *pi = fvdi_mfdb_info(mfdb);
     if (pi && pi->planar)
       return fvdi_planar_put(pi, x, y, colour);
+    if (pi && pi->stdfmt)
+      return fvdi_std_put(pi, x, y, colour);
   }
   uaecptr addr = fvdi_mfdb_pixel_addr(mfdb, x, y);
   uint32_t bytes = fvdi_mfdb_pixel_bytes(mfdb);
@@ -3258,6 +3326,100 @@ static bool fvdi_copy_rows_generic(uaecptr src_mfdb, uaecptr dst_mfdb,
   return true;
 }
 
+/* Plain copy (op 3) between the 8bpp screen and a standard-format MFDB,
+ * a plane row at a time on host pointers: the AES menu save/restore.
+ * Rows outside either surface were clipped away by the caller. */
+static bool fvdi_std_rows(uaecptr src_mfdb, uaecptr dst_mfdb,
+                          int32_t src_x, int32_t src_y,
+                          int32_t dst_x, int32_t dst_y,
+                          int32_t w, int32_t h)
+{
+  const bool src_scr = fvdi_mfdb_is_screen(src_mfdb);
+  const bool dst_scr = fvdi_mfdb_is_screen(dst_mfdb);
+  if (src_scr == dst_scr || fvdi_bytes_per_pixel() != 1)
+    return false;
+  const fvdi_mfdb_info_t *mi = fvdi_mfdb_info(src_scr ? dst_mfdb : src_mfdb);
+  if (!mi || !mi->stdfmt || !mi->addressable)
+    return false;
+  const int32_t mx = src_scr ? dst_x : src_x;       /* rect in the MFDB */
+  const int32_t my = src_scr ? dst_y : src_y;
+  const int32_t sx = src_scr ? src_x : dst_x;       /* rect on the screen */
+  const int32_t sy = src_scr ? src_y : dst_y;
+  if (mx < 0 || my < 0 || (uint32_t)(mx + w) > mi->width ||
+      (uint32_t)(my + h) > mi->height)
+    return false;
+  const uint32_t x0w = (uint32_t)mx >> 4;                 /* first word */
+  const uint32_t x1w = (uint32_t)(mx + w - 1) >> 4;       /* last word */
+  const uint32_t nwords = x1w - x0w + 1;
+  const uint32_t nbytes = nwords * 2u;
+  if (nbytes > FVDI_MAX_ACCEL_SPAN * 2)
+    return false;
+
+  /* every plane row of the rect must be host-addressable */
+  for (unsigned p = 0; p < mi->bpp; p++) {
+    for (int32_t yy = 0; yy < h; yy++) {
+      uae_u8 *q;
+      const uaecptr a = mi->base + (uaecptr)p * mi->plane_bytes +
+                        (uaecptr)(my + yy) * mi->row_bytes + x0w * 2u;
+      if (!nf_host_ram_ptr(a, nbytes, &q))
+        return false;
+    }
+  }
+  for (int32_t yy = 0; yy < h; yy++)
+    if (!fvdi_screen_span_ptr(sx, sy + yy, w))
+      return false;
+
+  static uae_u8 planebuf[8][FVDI_MAX_ACCEL_SPAN * 2];
+  for (int32_t yy = 0; yy < h; yy++) {
+    uae_u8 *srow = fvdi_screen_span_ptr(sx, sy + yy, w);
+    uaecptr pa[8];
+    uae_u8 *pp[8];
+    for (unsigned p = 0; p < mi->bpp; p++) {
+      pa[p] = mi->base + (uaecptr)p * mi->plane_bytes +
+              (uaecptr)(my + yy) * mi->row_bytes + x0w * 2u;
+      nf_host_ram_ptr(pa[p], nbytes, &pp[p]);
+    }
+    const unsigned bit0 = (unsigned)mx & 15u;     /* rect's first pixel in word 0 */
+
+    if (src_scr) {
+      /* screen -> planes: pixel i of the row -> bit (15 - (bit0+i)%16) of
+       * word (bit0+i)/16 in every plane */
+      for (unsigned p = 0; p < mi->bpp; p++)
+        memcpy(planebuf[p], pp[p], nbytes);         /* keep the bits outside */
+      for (int32_t i = 0; i < w; i++) {
+        const unsigned b = bit0 + (unsigned)i;
+        const unsigned wi = (b >> 4) * 2u, sh = 15u - (b & 15u);
+        const uint32_t v = srow[i];
+        for (unsigned p = 0; p < mi->bpp; p++) {
+          uint16_t wv = (uint16_t)((planebuf[p][wi] << 8) | planebuf[p][wi + 1]);
+          if ((v >> p) & 1u) wv |= (uint16_t)(1u << sh);
+          else               wv &= (uint16_t)~(1u << sh);
+          planebuf[p][wi] = (uae_u8)(wv >> 8);
+          planebuf[p][wi + 1] = (uae_u8)wv;
+        }
+      }
+      for (unsigned p = 0; p < mi->bpp; p++) {
+        if (pa[p] < NF_ST_RAM_SIZE)
+          pistorm_dma_to_stram(pa[p], planebuf[p], nbytes);
+        else
+          memcpy(pp[p], planebuf[p], nbytes);
+      }
+    } else {
+      /* planes -> screen */
+      for (int32_t i = 0; i < w; i++) {
+        const unsigned b = bit0 + (unsigned)i;
+        const unsigned wi = (b >> 4) * 2u, sh = 15u - (b & 15u);
+        uint32_t v = 0;
+        for (unsigned p = 0; p < mi->bpp; p++)
+          v |= (uint32_t)(((pp[p][wi] << 8 | pp[p][wi + 1]) >> sh) & 1u) << p;
+        srow[i] = (uae_u8)v;
+      }
+      fvdi_note_screen_span(sx, sy + yy, w);
+    }
+  }
+  return true;
+}
+
 /* Row fast path for ALL raster ops (latency work, phase 4).
  * [FVDI-MISS] showed Boing compositing with op 7 (S OR D) into an offscreen
  * 32bpp TT-RAM buffer; the per-pixel fallback made each blit a 5-15ms
@@ -3511,6 +3673,11 @@ static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
   g_fvdi_blit_path = "screen-rows";
   if (op == 3 && fvdi_mfdb_is_screen(src_mfdb) && fvdi_mfdb_is_screen(dst_mfdb) &&
       fvdi_screen_copy_rows(src_x, src_y, dst_x, dst_y, w, h))
+    return 1;
+
+  g_fvdi_blit_path = "std-rows";
+  if (op == 3 &&
+      fvdi_std_rows(src_mfdb, dst_mfdb, src_x, src_y, dst_x, dst_y, w, h))
     return 1;
 
   /* Fast path for plain copies between any direct surfaces (see above). */
@@ -4095,9 +4262,9 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
         fprintf(stderr, "[FVDI] blit op %u %dx%d: src %s @%08X (%d,%d) -> dst %s @%08X (%d,%d)%s"
                         " via %s, notes +%llu/+%llu/+%llu, dirty rows %u-%u cols %u-%u (writes %llu)\n",
                 op, w, h,
-                !si ? "screen" : si->screen ? "screen*" : si->planar ? "mem-planar" : "mem",
+                !si ? "screen" : si->screen ? "screen*" : si->planar ? "mem-planar" : si->stdfmt ? "mem-std" : "mem",
                 si ? si->base : 0u, src_x, src_y,
-                !di ? "screen" : di->screen ? "screen*" : di->planar ? "mem-planar" : "mem",
+                !di ? "screen" : di->screen ? "screen*" : di->planar ? "mem-planar" : di->stdfmt ? "mem-std" : "mem",
                 di ? di->base : 0u, dst_x, dst_y,
                 blit_r ? "" : "  NOT DONE",
                 g_fvdi_blit_path,
@@ -4110,6 +4277,7 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
           fprintf(stderr, "[FVDI]   mem MFDB @%08X: %ux%u wdwidth %u standard %u planes %u -> %s, %u byte/px, row %u bytes\n",
                   mi->base, mi->width, mi->height, mi->wdwidth, mi->standard, mi->bpp,
                   !mi->addressable ? "NOT addressable" :
+                  mi->stdfmt ? "standard format" :
                   mi->standard ? "standard format (declined)" : "direct",
                   mi->pixel_bytes, mi->row_bytes);
       }
