@@ -157,6 +157,7 @@ static struct {
     double       clk, fill_avg, adj_i;
     unsigned     resyncs, hiccups;
     int          vbl_locked;           /* lockstep with the 68k's answers */
+    int          dsp_idle;             /* last free run ended polling */
     /* lockstep: a program that answers the 68k about once a VBL (DSPMOD)
      * gets one VBL of samples per answer */
     uint32_t     answers;               /* answers to the 68k (engine)   */
@@ -1062,13 +1063,20 @@ static void *engine(void *arg)
         if (st == DSP_RUN)
             watchdog();
         int64_t due = clock_due(hz);
-        if (due <= 0 && F.vbl_locked && st == DSP_RUN && host_waiting()) {
-            /* VBL-locked, this VBL's sample periods all played, and the 68k
-             * asking: give the DSP instruction cycles without sample periods
-             * so it answers now. Nothing is borrowed - later SSI slots keep
-             * their full share - so this is simply a faster 56001 between
-             * two VBLs, and DSP time (in samples) stays one VBL per VBL. */
-            dsp_run(1024);
+        if (due <= 0 && F.vbl_locked && st == DSP_RUN &&
+            (!F.dsp_idle || host_waiting())) {
+            /* Lockstep, this VBL's sample periods all played: the DSP gets
+             * instruction cycles without sample periods until it is idle
+             * (polling a peripheral in place) - so it reads the 68k's data
+             * and mixes as soon as the data is there, and is waiting at
+             * its request loop when the next question comes, as a real
+             * 56001 would be. Stopping as soon as the 68k stopped writing
+             * left the mix half done: the next question then waited for
+             * it (~9 ms a VBL, and one VBL in five overran). Nothing is
+             * borrowed - later SSI slots keep their full share. */
+            uint64_t sk = F.dsp->idle_skips;
+            dsp_run(4096);
+            F.dsp_idle = F.dsp->idle_skips != sk;
             continue;
         }
         if (due <= 0) {
@@ -1103,6 +1111,7 @@ static void *engine(void *arg)
             }
             g_tx_vis_on = 0;
             host_irqs();
+            F.dsp_idle = 0;                   /* the held words are in */
         } else {
             for (unsigned i = 0; i < n && !atomic_load(&F.stop); i++)
                 frame();
