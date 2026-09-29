@@ -4646,8 +4646,9 @@ void pistorm_exc_ring_dump(void)
 	pistorm_snap_print();
 }
 
-/* An illegal / Line A / Line F exception names a PC that is running
- * something that is not code. Say what is there - 32 bytes either side and
+/* An illegal / Line F exception names a PC that is running something
+ * that is not code (Line A is not one: TOS and GEM applications call the
+ * Line A graphics routines that way, so vector 10 is normal traffic). Say what is there - 32 bytes either side and
  * the top of the stack, read from the host mirror so it cannot fault -
  * the first 8 times, without PISTORM_CPU_DIAG: a TOS/MiNT panic shows
  * the registers only, and by then the evidence is gone. */
@@ -4663,7 +4664,7 @@ static void pistorm_bad_opcode_dump(int nr)
 	uaecptr pc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
 	uaecptr sp = m68k_areg(regs, 7);
 	fprintf(stderr, "[CPU] %s at %08X (sr %04X sp %08X):\n",
-		nr == 4 ? "illegal instruction" : nr == 10 ? "Line A" : "Line F",
+		nr == 4 ? "illegal instruction" : "Line F",
 		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp);
 	if (pc >= 0x20u && pc < top && !(pc >= 0x00E00000u && pc < 0x01000000u)) {
 		uaecptr a0 = (pc - 0x20u) & ~1u;
@@ -4687,7 +4688,7 @@ static void pistorm_bad_opcode_dump(int nr)
 
 void REGPARAM2 Exception(int nr)
 {
-	if (nr == 4 || nr == 10 || nr == 11)
+	if (nr == 4 || nr == 11)
 		pistorm_bad_opcode_dump(nr);
 #if CPU_EXCEPTION_TRACE
 	extern volatile uint8_t g_buserr;
