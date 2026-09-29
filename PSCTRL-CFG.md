@@ -125,7 +125,7 @@ All HDMI sound shares one audio device; any one of these brings it up.
 
 | key | values | |
 |---|---|---|
-| `blitter` | on, `real`, or off | on (the default): the emulated ST BLiTTER, a software blit over the RAM copy, the real chip untouched - works with or without one fitted. `real`: pass the registers through to the real chip (needs bus arbitration in the CPLD). Off: hide `$FF8A00`, TOS uses software rendering |
+| `blitter` | on, `real`, or off | on: the emulated ST BLiTTER, a software blit over the RAM copy, the real chip untouched - works with or without one fitted. `real`: pass the registers through to the real chip (needs bus arbitration in the CPLD). Off: hide `$FF8A00`, TOS uses software rendering and a program that touches the blitter bus-errors. No key: follows `machine` - off for `st`, on for `ste`, `megast` and `falcon`, the machines that shipped with one |
 
 ## ROM
 

@@ -245,9 +245,10 @@ static bool blitter_machine_default(void)
 {
   if (!current_config || !current_config->machine_set)
     return false;                   /* default machine = plain ST */
-  /* STE and Mega ST shipped with the blitter; plain ST did not. */
+  /* STE, Mega ST and Falcon shipped with the blitter; plain ST did not. */
   return current_config->machine_kind == 1 ||
-         current_config->machine_kind == 2;
+         current_config->machine_kind == 2 ||
+         current_config->machine_kind == 3;
 }
 
 bool emulator_config_blitter_enabled(void)
