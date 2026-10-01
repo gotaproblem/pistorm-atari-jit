@@ -70,11 +70,14 @@ Writing `$FF8266` with the 2-, 256- or 65536-colour bit selects the Falcon
 shifter; the picture then follows the registers: width = line width x 16
 / bpp, height from VDB/VDE and the doubling/interlace bits of `$FF82C2`,
 pitch = (line width + offset) x 2, fine scroll from `$FF8265`, palette
-from `$FF9800`. Writing `$FF8260` (the ST shift) last - or `$FF8266` with
-none of those bits - is "ST again". That last rule differs from a real
-Falcon, where SPSHIFT = 0 is the 16-colour Falcon mode; it is there so a
-register save/restore of an ST screen does not pull the HDMI away from
-the desktop. Falcon 16-colour modes set through `VsetMode` work normally.
+from `$FF9800`. Writing `$FF8260` (the ST shift) last is "ST again".
+`$FF8266` with none of those bits is the Falcon's 16-colour mode, but a
+register save/restore of an ST screen writes the same value, so it takes
+the HDMI only when the geometry is not an ST one: anything but 80 or 40
+words a line with 200 or 400 lines. That is re-decided on every later
+write to the line width, offset or vertical window, since programs write
+SPSHIFT first (ACE Tracker: 640x480x16, 160 words, 480 lines). Falcon
+16-colour modes set through `VsetMode` always work.
 
 ## Where the frame comes from
 

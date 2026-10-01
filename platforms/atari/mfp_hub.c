@@ -220,6 +220,29 @@ int mfp_hub_irq_wanted(void)
     return deliverable() != 0;
 }
 
+/* The highest deliverable virtual channel right now, or -1. Lets the IACK
+ * site honour real MFP channel priority between a virtual interrupt and a
+ * racing real one: the Falcon sound Timer A (ch13) / GPIP7 (ch15) outrank
+ * the keyboard ACIA (ch6), so they must be serviced ahead of a mouse byte,
+ * not queued behind it. */
+int mfp_hub_top_wanted(void)
+{
+    uint16_t pend = deliverable();
+    if (!pend)
+        return -1;
+    int ch = 15;
+    while (ch >= 0 && !(pend & (1u << ch)))
+        ch--;
+    return ch;
+}
+
+/* virtual IACKs per channel (diagnostics: the Falcon 5 s line) */
+static _Atomic uint32_t g_iacks[16];
+uint32_t mfp_hub_iacks(int ch)
+{
+    return (ch >= 0 && ch < 16) ? atomic_load(&g_iacks[ch]) : 0u;
+}
+
 int mfp_hub_iack(void)
 {
     uint16_t pend = deliverable();
@@ -232,6 +255,7 @@ int mfp_hub_iack(void)
 
     uint16_t bit = (uint16_t)(1u << ch);
     atomic_fetch_and(&g_vpend, (uint16_t)~bit);  /* pending -> taken    */
+    atomic_fetch_add_explicit(&g_iacks[ch], 1u, memory_order_relaxed);
     if (ch == 6)
     {
         extern void kbd_usb_note_iack(void);     /* the ACIA byte is now the handler's */
@@ -250,6 +274,18 @@ int mfp_hub_iack(void)
         }
     }
     return (int)((atomic_load(&g_vr) & 0xF0u) | (unsigned)ch);
+}
+
+/* ---- diagnostics ------------------------------------------------------ */
+
+void mfp_hub_snapshot(uint16_t *ier, uint16_t *imr, uint16_t *pend,
+                      uint16_t *isr, uint8_t *vr)
+{
+    *ier  = atomic_load(&g_ier);
+    *imr  = atomic_load(&g_imr);
+    *pend = pending_now();
+    *isr  = atomic_load(&g_visr);
+    *vr   = atomic_load(&g_vr);
 }
 
 /* ---- reset ------------------------------------------------------------ */

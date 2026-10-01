@@ -6484,7 +6484,7 @@ enum nf_psvidel_ops {
   PSVIDEL_VMALLOC,      /* p0 = mode, p1 = value: ct60_vmalloc semantics   */
   PSVIDEL_SCREEN_ALLOC, /* p0 = bytes -> cleared video RAM (frees the last)*/
   PSVIDEL_INFO,         /* p0 = 0 w 1 h 2 bpp 3 base 4 mode 5 src 6 free   */
-  PSVIDEL_SNDX,         /* p0 = XBIOS opcode (104/105, 128-141), p1 = ptr
+  PSVIDEL_SNDX,         /* p0 = XBIOS opcode (104/105, 109/110, 128-141), p1 = ptr
                            to its arguments -> the XBIOS result            */
   PSVIDEL_FALCON_INFO   /* p0 = falcon_info() selector                     */
 };
@@ -6570,8 +6570,37 @@ static uae_u32 nf_call_psvidel(uae_u32 subid, uaecptr params)
        * two addresses and buffptr's pointer */
       int op = (int)(nf_get_param(params, 0) & 0xFFFFu);
       uaecptr ap = nf_get_param(params, 1);
+      static int sndx_log = -1;
+      if (sndx_log < 0) { const char *e = getenv("PISTORM_SNDX_LOG"); sndx_log = (e && *e == '1'); }
+      if (sndx_log) fprintf(stderr, "[SNDX] call op=%d\n", op);
       int32_t a[5] = { 0, 0, 0, 0, 0 };
       uint32_t out4[4] = { 0, 0, 0, 0 };
+      if (op == 109 || op == 110) {
+        /* Dsp_ExecProg(codeptr.l, codesize.l, ability.w) /
+         * Dsp_ExecBoot(codeptr.l, codesize.l): codesize in DSP words of
+         * 3 bytes. 32K words of memory plus block headers at most. */
+        uaecptr code = nf_read_long(ap);
+        uae_u32 n = nf_read_long(ap + 4);
+        if (op == 110 && n > 512) n = 512;
+        if (sndx_log) fprintf(stderr, "[SNDX] %s code=%06X n=%u\n",
+                              op == 110 ? "ExecBoot" : "ExecProg", (unsigned)code, (unsigned)n);
+        if (!code || n == 0 || n > 0x10000u) {
+          if (sndx_log) fprintf(stderr, "[SNDX] ExecProg SKIPPED (bad code/n) -> 0\n");
+          return 0;
+        }
+        uint32_t *w = (uint32_t *)malloc(n * sizeof(uint32_t));
+        if (!w)
+          return 0;
+        for (uae_u32 i = 0; i < n; i++) {
+          uaecptr p = code + 3u * i;
+          w[i] = ((uint32_t)nf_read_byte(p) << 16) |
+                 ((uint32_t)nf_read_byte(p + 1) << 8) |
+                 (uint32_t)nf_read_byte(p + 2);
+        }
+        falcon_dsp_exec(w, n, op == 110);
+        free(w);
+        return 0;
+      }
       switch (op) {
         case 130: case 133: case 135: case 137: case 138:
           a[0] = (int16_t)nf_read_word(ap);
@@ -6593,6 +6622,8 @@ static uae_u32 nf_call_psvidel(uae_u32 subid, uaecptr params)
           break;
       }
       int32_t r = falcon_sound_xbios(op, a, out4);
+      if (sndx_log) fprintf(stderr, "[SNDX] op=%d a0=%d a1=%d a2=%d -> %d\n",
+                            op, (int)a[0], (int)a[1], (int)a[2], (int)r);
       if (op == 141) {
         uaecptr p = nf_read_long(ap);
         if (p)

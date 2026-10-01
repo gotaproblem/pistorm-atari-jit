@@ -30,7 +30,7 @@ time is clocked, why, and what is measured. This file is the user side.
    ```
    PSVIDEL: Falcon Videl + SuperVidel XBIOS on the HDMI output
    PSVIDEL: video RAM at $A1000000, SupV cookie set
-   PSVIDEL: Falcon DSP56001 + sound matrix, XBIOS 104-105 128-141
+   PSVIDEL: Falcon DSP56001 + sound matrix, XBIOS 104-105 109-110 128-141
    ```
 
 3. In the emulator's log, look for:
@@ -61,14 +61,14 @@ sound and the YM2149, so `ym2149` or `dma_sound` may be on as well.
 | Sound DMA | `$FF8900-$FF8921`: 8-bit stereo/mono and 16-bit stereo play with 1-4 tracks, 16-bit record, repeat, Timer A and GPIP7 frame events |
 | Rates | the 25.175 MHz and 32 MHz clocks with the `$FF8935` prescaler (49170, 32780, 24585 ... Hz), or the STE rates |
 | CODEC | the adder, attenuation, gain, input and GPIO registers |
-| XBIOS | `Dsp_Lock` / `Dsp_Unlock` (104/105) and `Locksnd` ... `Buffptr` (128-141); the `_SND` cookie gains bits 1-4 |
+| XBIOS | `Dsp_Lock` / `Dsp_Unlock` (104/105), `Dsp_ExecProg` / `Dsp_ExecBoot` (109/110) and `Locksnd` ... `Buffptr` (128-141); the `_SND` cookie gains bits 1-4 |
 
 ## Not there yet
 
-* The DSP XBIOS beyond the locks: `Dsp_LoadProg`, `Dsp_ExecProg`,
-  `Dsp_DoBlock` and friends answer as they would on an ST. Software that
-  loads its DSP code through TOS rather than the bootstrap will not find
-  the DSP. Beats of Rage boots its DSP itself.
+* The rest of the DSP XBIOS: `Dsp_LoadProg`, `Dsp_DoBlock` and friends
+  answer as they would on an ST. `Dsp_ExecProg` / `Dsp_ExecBoot` work
+  (ACE Tracker loads its DSP code that way); Beats of Rage boots its DSP
+  itself.
 * The DSP-to-68k host interrupt (level 6 through the IVR). Falcon
   software overwhelmingly polls the host port instead.
 * External input and the ADC are silence. Microphone recording records
@@ -124,6 +124,8 @@ Environment variables, read at start-up:
 |---|---|
 | `PISTORM_DSP_TURBO=1..8` | the DSP's speed as a multiple of 32 MHz. Default 2. Programs pace themselves on the SSI and the host port, not on cycle counts, so a faster DSP only finishes its work sooner; 1 is a real Falcon's speed |
 | `PISTORM_FALCON_VBLSYNC=0` | keep DSP time on the wall clock even for a program that talks to the DSP once a VBL (the default locks the two together, which is what such programs need on a PiSTorm) |
+| `PISTORM_DSP_INLINE=0` | run a coprocessor DSP (ACE Tracker) on the engine thread instead of settling it on the 68k's thread at each host-port read (the default, as Hatari does) - for comparison only |
+| `PISTORM_FALCON_DEBUG=1` | every 5 s while a DSP program runs: host-port traffic, Timer A events raised and acknowledged, the MFP shadow, the DMA position; plus a dump when a program reloads its DSP. Off by default |
 | `PISTORM_FALCON_STATS=1` | the `[FALCON] 68k:` timing line every 10 s (off by default) |
 
 ## Software that checks for a Falcon

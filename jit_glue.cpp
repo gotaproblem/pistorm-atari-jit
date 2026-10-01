@@ -488,8 +488,32 @@ volatile uint8_t pistorm_mfp_last_iack_vector;
 /* IACK read at FC=7. Hardware returns the vector number for all three levels
  * (no autovector branch). do_interrupt() calls this before Exception(nr+24);
  * Exception_normal() uses this vector for the actual vector-table lookup. */
+/* Always-on, rate-limited (once a second) summary of how level-6 IACKs
+ * resolve - virtual hub (Falcon sound Timer A / keyboard), real MFP bus
+ * vector, or a failed ack (NOACK). Replaces the per-event CPU_DIAG flood
+ * for spotting an interrupt storm (e.g. native mouse movement starving
+ * ACE's sound interrupt). */
+static volatile unsigned g_l6_virt, g_l6_real, g_l6_noack;
+static void l6_tick(void)
+{
+    static uint64_t last_ns;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    if (!last_ns) { last_ns = now; return; }
+    if (now - last_ns < 1000000000ull) return;
+    unsigned v = g_l6_virt, r = g_l6_real, e = g_l6_noack;
+    g_l6_virt = g_l6_real = g_l6_noack = 0;
+    last_ns = now;
+    static int dbg = -1;
+    if (dbg < 0) { const char *ev = getenv("PISTORM_FALCON_DEBUG"); dbg = (ev && *ev == '1'); }
+    if (dbg && (v | r | e))
+        fprintf(stderr, "[MFP6] last 1s: %u virtual, %u real-bus, %u NOACK\n", v, r, e);
+}
+
 void intlev_ack (uint8_t nr)
 {
+    if (nr == 6) l6_tick();
     /* Virtual keyboard (USB/Bluetooth -> IKBD injection): if the pending
      * level-6 was raised for an injected byte, the real MFP has nothing to
      * acknowledge - a bus IACK would BERR. Supply GPIP4's vector directly.
@@ -513,12 +537,21 @@ void intlev_ack (uint8_t nr)
     if (nr == 6)
     {
         extern bool DMA_Sound_enabled;
+        extern int mfp_hub_top_wanted(void);
+        int vtop;
         if ((DMA_Sound_enabled || KBD_USB_enabled || pst_fdd_mfp_irq) &&
-            mfp_hub_irq_wanted())
+            (vtop = mfp_hub_top_wanted()) >= 0)
         {
             uint8_t live = 0;
             ps_read_ipl(&live);
-            if (live < 6)
+            /* Service the virtual cause when no real level-6 is racing us,
+             * OR when the virtual cause outranks the keyboard (channel > 6):
+             * the Falcon sound Timer A (ch13)/GPIP7 (ch15) have higher MFP
+             * channel priority than the keyboard ACIA, so a mouse byte must
+             * not delay the sound interrupt (ACE Tracker overruns its buffer
+             * and reports a CPU overload if it does). A real source higher
+             * than ch13 is not present on this machine's level 6. */
+            if (live < 6 || vtop > 6)
             {
                 int vec = mfp_hub_iack();
                 if (vec >= 0)
@@ -527,6 +560,7 @@ void intlev_ack (uint8_t nr)
                     pistorm_mfp_last_iack_vector = (uint16_t)vec;
                     pistorm_mfp_iack_counts[6]++;
                     kbd_usb_stat_virtual_iacks++;
+                    if (nr == 6) g_l6_virt++;
                     return;
                 }
             }
@@ -542,10 +576,12 @@ void intlev_ack (uint8_t nr)
          * expose a real 680x0 spurious interrupt frame to the guest. */
         pistorm_iack_vector = 0xFFFE;
         g_buserr = 0;
+        if (nr == 6) g_l6_noack++;
     }
     else
     {
         pistorm_iack_vector = vector;
+        if (nr == 6) g_l6_real++;
     }
 
     if (!iack_berr && nr == 6 && (pistorm_iack_vector & 0xFF) >= 0x40 && (pistorm_iack_vector & 0xFF) <= 0x4F)

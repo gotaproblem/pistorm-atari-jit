@@ -85,12 +85,22 @@ void mfp_hub_timer_a_event(void);
  * outranks every virtual in-service channel). */
 int mfp_hub_irq_wanted(void);
 
+/* Highest deliverable virtual channel now, or -1 (for IACK priority). */
+int mfp_hub_top_wanted(void);
+
 /* IACK, for intlev_ack (CPU thread): pick the highest deliverable
  * virtual channel; clear its pending latch (event sources), set its
  * in-service bit (software-EOI mode), and return the vector
  * ((VR & 0xF0) | channel). Returns -1 if nothing is deliverable -
  * caller falls through to the real-bus IACK. */
 int mfp_hub_iack(void);
+
+/* Diagnostics: virtual IACKs taken on a channel since start. */
+uint32_t mfp_hub_iacks(int ch);
+
+/* Diagnostics: the shadows as they stand (pend includes live levels). */
+void mfp_hub_snapshot(uint16_t *ier, uint16_t *imr, uint16_t *pend,
+                      uint16_t *isr, uint8_t *vr);
 
 /* Cold/warm reset: clear pending + in-service latches and restore the
  * power-on register shadows (enables/masks all set, VR software-EOI -

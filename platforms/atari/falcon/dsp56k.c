@@ -831,8 +831,12 @@ static int par_move(dsp56k_t *d, uint32_t mv, pend_t *p)
             else WR(DSP_SPACE_X, ea, v1);
             pend_reg(p, d2, v2);
         } else {                                        /* S1,D1  Y:ea,D2 */
-            int d1 = (mv >> 11) & 1 ? 0x05 : 0x04;      /* x1/x0 */
-            int s1 = (mv >> 10) & 1;                    /* A/B */
+            /* 0001 deff W1MMMRRR: d (bit 11) is S1 = A/B, e (bit 10)
+             * is D1 = X0/X1. They were swapped, so "A,X1 Y:ea,Y1" wrote
+             * X0 - in ACE Tracker's mix that overwrote a coefficient and
+             * put two clicks in every buffer (the buzz). */
+            int d1 = (mv >> 10) & 1 ? 0x05 : 0x04;      /* x1/x0 */
+            int s1 = (mv >> 11) & 1;                    /* A/B */
             int r2 = xy_y_reg[(mv >> 8) & 3];
             uint32_t v1 = acc_bus24(d, *acc(d, s1));
             uint32_t v2 = w ? 0 : reg_read(d, r2);
@@ -1259,14 +1263,20 @@ static void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
                 uint16_t ea = ea_calc(d, reg, NULL, NULL);
                 if (!doit) return;
                 if (is0B) do_jsr(d, ea); else d->pc = ea;
+                /* "jmp *": waiting for an interrupt, which only arrives
+                 * between runs - the caller may skip ahead */
+                if (!is0B && sub == 0x80 && ea == start_pc)
+                    d->idle_hint = 1;
                 return;
             }
             int kind = (op >> 5) & 7;         /* 000 JCLR 001 JSET 010 BCLR 011 BSET */
             uint32_t v = reg_read(d, reg);
             if (kind <= 1) {
+                /* JCLR/JSET/JSCLR/JSSET: the condition codes are not
+                 * affected (unlike BTST). Setting C here corrupted the
+                 * carry a program keeps across a polling wait. */
                 uint16_t tgt = (uint16_t)fetch(d);
                 int bitv = bit_of(v, b);
-                set_c(d, bitv);
                 if (bitv == kind) {
                     if (is0B) do_jsr(d, tgt); else d->pc = tgt;
                 }
@@ -1285,15 +1295,14 @@ static void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
         else ea = (uint16_t)(0xFFC0 | ((op >> 8) & 0x3F));
         uint32_t v = RD(space, ea);
         if (bit7) {
-            /* JCLR/JSET (0A) and JSCLR/JSSET (0B) */
+            /* JCLR/JSET (0A) and JSCLR/JSSET (0B): CCR not affected */
             uint16_t tgt = (uint16_t)fetch(d);
             int bitv = bit_of(v, b);
-            set_c(d, bitv);
             if (bitv == bit5) {
                 if (is0B) do_jsr(d, tgt); else d->pc = tgt;
                 /* "jclr #n,x:<<periph,*": waiting on a peripheral - the
                  * caller may skip ahead to its next event */
-                if (!is0B && tgt == start_pc && group == 2)
+                if (!is0B && tgt == start_pc && (group == 2 || ea >= 0xFFC0))
                     d->idle_hint = 1;
             }
             return;
@@ -1306,7 +1315,12 @@ static void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
     }
 
     case 0x0C:
-        if ((op & 0xFFF000) == 0x0C0000) { d->pc = (uint16_t)(op & 0xFFF); return; }
+        if ((op & 0xFFF000) == 0x0C0000) {
+            d->pc = (uint16_t)(op & 0xFFF);
+            if (d->pc == start_pc)
+                d->idle_hint = 1;             /* "jmp *" (short form) */
+            return;
+        }
         illegal(d);
         return;
     case 0x0D:

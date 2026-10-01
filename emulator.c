@@ -1474,6 +1474,20 @@ static void *ipl_task(void *)
     if ((KBD_USB_enabled || DMA_Sound_enabled || pst_fdd_mfp_irq) &&
         mfp_hub_irq_wanted() && 6 > g_irq && 6 > g_irq_mask)
     {
+      /* A VBL/HBL latched but not yet taken is pre-empted here. Its line
+       * stays asserted (the GLUE only drops it on the IACK it now never
+       * gets), and av_held - one latch per episode - would then refuse
+       * it for good: no VBL until a real level-6 interrupt moved the
+       * line (ACE Tracker: song display frozen while the Falcon sound
+       * Timer A ran, moving only with the mouse). Re-arm it, so the
+       * still-asserted line is latched again once the CPU has taken
+       * this one. */
+      if (g_irq == 2 || g_irq == 4)
+      {
+        av_held = 0;
+        if (g_irq == 4)
+          av4_last_tick = 0;
+      }
       g_irq = 6;
       IPL_KICK();
     }

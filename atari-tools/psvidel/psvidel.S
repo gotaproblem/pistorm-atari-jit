@@ -12,7 +12,8 @@
 |             VgetMonitor (89), VsetSync (90), VgetSize (91), VsetRGB (93),
 |             VgetRGB (94), Vfixmode (95), VsetMask (150),
 |             ct60_vmalloc ($C60E)                       - cfg psvidel
-|             Dsp_Lock (104), Dsp_Unlock (105), the sound calls
+|             Dsp_Lock (104), Dsp_Unlock (105), Dsp_ExecProg (109),
+|             Dsp_ExecBoot (110), the sound calls
 |             locksnd .. buffptr (128-141)               - cfg falcon_dsp
 | Each group is hooked only when the host has it switched on.
 |
@@ -289,6 +290,10 @@ xbios:
         cmp.w   #104,d0                 | Dsp_Lock / Dsp_Unlock
         beq     x_sndx
         cmp.w   #105,d0
+        beq     x_sndx
+        cmp.w   #109,d0                 | Dsp_ExecProg / Dsp_ExecBoot
+        beq     x_sndx
+        cmp.w   #110,d0
         beq     x_sndx
         cmp.w   #128,d0                 | the sound calls 128-141
         bcs.s   2f
@@ -572,7 +577,7 @@ nf_name:        .asciz  "PSVIDEL"
 msg_ok:         .asciz  "PSVIDEL: Falcon Videl + SuperVidel XBIOS on the HDMI output\r\n"
 msg_vram:       .asciz  "PSVIDEL: video RAM at $A1000000, SupV cookie set\r\n"
 msg_novram:     .asciz  "PSVIDEL: 24-bit bus - no video RAM, no SupV cookie\r\n"
-msg_dsp:        .asciz  "PSVIDEL: Falcon DSP56001 + sound matrix, XBIOS 104-105 128-141\r\n"
+msg_dsp:        .asciz  "PSVIDEL: Falcon DSP56001 + sound matrix, XBIOS 104-105 109-110 128-141\r\n"
 msg_nonf:       .asciz  "PSVIDEL: no PSVIDEL NatFeat (cfg psvidel / falcon_dsp) - not installed\r\n"
 msg_refused:    .asciz  "PSVIDEL: the host refused - not installed\r\n"
 msg_twice:      .asciz  "PSVIDEL: already installed\r\n"

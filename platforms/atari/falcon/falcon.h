@@ -54,6 +54,9 @@ void     falcon_step(unsigned frames);
 /* XBIOS locks (Dsp_Lock/Dsp_Unlock, Locksnd/Unlocksnd) */
 int32_t  falcon_dsp_lock(int lock);          /* 0 ok, -1 busy / not locked */
 int32_t  falcon_snd_lock(int lock);          /* 1 / -129 / 0 / -128 like TOS 4 */
+/* Dsp_ExecProg (boot 0: Dsp_LodToBinary stream) / Dsp_ExecBoot (boot 1:
+ * up to 512 bootstrap words): n 24-bit words, loaded at a DSP reset */
+int32_t  falcon_dsp_exec(const uint32_t *words, uint32_t n, int boot);
 uint32_t falcon_info(uint32_t what);
 /* XBIOS 104/105 and 128-141 with their arguments sign-extended; buffptr
  * (141) fills out4[4] for the caller to write back */

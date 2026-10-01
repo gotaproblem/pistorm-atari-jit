@@ -72,6 +72,7 @@ static struct {
     uint8_t  r8006, r8007;       /* monitor type / bus control            */
 
     int      src;                /* SRC_*                                  */
+    int      sp16;               /* SPSHIFT last written as 16 colours     */
     uint32_t bpp_override;       /* XBIOS modes: bpp from the mode word    */
     uint32_t cur_mode;           /* what VsetMode(-1) answers              */
     uint32_t sv_w, sv_h, sv_bpp, sv_fmt;
@@ -96,6 +97,7 @@ static volatile uint32_t g_vseq;
 static psvidel_frame_t   g_vpub;
 static int               g_vpub_active;
 static volatile uint64_t g_vbl_ns;
+static uint32_t          g_base_changes;    /* screen flips seen (diag)  */
 
 /* ...and its ST-RAM CONTENT as it stood at that VBL. The render thread
  * runs at its own rate and read the guest's screen live, so a game that
@@ -531,6 +533,7 @@ uint32_t psvidel_enable(uint32_t initial_mode)
     S.r8006 = 0x80;                /* VGA monitor: vmontype() == 2 */
     S.r8007 = 0x01;
     S.src = SRC_NONE;
+    S.sp16 = 0;
     S.bpp_override = 0;
     palette_defaults();
     S.armed = 1;
@@ -544,6 +547,7 @@ void psvidel_disable(void)
 {
     S.armed = 0;
     S.src = SRC_NONE;
+    S.sp16 = 0;
     recompute();
 }
 
@@ -564,6 +568,7 @@ uint32_t psvidel_setmode(uint32_t mode)
     uint32_t old = S.cur_mode;
     S.cur_mode = m;
     fill_regs(m, &g);
+    S.sp16 = 0;
 
     if (g.compat) {
         S.src = SRC_NONE;
@@ -692,6 +697,7 @@ uint32_t psvidel_info(uint32_t what)
     case 4: return S.cur_mode;
     case 5: return (uint32_t)S.src;
     case 6: return g_vram ? vram_largest() : 0;
+    case 7: return __atomic_load_n(&g_base_changes, __ATOMIC_RELAXED);
     }
     return 0;
 }
@@ -761,6 +767,31 @@ uint32_t psvidel_hw_read(uint32_t a, int size)
     return v;
 }
 
+/* Visible lines from the vertical window, as recompute() counts them */
+static uint32_t vis_lines(void)
+{
+    uint32_t vdb = rw(0xA8), vde = rw(0xAA), vco = rw(0xC2);
+    uint32_t lines = vde > vdb ? vde - vdb : 0;
+    if (!(vco & 0x02))
+        lines >>= 1;
+    if (vco & 0x01)
+        lines >>= 1;
+    return lines;
+}
+
+/* SPSHIFT holds the 16-colour value: a Falcon 16-colour screen, or the
+ * registers of an ST-compatible one being saved/restored? Only an ST
+ * geometry (80 or 40 words a line, 200 or 400 lines) stays "ST": ACE
+ * Tracker pokes 640x480x16 (160 words, 480 lines) straight into the
+ * registers and wants the Falcon shifter. Re-decided on every geometry
+ * write, since SPSHIFT usually goes in before VWRAP and the window. */
+static void sp16_decide(void)
+{
+    uint32_t vwrap = rw(0x10) & 0x03FFu, lines = vis_lines();
+    int st = (vwrap == 80u || vwrap == 40u) && (lines == 200u || lines == 400u);
+    S.src = (vwrap && !st) ? SRC_FALCON : SRC_NONE;
+}
+
 /* Side effects of one register write, once its bytes are stored. */
 static void reg_effect(uint32_t o, int *mode_dirty)
 {
@@ -769,18 +800,22 @@ static void reg_effect(uint32_t o, int *mode_dirty)
         /* SPSHIFT written last selects the Falcon shifter. A value with
          * none of the 2/256/65536-colour bits is the 16-colour mode -
          * which is also what a register save/restore of an ST-compatible
-         * screen looks like, so it is treated as "ST again" rather than
-         * yanking the HDMI away from the desktop. */
+         * screen looks like, so it only takes the HDMI when the geometry
+         * is not an ST one (sp16_decide). */
         if (rw(0x66) & 0x0510u) {
             S.src = SRC_FALCON;
+            S.sp16 = 0;
         } else {
-            S.src = SRC_NONE;
+            S.sp16 = 1;
+            sp16_decide();
         }
         S.bpp_override = 0;
         *mode_dirty = 1;
         break;
     case 0x0E: case 0x10: case 0x64:
     case 0xA8: case 0xAA: case 0xC2:
+        if (S.sp16)
+            sp16_decide();
         *mode_dirty = 1;
         break;
     default:
@@ -840,6 +875,7 @@ void psvidel_video_snoop(uint32_t a, uint32_t v, int size)
         case 0xFF820Du: S.base_lo = x & 0xFEu;         changed = 1; break;
         case 0xFF8260u:
             /* ST shift written last: the Falcon is an ST shifter again */
+            S.sp16 = 0;
             if (S.armed && S.src != SRC_NONE) {
                 S.src = SRC_NONE;
                 S.bpp_override = 0;
@@ -853,8 +889,11 @@ void psvidel_video_snoop(uint32_t a, uint32_t v, int size)
     if (changed) {
         /* a register-written base is 24-bit; in SV modes it addresses the
          * SV RAM, whose first 16MB mirror ST-RAM - the same bytes */
-        S.phys = ((uint32_t)S.base_hi << 16) | ((uint32_t)S.base_mid << 8) |
-                 S.base_lo;
+        uint32_t np = ((uint32_t)S.base_hi << 16) | ((uint32_t)S.base_mid << 8) |
+                      S.base_lo;
+        if (np != S.phys)
+            __atomic_add_fetch(&g_base_changes, 1, __ATOMIC_RELAXED);
+        S.phys = np;
         if (S.armed && S.src != SRC_NONE)
             recompute();
     }
@@ -1035,6 +1074,7 @@ void psvidel_reset(void)
     S.armed = 0;
     S.src = SRC_NONE;
     S.bpp_override = 0;
+    S.sp16 = 0;
     S.cur_mode = 0;
     g_fifo_n = 0;
     vram_alloc_reset();
