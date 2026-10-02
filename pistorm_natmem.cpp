@@ -41,6 +41,7 @@
 #include "platforms/atari/joy_usb.h"
 #include "platforms/atari/psvidel/psvidel.h"
 #include "platforms/atari/falcon/falcon.h"
+#include "platforms/atari/falcon/falcon_tos.h"
 
 extern "C"
 {
@@ -3530,6 +3531,8 @@ static uae_u32 hw_lget(uaecptr a)
     /* Falcon DSP host port / sound matrix (cfg falcon_dsp, once armed) */
     if (falcon_hw_owns(a))
         return falcon_hw_read(a, 4);
+    if (falcon_tos_owns(a))                 /* Falcon TOS: NVRAM, SCC */
+        return falcon_tos_read(a, 4);
 
     switch (hw_page_addr(a))
     {
@@ -3610,6 +3613,8 @@ static uae_u32 hw_wget(uaecptr a)
         return psvidel_hw_read(a, 2);
     if (falcon_hw_owns(a))
         return falcon_hw_read(a, 2);
+    if (falcon_tos_owns(a))
+        return falcon_tos_read(a, 2);
 
     switch (hw_page_addr(a))
     {
@@ -3683,6 +3688,8 @@ static uae_u32 hw_bget(uaecptr a)
         return psvidel_hw_read(a, 1);
     if (falcon_hw_owns(a))
         return falcon_hw_read(a, 1);
+    if (falcon_tos_owns(a))
+        return falcon_tos_read(a, 1);
     {   /* $FF8001 and the video base: the guest reads back what IT
          * wrote, not what the chip holds - see pistorm_stram_phys_init()
          * and the shadow frame buffer */
@@ -3751,6 +3758,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
     stram_memcfg_snoop(a, v, 4);
     v = pistorm_stram_memcfg_bus_value(a, v, 4);   /* the chip keeps the
                                                       board's own value */
+    falcon_tos_snoop(a, v, 4);          /* Falcon TOS: DMA mode -> SCSI */
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return;
@@ -3763,6 +3771,10 @@ static void hw_lput(uaecptr a, uae_u32 v)
     }
     if (falcon_hw_owns(a)) {
         falcon_hw_write(a, v, 4);
+        return;
+    }
+    if (falcon_tos_owns(a)) {
+        falcon_tos_write(a, v, 4);
         return;
     }
 
@@ -3850,6 +3862,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
     a = hw_fold_addr(a);
     stram_memcfg_snoop(a, v, 2);   /* see hw_lput */
     v = pistorm_stram_memcfg_bus_value(a, v, 2);
+    falcon_tos_snoop(a, v, 2);
 
     if (fpu_in_regs(a))
         return;
@@ -3867,6 +3880,10 @@ static void hw_wput(uaecptr a, uae_u32 v)
     }
     if (falcon_hw_owns(a)) {
         falcon_hw_write(a, v & 0xFFFFu, 2);
+        return;
+    }
+    if (falcon_tos_owns(a)) {
+        falcon_tos_write(a, v & 0xFFFFu, 2);
         return;
     }
 
@@ -3954,6 +3971,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
     a = hw_fold_addr(a);
     stram_memcfg_snoop(a, v, 1);   /* see hw_lput */
     v = pistorm_stram_memcfg_bus_value(a, v, 1);
+    falcon_tos_snoop(a, v, 1);
 
     if (fpu_in_regs(a))
         return;
@@ -3968,6 +3986,10 @@ static void hw_bput(uaecptr a, uae_u32 v)
     }
     if (falcon_hw_owns(a)) {
         falcon_hw_write(a, v & 0xFFu, 1);
+        return;
+    }
+    if (falcon_tos_owns(a)) {
+        falcon_tos_write(a, v & 0xFFu, 1);
         return;
     }
 

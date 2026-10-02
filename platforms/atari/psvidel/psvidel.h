@@ -43,6 +43,8 @@ extern "C" {
  * Returns 1 when the VRAM window exists. */
 int      psvidel_init(uint8_t *st_ram, uint32_t st_limit, int want_vram);
 int      psvidel_configured(void);        /* cfg `psvidel` was on         */
+void     psvidel_set_sysconfig(uint8_t r8006); /* $FF8006 from the next enable */
+void     psvidel_cold(void);              /* clear the warm-start bit     */
 uint8_t *psvidel_vram(void);              /* NULL without the window      */
 void     psvidel_reset(void);             /* guest RESET / hard reset     */
 

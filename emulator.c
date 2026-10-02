@@ -36,6 +36,7 @@
 #include "platforms/atari/st_blitter.h"
 #include "platforms/atari/psvidel/psvidel.h"
 #include "platforms/atari/falcon/falcon.h"
+#include "platforms/atari/falcon/falcon_tos.h"
 #include "sysdeps.h"
 #include "threaddep/thread.h"
 
@@ -810,6 +811,34 @@ static void *ipl_stats_task(void *)
     q2 = d2; q4 = d4; q6 = d6;
   }
   return NULL;
+}
+
+/* Falcon TOS mode (see the ROM detection in main): Videl, the DSP and
+ * the sound matrix answer from reset, as on a Falcon, and $FF8006 tells
+ * TOS what a Falcon would: VGA monitor and the ST-RAM size it sizes
+ * memory from (bits 5, 4, 1; bits 3-2 = 01, two ROM wait states). */
+static int g_falcon_tos;
+int emulator_falcon_tos(void) { return g_falcon_tos; }
+
+static void falcon_tos_arm(int cold)
+{
+  if (!g_falcon_tos)
+    return;
+  falcon_tos_reset();                  /* RTC interrupt bits, SCC pointers */
+  if (cold && psvidel_configured())
+    psvidel_cold();                    /* TOS boots cold: $FF8007 bit 6 */
+  extern uint32_t emulator_config_stram_size(void);
+  uint32_t ram = emulator_config_stram_size();
+  if (!ram || ram > 0x00400000u)
+    ram = 0x00400000u;                 /* the flat 4MB guest model */
+  uint8_t mem = ram >= 0x00400000u ? 0x16 : ram >= 0x00200000u ? 0x14 :
+                ram >= 0x00100000u ? 0x06 : 0x04;
+  if (psvidel_configured()) {
+    psvidel_set_sysconfig((uint8_t)(0x80u | mem));   /* VGA */
+    psvidel_enable(0x001Au);                          /* VGA 640x480x16 */
+  }
+  if (falcon_configured())
+    falcon_arm();
 }
 
 static void *ipl_task(void *)
@@ -2256,6 +2285,27 @@ int main (int argc, char *argv[])
       printf ("[INIT] ROM loaded - %dK mapped at 0x%06X-0x%06X\n",
               config->rom.rom_size / 1024,
               (unsigned) ROM_START, (unsigned) ROM_END);
+
+      /* Falcon TOS (4.0x: the version word at ROM+2) on `machine falcon`:
+       * it drives Videl, the sound matrix and the DSP from its first
+       * instructions, so they are armed at power-on and after every reset
+       * instead of by PSVIDEL.PRG (falcon_tos_arm). PISTORM_FALCON_TOS=0/1
+       * overrides the detection. */
+      {
+        extern int emulator_config_machine_kind(void);
+        const uint8_t *r = config->rom.rom_ptr;
+        unsigned ver = (config->rom.rom_size >= 4) ? ((unsigned)r[2] << 8 | r[3]) : 0;
+        g_falcon_tos = (emulator_config_machine_kind() == 3 && (ver & 0xFF00u) == 0x0400u);
+        const char *e = getenv("PISTORM_FALCON_TOS");
+        if (e && *e)
+          g_falcon_tos = (*e == '1');
+        if (g_falcon_tos)
+          printf ("[INIT] Falcon TOS %u.%02X: Videl, DSP and sound matrix armed from reset\n",
+                  ver >> 8, ver & 0xFFu);
+        else if ((ver & 0xFF00u) == 0x0400u)
+          printf ("[INIT] TOS %u.%02X is Falcon TOS: it needs `machine falcon`, `psvidel` and `falcon_dsp`\n",
+                  ver >> 8, ver & 0xFFu);
+      }
     }
   //}
   else {
@@ -2436,6 +2486,8 @@ int main (int argc, char *argv[])
     if (falcon_init (natmem_offset, gsz) != 0)
       fprintf (stderr, "[INIT] Falcon DSP failed to start\n");
   }
+
+  falcon_tos_arm(1);
 
   /* start threads */
   err = pthread_create(&cpu_tid, NULL, &cpu_task, NULL);
@@ -2650,6 +2702,7 @@ void cpu_pulse_reset(void)
   st_blitter_reset();
   psvidel_reset();   /* the Videl disarms: the ST shifter is back on HDMI */
   falcon_reset();    /* DSP held in reset, sound DMA stopped */
+  falcon_tos_arm(0); /* ...unless Falcon TOS owns the machine (warm) */
 
   pulse_reset_inprogress = 0;
 }
@@ -2672,6 +2725,7 @@ void atari_hard_reset(void)
   st_blitter_reset();
   psvidel_reset();
   falcon_reset();
+  falcon_tos_arm(1); /* hard reset: Falcon TOS boots cold */
   pistorm_net_reset();
 
   jit_cpu_reset(); /* drop stale translations before re-fetch */

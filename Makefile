@@ -48,6 +48,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/psvidel/psvidel.c \
          platforms/atari/falcon/dsp56k.c \
          platforms/atari/falcon/falcon_hw.c \
+         platforms/atari/falcon/falcon_tos.c \
          platforms/atari/falcon/falcon_audio.c \
          platforms/atari/avrecord.c \
          platforms/atari/video/vidplane.c \

@@ -226,6 +226,14 @@ void psvidel_vram_dirty(uint32_t off, uint32_t len)
 uint8_t *psvidel_vram(void) { return g_vram; }
 int psvidel_configured(void) { return S.configured; }
 
+/* $FF8006 as psvidel_enable() sets it: monitor type in bits 7-6 and, for
+ * Falcon TOS which sizes ST-RAM from it, the memory bits (5, 4, 1) and
+ * the ROM wait bits. Default: VGA, memory bits 0 (the TSR case - ST TOS
+ * never reads it). */
+static uint8_t g_r8006 = 0x80;
+void psvidel_set_sysconfig(uint8_t r8006) { g_r8006 = r8006; }
+void psvidel_cold(void) { S.r8007 &= (uint8_t)~0x40; }
+
 /* ------------------------------------------------------------------ */
 /* Register file helpers                                               */
 /* ------------------------------------------------------------------ */
@@ -530,8 +538,11 @@ uint32_t psvidel_enable(uint32_t initial_mode)
     mode_geometry(S.cur_mode, &g);
     if (g.valid)
         fill_regs(S.cur_mode, &g);
-    S.r8006 = 0x80;                /* VGA monitor: vmontype() == 2 */
-    S.r8007 = 0x01;
+    S.r8006 = g_r8006;             /* VGA monitor: vmontype() == 2 */
+    /* bit 6 is Falcon TOS's warm-start flag: it sets it once booted and
+     * looks at it after a reset. It survives a re-arm (a warm reset);
+     * psvidel_cold() clears it (power-on, hard reset). */
+    S.r8007 = (uint8_t)(0x01 | (S.r8007 & 0x40));
     S.src = SRC_NONE;
     S.sp16 = 0;
     S.bpp_override = 0;
