@@ -376,6 +376,59 @@ const char *se_cpu_rule(const char *key, const char *cpu)
 }
 
 /*
+ * What the machine line implies. A Falcon has no ACSI port - its hard
+ * disk port is SCSI, and TOS 4.0x has no ACSI code at all - and it is a
+ * 68030 machine, so the 68000-only prefetch core means nothing to it.
+ * It does have a blitter, Videl and the DSP, and Falcon TOS drives all
+ * three from its first instructions, so choosing `falcon` switches them
+ * on. Unlisted keys are allowed on every machine.
+ */
+static const struct { const char *key; const char *machines; const char *why; } mrule[] = {
+    { "acsi",           " st ste megast ", "no ACSI on a Falcon" },
+    { "cpu_compatible", " st ste megast ", "not on a Falcon (68030)" },
+};
+
+static const char *machine_word(const char *machine)
+{
+    int i = (machine && *machine) ? se_index("machine", machine) : 0;
+    const char *c = se_choice("machine", i < 0 ? 0 : i);
+    return c ? c : "st";               /* config_file.c: absent = st */
+}
+
+const char *se_machine_rule(const char *key, const char *machine)
+{
+    char pad[16];
+    snprintf(pad, sizeof pad, " %.12s ", machine_word(machine));
+    for (unsigned i = 0; i < sizeof mrule / sizeof mrule[0]; i++)
+        if (!strcasecmp(key, mrule[i].key))
+            return strstr(mrule[i].machines, pad) ? NULL : mrule[i].why;
+    return NULL;
+}
+
+static const struct { const char *machine, *key, *value; } mwants[] = {
+    { "falcon", "blitter",    "enabled" },
+    { "falcon", "psvidel",    "enabled" },
+    { "falcon", "falcon_dsp", "enabled" },
+};
+
+int se_machine_wants(const char *machine, int i, const char **key, const char **value)
+{
+    const char *m = machine_word(machine);
+    for (unsigned k = 0; k < sizeof mwants / sizeof mwants[0]; k++)
+        if (!strcasecmp(m, mwants[k].machine) && i-- == 0) {
+            *key = mwants[k].key;
+            *value = mwants[k].value;
+            return 1;
+        }
+    return 0;
+}
+
+const char *se_machine_min_cpu(const char *machine)
+{
+    return !strcasecmp(machine_word(machine), "falcon") ? "68030" : NULL;
+}
+
+/*
  * Switches the emulator has ON when the line is absent, and the word
  * that turns them off. config_file.c starts from all-zero except jit and
  * blitter; the PSCTRL tunables (psctrl_tunables.c) default lmc and

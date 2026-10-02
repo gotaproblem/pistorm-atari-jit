@@ -72,6 +72,17 @@ const char *se_cpu_rule(const char *key, const char *cpu);
 const char *se_off_value(const char *key);
 /* 1 and the clamp range of a typed number, 0 if it has none */
 int         se_int_range(const char *key, long *lo, long *hi);
+/* NULL = the key means something on this machine, else why not ("no
+ * ACSI on a Falcon"): greyed, skipped by the cursor, never ticked */
+const char *se_machine_rule(const char *key, const char *machine);
+/* What a machine expects switched on, walked i = 0, 1, ... until 0 is
+ * returned: the key and the value the page writes when the build does
+ * not already have it on (blitter, psvidel, falcon_dsp for a Falcon) */
+int         se_machine_wants(const char *machine, int i,
+                             const char **key, const char **value);
+/* the lowest cpu the machine needs ("68030" for a Falcon), or NULL */
+const char *se_machine_min_cpu(const char *machine);
+
 /* NULL = the key belongs in this build, else "apj-os only" / "gem only" */
 const char *se_env_rule(const char *key, const char *section);
 
