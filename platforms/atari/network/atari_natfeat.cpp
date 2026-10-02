@@ -1578,6 +1578,17 @@ static void fvdi_mfdb_parse(uaecptr mfdb, fvdi_mfdb_info_t *out)
     out->plane_bytes = out->row_bytes * out->height;
   }
 
+  /* On a true-colour screen fd_stand means nothing to a raster copy: the
+   * VDI's vro_cpyfm treats every memory MFDB as device format, and only
+   * vr_trnfm (fVDI's own 68k code here) reads the flag. XaAES saves the
+   * screen under a drop-down menu into a 16-plane MFDB with fd_stand = 1
+   * and restores it from there; declining it as "standard format" left
+   * both copies undone and the menu closed onto black. Same depth as the
+   * screen: device format, chunky like the screen. */
+  if (!out->screen && out->standard != 0 && !out->stdfmt &&
+      pistorm_fvdi_bpp() != 8 && bpp == pistorm_fvdi_bpp() && out->pixel_bytes)
+    out->standard = 0;
+
   out->addressable =
       out->screen ||
       (out->stdfmt && out->base && out->width && out->height &&
@@ -4252,8 +4263,11 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
        * was taken for, the path that did it, how many screen notes it
        * made (mouse hide / blit / mouse show) and the dirty rect as it
        * stands for the render afterwards - for a GEM menu whose
-       * background never comes back. The first 400 only. */
-      if (trace && shown < 400) {
+       * background never comes back. Only copies between the screen and
+       * memory of 2000+ pixels (a menu's save-under and its restore), so
+       * the desktop's icon and text blits at boot do not use up the 400. */
+      if (trace && shown < 400 && (int64_t)w * h >= 2000 &&
+          (!fvdi_mfdb_is_screen(src) || !fvdi_mfdb_is_screen(dst))) {
         shown++;
         const fvdi_mfdb_info_t *si = fvdi_mfdb_info(src);
         const fvdi_mfdb_info_t *di = fvdi_mfdb_info(dst);
