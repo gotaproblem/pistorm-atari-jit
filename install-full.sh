@@ -11,6 +11,11 @@
 # Safe to run more than once. Non-interactive use:
 #   BUILD=1 SERVICE=1 SAMBA=0 WEB=1 MACFIX=1 ./install-full.sh
 #
+# Also runs unattended inside a chroot of a stock Raspberry Pi OS image
+# (apj-os/tools/build-sd-image.sh does exactly that): systemctl enable/mask
+# work offline there, and start/restart/daemon-reload are skipped by
+# systemctl itself ("Running in chroot, ignoring request").
+#
 # cryptodad / hardened rewrite — 2026
 #
 set -euo pipefail
@@ -86,6 +91,18 @@ uninstall() {
     sudo systemctl unmask ctrl-alt-del.target
   fi
 
+  # the other units this script installs
+  for u in psweb.socket psweb.service atariclean.timer atariclean.service \
+           apj-wifi.service apj-sshkeys.service; do
+    if [ -e "/etc/systemd/system/$u" ]; then
+      say "Removing $u"
+      sudo systemctl disable --now "$u" 2>/dev/null || true
+      sudo rm -f "/etc/systemd/system/$u"
+    fi
+  done
+  sudo rm -f /usr/local/sbin/apj-wifi /usr/local/bin/psweb /usr/local/bin/atariclean
+  sudo systemctl daemon-reload
+
   # Samba share
   if [ -e /etc/samba/smb.conf ] && grep -q '^\[pistorm\]' /etc/samba/smb.conf; then
     say "Removing Samba [pistorm] share"
@@ -132,8 +149,16 @@ PiSTorm Atari installer (idempotent).
   ./install-full.sh --uninstall   restore boot files, remove service + share
                                       (leaves your games/ROMs/configs alone)
 
-Non-interactive env overrides:
-  BUILD=1  SERVICE=1  SAMBA=1  PISTORM_CFG=games.cfg  ./install-full.sh
+Non-interactive env overrides (1/y/yes = yes, anything else = no):
+  BUILD=1     build the emulator (make)
+  SERVICE=1   auto-start on boot (pistorm.service)
+  CADGUARD=1  mask Ctrl+Alt+Del console reboot (default yes)
+  WEB=1       psweb + WPE WebKit browser engine
+  MACFIX=1    atariclean + nightly timer + Samba Apple settings (default yes)
+  SAMBA=1     guest [pistorm] Samba share
+  KILLGUI=1   disable a desktop environment if one is found
+  PISTORM_CFG=games.cfg   config the service runs (default psctrl.cfg)
+  APJOS_VERSION=1.0       write S:\\APJOS.VER (atari-share/APJOS.VER)
 EOF
     exit 0 ;;
   "") ;;
@@ -295,8 +320,15 @@ chmod +x "$HERE/capmux.sh" 2>/dev/null || true
 # it, and how PDFGEM, WEBGEM and PSMON stayed missing from a fresh clone
 # without a word. A list names what is absent. It also lets .ACC through,
 # which that glob could never match - PSCTRL is an accessory.
+#
+# The fVDI/video tools ride along in the same folder: FVDIMODE (.PRG/.ACC)
+# is run from there; FVDICON.PRG, PSVIDEL.PRG and SETMCH.PRG belong in the
+# Atari's AUTO folder and are shipped here for copying across. SETMCH.PRG
+# is listed although it is not built yet (atari-tools/setmch, make on the
+# cross toolchain) - the warning below is how that shows.
 GEM_APPS="PSCTRL.ACC PSCTRL.PRG PSMON.ACC PSMON.PRG MP3GEM.PRG VIDGEM.PRG \
-          PDFGEM.PRG WEBGEM.PRG"
+          PDFGEM.PRG WEBGEM.PRG PSCLEAN.PRG \
+          FVDIMODE.PRG FVDIMODE.ACC FVDICON.PRG PSVIDEL.PRG SETMCH.PRG"
 GEM_DEST="$ROOT/atari-share/apj-os/natfeats"
 if [ -d "$HERE/configs/gem-binaries" ]; then
   say "Installing GEM programs into $GEM_DEST"
@@ -325,6 +357,16 @@ STBOX_DEST="$ROOT/atari-share/apj-os/STBox"
 say "Installing STBOX into $STBOX_DEST"
 mkdir -p "$STBOX_DEST"
 copy_newer "$HERE/configs/gem-binaries/STBOX.PRG" "$STBOX_DEST/STBOX.PRG"
+
+# APJ-OS distribution version. The Bespoke Desktop taskbar reads
+# S:\APJOS.VER (S: = atari-share) and shows "APJ-OS v<version>". It is the
+# distribution's number, not the emulator's, so it only comes in from the
+# outside: apj-os/install.sh and the SD-image build pass APJOS_VERSION from
+# apj-os/VERSIONS. One line, no newline - that is what the taskbar expects.
+if [ -n "${APJOS_VERSION:-}" ]; then
+  say "Writing APJ-OS version $APJOS_VERSION to $ROOT/atari-share/APJOS.VER"
+  printf '%s' "$APJOS_VERSION" > "$ROOT/atari-share/APJOS.VER"
+fi
 
 if [ -f "$HERE/configs/pistormbg.jpg" ]; then
   say "Installing desktop wallpaper into $ROOT/atari-share/apj-os/bg"
@@ -592,7 +634,36 @@ UNIT
 fi
 
 # --------------------------------------------------------------------------
-# 5d. Mac litter. A Mac copying onto the share leaves ._* AppleDouble
+# 5d. Optional: Samba share (drop games/images onto the Pi from another machine)
+#     Before the Mac fixes below, so a fresh install gets the Apple settings
+#     in the smb.conf it has just created.
+# --------------------------------------------------------------------------
+if ask SAMBA "Create a Samba share for the PiSTorm files?" n; then
+  say "Installing + configuring Samba share 'pistorm' -> $ROOT"
+  sudo apt-get install -y samba samba-common-bin
+  if grep -q '^\[pistorm\]' /etc/samba/smb.conf 2>/dev/null; then
+    warn "smb.conf already has a [pistorm] share — left as-is."
+  else
+    sudo tee -a /etc/samba/smb.conf >/dev/null <<SMB
+
+[pistorm]
+   comment = PiSTorm Atari files
+   path = $ROOT
+   browseable = yes
+   read only = no
+   guest ok = yes
+   create mask = 0664
+   directory mask = 0775
+   force user = $USER
+SMB
+    sudo systemctl restart smbd
+    warn "Guest-writable share created for home-LAN convenience."
+    warn "If this Pi is on an untrusted network, lock it down (valid users / smbpasswd)."
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# 5e. Mac litter. A Mac copying onto the share leaves ._* AppleDouble
 #     sidecars, .DS_Store, and .smbdeleteXXXX leftovers, which then turn up
 #     on the Atari's HOSTFS drive and in git trees. Three things, all
 #     idempotent: tools/atariclean (cleans directories, .st/.msa floppies
@@ -669,33 +740,6 @@ UNIT
 fi
 
 # --------------------------------------------------------------------------
-# 6. Optional: Samba share (drop games/images onto the Pi from another machine)
-# --------------------------------------------------------------------------
-if ask SAMBA "Create a Samba share for the PiSTorm files?" n; then
-  say "Installing + configuring Samba share 'pistorm' -> $ROOT"
-  sudo apt-get install -y samba samba-common-bin
-  if grep -q '^\[pistorm\]' /etc/samba/smb.conf 2>/dev/null; then
-    warn "smb.conf already has a [pistorm] share — left as-is."
-  else
-    sudo tee -a /etc/samba/smb.conf >/dev/null <<SMB
-
-[pistorm]
-   comment = PiSTorm Atari files
-   path = $ROOT
-   browseable = yes
-   read only = no
-   guest ok = yes
-   create mask = 0664
-   directory mask = 0775
-   force user = $USER
-SMB
-    sudo systemctl restart smbd
-    warn "Guest-writable share created for home-LAN convenience."
-    warn "If this Pi is on an untrusted network, lock it down (valid users / smbpasswd)."
-  fi
-fi
-
-# --------------------------------------------------------------------------
 say "Done."
 echo
 echo "  Runtime tree : $ROOT"
@@ -707,6 +751,8 @@ fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
 echo "  GEM programs : $ROOT/atari-share/apj-os/natfeats/"
+[ -e "$ROOT/atari-share/APJOS.VER" ] && \
+echo "  APJ-OS       : v$(cat "$ROOT/atari-share/APJOS.VER")  (S:\\APJOS.VER)"
 echo "                 (point a HOSTFS drive at $ROOT/atari-share)"
 echo
 echo "  STBOX (ST games in a GEM window):"

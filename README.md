@@ -77,6 +77,8 @@ See **VIDEO.md** for the full story, including how to publish a build for other 
 Run the installer to build the file tree and copy files into place (see **INSTALL-README.md**)
 >./install-full.sh
 
+For the complete **APJ-OS** distribution (this emulator plus FreeMiNT/XaAES, the Bespoke Desktop, the PS GEM apps and a ready Atari boot disk) see [gotaproblem/apj-os](https://github.com/gotaproblem/apj-os): a flashable SD-card image, or `install.sh` on stock Raspberry Pi OS Lite, which runs this installer for you.
+
 Reboot at this point
 
 ## Running

@@ -66,8 +66,20 @@ BUILD=1 SERVICE=1 SAMBA=0 ./install-full.sh
 | `BUILD=1`      | Run `make` (auto-detects Pi model)                  | prompt  |
 | `SERVICE=1`    | Install the systemd auto-start unit                 | prompt  |
 | `SAMBA=1`      | Install + configure the Samba share                 | prompt  |
+| `CADGUARD=1`   | Mask the Ctrl+Alt+Del console reboot                | prompt (yes) |
+| `WEB=1`        | Install the psweb browser engine (WPE WebKit)       | prompt (no) |
+| `MACFIX=1`     | atariclean + nightly timer + Samba Apple settings   | prompt (yes) |
 | `KILLGUI=1`    | Disable the desktop and switch to console boot      | prompt (declining **aborts**) |
 | `PISTORM_CFG=` | Config the auto-start service launches              | `psctrl.cfg` |
+| `APJOS_VERSION=` | Write `atari-share/APJOS.VER` (the taskbar's "APJ-OS v…" cell) | unset = file left alone |
+
+`APJOS_VERSION` is normally passed in by the APJ-OS distribution
+(`apj-os/install.sh` and its SD-image build, from `apj-os/VERSIONS`), not
+typed by hand.
+
+The script also runs unattended inside a chroot of a stock Raspberry Pi OS
+image — that is how the APJ-OS SD image is built. `systemctl enable`/`mask`
+work offline there; start/restart are skipped by systemctl itself.
 
 Any of these set to `1`/`y`/`yes` means yes; anything else means no. Unset means
 prompt on a TTY, or take the default when there is no TTY.
@@ -136,12 +148,42 @@ Created next to the repo (won't overwrite anything that already exists):
 │                    (PSCTRL-CFG.md documents every key; atari.cfg is the old flat file)
 ├── dkimages/
 │   └── fdd/         720k.st blank floppy; put disk/game images here
-├── atari-share/     point a HOSTFS drive here. The GEM programs
-│                    (MP3GEM.PRG, VIDGEM.PRG, VIDPLAY.TTP) are installed
-│                    into it, and it is the natural place to mount a
-│                    media share from another machine — see below
+├── atari-share/     point a HOSTFS drive here (APJ-OS uses S:). The natural
+│   │                place to mount a media share from another machine - see below
+│   ├── APJOS.VER    APJ-OS version, read by the taskbar (only with APJOS_VERSION)
+│   ├── Downloads/   WEBGEM downloads (only with WEB=1)
+│   └── apj-os/
+│       ├── natfeats/   the GEM programs - see the list below
+│       ├── STBox/      STBOX.PRG and its .st/.msa game images
+│       └── bg/         desktop wallpaper
 └── screendumps/     screenshots
 ```
+
+The GEM programs come from `configs/gem-binaries/` and are copied from a
+**named list**, so a missing one is reported rather than silently skipped.
+A re-run after `git pull` replaces older copies (`cp -u`) but never one you
+built yourself more recently.
+
+| Program | What it is |
+|---|---|
+| `PSCTRL.ACC` / `.PRG` | PiSTorm control panel: settings, JIT, benchmarks, restart/shutdown |
+| `PSMON.ACC` / `.PRG`  | Pi monitor: temperature, throttle, CPU and JIT load |
+| `MP3GEM.PRG`  | MP3 player (host decode, MP3PLAY NatFeat) |
+| `VIDGEM.PRG`  | Video player (host/VPU decode, VIDPLAY NatFeat) |
+| `PDFGEM.PRG`  | PDF viewer (host poppler, PSPDF NatFeat) |
+| `WEBGEM.PRG`  | Web browser (needs `WEB=1` on the Pi) |
+| `PSCLEAN.PRG` | Removes Mac/SMB litter from Atari drives |
+| `FVDIMODE.PRG` / `.ACC` | fVDI resolution and colour-depth switcher |
+| `FVDICON.PRG` | TOS VT52 console on the fVDI screen - goes in the AUTO folder |
+| `PSVIDEL.PRG` | Arms the PSVIDEL (Falcon Videl on HDMI) - goes in the AUTO folder |
+| `SETMCH.PRG`  | Forces the `_MCH` cookie - goes in the AUTO folder (built from `atari-tools/setmch`) |
+| `STBOX.PRG`   | A sandboxed ST in a GEM window (installed to `apj-os/STBox/`) |
+
+The installer also sets up two first-boot helpers used by the APJ-OS SD
+image, both harmless on an existing system: **`apj-wifi`** (edit `wifi.txt`
+on the FAT boot partition before first boot; it is applied and renamed
+`wifi.txt.applied`) and **`apj-sshkeys`** (generates ssh host keys when
+none exist).
 
 ### 3. Boot firmware — **merged, not overwritten**
 
@@ -244,8 +286,7 @@ A HOSTFS drive points at a real directory, so mount the remote share **inside**
 
 ```
 <parent>/atari-share/
-├── VIDGEM.PRG          installed for you
-├── VIDPLAY.TTP
+├── apj-os/             the GEM programs, installed for you
 └── media/              <- the mount point; the NAS appears here
 ```
 
@@ -455,6 +496,8 @@ sudo reboot
 This:
 
 - stops, disables and removes `pistorm.service`, and restores the tty1 login;
+- removes the `psweb`, `atariclean`, `apj-wifi` and `apj-sshkeys` units and
+  their programs in `/usr/local`;
 - removes just the `[pistorm]` stanza from `smb.conf` and restarts Samba;
 - restores `config.txt` and `cmdline.txt` from the `*-bak.txt` backups.
 
