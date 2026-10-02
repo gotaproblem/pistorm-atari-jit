@@ -51,6 +51,12 @@ ask() {
   [ "$def" = y ]
 }
 
+# Inside a chroot (the APJ-OS SD-image build) systemd is not running and
+# `systemctl enable --now` refuses outright, so there units are only
+# enabled; they start at the image's first boot. start/restart/stop are
+# fine either way - systemctl ignores them in a chroot.
+if systemd-detect-virt -q --chroot 2>/dev/null; then NOW=""; else NOW="--now"; fi
+
 copy_once() {                                # src dst  (never overwrites dst)
   [ -e "$1" ] || { warn "missing $1 — skipped"; return 0; }
   [ -e "$2" ] || cp "$1" "$2"
@@ -627,7 +633,7 @@ WantedBy=multi-user.target
 UNIT
   sudo systemctl daemon-reload
   sudo systemctl stop psweb.service 2>/dev/null || true
-  sudo systemctl enable --now psweb.socket
+  sudo systemctl enable $NOW psweb.socket
   sudo systemctl restart psweb.socket
   say "psweb.socket is listening; the emulator connects to /run/psweb/psweb.sock when WEBGEM starts"
   warn "Watch it:  journalctl -fu psweb   -   memory limit $(( MEM_KB * 40 / 100 / 1024 )) MB, killed at 1.5x"
@@ -699,7 +705,7 @@ Persistent=true
 WantedBy=timers.target
 UNIT
   sudo systemctl daemon-reload
-  sudo systemctl enable --now atariclean.timer
+  sudo systemctl enable $NOW atariclean.timer
   say "atariclean.timer: $ROOT is cleaned nightly at 04:15 (journalctl -u atariclean)"
 
   if [ -e /etc/samba/smb.conf ] && command -v testparm >/dev/null 2>&1; then
