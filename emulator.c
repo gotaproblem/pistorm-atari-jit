@@ -1521,6 +1521,23 @@ static void *ipl_task(void *)
       IPL_KICK();
     }
 
+    /* Falcon DSP host port HREQ: a level-6 interrupt the DSP vectors
+     * itself (IVR at IACK, jit_glue.cpp intlev_ack). A level: raised again
+     * after the handler's RTE for as long as the guest leaves RXDF/TXDE
+     * pending with the request enabled. Two atomic loads when no request
+     * is enabled - the common case. */
+    if (falcon_hreq() && 6 > g_irq && 6 > g_irq_mask)
+    {
+      if (g_irq == 2 || g_irq == 4)     /* as above: re-arm a pre-empted VBL/HBL */
+      {
+        av_held = 0;
+        if (g_irq == 4)
+          av4_last_tick = 0;
+      }
+      g_irq = 6;
+      IPL_KICK();
+    }
+
 #ifdef ATARI_LAT_DIAG
     /* Stall watchdog (measurement only): while a latched interrupt is
      * waiting on delivery, sample the CPU thread's state from this thread. */

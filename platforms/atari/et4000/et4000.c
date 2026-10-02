@@ -81,6 +81,7 @@ uint32_t pistorm_fvdi_bpp(void);
 const uint32_t *pistorm_fvdi_palette(void);
 uint32_t pistorm_fvdi_palette_gen(void);
 int pistorm_fvdi_is_active(void);
+int pistorm_fvdi_st_yield(void);   /* an ST program owns the screen */
 uint64_t pistorm_fvdi_write_count(void);
 void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx);
 void pistorm_fvdi_fetch_dirty_rect(uint32_t *mn, uint32_t *mx,
@@ -2591,6 +2592,18 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
 
     if (!pistorm_fvdi_is_active() || !src || w == 0 || h == 0)
         return false;
+    /* an ST program set an ST rez with its own screen: the Shifter's
+     * picture goes to HDMI (native path below) until it ends, then
+     * fVDI's whole frame is drawn again */
+    static bool yielded;
+    if (pistorm_fvdi_st_yield()) {
+        yielded = true;
+        return false;
+    }
+    if (yielded) {
+        yielded = false;
+        g_src_force_full = 1;
+    }
     if (w > ET4K_MAX_LW || h > ET4K_MAX_LH)
         return false;
     if (bpp != 8 && bpp != 16 && bpp != 32)
@@ -2959,6 +2972,26 @@ void *render_frame(void *vptr)
 
             if (t_build)
                 et4000_profile_add (ET4K_PROF_RENDER_BUILD, et4000_profile_now_ns() - t_build);
+
+            /* Screendump on a still picture. A dump is taken inside
+             * sdl_present, and the dirty gates above only present when
+             * the picture changed - so on a screen that is not changing
+             * (DSPBench's results waiting for a key, any idle desktop) the
+             * request sat until something moved, and then dumped that.
+             * DRM/fbdev: fb_mem still holds the frame on screen, dump it
+             * straight away (re-flipping a back buffer that was not
+             * refreshed could show an older frame). SDL: present again -
+             * the texture still holds the frame - and read that back. */
+            if (g_screendump_req && source_active && !rendered)
+            {
+                if (g_drm_mode || g_fbdev_mode)
+                {
+                    g_screendump_req = 0;
+                    et4000_do_screendump(g_et4000);
+                }
+                else
+                    rendered = true;
+            }
 
             if (rendered)
             {
