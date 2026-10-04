@@ -257,7 +257,15 @@ static uint32_t pistorm_rom_size = 0; // derived from image length at load, 64KB
 extern uint32_t ROM_START;
 extern uint32_t ROM_END;
 
-#define ST_RAM_SIZE (0x00400000u)  // 0x000000..
+#define ST_RAM_SIZE (0x00400000u)  // 0x000000.. the board's ST-RAM window (real bus behind it)
+/* Top of guest ST-RAM. 4MB, or 14MB on a Falcon (cfg falcon_stram 14M):
+ * then $400000-$DFFFFF is Pi memory the guest sees as ST-RAM - a real
+ * Falcon's 14MB. Nothing above ST_RAM_SIZE ever goes to the real bus
+ * (the board has no RAM there): it is mapped mirror-only, the real
+ * Shifter cannot show it (PSVIDEL/fVDI on HDMI can), and real-chip DMA
+ * (FDC/ACSI on the board) cannot reach it. Set once in jit_mem_init. */
+static uint32_t g_stram_top = ST_RAM_SIZE;
+extern "C" uint32_t pistorm_stram_top(void) { return g_stram_top; }
 /* NOTE: the ROM base is NOT a constant - TOS 1.x lives at 0x00FC0000 and
  * EmuTOS / TOS 2.06 at 0x00E00000. Use pistorm_rom_start (set in emulator.c
  * from the image length); this define is only the legacy default. */
@@ -293,6 +301,7 @@ extern uint32_t ROM_END;
 uae_u8 *natmem_offset = NULL; // the one array; x27 in JIT
 extern rtg_s rtg;
 extern volatile uint16_t st_palette[16];
+extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 
 #define STRAM_LOW_WRITE_THROUGH_SIZE 0x000005B4u
 #define STRAM_LOW_CONTROL_BANK_SIZE 0x00010000u
@@ -906,6 +915,13 @@ static int      g_shadow_ste_reg = 0;  /* the REAL Shifter has $FF820D -
 
 static inline int stram_shadow_on(void) { return g_shadow_base != 0; }
 
+/* cfg hdmi_only (a load of the config pointer and a flag: not cached, so
+ * a call before the .cfg is loaded cannot fix the answer at "off") */
+static inline int pistorm_hdmi_only(void)
+{
+    return emulator_config_hdmi_only() ? 1 : 0;
+}
+
 /* WHERE THE GUEST SAYS ITS SCREEN IS - from the registers it wrote, and
  * only once it has written them. Deliberately NOT stram_screen_base(),
  * which falls back to _v_bas_ad at $44e: during TOS 2.06's memory test
@@ -964,6 +980,7 @@ static void stram_shadow_refill(void)
 
     if (!scr || scr == g_shadow_src)
         return;
+    const uae_u32 prev = g_shadow_src;
     g_shadow_src = scr;
     {   /* the first few moves, so the log says what the shadow believes
          * when something goes wrong later */
@@ -974,9 +991,26 @@ static void stram_shadow_refill(void)
                     scr, g_shadow_base);
         }
     }
+    /* ONLY WHAT CHANGED. Copying all 32K over the bus held the CPU thread
+     * inside the guest's base-register write for milliseconds, with no
+     * interrupt taken: a game that flips screens (Frontier, every 6-8
+     * VBLs) had its VBL and Timer B handlers run 0.5-12ms late, so its
+     * palettes landed part-way down the frame - on the Shifter and on
+     * the HDMI mirror alike. The shadow already holds the previous
+     * screen exactly (every write to it while it was shown was sent
+     * here, and nothing else writes here while the stram cache keeps
+     * other addresses off the bus), so only the longs that differ from
+     * that screen need the bus. Without the cache every write goes
+     * through at its own address, the invariant does not hold, and the
+     * whole screen is copied as before. */
+    const int diff = prev && emulator_config_stram_cache_enabled();
     for (uint32_t o = 0; o < STRAM_SHADOW_SIZE; o += 4)
-        ps_write_32(g_shadow_base + o,
-                    do_get_mem_long((uae_u32 *)(natmem_offset + scr + o)));
+    {
+        const uae_u32 v = do_get_mem_long((uae_u32 *)(natmem_offset + scr + o));
+        if (diff && v == do_get_mem_long((uae_u32 *)(natmem_offset + prev + o)))
+            continue;
+        ps_write_32(g_shadow_base + o, v);
+    }
 }
 
 /* Screen writes land in the shadow; everything else keeps its address. */
@@ -1029,6 +1063,14 @@ static void stram_shadow_video_after(uaecptr a, int size)
     if (!hit)
         return;
     g_shadow_have_base = 1;            /* the guest owns a base now */
+    if (pistorm_hdmi_only())
+        return;                         /* cfg hdmi_only: nobody looks at the
+                                         * real Shifter, so no 32K copy per
+                                         * screen flip - the copy held the 68k
+                                         * for milliseconds with no interrupt
+                                         * taken. Guest reads of the base
+                                         * registers are still answered from
+                                         * its own writes (flag above). */
     stram_shadow_refill();
     stram_shadow_program_base();
 }
@@ -1412,8 +1454,10 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     else if (a == 0x00FF820Au) {
         st_rez_sync_trace(a, (uint8_t)(value >> 8));
     }
-    else if (a >= 0x00FF8240u && a < 0x00FF8260u)
+    else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
         st_palette[(a - 0x00FF8240u) >> 1] = value;
+        st_palette_log((a - 0x00FF8240u) >> 1, value);
+    }
 }
 
 static inline void st_video_snoop32(uint32_t address, uint32_t value)
@@ -1434,9 +1478,11 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
     } else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
         unsigned i = (a - 0x00FF8240u) >> 1;
         st_palette[i] = (uint16_t)(value >> 16);
-        if (i + 1 < 16)
+        st_palette_log(i, (uint16_t)(value >> 16));
+        if (i + 1 < 16) {
             st_palette[i + 1] = (uint16_t)value;
-        else
+            st_palette_log(i + 1, (uint16_t)value);
+        } else
             /* $FF825E: palette 15 in the high word, the low word lands on
              * $FF8260 - the resolution register. This used to be dropped,
              * so a rez written with a move.l reached the real GLUE but
@@ -1481,10 +1527,12 @@ static inline int stram_range_overlaps(uaecptr a, int sz, uae_u32 start, uae_u32
 
 static inline int stram_needs_bus_write(uaecptr a, int sz)
 {
+    a &= 0x00FFFFFFu;
+    if (a >= ST_RAM_SIZE)
+        return 0;                 /* Falcon 14MB: no board RAM up there */
     if (!emulator_config_stram_cache_enabled())
         return 1;
 
-    a &= 0x00FFFFFFu;
     if (a < STRAM_LOW_WRITE_THROUGH_SIZE)
         return 1;
 
@@ -1495,7 +1543,7 @@ static inline int stram_needs_bus_write(uaecptr a, int sz)
          * real Shifter shows nothing anyone looks at, and the write-through
          * was most of a Falcon game's frame time: Beats of Rage draws a
          * 150 KB screen a frame, and each of those words crossed the bus. */
-        return !psvidel_active();
+        return !psvidel_active() && !pistorm_hdmi_only();
     }
 
     return 0;
@@ -1657,14 +1705,14 @@ static inline void pistorm_smc(uaecptr addr, int sz)
 
 extern "C" void pistorm_dma_from_stram(uint32_t addr, uint8_t *dst, uint32_t n)
 {
-    if (addr < ST_RAM_SIZE && n <= ST_RAM_SIZE - addr)
+    if (addr < g_stram_top && n <= g_stram_top - addr)
         memcpy(dst, natmem_offset + addr, n);
 }
 
 /* DMA path (fdc.c) calls this so the mirror stays coherent with bus DMA-in */
 extern "C" void pistorm_dma_to_stram(uaecptr addr, const uint8_t *src, uint32_t n)
 {
-    if (addr < ST_RAM_SIZE && n <= ST_RAM_SIZE - addr)
+    if (addr < g_stram_top && n <= g_stram_top - addr)
         memcpy(natmem_offset + addr, src, n);
     pistorm_smc(addr, n);
 }
@@ -3511,6 +3559,45 @@ static void psvidel_ste_mirror(uaecptr a, uae_u32 v, int size)
 static uae_u32 hw_wget(uaecptr a);
 static void hw_wput(uaecptr a, uae_u32 v);
 
+/* Falcon TOS: reads of the video base ($FF8201/03/0D, with the unused even
+ * bytes $FF8200/02/0C) answered from the Videl's own base - the one the
+ * guest last wrote (psvidel_video_snoop). The board's ST Shifter cannot
+ * hold it: TOS 4.04 at 14MB puts the screen at $DF8200, the board keeps 22
+ * address bits and has no $FF820D. ACE Tracker saves the video registers
+ * with move.l $FF8200 / move.w $FF820C and writes them back to leave its
+ * own screen (the file selector): the board's truncated value went back and
+ * the HDMI showed the wrong memory. Only when the whole access is base
+ * bytes; the counters ($FF8205-09) and sync ($FF820A) still go to the bus. */
+static int falcon_vbase_read(uaecptr a, int size, uae_u32 *out)
+{
+    if (!emulator_falcon_tos())
+        return 0;
+    a &= 0x00FFFFFFu;
+    if (a < 0x00FF8200u || a + (uaecptr)size > 0x00FF820Eu)
+        return 0;
+    uint32_t phys = psvidel_getphys();
+    uae_u32 v = 0;
+    for (int i = 0; i < size; i++) {
+        uae_u8 b;
+        switch (a + (uaecptr)i) {
+        case 0x00FF8200u: case 0x00FF8202u: case 0x00FF820Cu: b = 0; break;
+        case 0x00FF8201u: b = (uae_u8)(phys >> 16); break;
+        case 0x00FF8203u: b = (uae_u8)(phys >> 8);  break;
+        case 0x00FF820Du: b = (uae_u8)phys;         break;
+        default: return 0;
+        }
+        v = (v << 8) | b;
+    }
+    {
+        static int said;
+        if (said++ < 4)
+            fprintf(stderr, "[FALCON] video base read $%06X.%d = $%0*X (Videl base $%06X)\n",
+                    (unsigned)a, size, size * 2, (unsigned)v, (unsigned)phys);
+    }
+    *out = v;
+    return 1;
+}
+
 static uae_u32 hw_lget(uaecptr a)
 {
     PROF_IO_R(a);
@@ -3523,6 +3610,11 @@ static uae_u32 hw_lget(uaecptr a)
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return 0;
+    {
+        uae_u32 vb;
+        if (falcon_vbase_read(a, 4, &vb))
+            return vb;
+    }
     /* PSVIDEL owns the Falcon-only video registers once armed; a long
      * that touches one is taken as two words so each half goes where it
      * belongs (bus or register file) */
@@ -3531,6 +3623,8 @@ static uae_u32 hw_lget(uaecptr a)
     /* Falcon DSP host port / sound matrix (cfg falcon_dsp, once armed) */
     if (falcon_hw_owns(a))
         return falcon_hw_read(a, 4);
+    if (emulator_falcon_tos() && (a & 0x00FFFFFCu) == 0x00FF8604u)
+        return (hw_wget(a) << 16) | (hw_wget(a + 2) & 0xFFFFu);
     if (falcon_tos_owns(a))                 /* Falcon TOS: NVRAM, SCC */
         return falcon_tos_read(a, 4);
 
@@ -3611,6 +3705,11 @@ static uae_u32 hw_wget(uaecptr a)
         return hw_mfp_wget(a);
     if (psvidel_hw_owns(a))
         return psvidel_hw_read(a, 2);
+    {
+        uae_u32 vb;
+        if (falcon_vbase_read(a, 2, &vb))
+            return vb;
+    }
     if (falcon_hw_owns(a))
         return falcon_hw_read(a, 2);
     if (falcon_tos_owns(a))
@@ -3686,6 +3785,11 @@ static uae_u32 hw_bget(uaecptr a)
         return hw_mfp_bget(a);
     if (psvidel_hw_owns(a))
         return psvidel_hw_read(a, 1);
+    {
+        uae_u32 vb;
+        if (falcon_vbase_read(a, 1, &vb))
+            return vb;
+    }
     if (falcon_hw_owns(a))
         return falcon_hw_read(a, 1);
     if (falcon_tos_owns(a))
@@ -3758,7 +3862,15 @@ static void hw_lput(uaecptr a, uae_u32 v)
     stram_memcfg_snoop(a, v, 4);
     v = pistorm_stram_memcfg_bus_value(a, v, 4);   /* the chip keeps the
                                                       board's own value */
-    falcon_tos_snoop(a, v, 4);          /* Falcon TOS: DMA mode -> SCSI */
+    /* Falcon TOS: a long at $FF8604 is data then mode - as two words,
+     * so the data byte reaches the 5380 register the old mode selects
+     * and the mode word still goes to the real DMA chip */
+    if (emulator_falcon_tos() && (a & 0x00FFFFFCu) == 0x00FF8604u)
+    {
+        hw_wput(a, v >> 16);
+        hw_wput(a + 2, v & 0xFFFFu);
+        return;
+    }
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
         return;
@@ -4256,7 +4368,7 @@ extern "C" uint16_t pistorm_blit_read16(uint32_t a)
 extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
 {
     a &= 0x00FFFFFEu;
-    if (a >= ST_RAM_SIZE)
+    if (a >= g_stram_top)
         return;                       /* the 24-bit blitter only writes ST-RAM */
     do_put_mem_word((uae_u16 *)(natmem_offset + a), v);
     stram_snoop_lowram(a, 2);
@@ -5454,6 +5566,32 @@ extern "C" void jit_mem_init(void)
     }
     /* stram_size single-bank boards: absent-bank range -> real bus */
     stram_alias_apply_banks();
+
+    /* Falcon 14MB ST-RAM (cfg falcon_stram 14M): $400000-$DFFFFF is
+     * mirror-only Pi memory (the lowram bank: direct reads, writes take
+     * the handler for SMC, nothing to the bus). Falcon TOS 4.0x sizes it
+     * from $FF8006 (falcon_tos_arm) and puts its screen at the top, so
+     * the Videl must be PSVIDEL's (HDMI). Conflicts: the ET4000's
+     * NOVA/XVDI windows live at $A00000-$DFFFFF, and stram_size models
+     * a smaller board. */
+    g_stram_top = ST_RAM_SIZE;
+    {
+        uint32_t want = emulator_config_falcon_stram();
+        if (want > ST_RAM_SIZE) {
+            if (emulator_config_machine_kind() != 3)
+                printf("[STRAM] falcon_stram %uK ignored: needs `machine falcon`\n", want >> 10);
+            else if (emulator_config_et4k_enabled())
+                printf("[STRAM] falcon_stram %uK ignored: the ET4000 (`vga`) uses $A00000-$DFFFFF\n", want >> 10);
+            else if (emulator_config_stram_size())
+                printf("[STRAM] falcon_stram %uK ignored: `stram_size` is set\n", want >> 10);
+            else {
+                g_stram_top = 0x00E00000u;
+                map_region(ST_RAM_SIZE, g_stram_top - ST_RAM_SIZE, &pistorm_lowram_bank);
+                printf("[STRAM] Falcon ST-RAM 14MB: $400000-$DFFFFF is Pi memory "
+                       "(the real Shifter and board DMA see only the first 4MB)\n");
+            }
+        }
+    }
 
     if (emulator_config_et4k_enabled()) {
         map_region(GUARD_BASE, GUARD_SIZE, &pistorm_guard_bank);

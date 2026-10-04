@@ -491,43 +491,6 @@ int main(void)
       remove(bak);
     }
 
-    /* --- a LIVE value that is also a boot key is saved as set -------
-     *
-     * `fps` is both: the render loop reads pst_fps, but the writer
-     * renders boot keys from the boot shadow. Field report: change the
-     * frame rate, Save, and the file still said the old fps - so the
-     * change was lost on the next boot, and a second save left the file
-     * byte for byte the same as its .bak. */
-    {
-      int fps_idx = -1, fps_lines = 0, fps_new = 0;
-      char bak[600];
-
-      for (i = 0; i < n; i++)
-        if (parse(i, &r) && !strcmp(r.name, "fps"))
-          fps_idx = i;
-      if (fps_idx < 0)
-        fail("no fps item");
-      else {
-        f = fopen(g_cfgpath, "w");
-        fprintf(f, "cpu 68000\nfps 60\n");
-        fclose(f);
-        if ((int)psctrl_settings_call(PSCTRL_SETINT, fps_idx, 30, 0, 0) != PS_R_OK)
-          fail("fps 30 was refused");
-        if ((int)psctrl_settings_call(PSCTRL_SAVE, 0, 0, 0, 0) != PS_R_OK)
-          fail("SAVE failed");
-        f = fopen(g_cfgpath, "r");
-        while (f && fgets(line, sizeof(line), f)) {
-          if (!strncmp(line, "fps ", 4)) fps_lines++;
-          if (!strcmp(line, "fps 30\n")) fps_new++;
-        }
-        if (f) fclose(f);
-        if (fps_lines != 1) fail("fps appears %d times after a save", fps_lines);
-        if (!fps_new)       fail("fps was changed to 30 and saved, but the file does not say so");
-        snprintf(bak, sizeof(bak), "%s.bak", g_cfgpath);
-        remove(bak);
-      }
-    }
-
     /* --- one line per managed key, whatever the file had -----------
      *
      * A doubled key is not a setting, it is a question of which copy
@@ -536,14 +499,14 @@ int main(void)
      * and are left alone. And a boot item that lives in a tunable
      * (audio_frames) must be written at all - it was not. */
     {
-      int nstram = 0, nfps = 0, nhdd = 0, nframes = 0, frames_idx = -1;
+      int nstram = 0, nhdd = 0, nframes = 0, frames_idx = -1;
       char bak[600];
 
       for (i = 0; i < n; i++)
         if (parse(i, &r) && !strcmp(r.name, "audio_frames"))
           frames_idx = i;
       f = fopen(g_cfgpath, "w");
-      fprintf(f, "stram_size 4M\nfps 60\nhdd a.img\nhdd b.img\nstram_size 1M\nfps 50\n");
+      fprintf(f, "stram_size 4M\nhdd a.img\nhdd b.img\nstram_size 1M\n");
       fclose(f);
       if (frames_idx < 0)
         fail("no audio_frames item");
@@ -554,13 +517,11 @@ int main(void)
       f = fopen(g_cfgpath, "r");
       while (f && fgets(line, sizeof(line), f)) {
         if (!strncmp(line, "stram_size ", 11)) nstram++;
-        if (!strncmp(line, "fps ", 4))         nfps++;
         if (!strncmp(line, "hdd ", 4))         nhdd++;
         if (!strcmp(line, "audio_frames 4096\n")) nframes++;
       }
       if (f) fclose(f);
       if (nstram != 1) fail("stram_size appears %d times after a save", nstram);
-      if (nfps != 1)   fail("fps appears %d times after a save", nfps);
       if (nhdd != 2)   fail("hdd lines: %d, expected both kept", nhdd);
       if (!nframes)    fail("audio_frames 4096 was set and saved, but the file does not say so");
       snprintf(bak, sizeof(bak), "%s.bak", g_cfgpath);

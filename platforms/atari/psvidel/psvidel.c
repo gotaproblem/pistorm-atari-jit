@@ -255,6 +255,13 @@ static void pal_entry_update(uint32_t i)
                     ((uint32_t)p[1] << 8) | p[3];
 }
 
+/* f.base of a frame whose vertical window is empty (VDE <= VDB): the
+ * Videl fetches no lines and the whole screen is border, colour 0.
+ * DSPBench closes the window around every timed test (no video DMA on
+ * the bus) and puts it back after; dropped as "no picture", the HDMI
+ * fell back to the ST path and flipped to 320x200 each time. */
+#define PSV_BASE_BLANK 0xFFFFFFFFu
+
 static void publish(const psvidel_frame_t *f, int active)
 {
     __atomic_add_fetch(&g_seq, 1, __ATOMIC_ACQ_REL);   /* odd: writing */
@@ -282,11 +289,26 @@ static void recompute(void)
     uint32_t vde   = rw(0xAA);
     uint32_t vco   = rw(0xC2);
     uint32_t sp    = rw(0x66);
-    uint32_t lines = vde > vdb ? vde - vdb : 0;
-    if (!(vco & 0x02))          /* not interlaced: counts are half-lines */
+    /* Only lines inside the vertical blank window (VBE..VBB) reach the
+     * screen: a VDB above VBE fetches lines nobody sees. DSPBench closes
+     * the window VDB first (VDB=1 with VDE still $3FF for a moment): taken
+     * raw that was a 511-line picture and the HDMI changed mode twice per
+     * test. Lines skipped at the top still move the first visible one. */
+    uint32_t vbb = rw(0xA4) & 0x7FFu, vbe = rw(0xA6) & 0x7FFu;
+    uint32_t top = vdb, bot = vde, skip = 0;
+    if (vbe && vbb > vbe) {
+        if (top < vbe) { skip = vbe - top; top = vbe; }
+        if (bot > vbb) bot = vbb;
+    }
+    uint32_t lines = bot > top ? bot - top : 0;
+    if (!(vco & 0x02)) {        /* not interlaced: counts are half-lines */
         lines >>= 1;
-    if (vco & 0x01)             /* line doubling                          */
+        skip >>= 1;
+    }
+    if (vco & 0x01) {           /* line doubling                          */
         lines >>= 1;
+        skip >>= 1;
+    }
 
     f.hscroll = S.regs[0x65] & 0x0Fu;
     f.base = S.phys;
@@ -319,9 +341,19 @@ static void recompute(void)
         if (f.hscroll)
             f.pitch += bpp * 2u;
         f.h = lines;
+        f.base += skip * f.pitch;
         f.ste_pal = (bpp == 2);
         if (f.fmt == PSV_FMT_PLANAR)
             f.w &= ~15u;
+        /* window closed: keep the last picture's size, all border */
+        static uint32_t last_w, last_h;
+        if (!lines && last_h && f.w == last_w) {
+            f.h = last_h;
+            f.base = PSV_BASE_BLANK;
+        } else if (lines) {
+            last_w = f.w;
+            last_h = lines;
+        }
     }
 
     if (f.w > PSV_MAX_W)
@@ -704,7 +736,7 @@ uint32_t psvidel_info(uint32_t what)
     case 0: return act ? f.w : 0;
     case 1: return act ? f.h : 0;
     case 2: return act ? f.bpp : 0;
-    case 3: return f.base;
+    case 3: return f.base == PSV_BASE_BLANK ? S.phys : f.base;
     case 4: return S.cur_mode;
     case 5: return (uint32_t)S.src;
     case 6: return g_vram ? vram_largest() : 0;
@@ -1174,6 +1206,8 @@ static const uint8_t *frame_source(const psvidel_frame_t *f, int *in_vram,
     uint32_t a = f->base;
     uint64_t bytes = (uint64_t)f->pitch * f->h + 64u;
     *in_vram = 0;
+    if (a == PSV_BASE_BLANK)
+        return NULL;
     if (a >= PSV_LO_BASE && a < PSV_LO_BASE + PSV_LO_SIZE)
         a -= PSV_LO_BASE;
     if (a >= PSV_VRAM_BASE && g_vram) {
@@ -1319,6 +1353,12 @@ int psvidel_frame_draw(const psvidel_frame_t *f, uint32_t *dst,
     last_gen = f->gen;
     last_pal = pal_gen;
 
+    /* Window closed (VDB/VDE, see PSV_BASE_BLANK): draw nothing - the
+     * screen keeps the last picture. DSPBench inverts colour 0 every 1024
+     * host words during its timed tests; filling the screen with it
+     * strobed white/blue. */
+    if (f->base == PSV_BASE_BLANK)
+        return 0;
     if (!src) {
         /* base points at nothing: black, once */
         if (!redraw_all)

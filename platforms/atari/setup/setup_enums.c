@@ -60,6 +60,13 @@ static const char *stram_l[] = { "not set - flat 4 MB, Pi-backed (APJ-OS)",
                                  "2.5M  (honest: caps at the board)",
                                  "4M    (honest: caps at the board)" };
 
+/* falcon_stram: a Falcon's ST-RAM. Unset = the board's 4MB; 14M = a
+ * 14MB Falcon, the 10MB above the board's 4MB backed by Pi memory
+ * (Falcon TOS 4.0x sizes it; the real Shifter sees only the first 4MB). */
+static const char *fstram[]  = { "", "14M" };
+static const char *fstram_l[]= { "not set - 4MB (the board's)",
+                                 "14M - 14MB Falcon, Pi-backed above 4MB" };
+
 /* The words the parser accepts for the same choice. A bare key counts as
  * the empty string: `blitter` alone means enabled, `ttram` alone means
  * 128M (CONFITEM_TTRAM: empty or a true word -> 128 MB). */
@@ -110,6 +117,7 @@ static const struct table tables[] = {
     T("audio_frames", frames),
     TL("jit_power", jitpow, jitpow_l),
     TL("stram_size", stram, stram_l),
+    TL("falcon_stram", fstram, fstram_l),
 };
 #undef T
 #undef TL
@@ -162,10 +170,10 @@ static const struct { const char *key; int env; } env_of[] = {
     { "m68k_speed",     SE_GEM },
     { "cpu_clock_multiplier", SE_GEM },
     /* vga is NOT here: a GEM build drives the ET4000 through NVDI.
-     * native_hdmi and fps are NOT here: native_hdmi is the ST-screen
-     * mirror on HDMI (config_file.c: "the native_hdmi ST-screen mirror"),
-     * which a GEM machine on an HDMI monitor needs, and fps paces the
-     * HDMI render thread whichever source it shows. */
+     * native_hdmi is NOT here: it is the ST-screen mirror on HDMI
+     * (config_file.c: "the native_hdmi ST-screen mirror"), which a GEM
+     * machine on an HDMI monitor needs. (fps is retired: HDMI follows
+     * the Atari's VBL.) */
     /* the ST Box - a sandboxed ST in a GEM window under APJ-OS */
     { "stbox_tos",      SE_APJ },
     { "stbox_machine",  SE_APJ },
@@ -177,7 +185,7 @@ static const struct { const char *key; int env; } env_of[] = {
 /* Retired: parsed and read by nothing (the parser ignores them with a
  * note). Never a row, so a leftover line cannot pass for a setting.
  * Developer: real, but tuning/debug knobs - hidden unless Tab. */
-static const char *retired[]   = { "vga_render", "loopcycles", "rtc" };
+static const char *retired[]   = { "vga_render", "loopcycles", "rtc", "fps" };
 static const char *developer[] = { "addr32", "stram_cache", "stram_direct",
                                    "network_debug", "jit" };
 
@@ -241,6 +249,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "mmu",            SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
     { "machine",        SE_TAB_MACHINE, SE_K_LIST,   "ste"     },
     { "stram_size",     SE_TAB_MACHINE, SE_K_LIST,   "1M"      },
+    { "falcon_stram",   SE_TAB_MACHINE, SE_K_LIST,   "14M"     },
     { "ttram",          SE_TAB_MACHINE, SE_K_LIST,   "128M"    },
     { "blitter",        SE_TAB_MACHINE, SE_K_LIST,   "enabled" },
     { "jit_power",      SE_TAB_MACHINE, SE_K_LIST,   "3"       },
@@ -251,8 +260,8 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "cpu_compatible", SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
     /* Video */
     { "vga",            SE_TAB_VIDEO,   SE_K_LIST,   "ET4000AX FVDI" },
-    { "fps",            SE_TAB_VIDEO,   SE_K_INT,    "60"      },
     { "native_hdmi",    SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
+    { "hdmi_only",      SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
     { "psvidel",        SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
     { "monitor",        SE_TAB_VIDEO,   SE_K_LIST,   "auto"    },
     { "shifter",        SE_TAB_VIDEO,   SE_K_LIST,   "st"      },
@@ -386,6 +395,7 @@ const char *se_cpu_rule(const char *key, const char *cpu)
 static const struct { const char *key; const char *machines; const char *why; } mrule[] = {
     { "acsi",           " st ste megast ", "no ACSI on a Falcon" },
     { "cpu_compatible", " st ste megast ", "not on a Falcon (68030)" },
+    { "falcon_stram",   " falcon ",        "Falcon only" },
 };
 
 static const char *machine_word(const char *machine)
@@ -460,7 +470,6 @@ const char *se_off_value(const char *key)
  * and config_file.c clamp them. The default is the catalogue tick value.
  */
 static const struct { const char *key; long lo, hi; } irange[] = {
-    { "fps",             10, 60 },
     { "vbl_refract_ns",   0, 20000000 },
     { "ym_gain",          0, 400 },        /* hundredths: 100 = unity */
     { "ym_lag_ms",        5, 200 },

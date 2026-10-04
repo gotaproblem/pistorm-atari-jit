@@ -14,6 +14,7 @@
 #include "platforms/atari/web/psweb_client.h"
 #include "platforms/atari/psvidel/psvidel.h"
 #include "platforms/atari/falcon/falcon.h"
+#include "platforms/atari/falcon/falcon_tos.h"
 
 #include "options.h"
 #include "memory.h"
@@ -68,6 +69,7 @@
  * with malloc'd scratch; now also sizes the static scratch arrays. */
 #define FVDI_POLY_MAX 4096
 #define NF_ST_RAM_SIZE 0x00400000u
+extern "C" uint32_t pistorm_stram_top(void);   /* pistorm_natmem.cpp: 4MB, or 14MB Falcon */
 #define NF_TT_RAM_BASE 0x01000000u
 #define TOS_E_OK ((uae_u32)0)
 #define TOS_EROFS ((uae_u32)-13)
@@ -411,6 +413,15 @@ static bool nf_host_ram_ptr(uaecptr addr, uint32_t size, uae_u8 **ptr)
   if (addr < NF_ST_RAM_SIZE && size <= NF_ST_RAM_SIZE - addr) {
     *ptr = natmem_offset + addr;
     return true;
+  }
+
+  /* Falcon 14MB ST-RAM above the board's 4MB: Pi memory, like TT-RAM */
+  {
+    uint32_t top = pistorm_stram_top();
+    if (addr >= NF_ST_RAM_SIZE && addr < top && size <= top - addr) {
+      *ptr = natmem_offset + addr;
+      return true;
+    }
   }
 
   if (tt_ram_available &&
@@ -3900,8 +3911,108 @@ static void fvdi_mouse_unobscure(bool was_visible)
     fvdi_mouse_show(g_fvdi_mouse.last_x, g_fvdi_mouse.last_y);
 }
 
+/* fVDI clips the pointer to the line-A screen size (V_REZ_HZ/V_REZ_VT,
+ * engine/mouse.s clip_mouse), which it writes once, at v_opnwk
+ * (workstn.c linea_setup). A program that asks for an ST rez -
+ * Setscreen(log, phys, 0, 0) - goes past PSVIDEL (no Videl mode is up:
+ * fVDI owns the HDMI) to EmuTOS, whose setscreen() re-runs linea_init()
+ * from the ST shifter: 320x200, 4 planes. That is what the program asked
+ * for, so it keeps it while it runs. But nothing puts fVDI's size back
+ * when it ends, and the desktop is left with the pointer in a 320x200 box.
+ *
+ * Writing the size back while the program runs is NOT safe (GEMBENCH
+ * sized its buffers from the 320x200 line-A, a repair grew the screen
+ * under it and it wrote through a null pointer over the vectors). So:
+ * snapshot fVDI's line-A tables while they are fVDI's, and put them back
+ * when the process that changed the rez terminates (newcpu.cpp's TRAP #1
+ * hook calls pistorm_fvdi_linea_restore on its Pterm0/Pterm).
+ * Workstation offsets (fVDI include/fvdi.h, 2-byte aligned): +28
+ * screen.mfdb.width, +30 .height, +46 screen.linea. */
+#define LA_TAB_LO  0x30Eu      /* INQ_TAB[0] .. DEV_TAB[44]: -0x30E..-0x25C */
+#define LA_TAB_N   ((0x30Eu - 0x25Au) / 2u)
+static struct {
+  uaecptr la;
+  uae_u16 w, h;
+  uae_u16 tab[LA_TAB_N];
+  bool valid;
+} g_la_snap;
+
+static void fvdi_linea_guard(uaecptr wk)
+{
+  static uae_u32 last_hz, last_vt;
+  if (!wk || (wk & 1u))
+    return;
+  uae_u32 w = nf_read_word(wk + 28u), h = nf_read_word(wk + 30u);
+  uaecptr la = nf_read_long(wk + 46u);
+  if (w < 320u || h < 200u || w > 4096u || h > 4096u ||
+      w != pistorm_fvdi_width() || h != pistorm_fvdi_height())
+    return;                       /* not the HDMI screen workstation */
+  if (la < 0x1000u || (la & 1u) || la >= 0x00E00000u)
+    return;
+  uae_u32 hz = nf_read_word(la - 0x00Cu), vt = nf_read_word(la - 0x004u);
+  if (hz == w && vt == h) {
+    if (!g_la_snap.valid || g_la_snap.la != la ||   /* fVDI's own state */
+        g_la_snap.w != w || g_la_snap.h != h) {
+      g_la_snap.la = la;
+      g_la_snap.w = (uae_u16)w;
+      g_la_snap.h = (uae_u16)h;
+      for (unsigned i = 0; i < LA_TAB_N; i++)
+        g_la_snap.tab[i] = nf_read_word(la - LA_TAB_LO + 2u * i);
+      g_la_snap.valid = true;
+    }
+  }
+  if (hz == last_hz && vt == last_vt)
+    return;
+  last_hz = hz;
+  last_vt = vt;
+  if (hz != w || vt != h)
+    fprintf(stderr, "[FVDI] line-A screen is now %ux%u, %u planes, %u bytes/line "
+            "(fVDI's screen is %ux%u) - pointer boxed until that program ends\n",
+            (unsigned)hz, (unsigned)vt, (unsigned)nf_read_word(la),
+            (unsigned)nf_read_word(la - 2u), (unsigned)w, (unsigned)h);
+}
+
+/* An ST program took the screen: Setscreen(log, phys, 0..2) with its own
+ * screen address. It draws into ST-RAM for the Shifter, not through fVDI,
+ * so while it runs the HDMI shows the Shifter (et4000.c's native path)
+ * instead of fVDI's framebuffer, and fVDI's picture comes back when the
+ * program ends. A GEM program that only re-asserts the rez -
+ * Setscreen(-1, -1, rez) - keeps drawing through fVDI and is not this. */
+extern "C" int pistorm_fvdi_is_active(void);
+static volatile int g_fvdi_st_yield;
+extern "C" int pistorm_fvdi_st_yield(void) { return g_fvdi_st_yield; }
+extern "C" void pistorm_fvdi_set_st_yield(int on)
+{
+  if (on && !pistorm_fvdi_is_active())
+    return;
+  if (on == g_fvdi_st_yield)
+    return;
+  g_fvdi_st_yield = on;
+  fprintf(stderr, on ? "[FVDI] ST program set an ST rez: HDMI shows the Shifter until it ends\n"
+                     : "[FVDI] ST program ended: HDMI back to fVDI\n");
+}
+
+/* The process that changed the ST rez is terminating: give the desktop
+ * fVDI's line-A screen back. CPU thread (TRAP #1 entry). */
+extern "C" void pistorm_fvdi_linea_restore(void)
+{
+  if (!g_la_snap.valid)
+    return;
+  uaecptr la = g_la_snap.la;
+  uae_u32 hz = nf_read_word(la - 0x00Cu), vt = nf_read_word(la - 0x004u);
+  if (hz == g_la_snap.w && vt == g_la_snap.h)
+    return;
+  for (unsigned i = 0; i < LA_TAB_N; i++)
+    nf_write_word(la - LA_TAB_LO + 2u * i, g_la_snap.tab[i]);
+  nf_write_word(la - 0x00Cu, g_la_snap.w);          /* V_REZ_HZ */
+  nf_write_word(la - 0x004u, g_la_snap.h);          /* V_REZ_VT */
+  fprintf(stderr, "[FVDI] program ended with line-A at %ux%u: fVDI's %ux%u restored\n",
+          (unsigned)hz, (unsigned)vt, (unsigned)g_la_snap.w, (unsigned)g_la_snap.h);
+}
+
 static uae_u32 fvdi_mouse_call(uaecptr params)
 {
+  fvdi_linea_guard(nf_get_param(params, 0));
   int32_t x = (int32_t)nf_get_param(params, 1);
   int32_t y = (int32_t)nf_get_param(params, 2);
   uae_u32 mouse = nf_get_param(params, 3);
@@ -6511,6 +6622,17 @@ static uae_u32 nf_call_psvidel(uae_u32 subid, uaecptr params)
     case PSVIDEL_ENABLE:
     {
       uae_u32 flags = 0;
+      /* Falcon TOS drives the Videl, DSP and sound itself. PSVIDEL.PRG in
+       * an AUTO folder would re-arm with its ST-compatible start mode,
+       * dropping the TOS desktop's Falcon mode off the HDMI, and hook
+       * XBIOS over TOS's own. Refused: the PRG says so and exits. */
+      if (emulator_falcon_tos()) {
+        static int said;
+        if (!said++)
+          fprintf(stderr, "[PSVIDEL] PSVIDEL.PRG under Falcon TOS - refused "
+                          "(TOS drives the Videl itself)\n");
+        return 0;
+      }
       if (psvidel_configured()) {
         uae_u32 v = psvidel_enable(nf_get_param(params, 0) & 0xFFFFu);
         if (v & 1)

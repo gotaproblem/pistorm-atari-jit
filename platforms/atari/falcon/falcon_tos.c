@@ -236,17 +236,79 @@ static void scc_write(uint32_t o, uint8_t v)
 /* NCR 5380 SCSI: an empty bus                                          */
 /* ------------------------------------------------------------------ */
 /* The Falcon's DMA chip routes $FF8604 to the 5380 when the mode word
- * has bit 3 set (bits 2-0 = register), as the ST routes it to ACSI. No
- * target ever answers: every register reads 0 - BSY never rises, so
- * TOS's selection times out on hz200 and it moves on (Hatari does the
- * same with no SCSI drive). Writes are dropped. The mode word itself
- * still goes to the real chip: the floppy shares it. */
+ * has bit 3 set and bit 4 clear (bits 2-0 = the 5380 register), as the
+ * ST routes it to ACSI. No target is fitted. Modelled on Hatari's
+ * ncr5380.c with no devices, register for register - a driver checks
+ * its own writes and the chip's handshakes, not just "BSY never rises":
+ *   0 CSD   the bus data: what we drive while arbitrating, else 0
+ *   1 ICR   reads back as written, with AIP (6) / LA (5) owned by the
+ *           chip; RST (7) resets the chip (ICR = $80, IRQ set)
+ *   2 MODE  reads back; arbitrate (bit 0) rising sets AIP, falling
+ *           clears it - an empty bus is always won at once
+ *   3 TCR   reads back
+ *   4 CSBS  the bus lines: no target, so only RST (from ICR bit 7)
+ *   5 BSR   IRQ (4); phase match never (the bus is free), no DRQ
+ *   6 IDR   0
+ *   7 reading clears the IRQ
+ * Writes to 5-7 start DMA: nothing to talk to. HDDRIVER arbitrates
+ * before every selection; with AIP never set (everything read 0) each
+ * one ran to its timeout and the scan crawled, then hung. The mode
+ * word itself still goes to the real chip: the floppy shares it. */
 static uint16_t g_dmamode;
 static int      g_scsi_logged;
+static uint8_t  g_ncr[8];
+static int      g_ncr_irq;
 
 static int scsi_selected(void)
 {
     return (g_dmamode & 0x18u) == 0x08u;
+}
+
+static void ncr_reset(void)
+{
+    memset(g_ncr, 0, sizeof g_ncr);
+    g_ncr[1] = 0x80;
+    g_ncr_irq = 1;
+}
+
+static uint8_t ncr_read(int reg)
+{
+    switch (reg) {
+    case 0: return (g_ncr[2] & 1) ? g_ncr[0] : 0;     /* arbitrating     */
+    case 1: return g_ncr[1];
+    case 2: return g_ncr[2];
+    case 3: return g_ncr[3];
+    case 4: return (uint8_t)(g_ncr[1] & 0x80);         /* RST only        */
+    case 5: return g_ncr_irq ? 0x10 : 0x00;
+    case 6: return 0;
+    default:                                           /* 7: reset IRQ    */
+        g_ncr_irq = 0;
+        return g_ncr[7];
+    }
+}
+
+static void ncr_write(int reg, uint8_t v)
+{
+    uint8_t old = g_ncr[reg];
+    switch (reg) {
+    case 1:
+        g_ncr[1] = (uint8_t)((v & ~0x60u) | (old & 0x60u));   /* AIP, LA */
+        if (v & 0x80)
+            ncr_reset();
+        break;
+    case 2:
+        g_ncr[2] = v;
+        if ((v & 1) && !(old & 1))
+            g_ncr[1] = (uint8_t)((g_ncr[1] | 0x40u) & ~0x20u);   /* AIP  */
+        else if (!(v & 1) && (old & 1))
+            g_ncr[1] &= (uint8_t)~0x40u;
+        break;
+    case 5:
+        break;                         /* start DMA send: keeps BSR     */
+    default:
+        g_ncr[reg] = v;
+        break;
+    }
 }
 
 void falcon_tos_snoop(uint32_t a, uint32_t v, int size)
@@ -256,18 +318,18 @@ void falcon_tos_snoop(uint32_t a, uint32_t v, int size)
     a &= 0x00FFFFFFu;
     if (size == 2 && a == 0xFF8606u)
         g_dmamode = (uint16_t)v;
-    else if (size == 4 && a == 0xFF8604u)
-        g_dmamode = (uint16_t)v;
     else if (size == 1 && a == 0xFF8607u)
         g_dmamode = (uint16_t)((g_dmamode & 0xFF00u) | (v & 0xFFu));
+    /* a long at $FF8604 is split into its two words by the caller, so
+     * the data byte meets the 5380 register the OLD mode selected */
 }
 
 static void scsi_note(void)
 {
     if (!g_scsi_logged) {
         g_scsi_logged = 1;
-        fprintf(stderr, "[FALCON] SCSI: TOS probing the NCR 5380 - empty bus, "
-                        "no ACSI traffic\n");
+        fprintf(stderr, "[FALCON] SCSI: NCR 5380 probed - empty bus "
+                        "(no targets), no ACSI traffic\n");
     }
 }
 
@@ -285,7 +347,8 @@ int falcon_tos_owns(uint32_t a)
 
 static uint8_t read8(uint32_t a)
 {
-    if (a == 0xFF8604u || a == 0xFF8605u) { scsi_note(); return 0; }
+    if (a == 0xFF8604u) return 0;      /* high byte of the data word    */
+    if (a == 0xFF8605u) { scsi_note(); return ncr_read(g_dmamode & 7); }
     if (a == 0xFF8961u) return g_idx;
     if (a == 0xFF8963u) return rtc_read(g_idx);
     if (a >= 0xFF8C80u && a < 0xFF8C88u) return scc_read(a & 7u);
@@ -294,7 +357,8 @@ static uint8_t read8(uint32_t a)
 
 static void write8(uint32_t a, uint8_t v)
 {
-    if (a == 0xFF8604u || a == 0xFF8605u) { scsi_note(); return; }
+    if (a == 0xFF8604u) return;
+    if (a == 0xFF8605u) { scsi_note(); ncr_write(g_dmamode & 7, v); return; }
     if (a == 0xFF8961u) { g_idx = v & 63; return; }
     if (a == 0xFF8963u) { rtc_write(g_idx, v); return; }
     if (a >= 0xFF8C80u && a < 0xFF8C88u) { scc_write(a & 7u, v); return; }
@@ -323,4 +387,6 @@ void falcon_tos_reset(void)
     g_idx = 0;
     g_scc_ptr[0] = g_scc_ptr[1] = 0;
     g_dmamode = 0;
+    memset(g_ncr, 0, sizeof g_ncr);    /* RESET line: the 5380 too      */
+    g_ncr_irq = 0;
 }

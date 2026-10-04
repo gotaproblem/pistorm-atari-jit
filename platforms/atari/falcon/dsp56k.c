@@ -866,13 +866,20 @@ void dsp56k_irq_raise(dsp56k_t *d, int vector, int level)
 {
     int i = (vector >> 1) & 31;
     d->irq_level[i] = (uint8_t)level;
-    __atomic_or_fetch(&d->irq_pending, 1ull << i, __ATOMIC_RELEASE);
+    /* Only the thread running the DSP raises and clears (under the DSP
+     * lock), and the host sources are re-asserted on every HSR/HRX/HTX
+     * access: skip the read-modify-write when the bit is already set -
+     * on the Pi 4 (no LSE) each was a call into a load/store-exclusive
+     * loop, ~4% of the 68k thread in DSPBench's transfer tests. */
+    if (!(__atomic_load_n(&d->irq_pending, __ATOMIC_RELAXED) & (1ull << i)))
+        __atomic_or_fetch(&d->irq_pending, 1ull << i, __ATOMIC_RELEASE);
 }
 
 void dsp56k_irq_clear(dsp56k_t *d, int vector)
 {
     int i = (vector >> 1) & 31;
-    __atomic_and_fetch(&d->irq_pending, ~(1ull << i), __ATOMIC_RELEASE);
+    if (__atomic_load_n(&d->irq_pending, __ATOMIC_RELAXED) & (1ull << i))
+        __atomic_and_fetch(&d->irq_pending, ~(1ull << i), __ATOMIC_RELEASE);
 }
 
 static int is_jsr(uint32_t op)

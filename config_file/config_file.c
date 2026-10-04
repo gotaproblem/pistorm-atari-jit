@@ -48,6 +48,7 @@ typedef enum {
   CONFITEM_STRAM_CACHE,
   CONFITEM_STRAM_DIRECT,
   CONFITEM_NATIVE_HDMI,
+  CONFITEM_HDMI_ONLY,
   CONFITEM_PSVIDEL,
   CONFITEM_FALCON_DSP,
   CONFITEM_CPU_CLOCK_MULTIPLIER,
@@ -68,6 +69,7 @@ typedef enum {
   CONFITEM_STBOX_MACHINE,
   CONFITEM_STBOX_PLANE,
   CONFITEM_STRAM_SIZE,
+  CONFITEM_FALCON_STRAM,
 } config_item;
 
 typedef struct {
@@ -113,6 +115,7 @@ static const config_switch_def config_switches[] = {
   { "stram_cache", CONFITEM_STRAM_CACHE },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
   { "native_hdmi", CONFITEM_NATIVE_HDMI },
+  { "hdmi_only", CONFITEM_HDMI_ONLY },
   { "psvidel", CONFITEM_PSVIDEL },
   { "falcon_dsp", CONFITEM_FALCON_DSP },
   { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
@@ -133,6 +136,7 @@ static const config_switch_def config_switches[] = {
   { "stbox_machine", CONFITEM_STBOX_MACHINE },
   { "stbox_plane", CONFITEM_STBOX_PLANE },
   { "stram_size", CONFITEM_STRAM_SIZE },
+  { "falcon_stram", CONFITEM_FALCON_STRAM },
 };
 
 const char *graphics_card_types[GRAPHICS_CARD_TYPES] = {
@@ -287,6 +291,11 @@ uint32_t emulator_config_stram_size(void)
   return current_config ? current_config->stram_size : 0;
 }
 
+uint32_t emulator_config_falcon_stram(void)
+{
+  return current_config ? current_config->falcon_stram : 0;
+}
+
 bool emulator_config_stram_cache_enabled(void)
 {
   return current_config ? current_config->stram_cache : false;
@@ -300,6 +309,14 @@ bool emulator_config_stram_direct_enabled(void)
 bool emulator_config_native_hdmi_enabled(void)
 {
   return current_config ? current_config->native_hdmi : true;
+}
+
+/* hdmi_only: the HDMI mirror is the only display anyone looks at, so the
+ * real Shifter's picture does not matter - pistorm_natmem.cpp then sends
+ * no screen writes and no shadow-frame-buffer copies over the bus. */
+bool emulator_config_hdmi_only(void)
+{
+  return current_config ? current_config->hdmi_only : false;
 }
 
 bool emulator_config_psvidel_enabled(void)
@@ -946,21 +963,9 @@ struct emulator_config *load_config_file_section(char *filename,
         break;
 
       case CONFITEM_FPS:
-        cfg->fps = get_int (parse_line + str_pos);
-        /* Host render cadence only (et4000 frame upload budget =
-         * 1000000/fps). Guest timing is untouched: VBL comes from real
-         * GLUE hardware and no interrupt/input path reads this. Clamp to
-         * the same 10..60 range emulator_config_fps() accepts - the old
-         * 50..120 parser clamp silently forced lower values back to 50,
-         * which is why cfg fps changes never reached the render loop.
-         * Lower values trade display smoothness for memory bandwidth
-         * (full 1080p32 uploads are ~8MB each). */
-        if (cfg->fps < 10)
-          cfg->fps = 10;
-        else if (cfg->fps > 60)
-          cfg->fps = 60;
-        printf ("[CFG] Set VGA FPS to %d Hz (render budget %d ms)\n",
-                cfg->fps, 1000 / cfg->fps);
+        /* Retired: the HDMI picture follows the Atari's own VBL now (see
+         * et4000.c render_frame). Ignored so an old .cfg still loads. */
+        printf ("[CFG] fps is retired - HDMI is paced by the Atari's VBL - ignored\n");
         break;
 
       case CONFITEM_TTRAM:
@@ -1284,6 +1289,12 @@ struct emulator_config *load_config_file_section(char *filename,
         printf ("[CFG] Native HDMI %s\n", cfg->native_hdmi ? "enabled" : "disabled");
         break;
 
+      case CONFITEM_HDMI_ONLY:
+        cfg->hdmi_only = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] HDMI only %s%s\n", cfg->hdmi_only ? "enabled" : "disabled",
+                cfg->hdmi_only ? " - the ST's own video output is not kept up to date" : "");
+        break;
+
       case CONFITEM_PSVIDEL:
         /* Falcon Videl + SuperVidel, HDMI only (PSVIDEL.md). Needs
          * PSVIDEL.PRG in AUTO to arm it; the 0xA0000000 video RAM window
@@ -1443,6 +1454,16 @@ struct emulator_config *load_config_file_section(char *filename,
          * the native display. */
         cfg->stram_size = (uint32_t)get_size_kb(parse_line + str_pos) * 1024u;
         printf ("[CFG] Physical ST-RAM %uKB\n", cfg->stram_size >> 10);
+        break;
+
+      case CONFITEM_FALCON_STRAM:
+        /* Falcon ST-RAM: "14M" gives a Falcon the 14MB a real one can
+         * have - the 4MB above the board's are Pi memory, ST-RAM to the
+         * guest (Mxalloc mode 0 finds it). Only with `machine falcon`;
+         * checked where the map is built (pistorm_natmem.cpp), since
+         * `machine` may come later in the section. */
+        cfg->falcon_stram = (uint32_t)get_size_kb(parse_line + str_pos) * 1024u;
+        printf ("[CFG] Falcon ST-RAM %uKB\n", cfg->falcon_stram >> 10);
         break;
 
       case CONFITEM_STBOX_PLANE:

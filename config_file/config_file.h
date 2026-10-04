@@ -122,7 +122,9 @@ struct emulator_config {
   bool stram_cache;
   bool stram_direct;
   uint32_t stram_size;   /* PHYSICAL ST-RAM bytes (0 = flat 4MB model) */
+  uint32_t falcon_stram; /* Falcon ST-RAM bytes, 14MB = Pi-backed above 4MB (0 = 4MB) */
   bool native_hdmi;
+  bool hdmi_only;     /* nobody watches the ST's own video output */
   bool cpu_clock_multiplier_set;
   int cpu_clock_multiplier;
   bool m68k_speed_set;
@@ -177,6 +179,7 @@ int  emulator_config_blitter_mode(void);  /* 0=off 1=real 2=emulated */
 bool emulator_config_stram_cache_enabled(void);
 bool emulator_config_stram_direct_enabled(void);
 bool emulator_config_native_hdmi_enabled(void);
+bool emulator_config_hdmi_only(void);
 bool emulator_config_psvidel_enabled(void);
 bool emulator_config_falcon_dsp_enabled(void);
 bool emulator_config_display_enabled(void);
@@ -187,6 +190,7 @@ int emulator_config_fps(void);
 const char *emulator_config_stbox_tos(void);   /* "" if unset */
 int emulator_config_stbox_plane(void);         /* 0 if unset  */
 uint32_t emulator_config_stram_size(void);     /* bytes; 0 = flat 4MB */
+uint32_t emulator_config_falcon_stram(void);   /* bytes; 0 = 4MB       */
 /* The file the running config was loaded from - PS_SAVE edits that one */
 const char *emulator_config_path(void);
 /* The section of that file the running config was loaded from, or "" if

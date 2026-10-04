@@ -75,6 +75,8 @@ typedef struct {
     _Atomic uint32_t tail;          /* consumer */
 } hfifo_t;
 
+static uint32_t g_hrx_ring[128];          /* last host words the DSP read */
+static uint32_t g_hrx_n;
 static inline uint32_t hf_count(hfifo_t *f)
 {
     return atomic_load_explicit(&f->head, memory_order_acquire) -
@@ -323,9 +325,21 @@ static _Atomic uint32_t g_rxall_n;
 #define HLOG 256u
 static struct { char dir; uint32_t v; uint16_t pc; } g_hlog[HLOG];
 static _Atomic uint32_t g_hlog_n;
+/* Debug ring and stats counters, bumped once per host word. A plain
+ * relaxed load + store, not an atomic add: on the Pi 4 the add was a call
+ * into a load/store-exclusive loop (~5% of the 68k thread in DSPBench's
+ * transfer tests). Each has one writer at a time; the worst a race can
+ * do is lose a debug-ring slot. */
+static inline uint32_t bump(_Atomic uint32_t *p)
+{
+    uint32_t v = atomic_load_explicit(p, memory_order_relaxed);
+    atomic_store_explicit(p, v + 1, memory_order_relaxed);
+    return v;
+}
+
 static void hlog(char dir, uint32_t v, uint16_t pc)
 {
-    uint32_t i = atomic_fetch_add_explicit(&g_hlog_n, 1, memory_order_relaxed);
+    uint32_t i = bump(&g_hlog_n);
     g_hlog[i % HLOG].dir = dir;
     g_hlog[i % HLOG].v = v & 0xFFFFFF;
     g_hlog[i % HLOG].pc = pc;
@@ -356,13 +370,15 @@ static void lat_add(_Atomic uint32_t *mx, _Atomic uint32_t *sum, _Atomic uint32_
     atomic_fetch_add_explicit(n, 1, memory_order_relaxed);
 }
 
+static int falcon_dbg(void);
 static void rxlog_add(uint32_t v)
 {
-    g_rxall[atomic_fetch_add_explicit(&g_rxall_n, 1, memory_order_relaxed) % RXALL] = v & 0xFFFFFF;
+    g_rxall[bump(&g_rxall_n) % RXALL] = v & 0xFFFFFF;
     unsigned i = g_rxlog_n++ % RXLOG;
     g_rxlog[i].v = v & 0xFFFFFF;
     g_rxlog[i].frames = F.frames;
-    g_rxlog[i].ns = rxlog_now();
+    /* a clock read per DSP word, only for the stall dump's +ms column */
+    g_rxlog[i].ns = falcon_dbg() ? rxlog_now() : 0;
 }
 
 static uint32_t periph_read(void *ctx, int space, uint16_t a)
@@ -390,9 +406,11 @@ static uint32_t periph_read(void *ctx, int space, uint16_t a)
         uint32_t v;
         if (tx_visible() && hf_peek(&F.tx, &v)) {
             hf_pop(&F.tx);
+            g_hrx_ring[g_hrx_n++ & 127u] = v;
             F.hrx_last = v;
             F.answer_armed = 1;
-            uint64_t t = atomic_exchange(&g_tx_idle_ns, 0);
+            uint64_t t = atomic_load_explicit(&g_tx_idle_ns, memory_order_relaxed)
+                         ? atomic_exchange(&g_tx_idle_ns, 0) : 0;
             if (t) {
                 uint64_t now = rxlog_now();
                 g_pick_lat = now - t;
@@ -669,11 +687,53 @@ static int g_dsp_inline = 1;
  * "68k runs it inline" mutually exclusive. In steady state only one thread
  * ever takes it (the other side is gated off by cpu_coproc()), so it is
  * uncontended except for the instant ownership changes hands. */
+/* PISTORM_FALCON_DEBUG=1, once: the first illegal DSP instruction, with
+ * the code around it, the vectors and TOS's resident entry, and the last
+ * 128 words the DSP took from the host port - to see whether a program
+ * arrived intact or the DSP ran into memory nothing loaded. */
+static void dsp_illegal_dump(void)
+{
+    static uint32_t seen;
+    static int dumped;
+    dsp56k_t *d = F.dsp;
+    if (dumped || d->illegal_count == seen)
+        return;
+    seen = d->illegal_count;
+    if (!falcon_dbg())
+        return;
+    dumped = 1;
+    fprintf(stderr, "[FALCON] DSP illegal at p:$%04X - dump (pc now $%04X, %u boots)\n",
+            d->illegal_pc, d->pc, F.boot_count);
+    uint16_t c = d->illegal_pc;
+    for (int r = -2; r < 4; r++) {
+        uint16_t b = (uint16_t)((c & ~7u) + r * 8);
+        fprintf(stderr, "[FALCON]   p:%04X:", b);
+        for (int k = 0; k < 8; k++)
+            fprintf(stderr, " %06X", dsp56k_mem_read(d, DSP_SPACE_P, (uint16_t)(b + k)));
+        fprintf(stderr, "\n");
+    }
+    for (int b = 0; b < 0x48; b += 8) {
+        fprintf(stderr, "[FALCON]   p:%04X:", b);
+        for (int k = 0; k < 8; k++)
+            fprintf(stderr, " %06X", dsp56k_mem_read(d, DSP_SPACE_P, (uint16_t)(b + k)));
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "[FALCON]   p:7EA9: %06X %06X %06X %06X\n",
+            dsp56k_mem_read(d, DSP_SPACE_P, 0x7EA9), dsp56k_mem_read(d, DSP_SPACE_P, 0x7EAA),
+            dsp56k_mem_read(d, DSP_SPACE_P, 0x7EAB), dsp56k_mem_read(d, DSP_SPACE_P, 0x7EAC));
+    uint32_t n = g_hrx_n, k0 = n > 128u ? n - 128u : 0u;
+    fprintf(stderr, "[FALCON]   last %u host words the DSP took (of %u):", n - k0, n);
+    for (uint32_t k = k0; k < n; k++)
+        fprintf(stderr, "%s%06X", (k - k0) % 12 ? " " : "\n[FALCON]    ", g_hrx_ring[k & 127u]);
+    fprintf(stderr, "\n");
+}
+
 static inline void dsp_run(uint32_t cycles)
 {
     pthread_mutex_lock(&g_dsp_mtx);
     host_irqs();
     dsp56k_run(F.dsp, cycles);
+    dsp_illegal_dump();
     pthread_mutex_unlock(&g_dsp_mtx);
 }
 
@@ -1243,6 +1303,10 @@ static inline int host_hot(void)
 static _Atomic uint32_t g_rx_waits, g_rx_wait_max_us, g_rx_wait_timeouts;
 /* dsp_settle: the coprocessor DSP run on the 68k thread (see there) */
 static int g_settled;                /* CPU thread only                   */
+/* 68k host-port accesses, counted on the CPU thread (no clock read): the
+ * engine compares it across its 2 ms sleeps to see the 68k has gone quiet
+ * on the port while the DSP still has its words to read (coproc_idle). */
+static volatile uint32_t g_host_acc;
 static _Atomic uint32_t g_settles, g_settle_max_us, g_settle_cutoffs;
 
 static uint64_t mono_ns(void)
@@ -1251,6 +1315,59 @@ static uint64_t mono_ns(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+
+/* PISTORM_FALCON_PROF=1: where a host-port access spends its time. Every
+ * 5 s: reads/writes per second as the 68k made them, the average time
+ * inside falcon_hw per access, and how much of that was the DSP running
+ * (dsp_settle). 1e9 / rate minus the time inside is what the access cost
+ * outside this file (JIT, bus dispatch). One counter read per access. */
+static int g_prof = -1;
+static _Atomic uint64_t g_prof_rd_n, g_prof_rd_t, g_prof_wr_n, g_prof_wr_t, g_prof_dsp_t;
+static inline uint64_t prof_ticks(void)
+{
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return mono_ns();
+#endif
+}
+static inline double prof_ns_per_tick(void)
+{
+#if defined(__aarch64__)
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f ? 1e9 / (double)f : 1.0;
+#else
+    return 1.0;
+#endif
+}
+static inline int prof_on(void)
+{
+    if (g_prof < 0) { const char *e = getenv("PISTORM_FALCON_PROF"); g_prof = (e && *e == '1'); }
+    return g_prof;
+}
+static void prof_report(void)
+{
+    static uint64_t t0;
+    uint64_t now = mono_ns();
+    if (!t0) { t0 = now; return; }
+    if (now - t0 < 5000000000ull)
+        return;
+    double secs = (double)(now - t0) / 1e9, k = prof_ns_per_tick();
+    t0 = now;
+    uint64_t rn = atomic_exchange(&g_prof_rd_n, 0), rt = atomic_exchange(&g_prof_rd_t, 0);
+    uint64_t wn = atomic_exchange(&g_prof_wr_n, 0), wt = atomic_exchange(&g_prof_wr_t, 0);
+    uint64_t dt = atomic_exchange(&g_prof_dsp_t, 0);
+    if (!rn && !wn)
+        return;
+    fprintf(stderr, "[FALCON] prof 5 s: reads %.0f/s (%.0f ns inside each), writes %.0f/s "
+            "(%.0f ns inside each), DSP runs %.0f ms of the %.0f ms inside\n",
+            rn / secs, rn ? rt * k / rn : 0.0, wn / secs, wn ? wt * k / wn : 0.0,
+            dt * k / 1e6, (rt + wt) * k / 1e6);
+}
+
 
 static void atomic_max_u32(_Atomic uint32_t *p, uint32_t v)
 {
@@ -1401,6 +1518,8 @@ static void *engine(void *arg)
             continue;
         }
         dsp_power_state();
+        if (prof_on())
+            prof_report();
         int st = atomic_load(&F.dsp_state);
         /* PISTORM_FALCON_DEBUG=1, while a DSP program runs: what moved in the last 5 s.
          * A 68k stuck waiting on the DSP shows as polls with no rx. */
@@ -1473,8 +1592,47 @@ static void *engine(void *arg)
             F.vbl_locked = 0;
             g_tx_vis_on = 0;
             if (st == DSP_RUN && cpu_coproc()) {
-                /* the 68k thread owns the DSP and clocks it through the
-                 * host port; just idle here until it needs the engine */
+                /* The 68k thread owns the DSP and clocks it through the
+                 * host port - but only while it keeps touching the port.
+                 * A 68k that writes its words and then goes quiet (TOS 4's
+                 * Dsp_DoBlock at boot: 152 words of its resident DSP code,
+                 * one TXDE check, no reads after) left them in the FIFO and
+                 * the DSP parked at P:$004E for good: TOS's handlers at
+                 * P:$7EA9 never arrived, and the next Dsp_ExecProg jumped
+                 * into empty memory (DSPBench hung, DSP pc $EABD). So when
+                 * the port has been quiet for a whole sleep and the DSP has
+                 * input it has not taken (a word or a host command), the
+                 * engine gives it its 1 ms of cycles - under the same mutex
+                 * as an inline run, so the 68k's next access cannot race
+                 * it - and the 68k's next read settles afresh. */
+                /* Likewise a program the 68k started and then left alone
+                 * must run to its first wait, as a free-running 56001
+                 * would: DSPBench boots its own loader by hand (PSG reset,
+                 * 512 words, no reads after) whose first act is copying
+                 * its handlers to P:$7EA9 - over the X:$3EA9 its memory
+                 * march wrote. Not run, the next Dsp_ExecProg jumped into
+                 * the march pattern (illegal instructions, RX/TX tests
+                 * dead). So also run while the DSP is neither settled by
+                 * the 68k nor seen parked by the last engine run. */
+                static uint32_t seen_acc;
+                static int eng_parked;
+                uint32_t acc = g_host_acc;
+                if (acc != seen_acc)
+                    eng_parked = 0;
+                if (acc == seen_acc &&
+                    (hf_count(&F.tx) || (atomic_load(&F.cvr) & 0x80) ||
+                     (!g_settled && !eng_parked))) {
+                    pthread_mutex_lock(&g_dsp_mtx);
+                    uint64_t sk = F.dsp->idle_skips;
+                    host_irqs();
+                    dsp56k_run(F.dsp, (uint32_t)(DSP_HZ / 1000.0));
+                    dsp_illegal_dump();
+                    eng_parked = F.dsp->idle_skips != sk ||
+                                 (F.dsp->halted && !F.dsp->irq_pending);
+                    pthread_mutex_unlock(&g_dsp_mtx);
+                    g_settled = 0;
+                }
+                seen_acc = acc;
                 falcon_audio_wait(2000);
             } else if (st == DSP_RUN) {
                 /* nothing clocks the DSP: run it at its own speed, 1 ms
@@ -1749,6 +1907,8 @@ static void dsp_settle(void)
     uint64_t t0 = dbg ? mono_ns() : 0;       /* two clock reads per word read */
     dsp56k_t *d = F.dsp;
     uint32_t quiet = 0, total = 0;
+    const int prof = prof_on();
+    uint64_t pt0 = prof ? prof_ticks() : 0;
     pthread_mutex_lock(&g_dsp_mtx);
     for (;;) {
         uint32_t rxh = atomic_load_explicit(&F.rx.head, memory_order_relaxed);
@@ -1757,6 +1917,7 @@ static void dsp_settle(void)
         uint64_t sk = d->idle_skips;
         host_irqs();
         dsp56k_run(d, 64);
+        dsp_illegal_dump();
         total += 64;
         int moved = rxh != atomic_load_explicit(&F.rx.head, memory_order_relaxed) ||
                     txt != atomic_load_explicit(&F.tx.tail, memory_order_relaxed) ||
@@ -1780,6 +1941,8 @@ static void dsp_settle(void)
         }
     }
     pthread_mutex_unlock(&g_dsp_mtx);
+    if (prof)
+        atomic_fetch_add_explicit(&g_prof_dsp_t, prof_ticks() - pt0, memory_order_relaxed);
     if (dbg) {
         atomic_fetch_add_explicit(&g_settles, 1, memory_order_relaxed);
         atomic_max_u32(&g_settle_max_us, (uint32_t)((mono_ns() - t0) / 1000u));
@@ -1787,7 +1950,19 @@ static void dsp_settle(void)
 }
 
 /* the 68k changed something the DSP can see: it must run again */
-static inline void dsp_unsettle(void) { g_settled = 0; }
+static int g_rx_lazy;
+static inline void dsp_unsettle(void) { g_settled = 0; g_rx_lazy = 0; }
+
+/* One 68k access to the host port (falcon_hw_read): whether the DSP is the
+ * 68k's to run, decided once per access, not once per byte - a long read
+ * at $FFA204 was four cpu_coproc() checks and four settles. */
+static int g_acc_coproc;
+static int g_acc_settled;     /* this access has brought the DSP up to now */
+/* g_rx_lazy (see dsp_unsettle): words the DSP sent are still unread. The
+ * 68k's data reads only take them in order and cannot see the DSP's
+ * progress, so a word read does not make the DSP run again until the
+ * receive FIFO is empty or the 68k looks at the status/control side
+ * (ICR/CVR/ISR/IVR), which it can see. */
 
 static uint8_t host_read8(uint32_t o)
 {
@@ -1800,8 +1975,16 @@ static uint8_t host_read8(uint32_t o)
     /* Coprocessor: bring the DSP up to "now" before the 68k sees the port
      * (dsp_settle). Otherwise (engine-clocked DSP) a receive read that
      * outran the engine waits for the word. */
-    if (cpu_coproc()) {
-        dsp_settle();
+    if (g_acc_coproc) {
+        if (o < 4 && g_rx_lazy) {
+            g_rx_lazy = 0;
+            dsp_unsettle();
+            g_acc_settled = 0;
+        }
+        if (!g_acc_settled) {
+            dsp_settle();
+            g_acc_settled = 1;
+        }
         have = hf_peek(&F.rx, &v);
         if (atomic_load_explicit(&g_dsp_resetting, memory_order_relaxed))
             have = 0;
@@ -1816,7 +1999,7 @@ static uint8_t host_read8(uint32_t o)
     case 2: {
         uint8_t isr = 0;
         uint32_t txn = hf_count(&F.tx);
-        atomic_fetch_add_explicit(&F.isr_polls, 1, memory_order_relaxed);
+        bump(&F.isr_polls);
         if (!have) {
             falcon_audio_kick();                 /* waiting on the DSP */
             if (!g_req_ns)
@@ -1837,7 +2020,12 @@ static uint8_t host_read8(uint32_t o)
     case 7:
         if (have) {
             hf_pop(&F.rx);
-            dsp_unsettle();                  /* HTDE may have opened */
+            /* HTDE may have opened. With words still queued the DSP
+             * only needs to run when the 68k can see it (g_rx_lazy) */
+            if (g_acc_coproc && hf_count(&F.rx))
+                g_rx_lazy = 1;
+            else
+                dsp_unsettle();
             hlog('R', v, 0);
             F.rx_last = v;
             if (g_req_ns) {
@@ -1873,10 +2061,12 @@ static void host_write8(uint32_t o, uint8_t v)
         F.txb[2] = v;
         g_req_ns = 0;                        /* still talking, not waiting */
         {
-            uint32_t n = atomic_fetch_add_explicit(&g_txlog_n, 1, memory_order_relaxed);
+            uint32_t n = bump(&g_txlog_n);
             g_txlog[n % TXLOG] = ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v;
         }
-        if (!hf_count(&F.tx) && !atomic_load_explicit(&g_tx_idle_ns, memory_order_relaxed))
+        /* pick-up latency stats (debug): a clock read per word otherwise */
+        if (falcon_dbg() && !hf_count(&F.tx) &&
+            !atomic_load_explicit(&g_tx_idle_ns, memory_order_relaxed))
             atomic_store(&g_tx_idle_ns, mono_ns());
         hlog('W', ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v, 0);
         /* Coprocessor, 68k blasting words without a handshake (DSPBench's
@@ -1993,10 +2183,37 @@ static inline void host_stamp(uint32_t a)
         atomic_store_explicit(&g_host_act_ns, mono_ns(), memory_order_relaxed);
 }
 
+static uint32_t falcon_hw_read_impl(uint32_t a, int size);
+static void falcon_hw_write_impl(uint32_t a, uint32_t v, int size);
 uint32_t falcon_hw_read(uint32_t a, int size)
 {
+    if (!prof_on())
+        return falcon_hw_read_impl(a, size);
+    uint64_t t = prof_ticks();
+    uint32_t v = falcon_hw_read_impl(a, size);
+    atomic_fetch_add_explicit(&g_prof_rd_t, prof_ticks() - t, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_prof_rd_n, 1, memory_order_relaxed);
+    return v;
+}
+void falcon_hw_write(uint32_t a, uint32_t v, int size)
+{
+    if (!prof_on()) {
+        falcon_hw_write_impl(a, v, size);
+        return;
+    }
+    uint64_t t = prof_ticks();
+    falcon_hw_write_impl(a, v, size);
+    atomic_fetch_add_explicit(&g_prof_wr_t, prof_ticks() - t, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_prof_wr_n, 1, memory_order_relaxed);
+}
+
+static uint32_t falcon_hw_read_impl(uint32_t a, int size)
+{
+    g_host_acc++;
     host_stamp(a);
     uint32_t v = 0;
+    if (a <= 0xFFA207u && a + (uint32_t)size > 0xFFA200u)
+        g_acc_coproc = cpu_coproc(), g_acc_settled = 0;
     for (int i = 0; i < size; i++) {
         uint32_t b = a + (uint32_t)i;
         uint8_t x;
@@ -2008,8 +2225,9 @@ uint32_t falcon_hw_read(uint32_t a, int size)
     return v;
 }
 
-void falcon_hw_write(uint32_t a, uint32_t v, int size)
+static void falcon_hw_write_impl(uint32_t a, uint32_t v, int size)
 {
+    g_host_acc++;
     host_stamp(a);
     for (int i = 0; i < size; i++) {
         uint32_t b = a + (uint32_t)i;

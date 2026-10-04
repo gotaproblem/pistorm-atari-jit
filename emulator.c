@@ -820,6 +820,7 @@ static void *ipl_stats_task(void *)
 static int g_falcon_tos;
 int emulator_falcon_tos(void) { return g_falcon_tos; }
 
+extern "C" uint32_t pistorm_stram_top(void);   /* pistorm_natmem.cpp */
 static void falcon_tos_arm(int cold)
 {
   if (!g_falcon_tos)
@@ -831,7 +832,12 @@ static void falcon_tos_arm(int cold)
   uint32_t ram = emulator_config_stram_size();
   if (!ram || ram > 0x00400000u)
     ram = 0x00400000u;                 /* the flat 4MB guest model */
-  uint8_t mem = ram >= 0x00400000u ? 0x16 : ram >= 0x00200000u ? 0x14 :
+  if (pistorm_stram_top() > 0x00400000u)
+    ram = pistorm_stram_top();         /* falcon_stram 14M */
+  /* TOS 4.04 (E0013A): d1 = b1 | b4<<1 | b5<<2 of $FF8006's high byte,
+   * RAM = 512K << d1, d1 = 5 meaning 14MB. Bits 3-2 = 01: ROM waits. */
+  uint8_t mem = ram >= 0x00E00000u ? 0x26 :
+                ram >= 0x00400000u ? 0x16 : ram >= 0x00200000u ? 0x14 :
                 ram >= 0x00100000u ? 0x06 : 0x04;
   if (psvidel_configured()) {
     psvidel_set_sysconfig((uint8_t)(0x80u | mem));   /* VGA */
@@ -841,6 +847,10 @@ static void falcon_tos_arm(int cold)
     falcon_arm();
 }
 
+extern "C" {
+volatile uint64_t pistorm_l6_hold_ticks;   /* last level-6 episode length */
+volatile uint8_t  pistorm_vbl_from6;       /* last VBL sighting left a 6  */
+}
 static void *ipl_task(void *)
 {
   cpu_set_t cpuset;
@@ -1375,6 +1385,21 @@ static void *ipl_task(void *)
           l4_entry = nowt;
         }
       }
+      /* PISTORM_ST_PAL_DEBUG evidence: how long the line sat at level 6
+       * before it dropped, and whether a VBL sighting came out of a level
+       * 6 - the encoded IPL shows only the highest level, so an MFP
+       * request held across the VBL hides it until the MFP is serviced. */
+      {
+        static uint64_t l6_on;
+        uint64_t t6;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t6));
+        if (ipl == 6 && g_ipl != 6)
+          l6_on = t6;
+        if (g_ipl == 6 && ipl != 6)
+          pistorm_l6_hold_ticks = t6 - l6_on;
+        if (ipl == 4)
+          pistorm_vbl_from6 = (g_ipl == 6);
+      }
       g_ipl = ipl;
 
       /* The real VBL: the GLUE's level-4 line has just come on. Copy the
@@ -1705,7 +1730,7 @@ int pistorm_pc_executable(unsigned int pc)
     if (pistorm_addr24)
       pc &= 0x00FFFFFFu;
   }
-  if (pc < 0x400000u)                                   /* ST-RAM window */
+  if (pc < pistorm_stram_top())                         /* ST-RAM window */
     return 1;
   if (tt_ram_available &&
       pc >= 0x01000000u && pc - 0x01000000u < tt_ram_size)
@@ -2260,8 +2285,6 @@ int main (int argc, char *argv[])
    * and this now lets a PISTORM_* in the launch script override it, which
    * is the precedence people already have in their fingers. */
   psctrl_tunables_init();
-  if (!pst_fps)
-    pst_fps = emulator_config_fps();
   pistorm_set_blitter_mode(emulator_config_blitter_mode());
 
   /*
@@ -2837,6 +2860,7 @@ uint8_t RTG_enabled = 1;
 
 /* ST Shifter palette cache: $FF8240..$FF825E, 16 big-endian words. */
 volatile uint16_t st_palette[16];
+extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 
 static inline void rtg_write_snoop(uint8_t type, uint32_t addr, uint32_t val)
 {
@@ -2892,6 +2916,7 @@ static inline void rtg_write_snoop(uint8_t type, uint32_t addr, uint32_t val)
 /* ST Shifter palette cache: $FF8240..$FF825E, 16 big-endian words. */
 #ifndef RTG
 volatile uint16_t st_palette[16];
+extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 #endif
 
 /* --- Logging & Sniffing Logic --- */
@@ -3027,8 +3052,10 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     rtg.hw_rez = (uint8_t)(value >> 8);  /* hardware truth for the renderer */
     pistorm_rez_sync_trace(a, (uint8_t)(value >> 8));
   }
-  else if (a >= 0x00FF8240 && a < 0x00FF8260)
+  else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     st_palette[(a - 0x00FF8240) >> 1] = value;
+    st_palette_log((a - 0x00FF8240) >> 1, value);
+  }
 }
 
 static inline void st_video_snoop32(uint32_t address, uint32_t value)
@@ -3049,8 +3076,11 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
   } else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     unsigned i = (a - 0x00FF8240) >> 1;
     st_palette[i] = (uint16_t)(value >> 16);
-    if (i + 1 < 16)
+    st_palette_log(i, (uint16_t)(value >> 16));
+    if (i + 1 < 16) {
       st_palette[i + 1] = (uint16_t)value;
+      st_palette_log(i + 1, (uint16_t)value);
+    }
   }
 }
 

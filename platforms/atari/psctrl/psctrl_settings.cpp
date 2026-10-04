@@ -618,26 +618,6 @@ static int vs_drv(const struct ps_item *it, int v)
   return PS_R_RESTART;
 }
 
-static int fg_fps(const struct ps_item *it)
-{
-  (void)it;
-  return pst_fps ? pst_fps : emulator_config_fps();
-}
-
-static int fs_fps(const struct ps_item *it, int v)
-{
-  if (v < it->min || v > it->max)
-    return PS_R_REJECT;
-  pst_fps = v;                     /* the render loop re-reads it */
-  /* `fps` is also a boot key, and the .cfg writer renders boot keys from
-   * the boot shadow - so the live value has to land there too, or a save
-   * writes the fps the machine STARTED with and the change is lost on
-   * the next boot. */
-  boot_seed();
-  g_boot.fps = v;
-  g_boot_dirty = 1;
-  return PS_R_OK;
-}
 
 static int ng_irq(const struct ps_item *it)  { (void)it; boot_seed(); return g_boot.network_irq_level; }
 static int ns_irq(const struct ps_item *it, int v)
@@ -715,8 +695,6 @@ RO_INT("soc_temp", "SoC temperature", PS_TAB_CPU, PS_U_NONE, ig_temp),
 RO_INT("throttled", "Firmware throttle bits", PS_TAB_CPU, PS_U_NONE, ig_thr),
 
 /* ----------------------------------------------------------- Video --- */
-ITEM("fps", "Host frame rate", PS_TAB_VIDEO, PS_K_INT, PS_C_LIVE, PS_U_HZ,
-     10, 60, 1, NULL, 0, 0, NULL, fg_fps, fs_fps, NULL),
 /* Range 0..20 ms in 0.1 ms steps. The old max of 200000 ns (0.2 ms) was
  * below the tunable's own 5 ms default, so the slider could not represent
  * the live value: it showed 5.0 ms on entry and then snapped into the
@@ -1297,7 +1275,7 @@ static const char *const g_bootkeys[] = {
   "machine", "cpu", "fpu", "mmu", "cpu_compatible", "shifter", "blitter",
   "stram_size", "ttram", "addr32", "stram_cache", "stram_direct",
   "native_hdmi", "psvidel", "vga", "monitor", "ym2149", "dma_sound", "falcon_dsp",
-  "ide", "kbd", "network", "network_irq", "fps", "rom", "stbox_tos",
+  "ide", "kbd", "network", "network_irq", "rom", "stbox_tos",
   "stbox_plane", "jit_cache", "m68k_speed", "cpu_clock_multiplier"
 };
 #define NBOOTKEYS ((int)(sizeof(g_bootkeys) / sizeof(g_bootkeys[0])))

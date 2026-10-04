@@ -53,6 +53,20 @@
 #endif
 
 
+#include "platforms/atari/falcon/falcon_tos.h"
+
+/* The order the guest sees, per access. Falcon TOS: native - first
+ * sector byte on D8-15, so a standard image reads as it lies on disk.
+ * A Falcon's hard-disk drivers (HDDRIVER, AHDI 6) do not look for a
+ * swapped MBR the way EmuTOS does: in the legacy order HDDRIVER made a
+ * C: from the root sector but could not read the FAT16 partition.
+ * Hatari presents a standard image to a Falcon the same way (ide.c:
+ * byteswap for a non-swapped image). EmuTOS and TOS 1/2: unchanged. */
+static inline int ide_native_order(void)
+{
+  return IDE_NATIVE_BYTEORDER || emulator_falcon_tos();
+}
+
 #define IDE_IDLE	0
 #define IDE_CMD		1
 #define IDE_DATA_IN	2
@@ -316,7 +330,7 @@ static void cmd_identify_complete(struct ide_taskfile *tf)
 {
   struct ide_drive *d = tf->drive;
   memcpy(d->data, d->identify, 512);
-#if IDE_NATIVE_BYTEORDER
+  if (ide_native_order())
   /* The identify block is synthesized HOST-side in the legacy per-word
    * layout. With the native data-port byte order the wire flips every
    * word, so pre-swap the copy once here: the guest then receives
@@ -331,7 +345,6 @@ static void cmd_identify_complete(struct ide_taskfile *tf)
       d->data[i + 1] = t;
     }
   }
-#endif
   data_in_state(tf);
   /* Arrange to copy just the identify buffer */
   d->dptr = d->data;
@@ -390,7 +403,7 @@ static void cmd_readsectors_complete(struct ide_taskfile *tf)
       tf->count,
       (long long)d->offset,
       d->heads, d->sectors, d->header_present,
-      IDE_NATIVE_BYTEORDER ? "native" : "legacy");
+      ide_native_order() ? "native" : "legacy");
 #endif
   /* DRDY is not guaranteed here but at least one buggy RC2014 firmware
      expects it */
@@ -596,12 +609,10 @@ static uint16_t ide_data_in(struct ide_drive *d, int len)
     v = *d->dptr;
     if (!d->eightbit) {
       if (len == 2) {
-#if IDE_NATIVE_BYTEORDER
-        v = (uint16_t)((v << 8) | d->dptr[1]);   /* first byte on D8-15 */
-#else
-        v |= (d->dptr[1] << 8);
-        //v = v << 8 | d->dptr[1]; // cryptodad byte swapped or not? -> resolved: see IDE_NATIVE_BYTEORDER
-#endif
+        if (ide_native_order())
+          v = (uint16_t)((v << 8) | d->dptr[1]);   /* first byte on D8-15 */
+        else
+          v |= (d->dptr[1] << 8);
       }
       d->dptr+=2;
     } else
@@ -613,6 +624,17 @@ static uint16_t ide_data_in(struct ide_drive *d, int len)
       if (d->length == 0) {
         d->state = IDE_IDLE;
         completed(&d->taskfile);
+        /* ATA PIO data-in: INTRQ comes as each sector is READY, not
+         * after the host has taken the last one (Hatari's
+         * ide_sector_read: no IRQ once nsector hits 0). Left asserted,
+         * it holds MFP GPIP5 - the ACSI/SCSI completion line - low.
+         * Falcon TOS boots an IDE disk's root sector and then never
+         * reads the IDE status; the ACSI boot loader on that sector saw
+         * GPIP5 low, took every command byte as acknowledged, and
+         * jumped into a buffer nothing had filled (4 bombs at
+         * $DDAC10). Falcon TOS only, as everything else is unchanged. */
+        if (emulator_falcon_tos())
+          d->intrq = 0;
       }
     }
   } else
@@ -634,23 +656,23 @@ static void ide_data_out(struct ide_drive *d, uint16_t v, int len)
   } else {
     if (d->eightbit)
       v &= 0xFF;
-#if IDE_NATIVE_BYTEORDER
-    if (!d->eightbit) {
-      *d->dptr++ = (uint8_t)(v >> 8);            /* symmetric with reads */
-      *d->dptr++ = (uint8_t)v;
-      d->taskfile.data = v;
+    if (ide_native_order()) {
+      if (!d->eightbit) {
+        *d->dptr++ = (uint8_t)(v >> 8);          /* symmetric with reads */
+        *d->dptr++ = (uint8_t)v;
+        d->taskfile.data = v;
+      } else {
+        *d->dptr++ = (uint8_t)v;
+        d->taskfile.data = v;
+      }
     } else {
-      *d->dptr++ = (uint8_t)v;
+      *d->dptr++ = v;
       d->taskfile.data = v;
+      if (!d->eightbit) {
+        *d->dptr++ = v >> 8;
+        d->taskfile.data = v >> 8;
+      }
     }
-#else
-    *d->dptr++ = v;
-    d->taskfile.data = v;
-    if (!d->eightbit) {
-      *d->dptr++ = v >> 8;
-      d->taskfile.data = v >> 8;
-    }
-#endif
     if (d->dptr == d->data + 512) {
       if (ide_write_sector(d) < 0) {
         ide_set_error(d);
@@ -669,6 +691,16 @@ static void ide_data_out(struct ide_drive *d, uint16_t v, int len)
 
 static void ide_issue_command(struct ide_taskfile *t)
 {
+  /* PISTORM_IDE_DEBUG=1: every command, which drive it went to and what
+   * it asked for - enough to follow a driver's probe and its partition
+   * scan drive by drive. */
+  if (pst_dbg_ide) {
+    struct ide_controller *c = t->drive->controller;
+    fprintf(stderr, "[IDE] cmd %02X -> %s drive %d (%s) cnt=%u lba=%02X:%02X%02X%02X\n",
+            t->command, c->name ? c->name : "?",
+            (int)(t->drive - c->drive), t->drive->present ? "present" : "ABSENT",
+            t->count, c->lba4, c->lba3, c->lba2, c->lba1);
+  }
   t->status &= ~(ST_ERR|ST_DRDY);
   t->status |= ST_BSY;
   t->error = 0;
@@ -1198,6 +1230,22 @@ int ide_make_ident ( int drive, uint16_t c, uint8_t h, uint8_t s, char *name, ui
 	/* Words 60-61: total user-addressable LBA sectors (mandatory for LBA drives) */
 	put_le16(p + 60, sectors & 0xffff);
 	put_le16(p + 61, sectors >> 16);
+
+	/* ATA strings (serial 10-19, firmware 23-26, model 27-46) hold two
+	 * characters per word, the FIRST in the high byte. They were copied
+	 * in as plain bytes, so every pair came out swapped - HDDRUTIL showed
+	 * "IPTSRO MDI EKD" for "PISTORM IDE DK". Swap each pair here; the
+	 * word values then carry the text the way a real drive sends it. */
+	{
+		uint8_t *b = (uint8_t *)target;
+		static const int rng[3][2] = { {10, 20}, {23, 27}, {27, 47} };
+		for (int k = 0; k < 3; k++)
+			for (int w = rng[k][0]; w < rng[k][1]; w++) {
+				uint8_t t = b[w * 2];
+				b[w * 2] = b[w * 2 + 1];
+				b[w * 2 + 1] = t;
+			}
+	}
 
 
   return 0;
