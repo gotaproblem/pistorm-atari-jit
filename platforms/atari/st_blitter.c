@@ -39,6 +39,28 @@
 
 #include "st_blitter.h"
 
+/* TT-RAM (Fast RAM) at $01000000. The real Falcon blitter has 24 address
+ * lines and cannot reach it, but here the blit runs over the emulator's
+ * memory, so an address register holding a TT-RAM address is honoured.
+ * Falcon TOS 4.04 with Fast RAM added (FASTRAM.PRG) puts the desktop's icon
+ * images in TT-RAM; its VDI blits them with the blitter, which read the
+ * 24-bit alias in ST-RAM instead - every icon came out blank. Any address
+ * outside TT-RAM keeps the hardware's 24-bit wrap, as before. */
+#include <stdbool.h>
+extern bool tt_ram_available;
+extern uint32_t tt_ram_size;
+#define BLIT_TT_BASE 0x01000000u
+static inline int blit_is_tt(uint32_t a)
+{
+    return tt_ram_available && a >= BLIT_TT_BASE && a - BLIT_TT_BASE < tt_ram_size;
+}
+/* the address a register really points at, and the mask its steps wrap in */
+static inline uint32_t blit_addr_mask(uint32_t a)
+{
+    return blit_is_tt(a) ? 0xFFFFFFFEu : 0x00FFFFFEu;
+}
+static unsigned g_tt_blits;
+
 static uint8_t R[0x40];   /* big-endian register file */
 static uint32_t g_fifo;      /* source FIFO, persists across blits */
 static uint16_t g_bus_word;  /* last word on the blitter's bus (hardware latch) */
@@ -106,9 +128,10 @@ static void sanitize(void)
     R[0x22 + 1] &= 0xFE;
     R[0x2E + 1] &= 0xFE;
     R[0x30 + 1] &= 0xFE;
-    R[0x24] = 0;                      /* addresses: 24-bit, even (byte 0 unused) */
+    /* addresses: even. The top byte is kept as written (24-bit on the
+     * hardware: blit_run and reads mask it unless it is a TT-RAM address -
+     * a long write sets all four bytes, two word writes may set it first) */
     R[0x24 + 3] &= 0xFE;
-    R[0x32] = 0;
     R[0x32 + 3] &= 0xFE;
     R[0x3A] &= 0x03;                  /* HOP */
     R[0x3B] &= 0x0F;                  /* OP */
@@ -143,8 +166,13 @@ static inline uint16_t blit_op(int op, uint16_t s, uint16_t d)
 
 static void blit_run(void)
 {
-    uint32_t src  = rd32(0x24) & 0x00FFFFFEu;
-    uint32_t dst  = rd32(0x32) & 0x00FFFFFEu;
+    const uint32_t smask = blit_addr_mask(rd32(0x24));
+    const uint32_t dmask = blit_addr_mask(rd32(0x32));
+    uint32_t src  = rd32(0x24) & smask;
+    uint32_t dst  = rd32(0x32) & dmask;
+    if ((smask | dmask) == 0xFFFFFFFEu && g_tt_blits++ < 3)
+        fprintf(stderr, "[BLIT] TT-RAM blit: src $%08X dst $%08X (the 24-bit blitter "
+                "cannot reach TT-RAM; the emulated one does)\n", src, dst);
     int32_t  sxi  = (int16_t)rd16(0x20);
     int32_t  syi  = (int16_t)rd16(0x22);
     int32_t  dxi  = (int16_t)rd16(0x2E);
@@ -222,7 +250,7 @@ static void blit_run(void)
             FIFO_SHIFT();
             g_bus_word = pistorm_blit_read16(src);
             FIFO_INSERT(g_bus_word);
-            src = (src + (uint32_t)sxi) & 0x00FFFFFEu;
+            src = (src + (uint32_t)sxi) & smask;
             have_fxsr = 1;
             g_accesses++;
         }
@@ -279,19 +307,19 @@ static void blit_run(void)
         if (x == 2 && nfsr)
             st_nfsr = 1;
         if (fetch_src)
-            src = (src + (uint32_t)((x == 1 || st_nfsr) ? syi : sxi)) & 0x00FFFFFEu;
+            src = (src + (uint32_t)((x == 1 || st_nfsr) ? syi : sxi)) & smask;
         if (x == 1)
         {
             have_fxsr = 0;
             yc--;
             x = xc;
-            dst = (dst + (uint32_t)dyi) & 0x00FFFFFEu;
+            dst = (dst + (uint32_t)dyi) & dmask;
             line = (line + (dyi >= 0 ? 1 : -1)) & 0xF;
         }
         else
         {
             x--;
-            dst = (dst + (uint32_t)dxi) & 0x00FFFFFEu;
+            dst = (dst + (uint32_t)dxi) & dmask;
         }
     }
 
@@ -309,8 +337,8 @@ static void blit_run(void)
         }
     }
     g_fifo = buf;
-    wr32(0x24, src & 0x00FFFFFEu);
-    wr32(0x32, dst & 0x00FFFFFEu);
+    wr32(0x24, src & smask);
+    wr32(0x32, dst & dmask);
     wr16(0x38, 0);
     R[0x3C] = (uint8_t)((R[0x3C] & 0x60) | line);   /* BUSY off */
 }
@@ -325,6 +353,9 @@ uint32_t st_blitter_reg_read(uint32_t addr, int size)
     {
         unsigned o = (off + (unsigned)i) & 0x3F;
         uint8_t b = R[o];
+        if ((o == 0x24 && !blit_is_tt(rd32(0x24))) ||
+            (o == 0x32 && !blit_is_tt(rd32(0x32))))
+            b = 0;                     /* 24-bit address: top byte reads 0 */
         if (o == 0x3C && g_busy_until && blit_now_ns() < g_busy_until)
             b |= 0x80;                 /* still "running" for pacing purposes */
         v = (v << 8) | b;

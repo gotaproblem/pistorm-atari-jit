@@ -4359,14 +4359,28 @@ static int sr_check(uaecptr a, uae_u32 sz) { return 1; } // return a < ST_RAM_SI
  * Writes follow the exact CPU ST-RAM write path: mirror + snoop +
  * write-through to the real bus (so the physical shifter displays the
  * result) + JIT SMC invalidation. */
+/* TT-RAM: the emulated blitter is given TT-RAM addresses (st_blitter.c) -
+ * plain host memory; a store into a TT-RAM code page is caught by the
+ * mprotect SMC handler (ttsmc_sigsegv) like any other host store. */
+static inline int blit_tt(uint32_t a)
+{
+    return tt_ram_available && a >= TT_RAM_BASE && a - TT_RAM_BASE < tt_ram_size - 1u;
+}
+
 extern "C" uint16_t pistorm_blit_read16(uint32_t a)
 {
+    if (blit_tt(a))
+        return do_get_mem_word((uae_u16 *)(natmem_offset + (a & ~1u)));
     a &= 0x00FFFFFEu;
     return do_get_mem_word((uae_u16 *)(natmem_offset + a));
 }
 
 extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
 {
+    if (blit_tt(a)) {
+        do_put_mem_word((uae_u16 *)(natmem_offset + (a & ~1u)), v);
+        return;
+    }
     a &= 0x00FFFFFEu;
     if (a >= g_stram_top)
         return;                       /* the 24-bit blitter only writes ST-RAM */
