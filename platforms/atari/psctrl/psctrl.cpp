@@ -602,6 +602,9 @@ void psctrl_sampler_start(void)
 
 /* --- the indexed read -------------------------------------------------- */
 
+extern "C" bool tt_ram_available;     /* emulator.c */
+extern "C" uint32_t tt_ram_size;
+
 uint32_t psctrl_getint(uint32_t index)
 {
   /* Settings live above PS_SET_BASE in the same namespace, so a guest
@@ -619,10 +622,12 @@ uint32_t psctrl_getint(uint32_t index)
       return (uint32_t)currprefs.cpu_model;
     case PS_CFG_FPU_MODEL:
       return (uint32_t)currprefs.fpu_model;
-    case PS_CFG_TTRAM_SIZE: {
-      const struct emulator_config *cfg = emulator_config_current();
-      return (cfg && cfg->ttram) ? cfg->ttram_size : 0;
-    }
+    case PS_CFG_TTRAM_SIZE:
+      /* what is actually mapped at $01000000, not the cfg line: "ttram on"
+       * leaves ttram_size 0 (128 MB default), the emulator clamps it and
+       * vetoes it on a 68000/010. FASTRAM.PRG hands this to Maddalt under
+       * Falcon TOS - a size past the mapping would crash the guest. */
+      return tt_ram_available ? tt_ram_size : 0;
 
     /* sampled guest/JIT statistics */
     case PS_STAT_EPOCH:

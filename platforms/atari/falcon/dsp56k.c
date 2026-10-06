@@ -17,6 +17,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stddef.h>
 
 #define M24  0xFFFFFFu
 #define M48  0xFFFFFFFFFFFFull
@@ -29,7 +30,7 @@ static inline int32_t sx24(uint32_t v) { return (int32_t)(v << 8) >> 8; }
 /* ------------------------------------------------------------------ */
 /* Memory                                                              */
 /* ------------------------------------------------------------------ */
-uint32_t dsp56k_mem_read(dsp56k_t *d, int space, uint16_t a)
+static inline uint32_t mem_rd(dsp56k_t *d, int space, uint16_t a)
 {
     switch (space) {
     case DSP_SPACE_P:
@@ -55,9 +56,15 @@ uint32_t dsp56k_mem_read(dsp56k_t *d, int space, uint16_t a)
     }
 }
 
-void dsp56k_mem_write(dsp56k_t *d, int space, uint16_t a, uint32_t v)
+uint32_t dsp56k_mem_read(dsp56k_t *d, int space, uint16_t a)
+{
+    return mem_rd(d, space, a);
+}
+
+static inline void mem_wr(dsp56k_t *d, int space, uint16_t a, uint32_t v)
 {
     v &= M24;
+    d->writes++;
     switch (space) {
     case DSP_SPACE_P:
         if (a < 0x200 && (d->omr & 3) != 3) { d->pint[a] = v; return; }
@@ -84,12 +91,18 @@ void dsp56k_mem_write(dsp56k_t *d, int space, uint16_t a, uint32_t v)
     }
 }
 
-#define RD(sp, a)     dsp56k_mem_read(d, (sp), (uint16_t)(a))
-#define WR(sp, a, v)  dsp56k_mem_write(d, (sp), (uint16_t)(a), (v))
+void dsp56k_mem_write(dsp56k_t *d, int space, uint16_t a, uint32_t v)
+{
+    mem_wr(d, space, a, v);
+}
+
+#define RD(sp, a)     mem_rd(d, (sp), (uint16_t)(a))
+#define WR(sp, a, v)  mem_wr(d, (sp), (uint16_t)(a), (v))
 
 static inline uint32_t fetch(dsp56k_t *d)
 {
-    uint32_t w = RD(DSP_SPACE_P, d->pc);
+    uint16_t pc = d->pc;
+    uint32_t w = (pc < 0x200 && (d->omr & 3) != 3) ? d->pint[pc] : d->ext[pc & 0x7FFF];
     d->pc++;
     d->cycles += 2;
     return w;
@@ -109,6 +122,7 @@ static void push(dsp56k_t *d, uint16_t hi, uint16_t lo)
     d->sp = (uint8_t)((d->sp & 0x30) | p);
     d->ssh[p] = hi;
     d->ssl[p] = lo;
+    d->writes++;
 }
 
 static void pop(dsp56k_t *d)
@@ -131,11 +145,25 @@ static void pop(dsp56k_t *d)
 static inline int scaling(dsp56k_t *d) { return (d->sr >> 10) & 3; } /* 0 none 1 down 2 up */
 
 /* E, U, N, Z of a 56-bit result */
-static void flags_euzn(dsp56k_t *d, int64_t v)
+static inline void flags_euzn(dsp56k_t *d, int64_t v)
 {
     uint16_t sr = d->sr & (uint16_t)~(SR_E | SR_U | SR_N | SR_Z);
     uint64_t u = (uint64_t)v & M56;
     int s = scaling(d);
+    if (s == 0) {                     /* no scaling: nearly always */
+        /* E: bits 55..47 not all equal = not a sign-extended 48-bit value */
+        if (sx48(u) != sx56(u))
+            sr |= SR_E;
+        /* U: bits 47 and 46 equal */
+        if (!(((u >> 47) ^ (u >> 46)) & 1))
+            sr |= SR_U;
+        if (u >> 55)
+            sr |= SR_N;
+        if (u == 0)
+            sr |= SR_Z;
+        d->sr = sr;
+        return;
+    }
     /* E: the bits above the 48-bit part (plus its MSB) are not all equal */
     int top = s == 1 ? 48 : s == 2 ? 46 : 47;
     uint64_t hi = u >> top;                      /* bits 55..top */
@@ -286,9 +314,10 @@ static void reg_write(dsp56k_t *d, int code, uint32_t v)
         if (p > 15) { d->sp |= 0x10; dsp56k_irq_raise(d, DSP_VEC_STACKERR, 3); p &= 0x0F; }
         d->sp = (uint8_t)((d->sp & 0x30) | p);
         d->ssh[p] = (uint16_t)v;
+        d->writes++;
         return;
     }
-    case 0x3D: SSL = (uint16_t)v; return;
+    case 0x3D: SSL = (uint16_t)v; d->writes++; return;
     case 0x3E: d->la = (uint16_t)v; return;
     case 0x3F: d->lc = (uint16_t)v; return;
     }
@@ -319,11 +348,17 @@ static inline int pcr_code(int ddddd)
 /* ------------------------------------------------------------------ */
 /* Address generation                                                  */
 /* ------------------------------------------------------------------ */
-static uint16_t agu_add(dsp56k_t *d, int rn, int32_t delta)
+static uint16_t agu_mod(dsp56k_t *d, int rn, int32_t delta);
+static inline uint16_t agu_add(dsp56k_t *d, int rn, int32_t delta)
+{
+    if (d->m[rn] == 0xFFFF)                   /* linear: nearly always */
+        return (uint16_t)(d->r[rn] + delta);
+    return agu_mod(d, rn, delta);
+}
+
+static uint16_t agu_mod(dsp56k_t *d, int rn, int32_t delta)
 {
     uint16_t r = d->r[rn], m = d->m[rn];
-    if (m == 0xFFFF)
-        return (uint16_t)(r + delta);
     if (m == 0) {
         /* reverse-carry: add with the bit order reversed */
         uint32_t rr = 0, dd = 0, x = r, y = (uint16_t)delta;
@@ -338,15 +373,22 @@ static uint16_t agu_add(dsp56k_t *d, int rn, int32_t delta)
     }
     if (m <= 0x7FFF) {
         uint32_t size = (uint32_t)m + 1;
-        uint32_t p2 = 1;
-        while (p2 < size) p2 <<= 1;
+        /* smallest power of two >= size (size >= 1) */
+        uint32_t p2 = size == 1 ? 1u : 1u << (32 - __builtin_clz(size - 1));
         int32_t ad = delta < 0 ? -delta : delta;
         if ((uint32_t)ad >= size && (ad & (int32_t)(p2 - 1)) == 0)
             return (uint16_t)(r + delta);     /* multiple of the block: linear */
         uint16_t base = (uint16_t)(r & ~(p2 - 1));
         int32_t off = (int32_t)(r - base) + delta;
-        off %= (int32_t)size;
-        if (off < 0) off += (int32_t)size;
+        /* the common case - a step inside the buffer, or one wrap - needs
+         * no division */
+        if (off >= (int32_t)size) {
+            off -= (int32_t)size;
+            if (off >= (int32_t)size) off %= (int32_t)size;
+        } else if (off < 0) {
+            off += (int32_t)size;
+            if (off < 0) { off %= (int32_t)size; if (off < 0) off += (int32_t)size; }
+        }
         return (uint16_t)(base + off);
     }
     return (uint16_t)(r + delta);             /* reserved: linear */
@@ -381,7 +423,7 @@ static uint16_t ea_calc(dsp56k_t *d, int mmmrrr, int *imm, uint32_t *immval)
 
 /* 2-bit MM effective address used by XY moves and LUA-style updates:
  * 00 (Rn)-Nn? no - the XY table: 00 (Rn), 01 (Rn)+Nn, 10 (Rn)-, 11 (Rn)+ */
-static uint16_t ea_xy(dsp56k_t *d, int mm, int rn)
+static inline uint16_t ea_xy(dsp56k_t *d, int mm, int rn)
 {
     uint16_t ea = d->r[rn];
     switch (mm) {
@@ -471,7 +513,7 @@ static inline uint32_t jj_reg(dsp56k_t *d, int jj)
     }
 }
 
-static void qqq_pair(dsp56k_t *d, int qqq, uint32_t *s1, uint32_t *s2)
+static inline void qqq_pair(dsp56k_t *d, int qqq, uint32_t *s1, uint32_t *s2)
 {
     switch (qqq & 7) {
     case 0: *s1 = d->x0; *s2 = d->x0; break;
@@ -493,13 +535,52 @@ static inline int64_t with_a1(int64_t v, uint32_t a1)
 
 /* Execute the data ALU half of a parallel instruction. Returns 0 for an
  * encoding that does not exist. */
-static int alu_op(dsp56k_t *d, int op)
+static inline __attribute__((always_inline)) int alu_op(dsp56k_t *d, int op)
 {
     if (op == 0)
         return 1;                              /* move only */
     int dbit = (op >> 3) & 1;
     int64_t *D = acc(d, dbit);
 
+    if ((op & 0x80) && !(d->sr & 0x0C00)) {
+        /* MPY/MPYR/MAC/MACR without scaling, in one pass: the same
+         * results and flags as alu_add/alu_round/flags_euzn below (V is
+         * the rounding's, L collects both, C untouched) */
+        uint32_t s1, s2;
+        qqq_pair(d, (op >> 4) & 7, &s1, &s2);
+        int64_t p = mul_product(s1, s2, (op >> 2) & 1);
+        uint16_t sr = d->sr;
+        int64_t r;
+        int v = 0;
+        if (op & 2) {
+            uint64_t ud = (uint64_t)*D & M56, us = (uint64_t)p & M56;
+            uint64_t rr = ud + us;
+            r = sx56(rr);
+            v = (int)((~(ud ^ us) & (ud ^ rr)) >> 55) & 1;
+        } else {
+            r = sx56((uint64_t)p);
+        }
+        if (v) sr |= SR_L;
+        if (op & 1) {
+            uint64_t u = (uint64_t)r & M56;
+            uint64_t rr = u + (1ull << 23);
+            if ((u & 0xFFFFFFull) == (1ull << 23))
+                rr &= ~(1ull << 24);             /* tie: round to even */
+            rr &= ~0xFFFFFFull & M56;
+            v = (int)(!(u >> 55) && ((rr >> 55) & 1));
+            r = sx56(rr);
+        }
+        sr = (uint16_t)(sr & ~(SR_V | SR_E | SR_U | SR_N | SR_Z));
+        if (v) sr |= SR_V | SR_L;
+        uint64_t u = (uint64_t)r & M56;
+        if (sx48(u) != r) sr |= SR_E;
+        if (!(((u >> 47) ^ (u >> 46)) & 1)) sr |= SR_U;
+        if (u >> 55) sr |= SR_N;
+        if (u == 0) sr |= SR_Z;
+        d->sr = sr;
+        *D = r;
+        return 1;
+    }
     if (op & 0x80) {                           /* MPY/MPYR/MAC/MACR */
         uint32_t s1, s2;
         qqq_pair(d, (op >> 4) & 7, &s1, &s2);
@@ -917,6 +998,12 @@ static void service_irq(dsp56k_t *d)
         return;
     dsp56k_irq_clear(d, best << 1);
     d->halted = 0;
+    if (d->hist_on) {
+        uint32_t h = d->hist_n++ & 63;
+        d->hist[h].kind = 1; d->hist[h].pc = (uint16_t)(best << 1); d->hist[h].pc2 = d->pc;
+        d->hist[h].sr = d->sr; d->hist[h].sp = d->sp;
+        d->hist[h].op = is_jsr(RD(DSP_SPACE_P, (uint16_t)(best << 1)));
+    }
     d->accept_level = best_lvl;
 
     uint16_t vec = (uint16_t)(best << 1);
@@ -1028,7 +1115,7 @@ static void illegal(dsp56k_t *d)
 
 /* Instructions with no parallel move (op < $100000, except the
  * $08xxxx/$09xxxx parallel class with bit 14 clear). */
-static void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
+static __attribute__((noinline)) void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
 {
     int hi = (op >> 16) & 0xFF;
     switch (hi) {
@@ -1307,9 +1394,12 @@ static void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
             int bitv = bit_of(v, b);
             if (bitv == bit5) {
                 if (is0B) do_jsr(d, tgt); else d->pc = tgt;
-                /* "jclr #n,x:<<periph,*": waiting on a peripheral - the
-                 * caller may skip ahead to its next event */
-                if (!is0B && tgt == start_pc && (group == 2 || ea >= 0xFFC0))
+                /* "jclr #n,x:<<periph,*" waits on a peripheral, and
+                 * "jset #n,x:flag,*" on a flag only an interrupt handler
+                 * can change (FalcAMP's MP3 loop at P:$1A0A): either way
+                 * nothing moves until an interrupt, which only arrives
+                 * between runs - the caller may skip ahead */
+                if (!is0B && tgt == start_pc)
                     d->idle_hint = 1;
             }
             return;
@@ -1345,50 +1435,174 @@ static void exec_nonpar(dsp56k_t *d, uint32_t op, uint16_t start_pc)
     illegal(d);
 }
 
-static void execute(dsp56k_t *d, uint32_t op)
+/* the other parallel moves: register writes deferred past the ALU op */
+static __attribute__((noinline)) void exec_par(dsp56k_t *d, uint32_t op)
+{
+    uint32_t mv = (op >> 8) & 0xFFFF;
+    /* fast forms with at most one register write: X:/Y: ea or aa (not
+     * L:), no move, U: (address update) - as par_move does them */
+    if ((mv & 0xC000) == 0x4000) {
+        int dd = (mv >> 12) & 3, ddd = (mv >> 8) & 7;
+        if (dd != 0 || (ddd & 4)) {
+            int w = (mv >> 7) & 1, reg = (dd << 3) | ddd;
+            int space = (mv >> 11) & 1 ? DSP_SPACE_Y : DSP_SPACE_X;
+            uint32_t val = 0;
+            int wr = 0;
+            if (mv & 0x40) {
+                int imm = 0; uint32_t immv = 0;
+                uint32_t sv = w ? 0 : reg_read(d, reg);
+                uint16_t ea = ea_calc(d, mv & 0x3F, &imm, &immv);
+                if (imm) { if (w) { val = immv; wr = 1; } }
+                else if (w) { val = RD(space, ea); wr = 1; }
+                else WR(space, ea, sv);
+            } else {
+                uint16_t ea = (uint16_t)(mv & 0x3F);
+                if (w) { val = RD(space, ea); wr = 1; }
+                else WR(space, ea, reg_read(d, reg));
+            }
+            if (!alu_op(d, op & 0xFF)) { illegal(d); return; }
+            if (wr) reg_write(d, reg, val);
+            return;
+        }
+    } else if (mv == 0x2000) {
+        if (!alu_op(d, op & 0xFF)) illegal(d);
+        return;
+    } else if ((mv & 0xFFE0) == 0x2040) {
+        (void)ea_calc(d, (int)(((mv >> 3) & 3) << 3) | (int)(mv & 7), NULL, NULL);
+        if (!alu_op(d, op & 0xFF)) illegal(d);
+        return;
+    }
+    pend_t p;
+    p.n = 0;
+    if (!par_move(d, (op >> 8) & 0xFFFF, &p)) { illegal(d); return; }
+    if (!alu_op(d, op & 0xFF)) { illegal(d); return; }
+    pend_commit(d, &p);
+}
+
+/* register read of an XY move: x0 x1 y0 y1 a b (a/b via the bus) */
+static inline uint32_t xy_get(dsp56k_t *d, int code)
+{
+    switch (code) {
+    case 0x04: return d->x0;
+    case 0x05: return d->x1;
+    case 0x06: return d->y0;
+    case 0x07: return d->y1;
+    case 0x0E: return acc_bus24(d, d->a);
+    default:   return acc_bus24(d, d->b);
+    }
+}
+
+/* register write of an XY move: x0 x1 y0 y1 a b */
+static inline void xy_set(dsp56k_t *d, int code, uint32_t v)
+{
+    switch (code) {
+    case 0x04: d->x0 = v; return;
+    case 0x05: d->x1 = v; return;
+    case 0x06: d->y0 = v; return;
+    case 0x07: d->y1 = v; return;
+    case 0x0E: d->a = acc_from24(v); return;
+    default:   d->b = acc_from24(v); return;
+    }
+}
+
+static inline void execute(dsp56k_t *d, uint32_t op)
 {
     uint16_t start_pc = (uint16_t)(d->pc - 1);
 
+    if (op & 0x800000) {
+        /* X: and Y: parallel move with an ALU op - the bulk of DSP code
+         * (par_move's first case, without the deferred-write list) */
+        uint32_t mv = op >> 8;
+        int xrn = mv & 7, xmm = (mv >> 3) & 3, xw = (mv >> 7) & 1;
+        int yrn = ((mv >> 5) & 3) | (xrn < 4 ? 4 : 0);
+        int ymm = (mv >> 12) & 3, yw = (mv >> 14) & 1;
+        int xreg = xy_x_reg[(mv >> 10) & 3], yreg = xy_y_reg[(mv >> 8) & 3];
+        uint32_t xv = xw ? 0 : xy_get(d, xreg);
+        uint32_t yv = yw ? 0 : xy_get(d, yreg);
+        uint16_t xa = ea_xy(d, xmm, xrn);
+        uint16_t ya = ea_xy(d, ymm, yrn);
+        if (xw) xv = RD(DSP_SPACE_X, xa); else WR(DSP_SPACE_X, xa, xv);
+        if (yw) yv = RD(DSP_SPACE_Y, ya); else WR(DSP_SPACE_Y, ya, yv);
+        if (!alu_op(d, op & 0xFF)) { illegal(d); return; }
+        if (xw) xy_set(d, xreg, xv);
+        if (yw) xy_set(d, yreg, yv);
+        return;
+    }
+
     int parallel = op >= 0x100000 ||
                    (((op >> 17) == 0x04) && !(op & 0x4000));  /* $08/$09 class */
-    if (parallel) {
-        pend_t p;
-        p.n = 0;
-        if (!par_move(d, (op >> 8) & 0xFFFF, &p)) { illegal(d); return; }
-        if (!alu_op(d, op & 0xFF)) { illegal(d); return; }
-        pend_commit(d, &p);
-    } else {
+    if (parallel)
+        exec_par(d, op);
+    else
         exec_nonpar(d, op, start_pc);
-    }
 }
 
 /* ------------------------------------------------------------------ */
 /* Run loop                                                            */
 /* ------------------------------------------------------------------ */
+/* A wait loop that is more than one instruction: FalcAMP waits for room
+ * in its output ring with "move r6,a / cmp y0,a / jpl / cmp y1,b / jmi"
+ * (r6 moves only in the SSI transmit interrupt) and for its next input
+ * block with "move x:$200,x0 / jset #2,x0,.. / jset #0,x:$f,..". None of
+ * them is "jump to itself", so the DSP spun through every cycle the
+ * engine gave it - DSP load 100% on the Pi and the MP3 stuttered.
+ * A short backward jump that arrives at the same target twice with every
+ * register the same and no write (memory, peripheral or stack) in
+ * between has done nothing and will do the same again until something
+ * from outside changes - an interrupt, which only arrives between runs,
+ * or a peripheral. The caller may skip ahead, as for "jmp *". */
+#define WL_SNAP offsetof(dsp56k_t, ssh)
+_Static_assert(offsetof(dsp56k_t, ssh) <= sizeof(((dsp56k_t *)0)->wl_snap),
+               "wl_snap too small");
+static void wait_loop(dsp56k_t *d, uint16_t tgt)
+{
+    /* snapshot at the first arrival, compare at the next: a loop an
+     * interrupt has just disturbed is found idle again after two passes */
+    if (tgt == d->wl_tgt && d->writes == d->wl_writes && d->wl_stage == 2 &&
+        memcmp(d->wl_snap, d, WL_SNAP) == 0) {
+        d->idle_hint = 1;
+        return;
+    }
+    d->wl_tgt = tgt;
+    d->wl_writes = d->writes;
+    memcpy(d->wl_snap, d, WL_SNAP);
+    d->wl_stage = 2;
+}
+
 void dsp56k_run(dsp56k_t *d, uint32_t cycles)
 {
     uint64_t end = d->cycles + cycles;
     while (d->cycles < end) {
-        if (d->irq_pending)
-            service_irq(d);
-        if (d->halted) {
-            d->cycles = end;
-            return;
+        if (__builtin_expect(d->irq_pending != 0 || d->halted, 0)) {
+            if (d->irq_pending)
+                service_irq(d);
+            if (d->halted) {
+                d->cycles = end;
+                return;
+            }
         }
         uint16_t spc = d->pc;
         uint32_t op = fetch(d);
         execute(d, op);
-        if (d->idle_hint) {
+        uint16_t npc = d->pc;
+        if (npc < spc && spc - npc <= 32 && !d->in_fast_irq && !d->rep_active)
+            wait_loop(d, npc);
+        if (__builtin_expect(d->hist_on, 0)) {
+            uint32_t h = d->hist_n++ & 63;
+            d->hist[h].kind = 0; d->hist[h].pc = spc; d->hist[h].pc2 = npc;
+            d->hist[h].op = op; d->hist[h].sr = d->sr; d->hist[h].sp = d->sp;
+        }
+        if (__builtin_expect(d->idle_hint, 0)) {
             d->idle_hint = 0;
             d->idle_skips++;
             d->cycles = end;
             return;
         }
         /* the loop-end test uses the address of the instruction's last
-         * word; a jump or interrupt has already moved the PC on */
-        uint16_t last = (uint16_t)(spc + ((d->pc == (uint16_t)(spc + 2)) ? 1 : 0));
-        if ((d->sr & SR_LF) && (d->pc == (uint16_t)(spc + 1) || d->pc == (uint16_t)(spc + 2)))
-            loop_end_check(d, last);
+         * word (npc - 1 after a one- or two-word instruction); a jump or
+         * interrupt has already moved the PC elsewhere */
+        if ((d->sr & SR_LF) && (uint16_t)(npc - spc - 1) <= 1u)
+            loop_end_check(d, (uint16_t)(npc - 1));
     }
 }
 
