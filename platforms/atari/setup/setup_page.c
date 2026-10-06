@@ -555,6 +555,46 @@ static void drop_by_rules(struct state *st)
         snprintf(st->msg, sizeof st->msg, "cpu %.8s: dropped %.40s", cpu ? cpu : "68000", gone);
 }
 
+/* The machine changed: what it expects follows it, what it cannot have
+ * goes. Choosing `falcon` switches on the blitter, PSVIDEL and the DSP
+ * (Falcon TOS drives all three from reset), raises the cpu to a 68030
+ * and turns the ACSI switch off (the Falcon's port is SCSI) - the image
+ * lines stay in the file, ignored, for when the build is an ST again. */
+static int acsi_switch_line(const struct state *st);
+static void apply_machine(struct state *st)
+{
+    const char *m = sc_get(&st->cfg, st->sec, "machine");
+    const char *key, *val;
+    char did[64] = "";
+#define DID(...) snprintf(did + strlen(did), sizeof did - strlen(did), __VA_ARGS__)
+    for (int i = 0; se_machine_wants(m, i, &key, &val); i++) {
+        const char *v = sc_get(&st->cfg, st->sec, key);
+        int on = v ? (se_kind(key) == SE_K_LIST ? !list_off(key, v) : sp_row_on(key, v))
+                   : se_off_value(key) != NULL;   /* absent-on (blitter) */
+        if (on)
+            continue;
+        if (sc_set(&st->cfg, st->sec, key, val) == 0)
+            DID("%s+%.10s", *did ? " " : "", key);
+    }
+    const char *min = se_machine_min_cpu(m);
+    const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
+    if (min && se_index("cpu", cpu ? cpu : "68000") < se_index("cpu", min) &&
+        sc_set(&st->cfg, st->sec, "cpu", min) == 0)
+        DID("%scpu %.6s", *did ? " " : "", min);
+    int asw = acsi_switch_line(st);
+    const char *a = asw >= 0 ? sc_get_n(&st->cfg, st->sec, "acsi", asw) : NULL;
+    if (a && sp_row_on("acsi", a) && se_machine_rule("acsi", m) &&
+        sc_set_n(&st->cfg, st->sec, "acsi", asw, se_off_value("acsi")) == 0)
+        DID("%s-acsi", *did ? " " : "");
+    if (sc_get(&st->cfg, st->sec, "cpu_compatible") &&
+        se_machine_rule("cpu_compatible", m) &&
+        sc_set(&st->cfg, st->sec, "cpu_compatible", NULL) == 0)
+        DID("%s-cpu_compatible", *did ? " " : "");
+#undef DID
+    if (*did)
+        snprintf(st->msg, sizeof st->msg, "%.6s: %.54s", m ? m : "st", did);
+}
+
 /*
  * The Drives tab. Two columns, walked top to bottom, left column first:
  *
@@ -702,13 +742,17 @@ static void build_drive_rows(struct state *st)
     }
     (void)nf;
     /* right column: acsi 0..7, then hostfs lines and an add row */
+    /* a Falcon has no ACSI port: the column greys, the lines stay */
+    const char *no_acsi = se_machine_rule("acsi", sc_get(&st->cfg, st->sec, "machine"));
     r = drow(st, ROW_KEY, "acsi", asw, 1, 0, "");
     r->ticked = acsi_on;
+    r->why = no_acsi;
     for (int i = 0; i < DRIVE_SLOTS; i++) {
         snprintf(num, sizeof num, "%d", i);
         r = drow(st, ROW_SLOT, "acsi", amap[i], 1, 1 + i, num);
         r->ticked = amap[i] >= 0;
         r->blocked = !acsi_on;
+        r->why = no_acsi;
         r->slot = i;
     }
     drow(st, ROW_LABEL, "hostfs", 0, 1, DRIVE_SLOTS + 2, "");
@@ -733,6 +777,7 @@ static void build_drive_rows(struct state *st)
 static void build_rows(struct state *st)
 {
     const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
+    const char *machine = sc_get(&st->cfg, st->sec, "machine");
     if (st->tab == SE_TAB_DRIVES) {
         build_drive_rows(st);
         return;
@@ -758,6 +803,7 @@ static void build_rows(struct state *st)
         r->blocked = parent_off(st, k);
         r->why = se_env_rule(k, st->sec);
         if (!r->why) r->why = se_cpu_rule(k, cpu);
+        if (!r->why) r->why = se_machine_rule(k, machine);
     }
     st->row[st->nrow].kind = ROW_SAVE; st->row[st->nrow++].text[0] = '\0';
     st->row[st->nrow].kind = ROW_BOOT; st->row[st->nrow++].text[0] = '\0';
@@ -891,6 +937,10 @@ static void tick(struct state *st, int open_editor_for_text)
 {
     struct row *r = &st->row[st->sel];
     if (r->kind == ROW_SLOT || r->kind == ROW_ADD) {
+        if (r->why) {
+            snprintf(st->msg, sizeof st->msg, "%.10s %s: %s", r->text, r->label, r->why);
+            return;
+        }
         if (r->blocked) {
             snprintf(st->msg, sizeof st->msg, "%.10s %s needs %.10s ticked", r->text, r->label,
                      !strcasecmp(r->text, "hdd") ? "ide" : r->text);
@@ -955,6 +1005,8 @@ static void tick(struct state *st, int open_editor_for_text)
         snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text, tv);
     if (!strcasecmp(r->text, "cpu"))
         drop_by_rules(st);
+    if (!strcasecmp(r->text, "machine"))
+        apply_machine(st);
 }
 
 static void commit_edit(struct state *st)
@@ -1058,6 +1110,8 @@ static void choose_accept(struct state *st)
                  se_label(r->text, st->choice));
         if (!strcasecmp(r->text, "cpu"))
             drop_by_rules(st);
+        if (!strcasecmp(r->text, "machine"))
+            apply_machine(st);
     }
 }
 

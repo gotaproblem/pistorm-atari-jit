@@ -36,6 +36,7 @@
 #include "platforms/atari/st_blitter.h"
 #include "platforms/atari/psvidel/psvidel.h"
 #include "platforms/atari/falcon/falcon.h"
+#include "platforms/atari/falcon/falcon_tos.h"
 #include "sysdeps.h"
 #include "threaddep/thread.h"
 
@@ -812,6 +813,44 @@ static void *ipl_stats_task(void *)
   return NULL;
 }
 
+/* Falcon TOS mode (see the ROM detection in main): Videl, the DSP and
+ * the sound matrix answer from reset, as on a Falcon, and $FF8006 tells
+ * TOS what a Falcon would: VGA monitor and the ST-RAM size it sizes
+ * memory from (bits 5, 4, 1; bits 3-2 = 01, two ROM wait states). */
+static int g_falcon_tos;
+int emulator_falcon_tos(void) { return g_falcon_tos; }
+
+extern "C" uint32_t pistorm_stram_top(void);   /* pistorm_natmem.cpp */
+static void falcon_tos_arm(int cold)
+{
+  if (!g_falcon_tos)
+    return;
+  falcon_tos_reset();                  /* RTC interrupt bits, SCC pointers */
+  if (cold && psvidel_configured())
+    psvidel_cold();                    /* TOS boots cold: $FF8007 bit 6 */
+  extern uint32_t emulator_config_stram_size(void);
+  uint32_t ram = emulator_config_stram_size();
+  if (!ram || ram > 0x00400000u)
+    ram = 0x00400000u;                 /* the flat 4MB guest model */
+  if (pistorm_stram_top() > 0x00400000u)
+    ram = pistorm_stram_top();         /* falcon_stram 14M */
+  /* TOS 4.04 (E0013A): d1 = b1 | b4<<1 | b5<<2 of $FF8006's high byte,
+   * RAM = 512K << d1, d1 = 5 meaning 14MB. Bits 3-2 = 01: ROM waits. */
+  uint8_t mem = ram >= 0x00E00000u ? 0x26 :
+                ram >= 0x00400000u ? 0x16 : ram >= 0x00200000u ? 0x14 :
+                ram >= 0x00100000u ? 0x06 : 0x04;
+  if (psvidel_configured()) {
+    psvidel_set_sysconfig((uint8_t)(0x80u | mem));   /* VGA */
+    psvidel_enable(0x001Au);                          /* VGA 640x480x16 */
+  }
+  if (falcon_configured())
+    falcon_arm();
+}
+
+extern "C" {
+volatile uint64_t pistorm_l6_hold_ticks;   /* last level-6 episode length */
+volatile uint8_t  pistorm_vbl_from6;       /* last VBL sighting left a 6  */
+}
 static void *ipl_task(void *)
 {
   cpu_set_t cpuset;
@@ -1346,6 +1385,21 @@ static void *ipl_task(void *)
           l4_entry = nowt;
         }
       }
+      /* PISTORM_ST_PAL_DEBUG evidence: how long the line sat at level 6
+       * before it dropped, and whether a VBL sighting came out of a level
+       * 6 - the encoded IPL shows only the highest level, so an MFP
+       * request held across the VBL hides it until the MFP is serviced. */
+      {
+        static uint64_t l6_on;
+        uint64_t t6;
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t6));
+        if (ipl == 6 && g_ipl != 6)
+          l6_on = t6;
+        if (g_ipl == 6 && ipl != 6)
+          pistorm_l6_hold_ticks = t6 - l6_on;
+        if (ipl == 4)
+          pistorm_vbl_from6 = (g_ipl == 6);
+      }
       g_ipl = ipl;
 
       /* The real VBL: the GLUE's level-4 line has just come on. Copy the
@@ -1483,6 +1537,23 @@ static void *ipl_task(void *)
        * still-asserted line is latched again once the CPU has taken
        * this one. */
       if (g_irq == 2 || g_irq == 4)
+      {
+        av_held = 0;
+        if (g_irq == 4)
+          av4_last_tick = 0;
+      }
+      g_irq = 6;
+      IPL_KICK();
+    }
+
+    /* Falcon DSP host port HREQ: a level-6 interrupt the DSP vectors
+     * itself (IVR at IACK, jit_glue.cpp intlev_ack). A level: raised again
+     * after the handler's RTE for as long as the guest leaves RXDF/TXDE
+     * pending with the request enabled. Two atomic loads when no request
+     * is enabled - the common case. */
+    if (falcon_hreq() && 6 > g_irq && 6 > g_irq_mask)
+    {
+      if (g_irq == 2 || g_irq == 4)     /* as above: re-arm a pre-empted VBL/HBL */
       {
         av_held = 0;
         if (g_irq == 4)
@@ -1659,7 +1730,7 @@ int pistorm_pc_executable(unsigned int pc)
     if (pistorm_addr24)
       pc &= 0x00FFFFFFu;
   }
-  if (pc < 0x400000u)                                   /* ST-RAM window */
+  if (pc < pistorm_stram_top())                         /* ST-RAM window */
     return 1;
   if (tt_ram_available &&
       pc >= 0x01000000u && pc - 0x01000000u < tt_ram_size)
@@ -2214,8 +2285,6 @@ int main (int argc, char *argv[])
    * and this now lets a PISTORM_* in the launch script override it, which
    * is the precedence people already have in their fingers. */
   psctrl_tunables_init();
-  if (!pst_fps)
-    pst_fps = emulator_config_fps();
   pistorm_set_blitter_mode(emulator_config_blitter_mode());
 
   /*
@@ -2256,6 +2325,27 @@ int main (int argc, char *argv[])
       printf ("[INIT] ROM loaded - %dK mapped at 0x%06X-0x%06X\n",
               config->rom.rom_size / 1024,
               (unsigned) ROM_START, (unsigned) ROM_END);
+
+      /* Falcon TOS (4.0x: the version word at ROM+2) on `machine falcon`:
+       * it drives Videl, the sound matrix and the DSP from its first
+       * instructions, so they are armed at power-on and after every reset
+       * instead of by PSVIDEL.PRG (falcon_tos_arm). PISTORM_FALCON_TOS=0/1
+       * overrides the detection. */
+      {
+        extern int emulator_config_machine_kind(void);
+        const uint8_t *r = config->rom.rom_ptr;
+        unsigned ver = (config->rom.rom_size >= 4) ? ((unsigned)r[2] << 8 | r[3]) : 0;
+        g_falcon_tos = (emulator_config_machine_kind() == 3 && (ver & 0xFF00u) == 0x0400u);
+        const char *e = getenv("PISTORM_FALCON_TOS");
+        if (e && *e)
+          g_falcon_tos = (*e == '1');
+        if (g_falcon_tos)
+          printf ("[INIT] Falcon TOS %u.%02X: Videl, DSP and sound matrix armed from reset\n",
+                  ver >> 8, ver & 0xFFu);
+        else if ((ver & 0xFF00u) == 0x0400u)
+          printf ("[INIT] TOS %u.%02X is Falcon TOS: it needs `machine falcon`, `psvidel` and `falcon_dsp`\n",
+                  ver >> 8, ver & 0xFFu);
+      }
     }
   //}
   else {
@@ -2436,6 +2526,8 @@ int main (int argc, char *argv[])
     if (falcon_init (natmem_offset, gsz) != 0)
       fprintf (stderr, "[INIT] Falcon DSP failed to start\n");
   }
+
+  falcon_tos_arm(1);
 
   /* start threads */
   err = pthread_create(&cpu_tid, NULL, &cpu_task, NULL);
@@ -2650,6 +2742,7 @@ void cpu_pulse_reset(void)
   st_blitter_reset();
   psvidel_reset();   /* the Videl disarms: the ST shifter is back on HDMI */
   falcon_reset();    /* DSP held in reset, sound DMA stopped */
+  falcon_tos_arm(0); /* ...unless Falcon TOS owns the machine (warm) */
 
   pulse_reset_inprogress = 0;
 }
@@ -2672,6 +2765,7 @@ void atari_hard_reset(void)
   st_blitter_reset();
   psvidel_reset();
   falcon_reset();
+  falcon_tos_arm(1); /* hard reset: Falcon TOS boots cold */
   pistorm_net_reset();
 
   jit_cpu_reset(); /* drop stale translations before re-fetch */
@@ -2766,6 +2860,7 @@ uint8_t RTG_enabled = 1;
 
 /* ST Shifter palette cache: $FF8240..$FF825E, 16 big-endian words. */
 volatile uint16_t st_palette[16];
+extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 
 static inline void rtg_write_snoop(uint8_t type, uint32_t addr, uint32_t val)
 {
@@ -2821,6 +2916,7 @@ static inline void rtg_write_snoop(uint8_t type, uint32_t addr, uint32_t val)
 /* ST Shifter palette cache: $FF8240..$FF825E, 16 big-endian words. */
 #ifndef RTG
 volatile uint16_t st_palette[16];
+extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 #endif
 
 /* --- Logging & Sniffing Logic --- */
@@ -2956,8 +3052,10 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     rtg.hw_rez = (uint8_t)(value >> 8);  /* hardware truth for the renderer */
     pistorm_rez_sync_trace(a, (uint8_t)(value >> 8));
   }
-  else if (a >= 0x00FF8240 && a < 0x00FF8260)
+  else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     st_palette[(a - 0x00FF8240) >> 1] = value;
+    st_palette_log((a - 0x00FF8240) >> 1, value);
+  }
 }
 
 static inline void st_video_snoop32(uint32_t address, uint32_t value)
@@ -2978,8 +3076,11 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
   } else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     unsigned i = (a - 0x00FF8240) >> 1;
     st_palette[i] = (uint16_t)(value >> 16);
-    if (i + 1 < 16)
+    st_palette_log(i, (uint16_t)(value >> 16));
+    if (i + 1 < 16) {
       st_palette[i + 1] = (uint16_t)value;
+      st_palette_log(i + 1, (uint16_t)value);
+    }
   }
 }
 

@@ -494,6 +494,8 @@ volatile uint8_t pistorm_mfp_last_iack_vector;
  * for spotting an interrupt storm (e.g. native mouse movement starving
  * ACE's sound interrupt). */
 static volatile unsigned g_l6_virt, g_l6_real, g_l6_noack;
+extern "C" int falcon_hreq(void);         /* platforms/atari/falcon/falcon_hw.c */
+extern "C" uint8_t falcon_ivr(void);
 static void l6_tick(void)
 {
     static uint64_t last_ns;
@@ -511,8 +513,11 @@ static void l6_tick(void)
         fprintf(stderr, "[MFP6] last 1s: %u virtual, %u real-bus, %u NOACK\n", v, r, e);
 }
 
+extern "C" { volatile uint8_t pistorm_iack_dsp; }  /* vector is the DSP's IVR */
+
 void intlev_ack (uint8_t nr)
 {
+    pistorm_iack_dsp = 0;
     if (nr == 6) l6_tick();
     /* Virtual keyboard (USB/Bluetooth -> IKBD injection): if the pending
      * level-6 was raised for an injected byte, the real MFP has nothing to
@@ -563,6 +568,25 @@ void intlev_ack (uint8_t nr)
                     if (nr == 6) g_l6_virt++;
                     return;
                 }
+            }
+        }
+    }
+
+    /* Falcon DSP host port (falcon_hw.c falcon_hreq): level 6, vectored
+     * by the DSP's IVR. After the virtual MFP channels (Hatari's order:
+     * MFP first); a real level-6 on the bus is acknowledged first and
+     * HREQ, a level, raises again after the guest's RTE. */
+    if (nr == 6)
+    {
+        if (falcon_hreq())
+        {
+            uint8_t live = 0;
+            ps_read_ipl(&live);
+            if (live < 6)
+            {
+                pistorm_iack_vector = falcon_ivr();
+                pistorm_iack_dsp = 1;    /* do_interrupt: not an MFP vector */
+                return;
             }
         }
     }

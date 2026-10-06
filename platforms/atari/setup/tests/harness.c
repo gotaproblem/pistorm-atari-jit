@@ -598,7 +598,7 @@ static void run_enums(void)
 
     CHECK(se_count("hostfs") == 0, "hostfs should be free text");
     CHECK(se_count("rom") == 0, "rom should be free text");
-    CHECK(se_count("fps") == 0, "fps should be a typed number");
+    CHECK(se_retired("fps"), "fps is retired: HDMI follows the VBL");
 
     /* every value in the default config must be in its list, or the page
      * would open the chooser on choice 1 and silently offer to change it */
@@ -681,7 +681,6 @@ static void run_relevance(void)
     /* the ST-screen mirror on HDMI serves a GEM machine on an HDMI
      * monitor too, and fps paces that output whichever source it shows */
     CHECK(se_env("native_hdmi") == SE_BOTH, "native_hdmi is the ST-screen mirror: both");
-    CHECK(se_env("fps") == SE_BOTH, "fps paces HDMI for either machine");
 
     /* retired keys are never rows; developer keys hide unless Tab */
     CHECK(se_retired("vga_render") && se_retired("loopcycles") && se_retired("rtc"),

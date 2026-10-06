@@ -117,9 +117,19 @@ void pistorm_dma_from_stram(uint32_t, uint8_t*, uint32_t);
 }
 #endif
 
+/* falcon_stram 14M: the DMA address counter is 24 bits (a Falcon's is),
+ * not the ST's 22, or a buffer at $C1xxxx lands at $01xxxx - over the
+ * guest's low RAM. The board's real RAM ends at 4MB at most: above that
+ * the transfer goes to the natmem copy only. */
+uint32_t pistorm_stram_top(void);   /* pistorm_natmem.cpp */
+static inline uint32_t dma_hi_mask(void)
+{
+    return pistorm_stram_top() > 0x400000u ? 0xFFu : 0x3Fu;
+}
+
 static void dma_copy_to_ram(uint32_t addr, const uint8_t *buf, size_t count)
 {
-    for (size_t i = 0; i < count; i++)
+    for (size_t i = 0; i < count && addr + i < 0x400000u; i++)
         ps_write_8(addr + i, buf[i]);                  /* real ST-RAM — video shifter / bus masters */
 
     pistorm_dma_to_stram(addr, buf, (uint32_t)count);  /* JIT natmem mirror + SMC invalidate */
@@ -1065,7 +1075,7 @@ static uint32_t dma_read_addr(uint32_t addr, int size)
         val = fdc.dma_status;
      //   fprintf(stderr, "[DMA] READ $FF8606 -> 0x%04X\n", val);
         break;
-    case DMA_BASE_HIGH: val = (fdc.dma_addr >> 16) & 0x3Fu; break;
+    case DMA_BASE_HIGH: val = (fdc.dma_addr >> 16) & dma_hi_mask(); break;
     case DMA_BASE_MID:  val = (fdc.dma_addr >>  8) & 0xFFu; break;
     case DMA_BASE_LOW:  val = (fdc.dma_addr      ) & 0xFFu; break;
     default:            val = 0xFFu;                          break;
@@ -1091,8 +1101,8 @@ static void dma_write_addr(uint32_t addr, uint32_t val, int size)
      * counter must follow writes or an ACSI transfer that runs without
      * a floppy-style latch starts from a stale counter. */
     case DMA_BASE_HIGH:
-        fdc.dma_base_addr = (fdc.dma_base_addr & 0x00FFFFu) | ((uint32_t)(v8 & 0x3Fu) << 16);
-        fdc.dma_addr      = (fdc.dma_addr      & 0x00FFFFu) | ((uint32_t)(v8 & 0x3Fu) << 16);
+        fdc.dma_base_addr = (fdc.dma_base_addr & 0x00FFFFu) | ((uint32_t)(v8 & dma_hi_mask()) << 16);
+        fdc.dma_addr      = (fdc.dma_addr      & 0x00FFFFu) | ((uint32_t)(v8 & dma_hi_mask()) << 16);
         FDD_DBG("DMA base addr: 0x%06X", fdc.dma_base_addr);
         break;
     case DMA_BASE_MID:

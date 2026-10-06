@@ -3172,8 +3172,16 @@ static uae_u8 atari_live_ipl_level(void)
 #endif
 }
 
+/* Set by intlev_ack (jit_glue.cpp) when the level-6 vector came from the
+ * Falcon DSP's host port (its IVR, $FFA203), not from the MFP. Any
+ * vector is legitimate then - DSPBench and TOS put $FF there (vector
+ * $3FC) - so the MFP-only checks below must not touch it. */
+extern "C" volatile uint8_t pistorm_iack_dsp;
+
 static bool atari_iack_vector_is_valid(const int level, const int bus_vector)
 {
+	if (level == 6 && pistorm_iack_dsp)
+		return bus_vector >= 0 && bus_vector <= 0xff;
 #ifdef PISTORM_ATARI
 	/* Atari GLUE autovectors IPL2/IPL4. The MFP on IPL6 supplies vectors from
 	 * its 0x40..0x4f block. Anything outside that range is not a usable Atari
@@ -4409,9 +4417,80 @@ kludge_me_do:
 }
 
 // address = format $2 stack frame address field
+/* PISTORM_XBIOS_TRACE=1: log the XBIOS calls that change the screen -
+ * Setscreen (5), VsetMode (88) - with their arguments and the caller.
+ * Taken at TRAP #14 entry, before the frame is pushed, so a7 is the
+ * caller's stack and points at the opcode word. For finding who resets
+ * the line-A screen size under fVDI (the 320x200 pointer box). */
+/* The basepage of the running process (os_header->p_run, TOS 1.02+ and
+ * EmuTOS), 0 if it cannot be read. */
+static uae_u32 g_rez_owner;          /* process that last set an ST rez */
+static uae_u32 pistorm_cur_basepage(void)
+{
+	uae_u32 sb = get_long(0x4F2);
+	if (!sb || (sb & 1) || sb >= 0x01000000)
+		return 0;
+	uae_u32 pr = get_long(sb + 0x28);
+	if (!pr || (pr & 1) || pr >= 0x01000000)
+		return 0;
+	return get_long(pr);
+}
+
+/* TRAP #1 entry: when the process that changed the ST rez (Setscreen with
+ * a rez) ends with Pterm0/Pterm, hand fVDI its line-A screen size back -
+ * EmuTOS left it at the ST rez and fVDI clips the pointer to it. */
+extern "C" void pistorm_fvdi_linea_restore(void);
+extern "C" void pistorm_fvdi_set_st_yield(int on);
+static void pistorm_gemdos_hook(void)
+{
+	if (!g_rez_owner)
+		return;
+	uae_u16 op = get_word(m68k_areg(regs, 7));
+	if (op != 0x00 && op != 0x4C)
+		return;
+	if (pistorm_cur_basepage() != g_rez_owner)
+		return;
+	g_rez_owner = 0;
+	pistorm_fvdi_linea_restore();
+	pistorm_fvdi_set_st_yield(0);
+}
+
+static void pistorm_xbios_trace(void)
+{
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("PISTORM_XBIOS_TRACE");
+		on = (e && *e == '1');
+	}
+	uaecptr sp = m68k_areg(regs, 7);
+	if (get_word(sp) == 5 && (uae_s16)get_word(sp + 10) != -1) {
+		uae_s16 rez = (uae_s16)get_word(sp + 10);
+		uae_u32 phys = get_long(sp + 6);
+		g_rez_owner = pistorm_cur_basepage();   /* see pistorm_gemdos_hook */
+		/* an ST rez with its own screen: an ST program, not GEM */
+		if (g_rez_owner && rez >= 0 && rez <= 2 && phys != 0xFFFFFFFFu && phys != 0)
+			pistorm_fvdi_set_st_yield(1);
+	}
+	uae_u16 op = get_word(sp);
+	if (!on)
+		return;
+	if (op == 5)
+		fprintf(stderr, "[XBIOS] Setscreen(log $%08X, phys $%08X, rez %d, mode $%04X) from pc $%08X%s\n",
+				(unsigned)get_long(sp + 2), (unsigned)get_long(sp + 6),
+				(int)(uae_s16)get_word(sp + 10), (unsigned)get_word(sp + 12),
+				(unsigned)m68k_getpc(), regs.s ? " (super)" : "");
+	else if (op == 88)
+		fprintf(stderr, "[XBIOS] VsetMode($%04X) from pc $%08X\n",
+				(unsigned)get_word(sp + 2), (unsigned)m68k_getpc());
+}
+
 static void ExceptionX(int nr, uaecptr address, uaecptr oldpc)
 {
 	uaecptr pc = m68k_getpc();
+	if (nr == 46)
+		pistorm_xbios_trace();
+	else if (nr == 33)
+		pistorm_gemdos_hook();
 	regs.exception = nr;
 	regs.loop_mode = 0;
 
@@ -5231,7 +5310,9 @@ static void do_interrupt (int nr)
 	}
 #endif
 #if (1)
-	if (nr == 6)
+	/* a DSP host-port vector is the DSP's IVR: none of the MFP repair
+	 * below applies (it would take $FF for a garbled MFP byte) */
+	if (nr == 6 && !pistorm_iack_dsp)
 	{
 		const uae_u8 vec = pistorm_iack_vector & 0xff;
 		static uint32_t noack_retries;

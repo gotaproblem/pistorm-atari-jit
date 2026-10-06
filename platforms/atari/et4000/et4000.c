@@ -81,6 +81,8 @@ uint32_t pistorm_fvdi_bpp(void);
 const uint32_t *pistorm_fvdi_palette(void);
 uint32_t pistorm_fvdi_palette_gen(void);
 int pistorm_fvdi_is_active(void);
+int pistorm_fvdi_st_yield(void);   /* an ST program owns the screen */
+uint32_t pistorm_stram_top(void);  /* pistorm_natmem.cpp: 4MB, or 14MB Falcon */
 uint64_t pistorm_fvdi_write_count(void);
 void pistorm_fvdi_fetch_dirty(uint32_t *mn, uint32_t *mx);
 void pistorm_fvdi_fetch_dirty_rect(uint32_t *mn, uint32_t *mx,
@@ -280,10 +282,19 @@ static void et4000_configure_render_thread(void)
 #endif
 }
 
+/* The HDMI picture is paced by the Atari's own VBL (render_frame waits
+ * for et4000_native_vbl_snapshot to bump g_vbl_seq). This is only the
+ * longest it waits for one - no VBL arriving (machine halted, reset) -
+ * before drawing anyway. The old cfg `fps` cadence is retired: a fixed
+ * 25 against a 60Hz VBL showed frames at uneven spacing, and any
+ * per-frame palette work as flicker. */
+#define ET4K_VBL_TIMEOUT_US 50000
 static int et4000_frame_interval_us (void)
 {
-    return 1000000 / emulator_config_fps();
+    return ET4K_VBL_TIMEOUT_US;
 }
+
+static volatile uint32_t g_vbl_seq;        /* real VBLs seen by ipl_task */
 
 static int et4000_present_divisor(void)
 {
@@ -1513,6 +1524,15 @@ static inline int et4000_addr_is_vram_aperture(uint32_t addr)
            (addr >= ET4K_XVDI_VRAM && addr < ET4K_XVDI_VRAM + ET4K_VRAM_BYTES);
 }
 
+/* A native ST screen at addr: not one when it sits in a card aperture -
+ * unless that address is ST-RAM. falcon_stram 14M (no ET4000 there) puts
+ * ST-RAM over the NOVA/XVDI windows, and Falcon TOS puts its screen at
+ * the top of it ($DDxxxx): refusing that left the HDMI on the splash. */
+static inline int et4000_native_base_in_aperture(uint32_t addr)
+{
+    return addr >= pistorm_stram_top() && et4000_addr_is_vram_aperture(addr);
+}
+
 void et4000_update_display (ET4000State *s)
 {
     if (!s->fb_mem)
@@ -2276,7 +2296,7 @@ static uint32_t st_native_physbase_from_mirror(const uint8_t *st_ram)
                     (uint32_t)st_ram[0x451];
     base &= 0x00FFFFFEu;
 
-    if (base && base + 0x8000u < 0x00400000u)
+    if (base && base + 32000u <= pistorm_stram_top())   /* 14MB Falcon: anywhere in ST-RAM */
         return base;
     return 0;
 }
@@ -2314,9 +2334,24 @@ static void st_decode_row(const uint8_t *row, uint32_t src_w,
  * palw/lw/hs_raw: the palette and STE linewidth/fine scroll to draw with -
  * the live shifter snoops, or a VBL snapshot's copies (see ST NATIVE
  * SNAPSHOT below). */
+/* ST PALETTE TIMELINE (see ST NATIVE SNAPSHOT below): the palette as it
+ * changed down one frame - band 0 from the top of the display, then one
+ * band per line where software rewrote $FF8240 (Timer B / HBL splits). */
+#define PAL_BANDS 64u
+typedef struct { uint16_t line; uint16_t pal[16]; } pal_band_t;
+typedef struct { uint32_t n; pal_band_t b[PAL_BANDS]; } pal_tl_t;
+
+static inline uint32_t xrgb_avg(uint32_t a, uint32_t b)
+{
+    return 0xFF000000u | (((a & 0x00FEFEFEu) >> 1) + ((b & 0x00FEFEFEu) >> 1));
+}
+
+static void ste_load_palette_from (uint32_t pal[16], const volatile uint16_t *src);
+
 static void blit_st_native_ex(ET4000State *s, const uint8_t *st_ram, int st_mode,
                               const volatile uint16_t *palw,
-                              uint8_t lw, uint8_t hs_raw)
+                              uint8_t lw, uint8_t hs_raw,
+                              const pal_tl_t *tla, const pal_tl_t *tlb)
 {
     uint32_t src_w, src_h, planes, stride;
     switch (st_mode & 3)
@@ -2381,10 +2416,39 @@ static void blit_st_native_ex(ET4000State *s, const uint8_t *st_ram, int st_mode
 
     uint8_t idx[640 + 16];           /* +16: hscroll prefetch group */
 
+    /* palette timeline: the band live on each line; with tlb, the average
+     * of this frame's and the previous frame's (a palette swapped every
+     * frame, which a CRT shows blended) */
+    uint32_t ia = 0, ib = 0;
+    int pal_dirty = 1;
+    if (planes == 1 || !tla || !tla->n)
+        tla = tlb = NULL;
+    if (tlb && !tlb->n)
+        tlb = NULL;
+
     for (uint32_t y = 0; y < src_h; y++)
     {
         const uint8_t *row = st_ram + y * stride;
         uint32_t *o = dst + y * dst_pitch;
+
+        if (tla)
+        {
+            while (ia + 1 < tla->n && tla->b[ia + 1].line <= y) { ia++; pal_dirty = 1; }
+            if (tlb)
+                while (ib + 1 < tlb->n && tlb->b[ib + 1].line <= y) { ib++; pal_dirty = 1; }
+            if (pal_dirty)
+            {
+                ste_load_palette_from(pal, tla->b[ia].pal);
+                if (tlb)
+                {
+                    uint32_t p2[16];
+                    ste_load_palette_from(p2, tlb->b[ib].pal);
+                    for (int i = 0; i < 16; i++)
+                        pal[i] = xrgb_avg(pal[i], p2[i]);
+                }
+                pal_dirty = 0;
+            }
+        }
 
         if (planes == 1)
         {
@@ -2407,7 +2471,8 @@ static void blit_st_native_ex(ET4000State *s, const uint8_t *st_ram, int st_mode
 static void blit_st_native(ET4000State *s, const uint8_t *st_ram, int st_mode)
 {
     extern rtg_s rtg;                /* lives in emulator.c */
-    blit_st_native_ex(s, st_ram, st_mode, st_palette, rtg.linewidth, rtg.hscroll);
+    blit_st_native_ex(s, st_ram, st_mode, st_palette, rtg.linewidth, rtg.hscroll,
+                      NULL, NULL);
 }
 
 /* ST NATIVE SNAPSHOT.
@@ -2436,15 +2501,294 @@ typedef struct {
                  ? ST_SNAP_BYTES : 400u * (80u + 510u + 2u)];
     uint16_t pal[16];
     uint8_t  rez, lw, hs;
+    uint8_t  blend;              /* tlb holds the previous frame's     */
+    pal_tl_t tl, tlb;            /* palette timeline (PALETTE TIMELINE) */
 } st_snap_t;
 static st_snap_t         g_snap[ST_SNAP_BUFS];
 static unsigned          g_snap_w;               /* ipl_task only         */
 static volatile uint32_t g_snap_pub = ST_SNAP_NONE;
 
+/* PALETTE TIMELINE.
+ *
+ * Software that rewrites the palette part-way down the screen (a Timer B
+ * or HBL handler: Frontier's cockpit, raster bars) got one palette for the
+ * whole HDMI picture - whichever was live when the frame was sampled - so
+ * the picture flickered between them. And software that swaps two
+ * palettes on alternate frames for in-between shades (Frontier again)
+ * flashed instead of blending, as the eye does on a 50Hz CRT.
+ *
+ * Every palette write is logged with a timestamp (st_palette_log, CPU
+ * thread: one counter read and a ring slot, nothing else). At the real VBL
+ * the frame just shown is rebuilt from the log as bands: the line of each
+ * write is its time since the previous VBL over the line period, less the
+ * top border - the frame period itself says 50Hz (313 lines, display from
+ * line 63) or 60Hz (263, from 34), the same values Hatari uses; anything
+ * else (71Hz mono, a missed VBL) keeps the one-palette picture. When the
+ * timeline alternates A,B,A,B the snapshot carries the previous frame's
+ * too and the renderer averages them. PISTORM_ST_PAL_BLEND=0 turns the
+ * blending off; the bands always apply. */
+#define PAL_RING 4096u
+typedef struct { uint64_t t; uint16_t val; uint8_t idx; } pal_ev_t;
+static pal_ev_t          g_pev[PAL_RING];
+static volatile uint32_t g_pev_w, g_pev_r, g_pev_lost;
+
+static inline uint64_t pal_ticks(void)
+{
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+static inline uint64_t pal_tick_hz(void)
+{
+#if defined(__aarch64__)
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f ? f : 54000000ull;
+#else
+    return 1000000000ull;
+#endif
+}
+
+/* CPU thread, every $FF8240-$FF825E word the guest writes */
+void st_palette_log(unsigned idx, uint16_t val)
+{
+    if (idx > 15)
+        return;
+    uint32_t w = g_pev_w;
+    if (w - __atomic_load_n(&g_pev_r, __ATOMIC_ACQUIRE) >= PAL_RING) {
+        g_pev_lost = 1;
+        return;
+    }
+    pal_ev_t *e = &g_pev[w & (PAL_RING - 1u)];
+    e->t = pal_ticks();
+    e->val = val;
+    e->idx = (uint8_t)idx;
+    __atomic_store_n(&g_pev_w, w + 1u, __ATOMIC_RELEASE);
+}
+
+static pal_tl_t g_tl[3];                 /* this frame, -1, -2 (rotating) */
+static unsigned g_tl_cur;
+static uint16_t g_pal_run[16];           /* palette as the log has it     */
+static int      g_pal_run_ok;
+static uint64_t g_pal_vbl_prev;
+static int      g_pal_alt_run;
+
+/* Same palettes in the same order, band starts within 3 lines: a split
+ * placed by timestamp moves a line or two from frame to frame (interrupt
+ * latency), which must not hide a palette that alternates. */
+static int pal_tl_equal(const pal_tl_t *a, const pal_tl_t *b)
+{
+    if (a->n != b->n)
+        return 0;
+    for (uint32_t i = 0; i < a->n; i++) {
+        int d = (int)a->b[i].line - (int)b->b[i].line;
+        if (d < -3 || d > 3 || memcmp(a->b[i].pal, b->b[i].pal, sizeof a->b[i].pal))
+            return 0;
+    }
+    return 1;
+}
+
+static uint32_t pal_hash(const uint16_t *p)
+{
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 16; i++)
+        h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+static void pal_tl_copy(pal_tl_t *d, const pal_tl_t *s)
+{
+    d->n = s->n;
+    memcpy(d->b, s->b, s->n * sizeof s->b[0]);
+}
+
+/* ipl_task at the real VBL: the frame just shown as bands. Returns the
+ * timeline, and *prev_for_blend the previous frame's when blending. */
+/* VBL LOCK. ipl_task calls the snapshot when it SEES the VBL, and that
+ * is late by a varying amount - the frame-to-frame periods measured with
+ * Frontier ran 5..29ms around a true 16.68ms - so frame boundaries and
+ * line numbers taken from the call time were wrong by up to ~190 lines:
+ * whole frames got the cockpit palette, and the picture flickered. The
+ * real VBL is a fixed rate from the board's crystal (60Hz: 263 lines of
+ * 508 cycles; 50Hz: 313 x 512, at 8.0107MHz), and the sightings are
+ * never EARLY - so the true VBL is the lower envelope of the sightings
+ * on that grid. g_vl_off follows the envelope down at once and creeps
+ * up 4us a frame, which absorbs crystal drift. */
+static uint64_t g_vl_last, g_vl_ema, g_vl_T0;
+static int64_t  g_vl_off;
+
+/* the last true VBL at or before t; *P the frame period, 0 = no lock */
+static uint64_t vbl_lock(uint64_t t, uint64_t *P, uint32_t *total, long *first)
+{
+    const uint64_t hz = pal_tick_hz();
+    const uint64_t iv = g_vl_last ? t - g_vl_last : 0;
+    g_vl_last = t;
+    if (iv > hz / 250u && iv < hz / 25u)            /* 4..40ms sightings */
+        g_vl_ema = g_vl_ema
+                 ? (uint64_t)((int64_t)g_vl_ema + ((int64_t)iv - (int64_t)g_vl_ema) / 32)
+                 : iv;
+    const uint64_t us = g_vl_ema * 1000000ull / hz;
+    uint64_t p;
+    if (us > 18000 && us < 22000)      { p = hz * 20005ull / 1000000ull; *total = 313; *first = 63; }
+    else if (us > 15000 && us <= 18000) { p = hz * 16678ull / 1000000ull; *total = 263; *first = 34; }
+    else { *P = 0; g_vl_T0 = 0; return t; }
+    *P = p;
+    if (!g_vl_T0) { g_vl_T0 = t; g_vl_off = 0; }
+    /* Sightings land in [-P/8, 7P/8) of their VBL on the current model.
+     * The model moves once per 16 sightings, by the SECOND smallest error
+     * of the window, up or down: a single sighting late by more than 7P/8
+     * reads as early and is the one outlier that statistic ignores (the
+     * first version moved down on any early-looking sighting at once and
+     * a 13ms-late VBL dragged it 3.7ms early, where it crept back at
+     * 4us a frame). */
+    static int64_t w_min1, w_min2;
+    static int w_n;
+    const int64_t pre = (int64_t)(p / 8u);
+    const int64_t rel = (int64_t)(t - g_vl_T0) - g_vl_off + pre;
+    int64_t k = rel / (int64_t)p;
+    if (rel < 0 && k * (int64_t)p != rel)
+        k--;                                        /* floor, not trunc */
+    const int64_t err = rel - k * (int64_t)p - pre;
+    if (w_n == 0) { w_min1 = err; w_min2 = INT64_MAX; }
+    else if (err < w_min1) { w_min2 = w_min1; w_min1 = err; }
+    else if (err < w_min2) w_min2 = err;
+    if (++w_n >= 16) {
+        g_vl_off += w_min2;
+        w_n = 0;
+    }
+    if (g_vl_off > (int64_t)p || g_vl_off < -(int64_t)p) {   /* re-anchor */
+        g_vl_T0 += (uint64_t)g_vl_off;
+        g_vl_off = 0;
+    }
+    return g_vl_T0 + (uint64_t)g_vl_off + (uint64_t)(k * (int64_t)p);
+}
+
+static const pal_tl_t *pal_timeline_build(const pal_tl_t **prev_for_blend)
+{
+    static int blend_on = -1;
+    if (blend_on < 0) {
+        const char *e = getenv("PISTORM_ST_PAL_BLEND");
+        blend_on = !(e && *e == '0');
+    }
+    const uint64_t now = pal_ticks();
+    const uint64_t prev = g_pal_vbl_prev;
+    g_pal_vbl_prev = now;
+
+    if (!g_pal_run_ok || g_pev_lost) {
+        for (int i = 0; i < 16; i++)
+            g_pal_run[i] = st_palette[i];
+        g_pal_run_ok = 1;
+        g_pev_lost = 0;
+    }
+
+    /* the frame just shown: [vbl - P, vbl) on the locked grid */
+    uint64_t P = 0;
+    uint32_t total = 0;
+    long first = 0;
+    const uint64_t vbl = vbl_lock(now, &P, &total, &first);
+    const uint64_t fstart = P ? vbl - P : 0;
+    const uint64_t lt = P ? P / total : 0;
+
+    g_tl_cur = (g_tl_cur + 1u) % 3u;
+    pal_tl_t *tl = &g_tl[g_tl_cur];
+    tl->n = 1;
+    tl->b[0].line = 0;
+    memcpy(tl->b[0].pal, g_pal_run, sizeof g_pal_run);
+
+    uint32_t r = g_pev_r;
+    const uint32_t r0 = r;
+    const uint32_t w = __atomic_load_n(&g_pev_w, __ATOMIC_ACQUIRE);
+    for (; r != w; r++) {
+        const pal_ev_t *e = &g_pev[r & (PAL_RING - 1u)];
+        if ((int64_t)(e->t - (P ? vbl : now)) >= 0)
+            break;                               /* the next frame's     */
+        long L = -1;
+        if (lt && e->t > fstart)
+            L = (long)((e->t - fstart) / lt) - first;
+        g_pal_run[e->idx] = e->val;
+        if (L >= 200)
+            continue;                            /* bottom border: next  */
+        if (L <= 0) {
+            tl->b[0].pal[e->idx] = e->val;       /* before the display   */
+            continue;
+        }
+        pal_band_t *lb = &tl->b[tl->n - 1u];
+        if (lb->line == (uint16_t)L)
+            lb->pal[e->idx] = e->val;
+        else if (tl->n < PAL_BANDS) {
+            pal_band_t *nb = &tl->b[tl->n++];
+            *nb = *lb;
+            nb->line = (uint16_t)L;
+            nb->pal[e->idx] = e->val;
+        } else
+            lb->pal[e->idx] = e->val;
+    }
+    __atomic_store_n(&g_pev_r, r, __ATOMIC_RELEASE);
+
+    const pal_tl_t *p1 = &g_tl[(g_tl_cur + 2u) % 3u];
+    const pal_tl_t *p2 = &g_tl[(g_tl_cur + 1u) % 3u];
+    if (p1->n && !pal_tl_equal(tl, p1) && pal_tl_equal(tl, p2))
+        g_pal_alt_run++;
+    else
+        g_pal_alt_run = 0;
+    *prev_for_blend = (blend_on && g_pal_alt_run >= 2) ? p1 : NULL;
+
+    /* PISTORM_ST_PAL_DEBUG=1: frames that saw palette writes (the first
+     * 400 of them) - the frame period, every band (line, palette hash,
+     * colour 0/1) and the blend verdict - plus one line every 600 frames
+     * so a silent log still shows the VBLs arriving. */
+    {
+        /* =1 from the start; =N (N > 1) from N seconds after the first
+         * VBL, so a game's title sequence does not use up the 400 lines */
+        static int dbg = -1, shown;
+        static unsigned frames;
+        static uint64_t t_start;
+        if (dbg < 0) {
+            const char *e = getenv("PISTORM_ST_PAL_DEBUG");
+            dbg = e ? atoi(e) : 0;
+            if (dbg < 0)
+                dbg = 0;
+        }
+        frames++;
+        if (!t_start)
+            t_start = now;
+        const int live = dbg == 1 ||
+            (dbg > 1 && now - t_start >= (uint64_t)dbg * pal_tick_hz());
+        if (live && ((r != r0 && shown < 400) || frames % 600u == 0)) {
+            shown++;
+            extern volatile uint64_t pistorm_l6_hold_ticks;
+            extern volatile uint8_t pistorm_vbl_from6;
+            fprintf(stderr, "[stpal] f%u %3d period=%lluus lag=%lluus lock=%d from6=%d l6=%lluus ev=%u n=%u alt=%d blend=%d:",
+                    frames, shown, prev ? (unsigned long long)((now - prev) * 1000000ull / pal_tick_hz()) : 0ull,
+                    (unsigned long long)((now - vbl) * 1000000ull / pal_tick_hz()), P != 0,
+                    pistorm_vbl_from6, (unsigned long long)(pistorm_l6_hold_ticks * 1000000ull / pal_tick_hz()),
+                    (unsigned)(r - r0), tl->n, g_pal_alt_run, *prev_for_blend != NULL);
+            for (uint32_t i = 0; i < tl->n && i < 6; i++)
+                fprintf(stderr, " [%u %08X %03X/%03X]", tl->b[i].line,
+                        pal_hash(tl->b[i].pal), tl->b[i].pal[0], tl->b[i].pal[1]);
+            fprintf(stderr, "\n");
+        }
+    }
+    return tl;
+}
+
 void et4000_native_vbl_snapshot(void)
 {
     extern rtg_s rtg;
     extern bool emulator_config_shifter_ste(void);
+
+    __atomic_add_fetch(&g_vbl_seq, 1u, __ATOMIC_RELEASE);  /* render pacing */
+
+    /* always drain the palette log, even when the mirror is off */
+    const pal_tl_t *tl_prev = NULL;
+    const pal_tl_t *tl = pal_timeline_build(&tl_prev);
 
     if (!emulator_config_native_hdmi_enabled() || !rtg.natmem)
         return;
@@ -2472,12 +2816,18 @@ void et4000_native_vbl_snapshot(void)
     if (bytes > sizeof sn->pix)
         bytes = sizeof sn->pix;
     /* same bound the render loop applies before reading the mirror */
-    if (et4000_addr_is_vram_aperture(base) || base + bytes >= 0x00E00000u)
+    if (et4000_native_base_in_aperture(base) || base + bytes >= 0x00E00000u)
         return;
 
     memcpy(sn->pix, rtg.natmem + base, bytes);
     for (int i = 0; i < 16; i++)
         sn->pal[i] = st_palette[i];
+    pal_tl_copy(&sn->tl, tl);
+    sn->blend = tl_prev != NULL;
+    if (tl_prev)
+        pal_tl_copy(&sn->tlb, tl_prev);
+    else
+        sn->tlb.n = 0;
 
     __atomic_thread_fence(__ATOMIC_RELEASE);
     g_snap_pub = g_snap_w;
@@ -2492,7 +2842,8 @@ static int blit_st_native_snapshot(ET4000State *s)
         return 0;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     const st_snap_t *sn = &g_snap[i];
-    blit_st_native_ex(s, sn->pix, sn->rez, sn->pal, sn->lw, sn->hs);
+    blit_st_native_ex(s, sn->pix, sn->rez, sn->pal, sn->lw, sn->hs,
+                      &sn->tl, sn->blend ? &sn->tlb : NULL);
     return 1;
 }
 
@@ -2591,6 +2942,18 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
 
     if (!pistorm_fvdi_is_active() || !src || w == 0 || h == 0)
         return false;
+    /* an ST program set an ST rez with its own screen: the Shifter's
+     * picture goes to HDMI (native path below) until it ends, then
+     * fVDI's whole frame is drawn again */
+    static bool yielded;
+    if (pistorm_fvdi_st_yield()) {
+        yielded = true;
+        return false;
+    }
+    if (yielded) {
+        yielded = false;
+        g_src_force_full = 1;
+    }
     if (w > ET4K_MAX_LW || h > ET4K_MAX_LH)
         return false;
     if (bpp != 8 && bpp != 16 && bpp != 32)
@@ -2836,28 +3199,13 @@ void *render_frame(void *vptr)
          * budget always, and the output refresh when the display offers a
          * mode that fits. Opt-in, because a mode switch costs a visible
          * resync and can drop HDMI audio on some sinks. */
-        /* The frame budget used to be a stack local set once, so changing
-         * fps needed a restart. Re-read it every pass: it is one compare
-         * against a global, and it is what makes the Video tab's slider
-         * do anything. The guest-follow branch below still wins when it
-         * is on, because it assigns FRAME_RATE after this. */
-        if (pst_fps >= 10 && pst_fps <= 60)
-        {
-            int want = 1000000 / pst_fps;
-
-            if (want != FRAME_RATE && !follow_guest_hz)
-                FRAME_RATE = want;
-        }
-
         if (follow_guest_hz)
         {
             double hz = pistorm_guest_hz;
             if (hz > 0.0 && hz != applied_hz)
             {
                 applied_hz = hz;
-                FRAME_RATE = (int) (1000000.0 / hz);
-                printf("[DISPLAY] guest video is %.1f Hz - frame budget %d us\n",
-                       hz, FRAME_RATE);
+                printf("[DISPLAY] guest video is %.1f Hz\n", hz);
                 if (drmpres_match_refresh(hz) > 0)
                     printf("[DISPLAY] HDMI refresh now matches %.1f Hz\n", hz);
                 else
@@ -2935,8 +3283,9 @@ void *render_frame(void *vptr)
             }
 
             else if (emulator_config_native_hdmi_enabled() && rtg.vram_base &&
-                     !et4000_addr_is_vram_aperture(rtg.vram_base) &&
-                     rtg.vram_base + 0x8000 < 0xE00000)
+                     !et4000_native_base_in_aperture(rtg.vram_base) &&
+                     rtg.vram_base + 32000u <= 0xE00000u)  /* one ST screen; TOS 4.04 at
+                                                         * 14MB puts it at $DF8200 */
             {
                 g_sdl_tex_has_frame = 0;
                 g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
@@ -2959,6 +3308,26 @@ void *render_frame(void *vptr)
 
             if (t_build)
                 et4000_profile_add (ET4K_PROF_RENDER_BUILD, et4000_profile_now_ns() - t_build);
+
+            /* Screendump on a still picture. A dump is taken inside
+             * sdl_present, and the dirty gates above only present when
+             * the picture changed - so on a screen that is not changing
+             * (DSPBench's results waiting for a key, any idle desktop) the
+             * request sat until something moved, and then dumped that.
+             * DRM/fbdev: fb_mem still holds the frame on screen, dump it
+             * straight away (re-flipping a back buffer that was not
+             * refreshed could show an older frame). SDL: present again -
+             * the texture still holds the frame - and read that back. */
+            if (g_screendump_req && source_active && !rendered)
+            {
+                if (g_drm_mode || g_fbdev_mode)
+                {
+                    g_screendump_req = 0;
+                    et4000_do_screendump(g_et4000);
+                }
+                else
+                    rendered = true;
+            }
 
             if (rendered)
             {
@@ -2988,11 +3357,16 @@ void *render_frame(void *vptr)
         gettimeofday(&stop, NULL);
         render_took = ((stop.tv_sec - start.tv_sec) * 1000000) + (stop.tv_usec - start.tv_usec);
         remaining = FRAME_RATE - render_took;
+        (void)remaining;
 
         gettimeofday(&start, NULL);
 
         _VSYNC = 1;
 
+        /* Wait for the next real VBL (or ET4K_VBL_TIMEOUT_US without one):
+         * one HDMI frame per Atari frame, drawn as soon as ipl_task has
+         * snapshotted it. */
+        static uint32_t vbl_seen;
         do
         {
             /* 
@@ -3021,13 +3395,14 @@ void *render_frame(void *vptr)
             gettimeofday(&stop, NULL);
             took = ((stop.tv_sec - start.tv_sec) * 1000000) + (stop.tv_usec - start.tv_usec);
 
-            int todo = remaining - took;
-            if (todo > 1000)
-                usleep (todo > 2000 ? 1000 : todo / 2);
-            else
-                asm volatile ("yield" ::: "memory");
-        } 
-        while (took < remaining);//FRAME_RATE);
+            if (__atomic_load_n(&g_vbl_seq, __ATOMIC_ACQUIRE) != vbl_seen)
+                break;
+            if (took >= FRAME_RATE)
+                break;                       /* no VBL: draw anyway */
+            usleep (500);
+        }
+        while (1);
+        vbl_seen = __atomic_load_n(&g_vbl_seq, __ATOMIC_ACQUIRE);
 /* remove annoying messages */
 #if (0)
         /* check for overruns - only meaningful when we actually rendered this

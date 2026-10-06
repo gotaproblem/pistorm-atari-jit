@@ -105,6 +105,21 @@ struct dsp56k {
     uint16_t  illegal_pc;        /* pc after the last illegal opcode      */
     int       idle_hint;         /* polling a peripheral in place         */
     uint64_t  idle_skips;
+    /* wait loops (dsp56k_run): a short backward jump that comes round to
+     * the same registers with nothing written in between is waiting for
+     * an interrupt - see wait_loop() */
+    uint32_t  writes;            /* memory, peripheral and stack writes   */
+    uint32_t  wl_writes;
+    uint16_t  wl_tgt;
+    uint8_t   wl_stage;
+    uint8_t   wl_snap[96];       /* registers: x0 .. sp                   */
+    /* debug: the last instructions and interrupts (hist_on set by the
+     * owner; off costs one test per instruction). kind 0 = instruction
+     * (pc before, opcode, pc after), 1 = interrupt taken (vector, return
+     * pc, 0 fast / 1 long) */
+    int       hist_on;
+    uint32_t  hist_n;
+    struct { uint8_t kind; uint16_t pc, pc2, sr; uint32_t op; uint8_t sp; } hist[64];
 };
 
 void     dsp56k_init(dsp56k_t *d);       /* ROM tables, power-on state   */
