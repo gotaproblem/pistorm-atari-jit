@@ -1,0 +1,125 @@
+diff -ru a/src/falcon/dsp_core.c b/src/falcon/dsp_core.c
+--- a/src/falcon/dsp_core.c	2026-10-06 21:25:53.885775679 +0100
++++ b/src/falcon/dsp_core.c	2026-10-06 21:25:53.893686183 +0100
+@@ -31,6 +31,29 @@
+ #include "ioMem.h"
+ #include "dsp.h"
+ #include "log.h"
++#include "m68000.h"
++#include "cycles.h"
++#include "configuration.h"
++#include "video.h"
++#include <stdlib.h>
++
++/* PiStorm comparison trace (HATARI_DSPTRACE=<file>): the same events, in
++ * the same format, as the PiStorm emulator's PISTORM_DSP_TRACE dump, plus
++ * the 68k pc. Time is emulated (CPU cycles at 16 MHz). */
++static FILE *hdtr_f; static int hdtr_init; static unsigned hdtr_seq, hdtr_max;
++void hdtr(char t, uint32_t v, uint32_t x)
++{
++	if (!hdtr_init) {
++		const char *p = getenv("HATARI_DSPTRACE"), *m = getenv("HATARI_DSPTRACE_MAX");
++		hdtr_init = 1;
++		hdtr_max = m ? (unsigned)atol(m) : 50000000u;
++		if (p) { hdtr_f = fopen(p, "w"); if (hdtr_f) fprintf(hdtr_f, "# Hatari host-port trace\n#     seq        ms    frame t  value   x  dsp-pc  68k-pc\n"); }
++	}
++	if (!hdtr_f || hdtr_seq >= hdtr_max) return;
++	fprintf(hdtr_f, "%9u %9.3f %8u %c %06X %3u  %04X  %06X\n", hdtr_seq++,
++	        (double)CyclesGlobalClockCounter / 16000.0, (unsigned)nVBLs, t, v & 0xFFFFFF,
++	        x > 255 ? 255 : x, dsp_core.pc, (unsigned)(M68000_GetPC() & 0xFFFFFF));
++}
+ 
+ /*--- the DSP core itself ---*/
+ dsp_core_t dsp_core;
+@@ -1048,7 +1071,14 @@
+ 	uint8_t value;
+ 
+ 	value = dsp_core.hostport[addr];
++	if (addr == CPU_HOST_ISR) {
++		static int last = -1;
++		if (value != last) hdtr('P', value, 0);
++		last = value;
++	}
+ 	if (addr == CPU_HOST_TRXL) {
++		uint32_t w = (dsp_core.hostport[CPU_HOST_RXH] << 16) | (dsp_core.hostport[CPU_HOST_RXM] << 8) | value;
++		hdtr((dsp_core.hostport[CPU_HOST_ISR] & (1<<CPU_HOST_ISR_RXDF)) ? 'R' : 'r', w, 0);
+ 		/* Clear RXDF bit to say that CPU has read */
+ 		dsp_core.hostport[CPU_HOST_ISR] &= 0xff-(1<<CPU_HOST_ISR_RXDF);
+ 		dsp_core_dsp2host();
+@@ -1063,6 +1093,7 @@
+ {
+ 	switch(addr) {
+ 		case CPU_HOST_ICR:
++			hdtr('I', value, dsp_core.hostport[CPU_HOST_ICR]);
+ 			dsp_core.hostport[CPU_HOST_ICR]=value & 0xfb;
+ 			/* Set HF1 and HF0 accordingly on the host side */
+ 			dsp_core.periph[DSP_SPACE_X][DSP_HOST_HSR] &= 0xff-((1<<DSP_HOST_HSR_HF1)|(1<<DSP_HOST_HSR_HF0));
+@@ -1091,6 +1122,7 @@
+ 			dsp_core_hostport_update_hreq();
+ 			break;
+ 		case CPU_HOST_CVR:
++			hdtr('C', value, dsp_core.hostport[CPU_HOST_CVR]);
+ 			dsp_core.hostport[CPU_HOST_CVR]=value & 0x9f;
+ 			/* if bit 7=1, host command . HSR(bit HCP) is set*/
+ 			if (value & (1<<7)) {
+@@ -1111,6 +1143,7 @@
+ 			/* Read only */
+ 			break;
+ 		case CPU_HOST_IVR:
++			hdtr('V', value, dsp_core.hostport[CPU_HOST_IVR]);
+ 			dsp_core.hostport[CPU_HOST_IVR]=value;
+ 			break;
+ 		case CPU_HOST_TRXH:
+@@ -1133,12 +1166,15 @@
+ 								dsp_core.ramint[DSP_SPACE_P][dsp_core.bootstrap_pos]);
+ 
+ 				if (++dsp_core.bootstrap_pos == 0x200) {
++					hdtr('B', 0x200, 0);
+ 					LOG_TRACE(TRACE_DSP_STATE, "Dsp: wait bootstrap done\n");
+ 					dsp_core.registers[DSP_REG_R0] = dsp_core.bootstrap_pos;
+ 					dsp_core.registers[DSP_REG_OMR] = 0x02;
+ 					dsp_core.running = 1;
+ 				}
+ 			} else {
++				hdtr('W', (dsp_core.hostport[CPU_HOST_TXH]<<16) | (dsp_core.hostport[CPU_HOST_TXM]<<8) | dsp_core.hostport[CPU_HOST_TXL],
++				     (dsp_core.hostport[CPU_HOST_ISR] & (1<<CPU_HOST_ISR_TXDE)) ? 0 : 1);
+ 
+ 				/* If TRDY is set, the tranfert is direct to DSP (Burst mode) */
+ 				if (dsp_core.hostport[CPU_HOST_ISR] & (1<<CPU_HOST_ISR_TRDY)){
+diff -ru a/src/falcon/dsp_cpu.c b/src/falcon/dsp_cpu.c
+--- a/src/falcon/dsp_cpu.c	2026-10-06 21:25:53.888075902 +0100
++++ b/src/falcon/dsp_cpu.c	2026-10-06 21:25:53.893746644 +0100
+@@ -1135,6 +1135,7 @@
+ 	/* Host command interrupt */
+ 	if (interrupt == DSP_INTER_HOST_COMMAND) {
+ 		interrupt = dsp_core.hostport[CPU_HOST_CVR] & BITMASK(5);
++		{ extern void hdtr(char, uint32_t, uint32_t); hdtr('H', interrupt * 2, dsp_core.hostport[CPU_HOST_CVR]); }
+ 
+ 		/* Clear HC and HCP interrupt */
+ 		dsp_core.periph[DSP_SPACE_X][DSP_HOST_HSR] &= 0xff - (1<<DSP_HOST_HSR_HCP);
+@@ -1293,6 +1294,8 @@
+ 		if (space == DSP_SPACE_X) {
+ 			if (address == 0xffc0+DSP_HOST_HRX) {
+ 				value = dsp_core.dsp_host_rtx;
++				{ extern void hdtr(char, uint32_t, uint32_t);
++				  hdtr((dsp_core.periph[DSP_SPACE_X][DSP_HOST_HSR] & (1<<DSP_HOST_HSR_HRDF)) ? 'G' : 'g', value, 0); }
+ 				dsp_core_hostport_dspread();
+ 			}
+ 			else if (address == 0xffc0+DSP_SSI_RX) {
+@@ -1334,10 +1337,16 @@
+ 		if (space == DSP_SPACE_X) {
+ 			switch(address-0xffc0) {
+ 				case DSP_HOST_HTX:
++					{ extern void hdtr(char, uint32_t, uint32_t);
++					  hdtr('S', value, (dsp_core.periph[DSP_SPACE_X][DSP_HOST_HSR] & (1<<DSP_HOST_HSR_HTDE)) ? 0 : 1); }
+ 					dsp_core.dsp_host_htx = value;
+ 					dsp_core_hostport_dspwrite();
+ 					break;
+ 				case DSP_HOST_HCR:
++					if (dsp_core.periph[DSP_SPACE_X][DSP_HOST_HCR] != (value & 0x1f)) {
++						extern void hdtr(char, uint32_t, uint32_t);
++						hdtr('F', value & 0x1f, dsp_core.periph[DSP_SPACE_X][DSP_HOST_HCR]);
++					}
+ 					dsp_core.periph[DSP_SPACE_X][DSP_HOST_HCR] = value & 0x1f;
+ 					/* Set HF3 and HF2 accordingly on the host side */
+ 					dsp_core.hostport[CPU_HOST_ISR] &=

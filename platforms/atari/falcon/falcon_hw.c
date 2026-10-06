@@ -24,6 +24,7 @@
 
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -262,6 +263,75 @@ int falcon_hreq(void)
 uint8_t falcon_ivr(void) { return F.ivr; }
 
 /* ------------------------------------------------------------------ */
+/* Host-port trace and sync-point counters (PISTORM_DSP_TRACE)         */
+/* ------------------------------------------------------------------ */
+/* Every host-port event either side makes, in one time-ordered ring, with
+ * the DSP pc and the sample frame. Off unless PISTORM_DSP_TRACE=<entries>
+ * is set: each hook is then one load and a branch, and nothing else here
+ * changes what the port does. Written to a file (dtr_dump) on a stall
+ * (the 68k polling with nothing moving either way), on SIGUSR2 and at
+ * exit. tools/dsptrace/ compares a dump with Hatari's.
+ *   68k side: W word written   R word read   r read with nothing there
+ *             (the old word again)   D word dropped (FIFO full)
+ *             I ICR write   C CVR write   V IVR write   P ISR read (on change)
+ *             w an RX-read wait ended   s a same-thread DSP run ended
+ *   DSP side: G HRX read   g HRX read with nothing there   S HTX write
+ *             H host command taken   F HCR write (on change)
+ *             X reset released   B bootstrap done */
+typedef struct {
+    uint64_t ns;
+    uint32_t frame;
+    uint32_t v;
+    uint16_t dpc;
+    char     t;
+    uint8_t  x;
+} dtr_t;
+static dtr_t   *g_tr;
+static uint32_t g_tr_size;               /* entries, a power of two; 0 = off */
+static _Atomic uint32_t g_tr_n;
+static double g_tr_tick_ns = 1.0;       /* aarch64: ns per counter tick */
+static inline uint64_t dtr_now(void)    /* ns; a counter read on the Pi */
+{
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(v));
+    return (uint64_t)((double)v * g_tr_tick_ns);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+static void dtr_put(char t, uint32_t v, uint32_t x)
+{
+    uint32_t i = atomic_fetch_add_explicit(&g_tr_n, 1, memory_order_relaxed) & (g_tr_size - 1);
+    dtr_t *e = &g_tr[i];
+    e->ns = dtr_now();
+    e->frame = (uint32_t)F.frames;
+    e->v = v;
+    e->dpc = F.dsp ? F.dsp->pc : 0;
+    e->x = x > 255 ? 255 : (uint8_t)x;
+    e->t = t;
+}
+#define dtr(t, v, x) do { if (__builtin_expect(g_tr_size != 0, 0)) dtr_put((t), (v), (x)); } while (0)
+
+/* per-sync-point counters for the 5 s [DSPPORT] line (trace on only) */
+static struct {
+    _Atomic uint32_t rxw_n, rxw_sum_us, rxw_max_us, rxw_got, rxw_parked, rxw_timeout, rxw_short;
+    _Atomic uint32_t rx_stale;
+    _Atomic uint32_t st_n, st_sum_us, st_max_us, st_parked, st_cut;
+    _Atomic uint32_t hc_req, hc_taken, hc_sum_us, hc_max_us, hc_over, hc_wd;
+    _Atomic uint32_t tx_w, tx_max, tx_drop, rx_s, rx_max;
+} g_ps;
+static _Atomic uint64_t g_hc_req_ns;
+static void ps_max(_Atomic uint32_t *p, uint32_t v)
+{
+    uint32_t o = atomic_load_explicit(p, memory_order_relaxed);
+    while (v > o && !atomic_compare_exchange_weak(p, &o, v))
+        ;
+}
+
+/* ------------------------------------------------------------------ */
 /* DSP side peripherals (engine thread)                                */
 /* ------------------------------------------------------------------ */
 #define HCR_HRIE 0x01
@@ -293,6 +363,16 @@ static void host_irqs(void)
     if ((cvr & 0x80) && lvl && (hcr & HCR_HCIE)) {
         dsp56k_irq_raise(d, (cvr & 0x1F) * 2, lvl);
         atomic_fetch_and(&F.cvr, (uint8_t)0x7F);      /* taken */
+        if (g_tr_size) {
+            dtr('H', (cvr & 0x1F) * 2u, cvr);
+            atomic_fetch_add(&g_ps.hc_taken, 1);
+            uint64_t t = atomic_exchange(&g_hc_req_ns, 0);
+            if (t) {
+                uint32_t us = (uint32_t)((dtr_now() - t) / 1000u);
+                atomic_fetch_add(&g_ps.hc_sum_us, us);
+                ps_max(&g_ps.hc_max_us, us);
+            }
+        }
         if (falcon_dbg()) {
             static unsigned said;
             if (said++ < 60)
@@ -388,6 +468,7 @@ static void rxlog_add(uint32_t v)
     g_rxlog[i].ns = falcon_dbg() ? rxlog_now() : 0;
 }
 
+
 static uint32_t periph_read(void *ctx, int space, uint16_t a)
 {
     (void)ctx;
@@ -412,6 +493,7 @@ static uint32_t periph_read(void *ctx, int space, uint16_t a)
     case 0xFFEB: {                                               /* HRX */
         uint32_t v;
         if (tx_visible() && hf_peek(&F.tx, &v)) {
+            dtr('G', v, hf_count(&F.tx));
             hf_pop(&F.tx);
             g_hrx_ring[g_hrx_n++ & 127u] = v;
             F.hrx_last = v;
@@ -423,6 +505,8 @@ static uint32_t periph_read(void *ctx, int space, uint16_t a)
                 g_pick_lat = now - t;
                 g_pick_ns = now;
             }
+        } else {
+            dtr('g', F.hrx_last, 0);
         }
         host_irqs();
         return F.hrx_last;
@@ -457,7 +541,12 @@ static void periph_write(void *ctx, int space, uint16_t a, uint32_t v)
     case 0xFFE3: F.pcddr = v; return;
     case 0xFFE4: F.pbd = v; return;
     case 0xFFE5: F.pcd = v; return;
-    case 0xFFE8: atomic_store(&F.hcr, (uint8_t)(v & 0x1F)); host_irqs(); return;
+    case 0xFFE8:
+        if (g_tr_size && atomic_load(&F.hcr) != (uint8_t)(v & 0x1F))
+            dtr('F', v & 0x1F, atomic_load(&F.hcr));
+        atomic_store(&F.hcr, (uint8_t)(v & 0x1F));
+        host_irqs();
+        return;
     case 0xFFEB:                                                 /* HTX */
         if (F.answer_armed) {                /* the reply to what it read */
             F.answer_armed = 0;
@@ -492,6 +581,12 @@ static void periph_write(void *ctx, int space, uint16_t a, uint32_t v)
             g_pick_ns = 0;
         }
         hlog('S', v, F.dsp->pc);
+        if (g_tr_size) {
+            uint32_t q = hf_count(&F.rx);
+            dtr('S', v, q);
+            atomic_fetch_add(&g_ps.rx_s, 1);
+            ps_max(&g_ps.rx_max, q + 1);
+        }
         hf_push(&F.rx, v);
         host_irqs();
         return;
@@ -625,6 +720,7 @@ static void dsp_power_state(void)
     uint32_t ep = atomic_load(&F.reset_epoch);
     if (ep != F.reset_seen) {
         F.reset_seen = ep;
+        dtr('X', ep, 0);
         /* reset released: the bootstrap loader starts listening */
         dsp56k_reset(F.dsp);
         memset(F.dsp->pint, 0, sizeof F.dsp->pint);
@@ -677,6 +773,7 @@ static void dsp_boot_drain(void)
     /* the 56001 bootstrap also starts early when the host sets HF0 */
     if (F.boot_count >= 512 || (F.boot_count && (atomic_load(&F.icr) & 0x08))) {
         dsp_start_at_0();
+        dtr('B', F.boot_count, 0);
         fprintf(stderr, "[FALCON] DSP booted (%u words)\n", F.boot_count);
     }
 }
@@ -1547,6 +1644,157 @@ static int host_waiting(void)
            (polling && !hf_count(&F.rx));
 }
 
+/* ------------------------------------------------------------------ */
+/* Trace dumps, the stall check and the [DSPPORT] line (engine thread) */
+/* ------------------------------------------------------------------ */
+static volatile sig_atomic_t g_tr_sig;
+static void dtr_on_sigusr2(int sig)
+{
+    (void)sig;
+    g_tr_sig = 1;                        /* the engine dumps within ~2 ms */
+}
+
+static const char *dtr_what(char t)
+{
+    switch (t) {
+    case 'W': return "68k wrote word (x = words queued before)";
+    case 'R': return "68k read word (x = words left before)";
+    case 'r': return "68k read RX, nothing there: old word";
+    case 'D': return "68k word DROPPED, FIFO full";
+    case 'I': return "68k wrote ICR (x = old)";
+    case 'C': return "68k wrote CVR (x = old)";
+    case 'V': return "68k wrote IVR (x = old)";
+    case 'P': return "68k read ISR, changed (x = words queued to DSP)";
+    case 'w': return "RX-read wait ended: v = us, x 1 word 2 parked 3 timeout +16 short";
+    case 's': return "same-thread DSP run: v = cycles, x 1 parked 2 cut off 3 stopped";
+    case 'G': return "DSP read HRX (x = words left before)";
+    case 'g': return "DSP read HRX, nothing there";
+    case 'S': return "DSP wrote HTX (x = words unread before)";
+    case 'H': return "DSP took host command, v = vector (x = CVR)";
+    case 'F': return "DSP wrote HCR (x = old)";
+    case 'X': return "DSP reset released";
+    case 'B': return "DSP bootstrap done (v = words)";
+    }
+    return "?";
+}
+
+/* the last `want` entries (0 = the whole ring) and the port state */
+static void dtr_dump(const char *why, uint32_t want)
+{
+    static unsigned seq;
+    char path[256];
+    const char *pre = getenv("PISTORM_DSP_TRACE_FILE");
+    snprintf(path, sizeof path, "%s-%03u.txt", pre && *pre ? pre : "/tmp/dsptrace", seq++);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "[DSPPORT] trace dump: cannot write %s\n", path);
+        return;
+    }
+    uint32_t n = atomic_load(&g_tr_n);
+    uint32_t have = n < g_tr_size ? n : g_tr_size;
+    if (want && want < have)
+        have = want;
+    dsp56k_t *d = F.dsp;
+    fprintf(f, "# PiStorm Falcon host-port trace: %s\n", why);
+    fprintf(f, "# 68k: ICR $%02X CVR $%02X IVR $%02X, 68k->DSP %u queued, DSP->68k %u unread, "
+            "last word read $%06X\n", atomic_load(&F.icr), atomic_load(&F.cvr), F.ivr,
+            hf_count(&F.tx), hf_count(&F.rx), F.rx_last);
+    fprintf(f, "# DSP: pc $%04X sr $%04X HCR $%02X IPR $%06X, last HRX $%06X, idle hint %d, "
+            "irq %llx, state %d, %s, %s\n", d->pc, d->sr, atomic_load(&F.hcr), F.ipr,
+            F.hrx_last, d->idle_hint, (unsigned long long)d->irq_pending,
+            atomic_load(&F.dsp_state), cpu_coproc() ? "same-thread (coprocessor)" :
+            F.vbl_locked ? "engine, VBL lockstep" : "engine",
+            (F.crb & 0x3000) ? "SSI on" : "SSI off");
+    fprintf(f, "# frame %llu, ISR polls %u, %u events in all, last %u below\n",
+            (unsigned long long)F.frames, atomic_load(&F.isr_polls), n, have);
+    fprintf(f, "#     seq        ms    frame t  value   x  dsp-pc\n");
+    uint64_t t0 = 0;
+    for (uint32_t k = n - have; k != n; k++) {
+        const dtr_t *e = &g_tr[k & (g_tr_size - 1)];
+        if (!t0)
+            t0 = e->ns;
+        fprintf(f, "%9u %9.3f %8llu %c %06X %3u  %04X\n", k,
+                (double)(int64_t)(e->ns - t0) / 1e6, (unsigned long long)e->frame,
+                e->t, e->v & 0xFFFFFF, e->x, e->dpc);
+    }
+    fprintf(f, "# event types:\n");
+    static const char types[] = "WRrDICVPwsGgSHFXB";
+    for (const char *t = types; *t; t++)
+        fprintf(f, "#   %c  %s\n", *t, dtr_what(*t));
+    fclose(f);
+    fprintf(stderr, "[DSPPORT] trace dump (%s): %u events -> %s\n", why, have, path);
+}
+
+static void dtr_tick(void)
+{
+    if (!g_tr_size)
+        return;
+    if (g_tr_sig) {
+        g_tr_sig = 0;
+        dtr_dump("SIGUSR2", 0);
+    }
+    uint64_t now = rxlog_now();
+    /* Stall: the 68k keeps polling the port and nothing has moved either
+     * way - no word, no host command - for 0.3 s. Dumped once per stall. */
+    {
+        static uint64_t at;
+        static uint32_t txh, txt, rxh, rxt, hc, polls;
+        static int reported;
+        if (now - at >= 300000000ull) {
+            uint32_t a = atomic_load(&F.tx.head), b = atomic_load(&F.tx.tail);
+            uint32_t c = atomic_load(&F.rx.head), e = atomic_load(&F.rx.tail);
+            uint32_t h = atomic_load(&g_ps.hc_req) + atomic_load(&g_ps.hc_taken);
+            uint32_t p = atomic_load(&F.isr_polls);
+            int moved = a != txh || b != txt || c != rxh || e != rxt || h != hc;
+            if (moved || p - polls < 1000u) {
+                reported = 0;
+            } else if (!reported && atomic_load(&F.dsp_state) == DSP_RUN) {
+                reported = 1;
+                fprintf(stderr, "[DSPPORT] stall: the 68k polls the host port, nothing has moved "
+                        "for 0.3 s - DSP pc $%04X, %u queued to the DSP, %u unread by the 68k, "
+                        "CVR $%02X\n", F.dsp->pc, hf_count(&F.tx), hf_count(&F.rx),
+                        atomic_load(&F.cvr));
+                dtr_dump("stall: 68k polling, nothing moving either way for 0.3 s", 512);
+            }
+            at = now;
+            txh = a; txt = b; rxh = c; rxt = e; hc = h; polls = p;
+        }
+    }
+    /* every 5 s: what each sync point cost */
+    {
+        static uint64_t at;
+        static uint32_t polls0;
+        if (!at)
+            at = now;
+        if (now - at >= 5000000000ull) {
+            at = now;
+            uint32_t p = atomic_load(&F.isr_polls);
+            uint32_t rn = atomic_exchange(&g_ps.rxw_n, 0), rs = atomic_exchange(&g_ps.rxw_sum_us, 0);
+            uint32_t sn = atomic_exchange(&g_ps.st_n, 0), ss = atomic_exchange(&g_ps.st_sum_us, 0);
+            uint32_t ht = atomic_exchange(&g_ps.hc_taken, 0), hs = atomic_exchange(&g_ps.hc_sum_us, 0);
+            fprintf(stderr, "[DSPPORT] 5 s: RX-read waits %u (avg %.2f max %.2f ms; word %u, "
+                    "parked %u, timed out %u, short %u), empty RX reads %u; "
+                    "same-thread runs %u (avg %u max %u us; parked %u, cut off %u); "
+                    "HC requested %u, taken %u (avg %u max %u us; rewritten while pending %u, "
+                    "withdrawn %u, pending now %s); 68k->DSP %u words (max queued %u, dropped %u), "
+                    "DSP->68k %u words (max unread %u); ISR polls %u\n",
+                    rn, rn ? rs / 1000.0 / rn : 0.0, atomic_exchange(&g_ps.rxw_max_us, 0) / 1000.0,
+                    atomic_exchange(&g_ps.rxw_got, 0), atomic_exchange(&g_ps.rxw_parked, 0),
+                    atomic_exchange(&g_ps.rxw_timeout, 0), atomic_exchange(&g_ps.rxw_short, 0),
+                    atomic_exchange(&g_ps.rx_stale, 0),
+                    sn, sn ? ss / sn : 0, atomic_exchange(&g_ps.st_max_us, 0),
+                    atomic_exchange(&g_ps.st_parked, 0), atomic_exchange(&g_ps.st_cut, 0),
+                    atomic_exchange(&g_ps.hc_req, 0), ht, ht ? hs / ht : 0,
+                    atomic_exchange(&g_ps.hc_max_us, 0), atomic_exchange(&g_ps.hc_over, 0),
+                    atomic_exchange(&g_ps.hc_wd, 0),
+                    (atomic_load(&F.cvr) & 0x80) ? "yes" : "no",
+                    atomic_exchange(&g_ps.tx_w, 0), atomic_exchange(&g_ps.tx_max, 0),
+                    atomic_exchange(&g_ps.tx_drop, 0), atomic_exchange(&g_ps.rx_s, 0),
+                    atomic_exchange(&g_ps.rx_max, 0), p - polls0);
+            polls0 = p;
+        }
+    }
+}
 
 static void *engine(void *arg)
 {
@@ -1571,6 +1819,7 @@ static void *engine(void *arg)
             continue;
         }
         dsp_power_state();
+        dtr_tick();
         if (prof_on())
             prof_report();
         int st = atomic_load(&F.dsp_state);
@@ -1975,6 +2224,17 @@ static int rx_wait(uint32_t *v)
     uint32_t us = (uint32_t)((mono_ns() - t0) / 1000u);
     atomic_fetch_add_explicit(&g_rx_waits, 1, memory_order_relaxed);
     atomic_max_u32(&g_rx_wait_max_us, us);
+    if (g_tr_size) {
+        /* x: 1 a word came, 2 the DSP parked, 3 timed out; +16 = short wait */
+        int how = have ? 1 : (F.dsp->idle_skips - idle0 >= 2 ? 2 : 3);
+        dtr('w', us, (unsigned)how | (budget == RX_WAIT_SHORT_NS ? 16u : 0u));
+        atomic_fetch_add(&g_ps.rxw_n, 1);
+        atomic_fetch_add(&g_ps.rxw_sum_us, us);
+        ps_max(&g_ps.rxw_max_us, us);
+        atomic_fetch_add(how == 1 ? &g_ps.rxw_got : how == 2 ? &g_ps.rxw_parked : &g_ps.rxw_timeout, 1);
+        if (budget == RX_WAIT_SHORT_NS)
+            atomic_fetch_add(&g_ps.rxw_short, 1);
+    }
     return have;
 }
 
@@ -2013,7 +2273,9 @@ static void dsp_settle(void)
     if (g_settled)
         return;
     const int dbg = falcon_dbg();            /* settle stats are debug-only: */
-    uint64_t t0 = dbg ? mono_ns() : 0;       /* two clock reads per word read */
+    const int tr = g_tr_size != 0;           /* (or with the trace on):       */
+    uint64_t t0 = dbg || tr ? mono_ns() : 0; /* two clock reads per word read */
+    int how = 3;                             /* trace: 1 parked 2 cut off 3 stopped */
     dsp56k_t *d = F.dsp;
     uint32_t quiet = 0, total = 0;
     const int prof = prof_on();
@@ -2038,6 +2300,7 @@ static void dsp_settle(void)
          * it park. */
         if (d->idle_skips != sk || (d->halted && !d->irq_pending)) {
             g_settled = 1;
+            how = 1;
             break;
         }
         (void)moved;
@@ -2046,6 +2309,7 @@ static void dsp_settle(void)
         quiet = moved ? 0 : quiet + 64;
         if (quiet >= SETTLE_QUIET || total >= SETTLE_MAX) {
             atomic_fetch_add_explicit(&g_settle_cutoffs, 1, memory_order_relaxed);
+            how = 2;
             break;
         }
     }
@@ -2055,6 +2319,15 @@ static void dsp_settle(void)
     if (dbg) {
         atomic_fetch_add_explicit(&g_settles, 1, memory_order_relaxed);
         atomic_max_u32(&g_settle_max_us, (uint32_t)((mono_ns() - t0) / 1000u));
+    }
+    if (tr) {
+        uint32_t us = (uint32_t)((mono_ns() - t0) / 1000u);
+        dtr('s', total, (unsigned)how);
+        atomic_fetch_add(&g_ps.st_n, 1);
+        atomic_fetch_add(&g_ps.st_sum_us, us);
+        ps_max(&g_ps.st_max_us, us);
+        if (how == 1) atomic_fetch_add(&g_ps.st_parked, 1);
+        if (how == 2) atomic_fetch_add(&g_ps.st_cut, 1);
     }
 }
 
@@ -2138,12 +2411,26 @@ static uint8_t host_read8(uint32_t o)
         uint8_t icr = atomic_load(&F.icr);
         if (((icr & 1) && have) || ((icr & 2) && txn <= HF_SIZE - HF_TXDE_ROOM))
             isr |= 0x80;                                     /* HREQ */
+        if (g_tr_size) {
+            static int last = -1;                /* CPU thread only */
+            if (isr != last)
+                dtr('P', isr, txn);
+            last = isr;
+        }
         return isr;
     }
     case 3: return F.ivr;
     case 5: return (uint8_t)(v >> 16);
     case 6: return (uint8_t)(v >> 8);
     case 7:
+        if (g_tr_size) {
+            if (have) {
+                dtr('R', v, hf_count(&F.rx));
+            } else {
+                dtr('r', v, 0);
+                atomic_fetch_add(&g_ps.rx_stale, 1);
+            }
+        }
         if (have) {
             hf_pop(&F.rx);
             g_wrote_since_rx = 0;
@@ -2174,6 +2461,7 @@ static void host_write8(uint32_t o, uint8_t v)
 {
     switch (o) {
     case 0:
+        dtr('I', v, atomic_load(&F.icr));
         if (v & 0x80) {                                      /* INIT */
             if (v & 0x02) atomic_store(&F.tx.head, atomic_load(&F.tx.tail));
             if (v & 0x01) atomic_store(&F.rx.tail, atomic_load(&F.rx.head));
@@ -2182,6 +2470,18 @@ static void host_write8(uint32_t o, uint8_t v)
         atomic_store(&F.icr, v);
         break;
     case 1:
+        if (g_tr_size) {
+            uint8_t old = atomic_load(&F.cvr);
+            dtr('C', v, old);
+            if (v & 0x80) {
+                atomic_fetch_add(&g_ps.hc_req, 1);
+                if (old & 0x80)
+                    atomic_fetch_add(&g_ps.hc_over, 1);    /* rewritten while pending */
+                atomic_store(&g_hc_req_ns, rxlog_now());
+            } else if (old & 0x80) {
+                atomic_fetch_add(&g_ps.hc_wd, 1);          /* withdrawn (HC = 0) */
+            }
+        }
         atomic_store(&F.cvr, (uint8_t)(v & 0x9F));
         if ((v & 0x80) && falcon_dbg()) {               /* host command timeline */
             static unsigned said;
@@ -2190,7 +2490,7 @@ static void host_write8(uint32_t o, uint8_t v)
                         (v & 0x1F) * 2, (unsigned long long)F.frames, F.dsp->pc, F.dsp->r[3], F.dsp->sr);
         }
         break;
-    case 3: F.ivr = v; break;
+    case 3: dtr('V', v, F.ivr); F.ivr = v; break;
     case 5: F.txb[0] = v; break;
     case 6: F.txb[1] = v; break;
     case 7:
@@ -2216,6 +2516,16 @@ static void host_write8(uint32_t o, uint8_t v)
         if (hf_count(&F.tx) >= TX_SETTLE_AT && cpu_coproc()) {
             dsp_unsettle();
             dsp_settle();
+        }
+        if (g_tr_size) {
+            uint32_t q = hf_count(&F.tx);
+            dtr('W', ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v, q);
+            atomic_fetch_add(&g_ps.tx_w, 1);
+            ps_max(&g_ps.tx_max, q + 1);
+            if (q >= HF_SIZE) {
+                dtr('D', ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v, 0);
+                atomic_fetch_add(&g_ps.tx_drop, 1);
+            }
         }
         if (!hf_push(&F.tx, ((uint32_t)F.txb[0] << 16) | ((uint32_t)F.txb[1] << 8) | v)) {
             if (F.dropped_tx++ < 4)
@@ -2744,6 +3054,37 @@ int falcon_init(uint8_t *guest, uint32_t guest_size)
             fprintf(stderr, "[FALCON] coprocessor DSP stays on the engine thread (PISTORM_DSP_INLINE=0)\n");
         if (t != 2)
             fprintf(stderr, "[FALCON] DSP at %d x 32 MHz (PISTORM_DSP_TURBO)\n", t);
+        /* PISTORM_DSP_TRACE=<entries>: the host-port trace ring (see dtr) */
+        const char *tr = getenv("PISTORM_DSP_TRACE");
+        long te = tr ? atol(tr) : 0;
+        if (te > 0) {
+            uint32_t sz = 1024;
+            if (te < 1024) te = 8192;        /* "1" etc.: the default size */
+            while (sz < (uint32_t)te && sz < (1u << 24))
+                sz <<= 1;
+            g_tr = (dtr_t *)calloc(sz, sizeof *g_tr);
+#if defined(__aarch64__)
+            {
+                uint64_t fq;
+                __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(fq));
+                if (fq)
+                    g_tr_tick_ns = 1e9 / (double)fq;
+            }
+#endif
+            if (g_tr) {
+                g_tr_size = sz;
+                struct sigaction sa;
+                memset(&sa, 0, sizeof sa);
+                sa.sa_handler = dtr_on_sigusr2;
+                sigemptyset(&sa.sa_mask);
+                sa.sa_flags = SA_RESTART;
+                sigaction(SIGUSR2, &sa, NULL);
+                fprintf(stderr, "[DSPPORT] host-port trace on: %u events; dumped on a stall, "
+                        "on SIGUSR2 and at exit to %s-NNN.txt\n", sz,
+                        getenv("PISTORM_DSP_TRACE_FILE") ? getenv("PISTORM_DSP_TRACE_FILE")
+                                                         : "/tmp/dsptrace");
+            }
+        }
     }
     F.dsp = (dsp56k_t *)calloc(1, sizeof(dsp56k_t));
     if (!F.dsp)
@@ -2809,4 +3150,6 @@ void falcon_shutdown(void)
     falcon_audio_kick();
     pthread_join(F.thread, NULL);
     falcon_audio_close();
+    if (g_tr_size)
+        dtr_dump("exit", 0);
 }
