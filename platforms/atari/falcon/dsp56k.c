@@ -1055,6 +1055,30 @@ static void do_jsr(dsp56k_t *d, uint16_t target)
         d->pc = target;
         return;
     }
+    if ((d->sr & SR_LF) && (uint16_t)(ret - 1) == d->la) {
+        /* A JSR (or JScc / JSSET / JSCLR taken) whose last word is at LA:
+         * the 56001 makes the loop decision when it fetches LA, before the
+         * jump, so the address it stacks is where the loop goes on - the
+         * loop start with LC decremented, or LA+1 with the loop already
+         * ended - and the RTS goes straight there. Stacked as LA+1 with no
+         * loop processing (run() checks sequential instructions only) the
+         * RTS fell out of the loop onto the code after it, which in
+         * Sonolumineszenz is the routine's own RTS: it popped the DO's
+         * frame, ran the loop again on a corrupt stack and finally
+         * returned to P:$0000 (the DSP restarted, the demo went white).
+         * Hatari reaches the same place by testing PC == LA+1 after every
+         * instruction, the RTS included. */
+        if (d->lc == 1) {
+            d->sr = (uint16_t)((d->sr & ~SR_LF) | (SSL & SR_LF));
+            pop(d);
+            d->la = SSH;
+            d->lc = SSL;
+            pop(d);
+        } else {
+            d->lc--;
+            ret = SSH;
+        }
+    }
     push(d, ret, d->sr);
     d->pc = target;
 }

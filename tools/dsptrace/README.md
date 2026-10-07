@@ -14,6 +14,7 @@ PISTORM_DSP_TRACE=4194304 ./emulator ...
 | Variable | Meaning |
 |---|---|
 | `PISTORM_DSP_TRACE` | Size of the trace ring in events, rounded up to a power of two (maximum 16M). Each event takes 24 bytes, so 4194304 events take 96 MB, about 30 s of a busy port. Values below 1024 (for example `1`) give 8192 events. `0` or unset turns tracing off; the port then costs one test per event. |
+| `PISTORM_DSP_TRACE_FIRST` | Set to `1` to keep the first events instead of the last. Recording stops when the ring is full, and that dump is written straight away. Use this to capture a program's start without having to time a SIGUSR2. |
 | `PISTORM_DSP_TRACE_FILE` | Prefix for dump files. The default is `/tmp/dsptrace`, giving `/tmp/dsptrace-000.txt`, `-001`, and so on. |
 
 The trace is written to a file in three cases:

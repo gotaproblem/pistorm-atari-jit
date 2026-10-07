@@ -71,6 +71,23 @@ static uint32_t g_turbo_cut;           /* engine: batches run at 1x (behind) */
  * clears once this many words are unread, so the DSP paces to the 68k.
  * Beats of Rage sends one word a VBL this way and is unaffected. */
 static unsigned g_htx_depth = 4;
+/* TXDE as the 68k sees it. Default: set while a whole block still fits in
+ * the deep FIFO (HF_TXDE_ROOM), for DSPMOD's blind bursts.
+ * PISTORM_DSP_TXDE=chip: the 56001's own rule - set while fewer than two
+ * words are in flight (the host's TX register and the DSP's HRX), so a 68k
+ * that checks TXDE before each word waits for the DSP to take them, as on
+ * a Falcon. Words written without checking still queue (the FIFO stays
+ * deep). Sonolumineszenz needs it: its music interrupt's host command
+ * makes the DSP save every 68k word still in flight in a 10-word buffer
+ * (X:$38AC) - with TXDE always set the main program had 24 queued, the
+ * save ran over into the next buffer and the music state, the main
+ * program's data came back with "DSP" in it, and the 68k ran into its own
+ * command buffer (illegal instruction at $34A54). */
+static int g_txde_chip;
+static inline int tx_empty(uint32_t txn)
+{
+    return g_txde_chip ? txn < 2u : txn <= HF_SIZE - HF_TXDE_ROOM;
+}
 typedef struct {
     uint32_t w[HF_SIZE];
     _Atomic uint32_t head;          /* producer */
@@ -255,7 +272,7 @@ int falcon_hreq(void)
         return 0;
     if ((icr & 1) && hf_count(&F.rx))
         return 1;
-    if ((icr & 2) && hf_count(&F.tx) <= HF_SIZE - HF_TXDE_ROOM)
+    if ((icr & 2) && tx_empty(hf_count(&F.tx)))
         return 1;
     return 0;
 }
@@ -288,7 +305,9 @@ typedef struct {
 } dtr_t;
 static dtr_t   *g_tr;
 static uint32_t g_tr_size;               /* entries, a power of two; 0 = off */
+static int      g_tr_first;              /* keep the first g_tr_size events */
 static _Atomic uint32_t g_tr_n;
+static _Atomic int g_tr_pause;           /* recording held: a dump is being written */
 static double g_tr_tick_ns = 1.0;       /* aarch64: ns per counter tick */
 static inline uint64_t dtr_now(void)    /* ns; a counter read on the Pi */
 {
@@ -304,8 +323,12 @@ static inline uint64_t dtr_now(void)    /* ns; a counter read on the Pi */
 }
 static void dtr_put(char t, uint32_t v, uint32_t x)
 {
-    uint32_t i = atomic_fetch_add_explicit(&g_tr_n, 1, memory_order_relaxed) & (g_tr_size - 1);
-    dtr_t *e = &g_tr[i];
+    if (atomic_load_explicit(&g_tr_pause, memory_order_relaxed))
+        return;
+    uint32_t i = atomic_fetch_add_explicit(&g_tr_n, 1, memory_order_relaxed);
+    if (g_tr_first && i >= g_tr_size)
+        return;                          /* full: the start is what is wanted */
+    dtr_t *e = &g_tr[i & (g_tr_size - 1)];
     e->ns = dtr_now();
     e->frame = (uint32_t)F.frames;
     e->v = v;
@@ -1679,6 +1702,24 @@ static const char *dtr_what(char t)
 }
 
 /* the last `want` entries (0 = the whole ring) and the port state */
+/* number formatting for dtr_dump: printf per line took long enough on the
+ * Pi (4M lines) that a dump was cut short by quitting the emulator */
+static char *put_dec(char *p, uint64_t v, int width)
+{
+    char t[24];
+    int n = 0;
+    do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    for (int i = n; i < width; i++) *p++ = ' ';
+    while (n) *p++ = t[--n];
+    return p;
+}
+static char *put_hex(char *p, uint32_t v, int digits)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    for (int i = digits - 1; i >= 0; i--) *p++ = hx[(v >> (4 * i)) & 15];
+    return p;
+}
+
 static void dtr_dump(const char *why, uint32_t want)
 {
     static unsigned seq;
@@ -1691,6 +1732,8 @@ static void dtr_dump(const char *why, uint32_t want)
         return;
     }
     uint32_t n = atomic_load(&g_tr_n);
+    if (g_tr_first && n > g_tr_size)
+        n = g_tr_size;
     uint32_t have = n < g_tr_size ? n : g_tr_size;
     if (want && want < have)
         have = want;
@@ -1708,21 +1751,112 @@ static void dtr_dump(const char *why, uint32_t want)
     fprintf(f, "# frame %llu, ISR polls %u, %u events in all, last %u below\n",
             (unsigned long long)F.frames, atomic_load(&F.isr_polls), n, have);
     fprintf(f, "#     seq        ms    frame t  value   x  dsp-pc\n");
+    if (have > 100000)
+        fprintf(stderr, "[DSPPORT] writing trace dump (%s): %u events to %s - "
+                "wait for \"done\" before quitting\n", why, have, path);
+    static char buf[1 << 20];
+    char *p = buf;
     uint64_t t0 = 0;
     for (uint32_t k = n - have; k != n; k++) {
         const dtr_t *e = &g_tr[k & (g_tr_size - 1)];
         if (!t0)
             t0 = e->ns;
-        fprintf(f, "%9u %9.3f %8llu %c %06X %3u  %04X\n", k,
-                (double)(int64_t)(e->ns - t0) / 1e6, (unsigned long long)e->frame,
-                e->t, e->v & 0xFFFFFF, e->x, e->dpc);
+        /* "%9u %9.3f %8u %c %06X %3u  %04X\n" */
+        int64_t us = (int64_t)(e->ns - t0) / 1000;
+        int neg = us < 0;
+        if (neg) us = -us;
+        p = put_dec(p, k, 9);
+        *p++ = ' ';
+        {
+            char t[24], *q = put_dec(t, (uint64_t)us / 1000, 0);
+            int len = (int)(q - t) + 4 + neg;
+            for (int i = len; i < 9; i++) *p++ = ' ';
+            if (neg) *p++ = '-';
+            for (char *r = t; r < q; r++) *p++ = *r;
+            *p++ = '.';
+            uint32_t frac = (uint32_t)((uint64_t)us % 1000);
+            *p++ = (char)('0' + frac / 100);
+            *p++ = (char)('0' + frac / 10 % 10);
+            *p++ = (char)('0' + frac % 10);
+        }
+        *p++ = ' ';
+        p = put_dec(p, e->frame, 8);
+        *p++ = ' ';
+        *p++ = e->t;
+        *p++ = ' ';
+        p = put_hex(p, e->v & 0xFFFFFF, 6);
+        *p++ = ' ';
+        p = put_dec(p, e->x, 3);
+        *p++ = ' ';
+        *p++ = ' ';
+        p = put_hex(p, e->dpc, 4);
+        *p++ = '\n';
+        if (p - buf > (long)sizeof buf - 128) {
+            fwrite(buf, 1, (size_t)(p - buf), f);
+            p = buf;
+        }
     }
+    fwrite(buf, 1, (size_t)(p - buf), f);
     fprintf(f, "# event types:\n");
     static const char types[] = "WRrDICVPwsGgSHFXB";
     for (const char *t = types; *t; t++)
         fprintf(f, "#   %c  %s\n", *t, dtr_what(*t));
     fclose(f);
-    fprintf(stderr, "[DSPPORT] trace dump (%s): %u events -> %s\n", why, have, path);
+    fprintf(stderr, "[DSPPORT] trace dump (%s): %u events -> %s%s\n", why, have, path,
+            have > 100000 ? " - done" : "");
+}
+
+/* A whole-ring dump is millions of lines: written on its own thread so the
+ * engine keeps clocking the DSP and the sound plays on (on the engine it
+ * stopped both for the length of the write - "frozen, no sound, no more
+ * logging"). Recording is held while it writes, so the dump is the ring
+ * exactly as it was when asked for; events in that time are not kept. */
+static _Atomic int g_tr_dumping;
+static _Atomic(const char *) g_tr_mark_why;
+static int g_tr_mark_done;               /* its dump has been started */
+struct dtr_job { const char *why; int resume; };
+static void *dtr_dump_thread(void *arg)
+{
+    struct dtr_job *j = (struct dtr_job *)arg;
+    dtr_dump(j->why, 0);
+    if (j->resume && !atomic_load(&g_tr_mark_why))
+        atomic_store(&g_tr_pause, 0);
+    atomic_store(&g_tr_dumping, 0);
+    free(j);
+    return NULL;
+}
+static void dtr_dump_async(const char *why, int resume)
+{
+    if (atomic_exchange(&g_tr_dumping, 1))
+        return;                              /* one at a time */
+    atomic_store(&g_tr_pause, 1);
+    struct dtr_job *j = (struct dtr_job *)malloc(sizeof *j);
+    pthread_t th;
+    if (j) {
+        j->why = why;
+        j->resume = resume;
+        if (pthread_create(&th, NULL, dtr_dump_thread, j) == 0) {
+            pthread_detach(th);
+            return;
+        }
+        free(j);
+    }
+    dtr_dump(why, 0);                        /* no thread: write it here */
+    if (resume && !atomic_load(&g_tr_mark_why))
+        atomic_store(&g_tr_pause, 0);
+    atomic_store(&g_tr_dumping, 0);
+}
+
+/* Something outside the DSP went wrong (the 68k ran into an illegal
+ * instruction): hold the ring as it is and write it. Called from the CPU
+ * thread; the engine starts the write on its next pass. */
+void falcon_trace_mark(const char *why)
+{
+    if (!g_tr_size)
+        return;
+    atomic_store(&g_tr_pause, 1);
+    const char *none = NULL;
+    atomic_compare_exchange_strong(&g_tr_mark_why, &none, why);
 }
 
 static void dtr_tick(void)
@@ -1731,7 +1865,23 @@ static void dtr_tick(void)
         return;
     if (g_tr_sig) {
         g_tr_sig = 0;
-        dtr_dump("SIGUSR2", 0);
+        dtr_dump_async("SIGUSR2", 1);
+    }
+    {
+        static int marked;
+        const char *why = atomic_load(&g_tr_mark_why);
+        if (why && !marked && !atomic_load(&g_tr_dumping)) {
+            marked = 1;                      /* recording stays held */
+            g_tr_mark_done = 1;
+            dtr_dump_async(why, 0);
+        }
+    }
+    if (g_tr_first) {
+        static int dumped;
+        if (!dumped && atomic_load(&g_tr_n) >= g_tr_size) {
+            dumped = 1;
+            dtr_dump_async("first events: the ring is full, recording stopped", 0);
+        }
     }
     uint64_t now = rxlog_now();
     /* Stall: the 68k keeps polling the port and nothing has moved either
@@ -1748,7 +1898,8 @@ static void dtr_tick(void)
             int moved = a != txh || b != txt || c != rxh || e != rxt || h != hc;
             if (moved || p - polls < 1000u) {
                 reported = 0;
-            } else if (!reported && atomic_load(&F.dsp_state) == DSP_RUN) {
+            } else if (!reported && atomic_load(&F.dsp_state) == DSP_RUN &&
+                       !atomic_load(&g_tr_dumping)) {
                 reported = 1;
                 fprintf(stderr, "[DSPPORT] stall: the 68k polls the host port, nothing has moved "
                         "for 0.3 s - DSP pc $%04X, %u queued to the DSP, %u unread by the 68k, "
@@ -2405,11 +2556,11 @@ static uint8_t host_read8(uint32_t o)
                 g_req_ns = mono_ns();
         }
         if (have) isr |= 0x01;                               /* RXDF */
-        if (txn <= HF_SIZE - HF_TXDE_ROOM) isr |= 0x02;      /* TXDE */
+        if (tx_empty(txn)) isr |= 0x02;                      /* TXDE */
         if (txn == 0) isr |= 0x04;                           /* TRDY */
         isr |= (uint8_t)(((atomic_load(&F.hcr) >> 3) & 3) << 3); /* HF2 HF3 */
         uint8_t icr = atomic_load(&F.icr);
-        if (((icr & 1) && have) || ((icr & 2) && txn <= HF_SIZE - HF_TXDE_ROOM))
+        if (((icr & 1) && have) || ((icr & 2) && tx_empty(txn)))
             isr |= 0x80;                                     /* HREQ */
         if (g_tr_size) {
             static int last = -1;                /* CPU thread only */
@@ -2477,7 +2628,7 @@ static void host_write8(uint32_t o, uint8_t v)
                 atomic_fetch_add(&g_ps.hc_req, 1);
                 if (old & 0x80)
                     atomic_fetch_add(&g_ps.hc_over, 1);    /* rewritten while pending */
-                atomic_store(&g_hc_req_ns, rxlog_now());
+                atomic_store(&g_hc_req_ns, dtr_now());
             } else if (old & 0x80) {
                 atomic_fetch_add(&g_ps.hc_wd, 1);          /* withdrawn (HC = 0) */
             }
@@ -3042,6 +3193,10 @@ int falcon_init(uint8_t *guest, uint32_t guest_size)
         if (t > 8) t = 8;
         g_dsp_hz = DSP_HZ_REAL * t;
         host_hot_init();
+        const char *tm = getenv("PISTORM_DSP_TXDE");
+        g_txde_chip = tm && (!strcmp(tm, "chip") || !strcmp(tm, "1"));
+        if (g_txde_chip)
+            fprintf(stderr, "[FALCON] host port TXDE: chip rule, two words in flight (PISTORM_DSP_TXDE=chip)\n");
         const char *hd = getenv("PISTORM_DSP_HTX_DEPTH");
         if (hd) { int v = atoi(hd); if (v >= 1 && v <= 32768) g_htx_depth = (unsigned)v; }
         const char *vs = getenv("PISTORM_FALCON_VBLSYNC");
@@ -3072,6 +3227,8 @@ int falcon_init(uint8_t *guest, uint32_t guest_size)
             }
 #endif
             if (g_tr) {
+                const char *tf = getenv("PISTORM_DSP_TRACE_FIRST");
+                g_tr_first = tf && *tf == '1';
                 g_tr_size = sz;
                 struct sigaction sa;
                 memset(&sa, 0, sizeof sa);
@@ -3079,8 +3236,10 @@ int falcon_init(uint8_t *guest, uint32_t guest_size)
                 sigemptyset(&sa.sa_mask);
                 sa.sa_flags = SA_RESTART;
                 sigaction(SIGUSR2, &sa, NULL);
-                fprintf(stderr, "[DSPPORT] host-port trace on: %u events; dumped on a stall, "
-                        "on SIGUSR2 and at exit to %s-NNN.txt\n", sz,
+                fprintf(stderr, "[DSPPORT] host-port trace on: %s %u events; dumped %son a stall, "
+                        "on SIGUSR2 and at exit to %s-NNN.txt\n",
+                        g_tr_first ? "the first" : "the last", sz,
+                        g_tr_first ? "when full, " : "",
                         getenv("PISTORM_DSP_TRACE_FILE") ? getenv("PISTORM_DSP_TRACE_FILE")
                                                          : "/tmp/dsptrace");
             }
@@ -3150,6 +3309,19 @@ void falcon_shutdown(void)
     falcon_audio_kick();
     pthread_join(F.thread, NULL);
     falcon_audio_close();
-    if (g_tr_size)
-        dtr_dump("exit", 0);
+    if (g_tr_size) {
+        /* a dump being written on its own thread must finish before the
+         * process goes (quitting cut one short at 78 MB) */
+        for (int i = 0; i < 6000 && atomic_load(&g_tr_dumping); i++)
+            usleep(10000);
+        static int marked_written;
+        const char *why = atomic_load(&g_tr_mark_why);
+        if (why)
+            marked_written = 1;              /* written by the engine, or: */
+        if (why && !atomic_load(&g_tr_dumping) && atomic_load(&g_tr_pause) == 1 &&
+            !g_tr_mark_done)
+            dtr_dump(why, 0);
+        else if (!marked_written)
+            dtr_dump("exit", 0);
+    }
 }

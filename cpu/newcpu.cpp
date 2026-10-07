@@ -4767,6 +4767,7 @@ void pistorm_exc_ring_dump(void)
  * the top of the stack, read from the host mirror so it cannot fault -
  * the first 8 times, without PISTORM_CPU_DIAG: a TOS/MiNT panic shows
  * the registers only, and by then the evidence is gone. */
+extern "C" void falcon_trace_mark(const char *why);   /* falcon_hw.c */
 static void pistorm_bad_opcode_dump(int nr)
 {
 	static int shown;
@@ -4781,6 +4782,11 @@ static void pistorm_bad_opcode_dump(int nr)
 	fprintf(stderr, "[CPU] %s at %08X (sr %04X sp %08X):\n",
 		nr == 4 ? "illegal instruction" : "Line F",
 		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp);
+	{
+		/* PISTORM_DSP_TRACE: hold the Falcon host-port trace as it was
+		 * when the 68k went astray, and write it (no-op otherwise) */
+		falcon_trace_mark(nr == 4 ? "68k illegal instruction" : "68k Line F");
+	}
 	if (pc >= 0x20u && pc < top && !(pc >= 0x00E00000u && pc < 0x01000000u)) {
 		uaecptr a0 = (pc - 0x20u) & ~1u;
 		for (int row = 0; row < 4; row++) {

@@ -75,7 +75,11 @@ def occurrences(hay, needle, limit=2):
 def align(o, h, win):
     """(i, j): a run of `win` words at o[i:] that occurs once in h, at j"""
     step = max(1, win // 2)
+    tries = 0
     for i in range(0, max(0, len(o) - win + 1), step):
+        tries += 1
+        if tries > 400:                  # each try scans all of hatari's stream
+            return None
         js = occurrences(h, o[i:i + win])
         if len(js) == 1:
             return i, js[0]
