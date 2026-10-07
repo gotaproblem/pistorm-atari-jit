@@ -71,19 +71,19 @@ static uint32_t g_turbo_cut;           /* engine: batches run at 1x (behind) */
  * clears once this many words are unread, so the DSP paces to the 68k.
  * Beats of Rage sends one word a VBL this way and is unaffected. */
 static unsigned g_htx_depth = 4;
-/* TXDE as the 68k sees it. Default: set while a whole block still fits in
- * the deep FIFO (HF_TXDE_ROOM), for DSPMOD's blind bursts.
- * PISTORM_DSP_TXDE=chip: the 56001's own rule - set while fewer than two
+/* TXDE as the 68k sees it: the 56001's own rule - set while fewer than two
  * words are in flight (the host's TX register and the DSP's HRX), so a 68k
  * that checks TXDE before each word waits for the DSP to take them, as on
  * a Falcon. Words written without checking still queue (the FIFO stays
- * deep). Sonolumineszenz needs it: its music interrupt's host command
+ * deep), so DSPMOD's blind bursts are unaffected (Beats of Rage, FalcAMP,
+ * ACE Tracker and DSPBench checked). PISTORM_DSP_TXDE=fifo restores the
+ * old rule: set while a whole block still fits in the FIFO (HF_TXDE_ROOM). Sonolumineszenz needs it: its music interrupt's host command
  * makes the DSP save every 68k word still in flight in a 10-word buffer
  * (X:$38AC) - with TXDE always set the main program had 24 queued, the
  * save ran over into the next buffer and the music state, the main
  * program's data came back with "DSP" in it, and the 68k ran into its own
  * command buffer (illegal instruction at $34A54). */
-static int g_txde_chip;
+static int g_txde_chip = 1;
 static inline int tx_empty(uint32_t txn)
 {
     return g_txde_chip ? txn < 2u : txn <= HF_SIZE - HF_TXDE_ROOM;
@@ -3194,9 +3194,9 @@ int falcon_init(uint8_t *guest, uint32_t guest_size)
         g_dsp_hz = DSP_HZ_REAL * t;
         host_hot_init();
         const char *tm = getenv("PISTORM_DSP_TXDE");
-        g_txde_chip = tm && (!strcmp(tm, "chip") || !strcmp(tm, "1"));
-        if (g_txde_chip)
-            fprintf(stderr, "[FALCON] host port TXDE: chip rule, two words in flight (PISTORM_DSP_TXDE=chip)\n");
+        g_txde_chip = !(tm && (!strcmp(tm, "fifo") || !strcmp(tm, "0")));
+        if (!g_txde_chip)
+            fprintf(stderr, "[FALCON] host port TXDE: set while the FIFO has room (PISTORM_DSP_TXDE=fifo)\n");
         const char *hd = getenv("PISTORM_DSP_HTX_DEPTH");
         if (hd) { int v = atoi(hd); if (v >= 1 && v <= 32768) g_htx_depth = (unsigned)v; }
         const char *vs = getenv("PISTORM_FALCON_VBLSYNC");
