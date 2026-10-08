@@ -1499,6 +1499,14 @@ struct emulator_config *load_config_file_section(char *filename,
          * namespace: every runtime tunable's name IS its .cfg key, so a
          * key added there needs no case here and no parser change. It
          * only warns if neither list knows the key. */
+        if (!strcasecmp(cur_cmd, "jit_power")) {
+          /* jit_power 0 is "JIT off" and it means it from boot: the
+           * interpreter is chosen by jit_cpu_init() from cfg->jit, so
+           * set that here. 1..6 is JIT on with that chain budget (the
+           * budget itself is the PSCTRL tunable below). */
+          cfg->jit = strtol(parse_line + str_pos, NULL, 0) != 0;
+          printf ("[CFG] JIT %s (jit_power)\n", cfg->jit ? "enabled" : "disabled");
+        }
         if (psctrl_settings_config_key(cur_cmd, parse_line + str_pos))
           break;
         if (!strcasecmp(cur_cmd, "vga_render") ||

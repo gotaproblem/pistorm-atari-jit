@@ -100,6 +100,9 @@ static volatile int g_pend_idx[PEND_MAX];
 static volatile int g_pend_val[PEND_MAX];
 static volatile int g_pend_n = 0;
 
+/* set while psctrl_settings_config_key() applies a .cfg line */
+static int g_cfg_loading = 0;
+
 static int defer(int idx, int value)
 {
   int n = g_pend_n;
@@ -372,6 +375,14 @@ static int js_power(const struct ps_item *it, int v)
   (void)it;
   if (v < 0 || v > 6)
     return PS_R_REJECT;
+  if (g_cfg_loading) {
+    /* from the .cfg: on/off is cfg->jit (config_file.c), which
+     * jit_cpu_init() reads; only the budget is ours. Deferring here
+     * queued a runtime JIT switch that undid the cfg. */
+    if (v)
+      pst_pissoff_mult = 256 << (v - 1);
+    return PS_R_OK;
+  }
   if (v == 0)
     return defer(item_index("jit_power"), 0);
   if (!currprefs.cachesize)
@@ -452,8 +463,8 @@ static int jg_compfpu(const struct ps_item *it)   { (void)it; return currprefs.c
 
 /* The tunable is what the .cfg reads and writes; currprefs is what runs.
  * While the .cfg is being loaded there is no CPU to defer to - jit_glue
- * seeds currprefs from the tunable when it starts. */
-static int g_cfg_loading = 0;
+ * seeds currprefs from the tunable when it starts. (g_cfg_loading is
+ * defined near the top: js_power needs it too.) */
 
 static int js_constjump(const struct ps_item *it, int v)
 {
