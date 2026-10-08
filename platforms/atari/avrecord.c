@@ -671,6 +671,68 @@ static void *writer_thread(void *arg)
 
 /* ------------------------------------------------------------- frames --- */
 
+/* The guest may change resolution while recording - a program opening its
+ * own screen mode and going back to the desktop's (POV-Ray does it around
+ * every animation frame). The recording keeps the size it started with;
+ * a frame of another size is fitted into it: aspect kept, centred, black
+ * borders, nearest-neighbour, whole-number scale when enlarging so pixels
+ * stay square and sharp. Render thread only, like the rest of this file. */
+static int  g_was_fitted = 0;    /* last frame was fitted: next native one is copied whole */
+static int *g_fit_xmap = NULL;   /* dest column -> source column */
+static int  g_fit_xmap_w = 0, g_fit_xmap_sw = 0;
+
+static void fit_frame(const void *fb, int stride_bytes, int w, int h)
+{
+    if (pthread_mutex_trylock(&g_fmx) != 0) {
+        /* writer busy: skip this one (the next frame comes along shortly),
+         * but make sure the next native-size copy covers everything */
+        g_was_fitted = 1;
+        return;
+    }
+
+    double s = (double)g_w / w;
+    if ((double)g_h / h < s)
+        s = (double)g_h / h;
+    if (s >= 1.0)
+        s = (double)(int)s;              /* integer enlargement */
+    int ow = (int)(w * s), oh = (int)(h * s);
+    if (ow < 1) ow = 1;
+    if (oh < 1) oh = 1;
+    if (ow > g_w) ow = g_w;
+    if (oh > g_h) oh = g_h;
+    int ox = (g_w - ow) / 2, oy = (g_h - oh) / 2;
+
+    if (g_fit_xmap_w != ow || g_fit_xmap_sw != w) {
+        int *m = realloc(g_fit_xmap, (size_t)ow * sizeof(int));
+        if (!m) {
+            pthread_mutex_unlock(&g_fmx);
+            return;
+        }
+        g_fit_xmap = m;
+        for (int x = 0; x < ow; x++)
+            g_fit_xmap[x] = (int)(((int64_t)x * w) / ow);
+        g_fit_xmap_w = ow;
+        g_fit_xmap_sw = w;
+    }
+
+    memset(g_latest, 0, (size_t)g_w * g_h * 4);
+    const uint8_t *src = (const uint8_t *)fb;
+    for (int y = 0; y < oh; y++) {
+        const uint32_t *sr = (const uint32_t *)(src +
+                              (size_t)(((int64_t)y * h) / oh) * stride_bytes);
+        uint32_t *dr = (uint32_t *)(g_latest + ((size_t)(oy + y) * g_w + ox) * 4);
+        for (int x = 0; x < ow; x++)
+            dr[x] = sr[g_fit_xmap[x]];
+    }
+    g_pend_valid = 0;                    /* the whole buffer is current */
+    pthread_mutex_unlock(&g_fmx);
+
+    if (!g_was_fitted)
+        fprintf(stderr, "[AVREC] frame size %dx%d: fitted into the %dx%d recording\n",
+                w, h, g_w, g_h);
+    g_was_fitted = 1;
+}
+
 void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
                           int dx0, int dy0, int dx1, int dy1)
 {
@@ -686,6 +748,7 @@ void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
         if (g_fps < 1 || g_fps > 60) g_fps = mode == REC_PNG ? 10 : 25;
         g_w = w; g_h = h;
         g_png_frame = 0;
+        g_was_fitted = 0;
 
         char path[600];
         g_fh264 = NULL;
@@ -747,10 +810,14 @@ void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
     }
 
     if (w != g_w || h != g_h) {
-        fprintf(stderr, "[AVREC] frame size changed (%dx%d -> %dx%d), stopping\n",
-                g_w, g_h, w, h);
-        avrecord_stop();
+        fit_frame(fb, stride_bytes, w, h);
         return;
+    }
+    if (g_was_fitted) {
+        /* back at the recording's own size after fitted frames: the
+         * buffer holds the fitted picture, so this copy must be whole */
+        dx0 = 0; dy0 = 0; dx1 = w - 1; dy1 = h - 1;
+        g_was_fitted = 0;
     }
 
     /* clamp this frame's dirty rect */
