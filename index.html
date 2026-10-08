@@ -317,7 +317,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
         <span class="chip"><b>●</b> Raspberry Pi 4</span>
         <span class="chip">382× an 8 MHz ST</span>
         <span class="chip">RPi OS Lite · Trixie · aarch64</span>
-        <span class="chip">MIT licence</span>
+        <span class="chip">Open source · MIT and GPL</span>
       </div>
     </div>
     <div class="gem" aria-label="Example session">
@@ -364,7 +364,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
       <div class="features">
         <div class="feat"><h4>JIT 68040 with FPU</h4><p>Based on the Amiberry ARM64 JIT with hardware FPU. Any CPU from 68000 to 68060, or the interpreter when you need exact behaviour.</p></div>
         <div class="feat"><h4>Direct ST-RAM access</h4><p><code>stram_cache</code> keeps a copy of ST-RAM on the Pi and writes through only what the hardware must see. <code>stram_direct</code> lets the JIT use it inline.</p></div>
-        <div class="feat"><h4>128 MB TT-RAM</h4><p>Fast RAM at <code>$01000000</code>, in the Pi's memory. MiNT and the JIT both want it.</p></div>
+        <div class="feat"><h4>Up to 256 MB TT-RAM</h4><p>Fast RAM at <code>$01000000</code>, in the Pi's memory. How much you can give it depends on how much RAM your Pi has.</p></div>
       </div>
     </div>
 
@@ -390,11 +390,11 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
       <h3>Input, drives and network</h3>
       <div class="features">
         <div class="feat"><h4>Xbox and USB gamepads</h4><p>Wired or Bluetooth pads as ST joysticks and STe joypads, in GEM, games and the ST Box. One line: <code>usb gamepad</code>.</p></div>
-        <div class="feat"><h4>USB keyboard and mouse</h4><p>Merged into the IKBD stream. The real ST keyboard and mouse keep working.</p></div>
+        <div class="feat"><h4>USB keyboard and mouse</h4><p>Merged into the IKBD stream. The real ST keyboard and mouse are optional: use them, USB, or both.</p></div>
         <div class="feat"><h4>Floppy, IDE, ACSI, HOSTFS</h4><p>WD1772 floppy emulation, IDE and ACSI disk images, and folders on the Pi as GEMDOS drives.</p></div>
-        <div class="feat"><h4>Networking</h4><p>FreeMiNT networking over the Pi's WiFi or Ethernet, through the NatFeat Ethernet driver.</p></div>
+        <div class="feat"><h4>Networking</h4><p>FreeMiNT networking over the Pi's WiFi, through the NatFeat Ethernet driver. The Pi's RJ45 Ethernet port isn't supported yet.</p></div>
         <div class="feat"><h4>Emulated blitter</h4><p>The ST BLiTTER in software over the RAM copy, with or without a real chip fitted.</p></div>
-        <div class="feat"><h4>ST Box</h4><p>A sandboxed 68000 ST or STe in a GEM window under APJ-OS, for games that want a plain machine. <a href="#stbox">More</a></p></div>
+        <div class="feat"><h4>ST Box</h4><p>A sandboxed 68000 ST or STe in a resizable GEM window under APJ-OS, for games that want a plain machine. <a href="#stbox">More</a></p></div>
       </div>
     </div>
   </div>
@@ -411,10 +411,12 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
       <div class="panel">
         <h3>Host</h3>
         <dl class="spec">
-          <dt>Board</dt><dd>Raspberry Pi 4, 2&nbsp;GB or more. The Pi 3B is tested with the APJ-OS install script.</dd>
+          <dt>Board</dt><dd>Raspberry Pi 4, 1&nbsp;GB or more. More RAM lets you give the Atari more TT-RAM. The Pi 3B is tested with the APJ-OS install script.</dd>
           <dt>OS</dt><dd>Raspberry Pi OS Lite, Trixie, 64-bit. Lite is required: a desktop holds the display and takes the isolated cores.</dd>
           <dt>Cores</dt><dd>2 for emulation, 2 for Linux. Build with <code>make -j2</code>.</dd>
           <dt>Display</dt><dd>A monitor on the Pi's HDMI, connected at boot, for HDMI output.</dd>
+          <dt>Input</dt><dd>The ST's own keyboard and mouse, or USB and Bluetooth ones on the Pi. Either works.</dd>
+          <dt>Network</dt><dd>The Pi's WiFi. RJ45 Ethernet isn't supported yet.</dd>
         </dl>
         <p class="note">The Pi 3A+ and Pi Zero 2 W have 512&nbsp;MB of RAM and can't fit the memory layout. The Pi 5's GPIO sits behind the RP1 chip, which is too slow for bus work.</p>
       </div>
@@ -536,6 +538,41 @@ sudo ./ataritest --memory tests=rw</pre></div>
     </div>
   </div>
 </section>
+
+<section class="block" id="licences">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Licences</span>
+      <h2>Open source, under several licences</h2>
+      <p>The repository's <code>LICENSE</code> is MIT, inherited from the PiStorm project. It also contains code under other licences, and the GPL parts decide the terms for the built emulator as a whole.</p>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Part</th><th>Licence</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td>PiStorm base, bus protocol and the Atari platform code (NatFeats, Falcon DSP, ST Box and others)</td><td class="k">MIT</td><td class="v">LICENSE, SPDX headers</td></tr>
+        <tr><td>68k CPU core, MMU and ARM64 JIT, from the UAE / WinUAE / Amiberry line</td><td class="k">GPL-2.0-or-later</td><td class="v">cpu/, jit/, include/uae/</td></tr>
+        <tr><td>SoftFloat FPU emulation (John R. Hauser)</td><td class="k">SoftFloat-2a / BSD</td><td class="v">softfloat/</td></tr>
+        <tr><td>Musashi 68000 core for the ST Box (Karl Stenerud)</td><td class="k">MIT-style</td><td class="v">third_party/musashi/</td></tr>
+        <tr><td>stb single-file libraries</td><td class="k">MIT or public domain</td><td class="v">third_party/stb/</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3 class="tbl-title">APJ-OS and its parts</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Part</th><th>Licence</th></tr></thead>
+      <tbody>
+        <tr><td>APJ-OS scripts and documentation</td><td class="k">GPL-2.0</td></tr>
+        <tr><td>FreeMiNT and XaAES, TeraDesk / Bespoke Desktop, TosWin2</td><td class="k">GPL-2.0</td></tr>
+        <tr><td>EmuTOS</td><td class="k">GPL-2.0</td></tr>
+        <tr><td>fVDI</td><td class="k">GPL</td></tr>
+        <tr><td>apj-os-tools GEM apps (PSCTRL, PSMON, PDFGEM, WEBGEM and others)</td><td class="k">MIT (per-file headers)</td></tr>
+        <tr><td>CoreMark, in PSCTRL's benchmark</td><td class="k">EEMBC licence + trademark terms</td></tr>
+        <tr><td>Dhrystone 2.1 (Reinhold P. Weicker)</td><td class="k">freely distributed source</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">Not included: Atari TOS ROM images and commercial Atari software. EmuTOS replaces TOS. Source for every GPL component, with all changes, is in the repositories linked above. This is a summary; the licence files in each repository are what apply.</p>
+  </div>
+</section>
 </div>
 
 <!-- ============================================================ CONFIG -->
@@ -623,7 +660,7 @@ hostfs S /home/pistorm/atari-share</pre>
         <tr><td class="k">jit_power</td><td class="v">0 – 6</td><td>The compiled-chain budget, 256 &lt;&lt; (N−1): 1 = 256 (default) up to 6 = 8192. 0 turns the JIT off. Step it down if MiNT beeps or the mouse gets erratic.</td></tr>
         <tr><td class="k">jit_cache</td><td class="v">KB, default 8192</td><td>The translation cache. 16384 for big applications.</td></tr>
         <tr><td class="k">machine</td><td class="v">st ste megast falcon</td><td>What the guest is told it is, and the hardware modelled around it.</td></tr>
-        <tr><td class="k">ttram</td><td class="v">size, 128M</td><td>TT-RAM in the Pi's memory. Needs a 32-bit CPU.</td></tr>
+        <tr><td class="k">ttram</td><td class="v">16M … 256M, default 128M</td><td>TT-RAM in the Pi's memory, up to 256 MB. The size you can use depends on the Pi's RAM. Needs a 32-bit CPU.</td></tr>
         <tr><td class="k">stram_size</td><td class="v">512K … 4M</td><td>The ST-RAM the guest sees, matched against the board's real DRAM.</td></tr>
         <tr><td class="k">stram_cache</td><td class="v">on / off</td><td>Serve CPU reads from a copy of ST-RAM on the Pi. Much faster.</td></tr>
         <tr><td class="k">stram_direct</td><td class="v">on / off</td><td>Let the JIT read and write that copy inline. Faster again, and breaks some software.</td></tr>
@@ -650,13 +687,13 @@ hostfs S /home/pistorm/atari-share</pre>
     <div class="tbl-wrap"><table>
       <thead><tr><th>Key</th><th>Values</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td class="k">kbd</td><td class="v">usb [nograb] [merge|standalone] [mousediv N]</td><td>USB or Bluetooth keyboard and mouse, injected into the IKBD stream. F12 toggles the grab.</td></tr>
+        <tr><td class="k">kbd</td><td class="v">usb [nograb] [merge|standalone] [mousediv N]</td><td>USB or Bluetooth keyboard and mouse, injected into the IKBD stream. The real ST keyboard and mouse are optional. F12 toggles the grab.</td></tr>
         <tr><td class="k">usb</td><td class="v">gamepad</td><td>Xbox and other pads as joysticks and STe joypads. Pad 0 is joystick 1 and pad A.</td></tr>
         <tr><td class="k">ide / hdd</td><td class="v">N:image</td><td>IDE disk images, up to 8. The first should be bootable.</td></tr>
         <tr><td class="k">acsi</td><td class="v">N:image</td><td>Emulated ACSI targets beside real devices. <code>.hfs</code> volumes for Spectre.</td></tr>
         <tr><td class="k">fdd</td><td class="v">A:image B:image</td><td>Floppy drives: <code>.st</code> read-write, <code>.msa</code> read-only. F11 swaps disks.</td></tr>
         <tr><td class="k">hostfs</td><td class="v">drive path [ro]</td><td>A Pi folder as a GEMDOS drive. The installed share is S:.</td></tr>
-        <tr><td class="k">network</td><td class="v">on / off</td><td>FreeMiNT networking over a TAP device, set up by <code>netstart.sh</code>.</td></tr>
+        <tr><td class="k">network</td><td class="v">on / off</td><td>FreeMiNT networking over a TAP device, set up by <code>netstart.sh</code>. WiFi only for now; the RJ45 port isn't supported yet.</td></tr>
       </tbody>
     </table></div>
   </div>
@@ -773,23 +810,13 @@ cd ../psmon && make</pre></div>
       <h2>How it's built</h2>
       <p>The box has its own ST-RAM, its own TOS ROM, and its own models of the Shifter, MFP, PSG, ACIA and floppy controller. A Musashi 68000 core runs it, paced against the Pi's clock to exactly 8.021248&nbsp;MHz and a 50.05&nbsp;Hz PAL frame.</p>
       <p>It runs on core 3 in small, bounded slices between the main machine's interrupt work, so the APJ-OS desktop keeps running alongside it. Its picture goes to a spare HDMI overlay plane laid exactly over the GEM window, so video playback and the box can share the screen.</p>
+      <p>The window resizes in real time while the box runs. Drag it to any size, up to full screen, and the picture scales with it, keeping the ST's aspect ratio.</p>
       <p>Nothing the box does touches the real ST. Its memory, disks and hardware are all its own.</p>
     </div>
-    <div class="gem">
-      <div class="gem-bar"><span class="closer"></span><span class="ttl">STBOX — TOS 2.06 · STE · 4 MB</span><span></span></div>
-      <div style="aspect-ratio:16/10;max-width:100%;background:#0000a8;display:grid;place-items:center;position:relative;overflow:hidden" role="img" aria-label="Illustration of an ST desktop running inside the ST Box window">
-        <div style="position:absolute;inset:0 0 auto 0;height:9%;background:#fff;color:#000;font:500 0.72rem/1 var(--f-mono);display:flex;align-items:center;gap:16px;padding-inline:10px">Desk&nbsp;&nbsp;File&nbsp;&nbsp;View&nbsp;&nbsp;Options</div>
-        <div style="position:absolute;left:5%;top:16%;display:grid;gap:14px;justify-items:center;color:#fff;font:500 0.66rem/1 var(--f-mono)">
-          <span style="width:30px;height:24px;background:#fff;border:2px solid #000;display:block"></span>FLOPPY A
-          <span style="width:30px;height:24px;background:#fff;border:2px solid #000;display:block"></span>FLOPPY B
-        </div>
-        <div style="background:#fff;color:#000;border:2px solid #000;width:58%;font:500 0.7rem/1.5 var(--f-mono);margin-left:12%">
-          <div style="border-bottom:2px solid #000;padding:3px 8px;text-align:center">A:\</div>
-          <div style="padding:8px 10px;display:grid;grid-template-columns:1fr 1fr;gap:4px 12px"><span>XENON2.PRG</span><span>AUTO</span><span>DESKTOP.INF</span><span>GAME.DAT</span></div>
-        </div>
-      </div>
-      <p class="caption" style="padding:0 14px 12px">Illustration. ESC moves the mouse between the box and the desktop.</p>
-    </div>
+    <figure style="margin:0;min-width:0">
+      <a href="stbox-desktop.png" class="shot"><img src="stbox-desktop.png" width="1920" height="1080" alt="The ST Box window open on the APJ-OS desktop next to a Z: drive window full of .st and .msa game images"></a>
+      <figcaption class="caption">The ST Box on the APJ-OS desktop, beside a folder of game images on Z:. The box's picture is drawn on its own HDMI overlay plane, so a screen dump shows the window empty.</figcaption>
+    </figure>
   </div>
 </section>
 
@@ -843,6 +870,7 @@ cd ../psmon && make</pre></div>
         <div class="feat"><h4>PSG sound</h4><p>The YM2149 mixed into the Pi's audio output.</p></div>
         <div class="feat"><h4>Memory sizing</h4><p>MMU bank aliasing, so TOS sizes 512K, 1M, 2M and 4M correctly.</p></div>
         <div class="feat"><h4>Input</h4><p>USB keyboard and mouse, the real ST keyboard, mouse and joystick, and Xbox or USB gamepads, routed to whichever has focus.</p></div>
+        <div class="feat"><h4>Resizable window</h4><p>Resize the window while a game runs. The picture scales in real time and keeps the ST's aspect ratio.</p></div>
         <div class="feat"><h4>Crash reports</h4><p>A double bus fault halts the box with a 64K PC trace, a disassembly of the scene and write watchpoints.</p></div>
       </div>
     </div>
@@ -1079,8 +1107,8 @@ HARNESS_STE=1 ROMS=roms GAMES=games \
 <footer>
   <div class="wrap">
     <div>
-      <p><strong style="color:var(--ink)">PiSTorm Atari JIT</strong> · MIT licence · by gotaproblem</p>
-      <p>JIT based on Amiberry. NatFeats from ARAnyM. PiStorm hardware by the PiStorm project.</p>
+      <p><strong style="color:var(--ink)">PiSTorm Atari JIT</strong> · by gotaproblem · <a href="#licences">Licences</a></p>
+      <p>JIT and CPU core from Amiberry/WinUAE. NatFeats from ARAnyM. PiStorm hardware by Claude Schwarz and the PiStorm community.</p>
     </div>
     <div class="discord">
       <span>Atari PiSTorm Discord</span>
