@@ -1046,11 +1046,18 @@ LOWFUNC(NONE,WRITE,2,raw_fp_from_exten_mr,(RR4 adr, FR s))
 	uae_u32* branchadd_end = (uae_u32*)get_target();
 	B_i(0);            // end_of_op
 
-	// isnan
+	// isnan: exponent all ones - infinity when the fraction is 0, else
+	// NaN. (This used to write NaN for both, and +inf came back as 2.0.)
 	write_jmp_target(branchadd_isnan, (uintptr)get_target());
-	MOV_xish(REG_WORK1, 0x7fff, 16);
-	MOVN_xi(REG_WORK2, 0);
-	B_i(4);
+	LSL_xxi(REG_WORK3, REG_WORK1, 12);          // fraction bits only
+	UBFX_xxii(REG_WORK1, REG_WORK1, 63, 1);     // extract sign
+	LSL_xxi(REG_WORK1, REG_WORK1, 31);
+	MOV_xish(REG_WORK2, 0x7fff, 16);
+	ORR_xxx(REG_WORK1, REG_WORK1, REG_WORK2);   // sign | exponent 7fff
+	MOVN_xi(REG_WORK2, 0);                      // NaN: mantissa all ones
+	CBNZ_xi(REG_WORK3, 2);
+	MOV_xi(REG_WORK2, 0);                       // infinity: mantissa 0
+	B_i(4);                                     // -> REV32 below
 
 	// iszero
 	write_jmp_target(branchadd_iszero, (uintptr)get_target());
@@ -1098,6 +1105,25 @@ LOWFUNC(NONE,READ,2,raw_fp_to_exten_rm,(FW d, RR4 adr))
 	// not_zero
 	write_jmp_target(branchadd_notzero, (uintptr)get_target());
 	write_jmp_target(branchadd_notzero2, (uintptr)get_target());
+	// exponent all ones: infinity when the fraction (the explicit integer
+	// bit is already cleared) is 0, else NaN. The rebias below would turn
+	// either into a number near 1.0 (+inf came back as 2.0).
+	MOV_xi(REG_WORK3, 0x7fff);
+	CMP_xx(REG_WORK2, REG_WORK3);
+	uae_u32* branchadd_finite = (uae_u32*)get_target();
+	BNE_i(0);				// finite
+	UBFX_xxii(REG_WORK4, REG_WORK4, 15, 1);		// extract sign
+	LSL_xxi(REG_WORK4, REG_WORK4, 63);
+	MOV_xish(REG_WORK2, 0x7ff0, 48);			// infinity
+	ORR_xxx(REG_WORK2, REG_WORK2, REG_WORK4);
+	CBZ_xi(REG_WORK1, 2);
+	SET_xxbit(REG_WORK2, REG_WORK2, 51);		// quiet NaN
+	FMOV_dx(d, REG_WORK2);
+	uae_u32* branchadd_end3 = (uae_u32*)get_target();
+	B_i(0);					// end_of_op
+
+	// finite
+	write_jmp_target(branchadd_finite, (uintptr)get_target());
 	MOV_xi(REG_WORK3, 15360);                 // diff of bias between double and long double
 	SUB_xxx(REG_WORK2, REG_WORK2, REG_WORK3);	// exponent done, ToDo: check for carry -> result gets Inf in double
 	UBFX_xxii(REG_WORK4, REG_WORK4, 15, 1);		// extract sign
@@ -1110,6 +1136,7 @@ LOWFUNC(NONE,READ,2,raw_fp_to_exten_rm,(FW d, RR4 adr))
 	// end_of_op
 	write_jmp_target(branchadd_end, (uintptr)get_target());
 	write_jmp_target(branchadd_end2, (uintptr)get_target());
+	write_jmp_target(branchadd_end3, (uintptr)get_target());
 }
 LENDFUNC(NONE,READ,2,raw_fp_to_exten_rm,(FW d, RR4 adr))
 

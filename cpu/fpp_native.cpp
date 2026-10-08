@@ -422,6 +422,16 @@ static void fp_to_exten(fpdata *fpd, uae_u32 wrd1, uae_u32 wrd2, uae_u32 wrd3)
 			fpd->fp = (wrd1 & 0x80000000) ? -0.0 : +0.0;
 			return;
 		}
+		if ((wrd1 & 0x7fff0000) == 0x7fff0000) {
+			/* exponent all ones: infinity when the fraction (the
+			 * mantissa less its explicit integer bit) is 0, else NaN.
+			 * The ldexp() below would turn either into 0 or inf. */
+			if ((wrd2 & 0x7fffffff) == 0 && wrd3 == 0)
+				fpd->fp = (wrd1 & 0x80000000) ? -INFINITY : INFINITY;
+			else
+				fpd->fp = (wrd1 & 0x80000000) ? -NAN : NAN;
+			return;
+		}
 		frac = ((double)wrd2 + ((double)wrd3 / twoto32)) / 2147483648.0;
 		if (wrd1 & 0x80000000) {
 			frac = -frac;
@@ -432,6 +442,16 @@ static void fp_to_exten(fpdata *fpd, uae_u32 wrd1, uae_u32 wrd2, uae_u32 wrd3)
 		double frac;
 		if ((wrd1 & 0x7fff0000) == 0 && wrd2 == 0 && wrd3 == 0) {
 			fpd->fp = (wrd1 & 0x80000000) ? -0.0 : +0.0;
+			return;
+		}
+		if ((wrd1 & 0x7fff0000) == 0x7fff0000) {
+			/* exponent all ones: infinity when the fraction (the
+			 * mantissa less its explicit integer bit) is 0, else NaN.
+			 * The ldexp() below would turn either into 0 or inf. */
+			if ((wrd2 & 0x7fffffff) == 0 && wrd3 == 0)
+				fpd->fp = (wrd1 & 0x80000000) ? -INFINITY : INFINITY;
+			else
+				fpd->fp = (wrd1 & 0x80000000) ? -NAN : NAN;
 			return;
 		}
 		frac = ((double)wrd2 + ((double)wrd3 / twoto32)) / 2147483648.0;
@@ -466,6 +486,14 @@ static void fp_from_exten(fpdata *fpd, uae_u32 *wrd1, uae_u32 *wrd2, uae_u32 *wr
 			*wrd2 = 0xffffffff;
 			*wrd3 = 0xffffffff;
 			return;
+		} else if (fp_is_infinity(fpd)) {
+			/* frexp() of an infinity leaves the exponent unspecified
+			 * and (uae_u32) of inf saturates on AArch64: +inf came out
+			 * as 3FFF FFFFFFFF FFFFFFFF, read back as 2.0 */
+			*wrd1 = (signbit(fpd->fp) ? 0x80000000 : 0) | 0x7fff0000;
+			*wrd2 = 0;
+			*wrd3 = 0;
+			return;
 		}
 		v = fpd->fp;
 		if (v < 0) {
@@ -499,6 +527,15 @@ static void fp_from_exten(fpdata *fpd, uae_u32 *wrd1, uae_u32 *wrd2, uae_u32 *wr
 		*wrd1 = 0x7fff0000;
 		*wrd2 = 0xffffffff;
 		*wrd3 = 0xffffffff;
+		return;
+	}
+	else if (fp_is_infinity(fpd)) {
+		/* frexp() of an infinity leaves the exponent unspecified and
+		 * (uae_u32) of inf saturates on AArch64: +inf came out as
+		 * 3FFF FFFFFFFF FFFFFFFF, read back as 2.0 */
+		*wrd1 = (signbit(fpd->fp) ? 0x80000000 : 0) | 0x7fff0000;
+		*wrd2 = 0;
+		*wrd3 = 0;
 		return;
 	}
 	v = fpd->fp;
