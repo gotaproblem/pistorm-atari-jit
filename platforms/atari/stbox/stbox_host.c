@@ -76,6 +76,25 @@ struct sbuf {
 static struct sbuf g_buf[NBUF];
 static int g_cur;
 
+/* SCREEN CAPTURE (screendump + recorder, et4000.c).
+ *
+ * The box is on its own overlay plane, composited above the Atari
+ * framebuffer at scanout, so a dump of the framebuffer has a black hole
+ * where the box is. The render thread records what it last put on the
+ * plane - which buffer, the source rect in it and the destination rect in
+ * display pixels, plus the presenter geometry it mapped through - and
+ * stbox_capture_blend() draws exactly that into a COPY of the framebuffer.
+ *
+ * g_cap_lock covers convert -> commit -> flip on the render thread, so a
+ * capture can never read a buffer that is being rewritten. Both threads are
+ * on cores 0/1; nothing here touches core 3. */
+static pthread_mutex_t g_cap_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_cap_valid;       /* plane is showing g_cap_buf       */
+static int g_cap_buf;
+static uint32_t g_cap_sx, g_cap_sy, g_cap_sw, g_cap_sh;   /* in the buffer */
+static int g_cap_dx, g_cap_dy, g_cap_dw, g_cap_dh;        /* display px    */
+static int g_cap_ddx, g_cap_ddy, g_cap_ddw, g_cap_ddh;    /* presenter dst */
+
 /* atomic props */
 static int g_atomic;
 static uint32_t pr_fb, pr_crtc, pr_cx, pr_cy, pr_cw, pr_ch,
@@ -748,6 +767,7 @@ static void *render_main(void *arg)
         if (fr == last_frame) { usleep(2000); continue; }
         last_frame = fr;
 
+        pthread_mutex_lock(&g_cap_lock);
         struct sbuf *b = &g_buf[g_cur];
         int sw, sh;
         int res_dbg = stbox_shared.shift_res;
@@ -783,6 +803,8 @@ static void *render_main(void *arg)
             int y1 = (dy + dh) < (cy + ch) ? (dy + dh) : (cy + ch);
             if (x1 <= x0 || y1 <= y0) {        /* fully covered: hide  */
                 commit(0, 0, 0, 0, 0, 0, 0, 0, 0);
+                g_cap_valid = 0;
+                pthread_mutex_unlock(&g_cap_lock);
                 continue;
             }
             sx = (uint32_t)((int64_t)(x0 - dx) * sw / dw);
@@ -802,10 +824,109 @@ static void *render_main(void *arg)
                     b->fb, sx, sy, vw, vh, dx, dy, dw, dh, cr,
                     cr < 0 ? errno : 0, fr, res_dbg, stbox_shared.video_base);
         }
+        if (cr == 0) {
+            g_cap_buf = g_cur;
+            g_cap_sx = sx; g_cap_sy = sy; g_cap_sw = vw; g_cap_sh = vh;
+            g_cap_dx = dx; g_cap_dy = dy; g_cap_dw = dw; g_cap_dh = dh;
+            g_cap_ddx = ddx; g_cap_ddy = ddy; g_cap_ddw = ddw; g_cap_ddh = ddh;
+            g_cap_valid = 1;
+        } else
+            g_cap_valid = 0;
         g_cur ^= 1;
+        pthread_mutex_unlock(&g_cap_lock);
     }
+    pthread_mutex_lock(&g_cap_lock);
+    g_cap_valid = 0;
+    pthread_mutex_unlock(&g_cap_lock);
     commit(0, 0, 0, 0, 0, 0, 0, 0, 0);         /* hide on exit */
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* screen capture                                                     */
+/* ------------------------------------------------------------------ */
+int stbox_capture_pending(void)
+{
+    return g_started && g_cap_valid;
+}
+
+int stbox_capture_blend(void *dstv, int dst_stride, int dst_w, int dst_h)
+{
+    static uint32_t *xmap, *row;
+    static int xmap_n, row_n;
+    int rc = 0;
+
+    if (!dstv || dst_stride <= 0 || dst_w <= 0 || dst_h <= 0)
+        return 0;
+    if (!stbox_capture_pending())
+        return 0;
+
+    pthread_mutex_lock(&g_cap_lock);
+    if (!g_cap_valid || g_cap_ddw <= 0 || g_cap_ddh <= 0 ||
+        !g_cap_sw || !g_cap_sh)
+        goto out;
+    {
+        const struct sbuf *b = &g_buf[g_cap_buf];
+        if (!b->map || !b->pitch)
+            goto out;
+
+        /* Display pixels -> framebuffer pixels: the inverse of the MAPX/MAPY
+         * the render loop used, through the same presenter geometry. */
+        int64_t fx0 = (int64_t)(g_cap_dx - g_cap_ddx) * dst_w / g_cap_ddw;
+        int64_t fy0 = (int64_t)(g_cap_dy - g_cap_ddy) * dst_h / g_cap_ddh;
+        int64_t fx1 = (int64_t)(g_cap_dx + g_cap_dw - g_cap_ddx) * dst_w / g_cap_ddw;
+        int64_t fy1 = (int64_t)(g_cap_dy + g_cap_dh - g_cap_ddy) * dst_h / g_cap_ddh;
+        int64_t fw = fx1 - fx0, fh = fy1 - fy0;
+        if (fw < 1 || fh < 1)
+            goto out;
+        int x0 = fx0 < 0 ? 0 : (int)fx0;
+        int y0 = fy0 < 0 ? 0 : (int)fy0;
+        int x1 = fx1 > dst_w ? dst_w : (int)fx1;
+        int y1 = fy1 > dst_h ? dst_h : (int)fy1;
+        if (x1 <= x0 || y1 <= y0)
+            goto out;
+
+        /* Never read past the buffer, whatever the geometry says. */
+        uint32_t sw = g_cap_sw, sh = g_cap_sh;
+        if (g_cap_sx >= SRC_W || g_cap_sy >= SRC_H)
+            goto out;
+        if (g_cap_sx + sw > SRC_W) sw = SRC_W - g_cap_sx;
+        if (g_cap_sy + sh > SRC_H) sh = SRC_H - g_cap_sy;
+
+        int n = x1 - x0;
+        if (xmap_n < n) {
+            uint32_t *p = realloc(xmap, (size_t)n * sizeof *xmap);
+            if (!p) goto out;
+            xmap = p; xmap_n = n;
+        }
+        if (row_n < (int)sw) {
+            uint32_t *p = realloc(row, (size_t)sw * sizeof *row);
+            if (!p) goto out;
+            row = p; row_n = (int)sw;
+        }
+        for (int x = x0; x < x1; x++)
+            xmap[x - x0] = (uint32_t)((int64_t)(x - fx0) * sw / fw);
+
+        /* The dumb buffer is write-combined, so CPU reads are slow: pull
+         * each source row into cached memory once and scale from there.
+         * Nearest neighbour - ST pixels are meant to look like squares. */
+        int last_sy = -1;
+        for (int y = y0; y < y1; y++) {
+            int syy = (int)g_cap_sy + (int)((int64_t)(y - fy0) * sh / fh);
+            if (syy != last_sy) {
+                memcpy(row, b->map + (size_t)syy * b->pitch + (size_t)g_cap_sx * 4,
+                       (size_t)sw * 4);
+                last_sy = syy;
+            }
+            uint32_t *d = (uint32_t *)((uint8_t *)dstv + (size_t)y * dst_stride) + x0;
+            for (int i = 0; i < n; i++)
+                d[i] = row[xmap[i]] | 0xFF000000u;   /* XRGB -> opaque ARGB */
+        }
+        rc = 1;
+    }
+out:
+    pthread_mutex_unlock(&g_cap_lock);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */

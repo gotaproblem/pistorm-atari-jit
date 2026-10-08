@@ -70,6 +70,16 @@ int  stbox_get_focus(void);
 /* stats for PSMON/NatFeat: guest MIPS-ish, frames, slice overruns */
 void stbox_get_stats(uint32_t out[4]);
 
+/* Screen capture: the box is an overlay plane, so it is not in the Atari
+ * framebuffer that screendumps and the recorder read. stbox_capture_blend()
+ * draws what the plane is showing - same rect, same clip - into a COPY of
+ * that framebuffer (ARGB8888, dst_stride in BYTES). Returns 1 if it drew,
+ * 0 if there was nothing to draw (not running, hidden, fully covered).
+ * stbox_capture_pending() is the cheap check, so a caller can skip the
+ * framebuffer copy entirely when it is 0. Any thread except core 3. */
+int  stbox_capture_pending(void);
+int  stbox_capture_blend(void *dst, int dst_stride, int dst_w, int dst_h);
+
 /* ------------------------------------------------------------------ */
 /* sandbox PSG audio (stbox_psg.c renders; stbox.c produces)          */
 /* ------------------------------------------------------------------ */

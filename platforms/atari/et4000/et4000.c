@@ -37,6 +37,7 @@
 
 #include "et4000.h"
 #include "../video/vidplay.h"
+#include "../stbox/stbox.h"      /* ST Box overlay: screendump/recorder blend */
 #include "../psvidel/psvidel.h"
 #include "../../../config_file/config_file.h"
 
@@ -872,7 +873,7 @@ static void et4000_start_screenrecord(int seconds)
     printf("[ET4K] Recording %d seconds -> %s\n", seconds, g_screenrecord_dir);
 }
 
-/* THE VIDEO OVERLAY IS NOT IN THE FRAMEBUFFER.
+/* THE OVERLAYS ARE NOT IN THE FRAMEBUFFER.
  *
  * s->fb_mem is the Atari screen. A film plays on a separate DRM plane which the
  * display controller composites above it at scanout, so a recording taken
@@ -883,6 +884,10 @@ static void et4000_start_screenrecord(int seconds)
  * So while something is playing, take a COPY of the framebuffer and let vidplay
  * draw the current frame into it. A copy specifically: blending into fb_mem
  * would put the film on the real Atari monitor too.
+ *
+ * The ST Box is the same story - its own overlay plane over a GEM window - so
+ * while it is on screen stbox_capture_blend() draws its picture into the same
+ * copy, after the film.
  *
  * Returns the buffer to hand to the recorder - fb_mem itself when there is
  * nothing to blend, which is the usual case and costs nothing. */
@@ -895,9 +900,10 @@ static const void *et4000_record_compose(ET4000State *s, int *full_frame)
     int rc;
 
     int pending = vidplay_capture_pending();
+    int box     = stbox_capture_pending();
 
     *full_frame = 0;
-    if (pending == 0)
+    if (pending == 0 && !box)
         return s->fb_mem;
     if (pending < 0) {
         /* Zero-copy HEVC: the frames are Broadcom SAND-tiled dmabufs and the
@@ -913,7 +919,8 @@ static const void *et4000_record_compose(ET4000State *s, int *full_frame)
                             "cannot read its frames - the recording will have "
                             "sound but no picture where the film is.\n");
         }
-        return s->fb_mem;
+        if (!box)
+            return s->fb_mem;
     }
 
     /* PACE AGAINST THE WRITER, NOT THE RENDER LOOP.
@@ -964,9 +971,16 @@ static const void *et4000_record_compose(ET4000State *s, int *full_frame)
     }
     memcpy(g_rec_scratch, s->fb_mem, need);
 
-    rc = vidplay_capture_blend(g_rec_scratch, (int)s->fb_stride,
-                               (int)s->fb_width, (int)s->fb_height);
-    if (rc <= 0)
+    rc = 0;
+    if (pending > 0 &&
+        vidplay_capture_blend(g_rec_scratch, (int)s->fb_stride,
+                              (int)s->fb_width, (int)s->fb_height) > 0)
+        rc = 1;
+    if (box &&
+        stbox_capture_blend(g_rec_scratch, (int)s->fb_stride,
+                            (int)s->fb_width, (int)s->fb_height) > 0)
+        rc = 1;
+    if (!rc)
         return s->fb_mem;   /* nothing drawn (fully clipped, or it just went) */
 
     /* The blended region changes every frame and the guest knows nothing about
@@ -979,12 +993,13 @@ static const void *et4000_record_compose(ET4000State *s, int *full_frame)
  * framebuffer has a hole where the picture is (the plane composites at
  * scanout), so blend the film's current frame into a COPY first - the same
  * mechanism the screen recorder uses. Zero-copy HEVC frames are
- * CPU-unreadable; those dumps keep the hole, with a note saying why. */
+ * CPU-unreadable; those dumps keep the hole, with a note saying why.
+ * The ST Box's overlay is blended into the same copy, after the film. */
 static void et4000_do_screendump(ET4000State *s)
 {
     const uint32_t *src;
     uint32_t *tmp = NULL;
-    int pend;
+    int pend, box;
 
     if (!s->fb_mem || !s->fb_width || !s->fb_height || !s->fb_stride)
     {
@@ -994,19 +1009,29 @@ static void et4000_do_screendump(ET4000State *s)
 
     src = (const uint32_t *)s->fb_mem;
     pend = vidplay_capture_pending();
+    box  = stbox_capture_pending();
 
-    if (pend > 0)
+    if (pend > 0 || box)
     {
         size_t need = (size_t)s->fb_stride * s->fb_height;
         tmp = malloc(need);
         if (tmp)
         {
+            int drawn = 0;
             memcpy(tmp, s->fb_mem, need);
-            if (vidplay_capture_blend(tmp, (int)s->fb_stride,
-                                      (int)s->fb_width, (int)s->fb_height) == 0)
+            if (pend > 0 &&
+                vidplay_capture_blend(tmp, (int)s->fb_stride,
+                                      (int)s->fb_width, (int)s->fb_height) > 0)
+                drawn = 1;
+            if (box &&
+                stbox_capture_blend(tmp, (int)s->fb_stride,
+                                    (int)s->fb_width, (int)s->fb_height) > 0)
+                drawn = 1;
+            if (drawn)
                 src = tmp;
         }
-    } else if (pend < 0)
+    }
+    if (pend < 0)
     {
         fprintf(stderr, "[DISPLAY] note: this film decodes straight into the "
                 "display hardware (zero-copy HEVC) - the dump will have a "
