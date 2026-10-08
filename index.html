@@ -1,0 +1,1186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="PiSTorm Atari JIT: an ARM64 JIT 68040 on a Raspberry Pi 4 in the 68000 socket of a real Atari ST, plus the APJ-OS desktop.">
+<title>PiSTorm Atari JIT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+html{-webkit-text-size-adjust:100%} body{margin:0} img{max-width:100%} [hidden]{display:none!important}
+/* Layout: a small multi-page site in one file (hash routes: home, benchmarks, config, psctrl). Sticky nav; pages alternate prose with GEM-style "window" panels. */
+:root {
+  --bg: #f3f5f2;
+  --surface: #ffffff;
+  --ink: #16201b;
+  --muted: #56645c;
+  --line: #d6ddd7;
+  --accent: #0b7a52;
+  --accent-ink: #ffffff;
+  --accent-soft: #e2f0e9;
+  --raspberry: #c51a4a;
+  --bar-muted: #b9c6bf;
+  --term-bg: #0f1713;
+  --term-fg: #d6f5e4;
+  --term-dim: #7fa892;
+  --term-prompt: #5ad6a2;
+  --warn: #9a5b00;
+  --warn-soft: #fbf0dc;
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --step--1: 0.84rem;
+  --step-0: 1rem;
+  --step-1: 1.2rem;
+  --step-2: 1.55rem;
+  --step-3: 2.1rem;
+  --step-4: clamp(2.4rem, 6vw, 4.2rem);
+  --radius: 4px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1411; --surface: #151d19; --ink: #e5ece7; --muted: #9aaaa1; --line: #29342e;
+    --accent: #3fc48f; --accent-ink: #06130d; --accent-soft: #173326; --bar-muted: #3b4b43;
+    --raspberry: #ff5c86; --term-bg: #08100c; --term-fg: #d6f5e4; --term-dim: #6f9884; --term-prompt: #5ad6a2;
+    --warn: #f0b45a; --warn-soft: #2b2112; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1411; --surface: #151d19; --ink: #e5ece7; --muted: #9aaaa1; --line: #29342e;
+  --accent: #3fc48f; --accent-ink: #06130d; --accent-soft: #173326; --bar-muted: #3b4b43;
+  --raspberry: #ff5c86; --term-bg: #08100c; --term-fg: #d6f5e4; --term-dim: #6f9884; --term-prompt: #5ad6a2;
+  --warn: #f0b45a; --warn-soft: #2b2112; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 400 var(--step-0)/1.6 var(--f-body); }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wrap { max-width: 1120px; margin-inline: auto; padding-inline: 20px; }
+h1, h2, h3 { font-family: var(--f-display); line-height: 1.1; text-wrap: balance; margin: 0; }
+h1 { font-size: var(--step-4); font-weight: 800; letter-spacing: -0.025em; }
+h2 { font-size: var(--step-3); font-weight: 800; letter-spacing: -0.01em; }
+h3 { font-size: var(--step-1); font-weight: 700; }
+p { margin: 0; }
+code { font-family: var(--f-mono); font-size: 0.9em; background: var(--accent-soft); padding: 0.1em 0.35em; border-radius: 3px; overflow-wrap: anywhere; }
+.eyebrow { font: 500 var(--step--1)/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); }
+.muted { color: var(--muted); }
+
+/* nav */
+.nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); }
+.nav .wrap { display: flex; align-items: center; gap: 20px; padding-block: 12px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 10px; font: 800 1.05rem/1 var(--f-display); color: var(--ink); text-decoration: none; }
+.nav ul { display: flex; gap: 4px 18px; list-style: none; margin: 0 0 0 auto; padding: 0; flex-wrap: wrap; }
+.nav ul a { color: var(--muted); text-decoration: none; font-size: 0.94rem; padding-block: 4px; border-bottom: 2px solid transparent; }
+.nav ul a:hover { color: var(--ink); }
+.nav ul a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+
+.devbar { background: var(--warn-soft); color: var(--ink); font-size: 0.9rem; border-bottom: 1px solid var(--line); }
+.devbar .wrap { padding-block: 8px; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.devbar b { font: 500 0.72rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--warn); }
+
+/* hero */
+.hero { padding-block: 64px 56px; }
+.hero .wrap { display: grid; grid-template-columns: 1.05fr 1fr; gap: 48px; align-items: center; }
+.hero h1 em { font-style: normal; color: var(--accent); }
+.lede { font-size: var(--step-1); color: var(--muted); max-width: 40ch; }
+.hero .copy { display: grid; gap: 18px; min-width: 0; }
+.cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: var(--radius); font: 600 0.95rem/1 var(--f-body); text-decoration: none; border: 1px solid var(--line); color: var(--ink); background: var(--surface); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:hover { filter: brightness(1.06); }
+.specline { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font: 500 0.8rem/1 var(--f-mono); padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--surface); }
+.chip b { color: var(--raspberry); font-weight: 500; }
+
+/* GEM-style window */
+.gem { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; min-width: 0; box-shadow: 0 12px 32px -18px rgb(0 0 0 / 0.35); }
+.gem-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); font: 500 0.82rem/1 var(--f-mono); color: var(--muted); }
+.gem-bar .closer { width: 12px; height: 12px; border: 1.5px solid var(--muted); border-radius: 2px; flex: none; }
+.gem-bar .ttl { flex: 1; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term { background: var(--term-bg); color: var(--term-fg); font: 400 0.86rem/1.7 var(--f-mono); padding: 18px 20px; overflow-x: auto; margin: 0; white-space: pre; }
+.term .c { color: var(--term-dim); }
+.term .p { color: var(--term-prompt); }
+
+/* sections */
+section.block { padding-block: 72px; border-top: 1px solid var(--line); }
+.page-head { padding-block: 56px 40px; }
+.page-head .wrap { display: grid; gap: 14px; }
+.page-head h1 { font-size: clamp(2.2rem, 5vw, 3.4rem); }
+.sec-head { display: grid; gap: 12px; max-width: 64ch; margin-bottom: 36px; }
+.sec-head p { color: var(--muted); font-size: var(--step-1); }
+.prose { display: grid; gap: 14px; max-width: 68ch; }
+.prose p { color: var(--muted); }
+
+/* stack diagram */
+.stack { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; }
+.layer { padding: 22px 20px; display: grid; gap: 8px; align-content: start; border-right: 1px solid var(--line); min-width: 0; }
+.layer:last-child { border-right: 0; }
+.layer .tag { font: 500 0.75rem/1 var(--f-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+.layer h3 { font-size: 1.08rem; }
+.layer p { color: var(--muted); font-size: 0.94rem; }
+.layer.pi .tag { color: var(--raspberry); }
+
+.features { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px 36px; }
+.feat-group + .feat-group { margin-top: 48px; }
+.feat-group > h3 { font: 500 var(--step--1)/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 20px; }
+.feat { display: grid; gap: 6px; padding-top: 14px; border-top: 2px solid var(--ink); align-content: start; min-width: 0; }
+.feat h4 { font: 700 1.05rem/1.25 var(--f-display); margin: 0; }
+.feat p { color: var(--muted); font-size: 0.95rem; }
+
+/* hardware */
+.hw { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+dl.spec { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 20px; margin: 0; }
+dl.spec dt { font: 500 0.82rem/1.6 var(--f-mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+dl.spec dd { margin: 0; }
+.note { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 12px 16px; border-radius: 0 var(--radius) var(--radius) 0; font-size: 0.95rem; }
+
+/* install */
+.routes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-bottom: 48px; }
+.route .badge { font: 500 0.72rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.1em; padding: 4px 7px; border-radius: 3px; justify-self: start; background: var(--accent-soft); color: var(--accent); }
+ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 28px; counter-reset: s; }
+ol.steps > li { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 4px 20px; counter-increment: s; }
+ol.steps > li::before { content: counter(s); grid-row: span 3; font: 800 1.6rem/1 var(--f-display); color: var(--accent); border: 2px solid var(--accent); width: 46px; height: 46px; display: grid; place-items: center; border-radius: var(--radius); }
+ol.steps p { color: var(--muted); }
+.cmd { position: relative; margin-top: 10px; border-radius: var(--radius); overflow: hidden; min-width: 0; }
+.cmd .term { padding-right: 84px; }
+.copy-btn { position: absolute; top: 10px; right: 10px; font: 500 0.75rem/1 var(--f-mono); padding: 6px 9px; border-radius: 3px; border: 1px solid #3a4d43; background: #18241e; color: #cfe9db; cursor: pointer; }
+.copy-btn:hover { background: #22332a; }
+
+/* tables */
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 0.94rem; }
+th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 0.76rem/1.4 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+td.k { font-family: var(--f-mono); white-space: nowrap; color: var(--accent); }
+td.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.v { font-family: var(--f-mono); font-size: 0.86rem; color: var(--muted); }
+.caption { font-size: 0.86rem; color: var(--muted); margin-top: 10px; }
+.tbl-title { font: 700 var(--step-1)/1.2 var(--f-display); margin: 44px 0 14px; }
+
+/* APJ-OS */
+.apj { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: start; }
+.desk { position: relative; aspect-ratio: 16 / 9; max-width: 100%; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); background: linear-gradient(160deg, #1d6b52, #0d3b30); }
+.desk .win { position: absolute; background: #fbfbfb; color: #1b1b1b; border-radius: 4px; box-shadow: 0 10px 24px -10px rgb(0 0 0 / 0.5); font: 400 0.72rem/1.4 var(--f-body); overflow: hidden; }
+.desk .win .t { background: #f3f3f3; border-bottom: 1px solid #e5e5e5; padding: 5px 8px; font-weight: 600; display: flex; justify-content: space-between; }
+.desk .win .t span:last-child { color: #8a8a8a; letter-spacing: 3px; }
+.desk .w1 { left: 6%; top: 9%; width: 46%; }
+.desk .w2 { right: 6%; top: 22%; width: 40%; }
+.desk .icons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 10px; }
+.desk .ico { display: grid; justify-items: center; gap: 3px; font-size: 0.64rem; }
+.desk .ico i { width: 26px; height: 20px; background: #0067c0; border-radius: 3px; display: block; opacity: 0.85; }
+.desk .ico:nth-child(2) i { background: #e8a33d; } .desk .ico:nth-child(3) i { background: #6b7f8c; } .desk .ico:nth-child(4) i { background: #c94f4f; }
+.desk .meter { padding: 10px; display: grid; gap: 6px; }
+.desk .meter div { display: grid; grid-template-columns: 54px 1fr; gap: 8px; align-items: center; }
+.desk .meter u { display: block; height: 6px; border-radius: 3px; background: #e5e5e5; text-decoration: none; position: relative; overflow: hidden; }
+.desk .meter u::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--w); background: #0067c0; }
+.desk .taskbar { position: absolute; left: 0; right: 0; bottom: 0; height: 9%; background: rgb(243 243 243 / 0.92); display: flex; align-items: center; gap: 8px; padding: 0 10px; font: 500 0.66rem/1 var(--f-body); color: #333; }
+.desk .taskbar b { width: 14px; height: 14px; background: #0067c0; border-radius: 3px; }
+.desk .taskbar span:last-child { margin-left: auto; font-variant-numeric: tabular-nums; }
+.shot { display: block; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; max-width: 100%; box-shadow: 0 12px 32px -18px rgb(0 0 0 / 0.45); }
+.shot img { display: block; width: 100%; height: auto; }
+.res-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.res-grid .tbl-wrap table { min-width: 0; }
+@media (max-width: 900px) { .res-grid { grid-template-columns: 1fr; } }
+ul.list { margin: 0; padding: 0; list-style: none; display: grid; gap: 14px; }
+ul.list li { display: grid; gap: 2px; padding-left: 16px; border-left: 2px solid var(--line); }
+ul.list li strong { font-weight: 600; }
+ul.list li span { color: var(--muted); font-size: 0.95rem; }
+
+.repos { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 40px; }
+.repo { display: grid; gap: 6px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); text-decoration: none; color: var(--ink); min-width: 0; align-content: start; }
+.repo:hover { border-color: var(--accent); }
+.repo .n { font: 500 0.88rem/1.3 var(--f-mono); color: var(--accent); overflow-wrap: anywhere; }
+.repo .b { font: 400 0.76rem/1 var(--f-mono); color: var(--muted); }
+.repo p { font-size: 0.92rem; color: var(--muted); }
+
+.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+
+/* benchmarks */
+.hero-num { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.hero-num > div { padding: 22px 24px; border-right: 1px solid var(--line); display: grid; gap: 4px; min-width: 0; }
+.hero-num > div:last-child { border-right: 0; }
+.hero-num .big { font: 800 2.6rem/1 var(--f-display); font-variant-numeric: tabular-nums; }
+.hero-num .lbl { font-size: 0.92rem; color: var(--muted); }
+.chart { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 24px; display: grid; gap: 14px; min-width: 0; }
+.chart-title { display: grid; gap: 4px; }
+.chart-title h3 { font-size: 1.1rem; }
+.bars { display: grid; gap: 12px; }
+.bar-row { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr) 3.5rem; gap: 14px; align-items: center; position: relative; }
+.bar-row .lab { font-size: 0.9rem; line-height: 1.25; }
+.bar-row .lab small { display: block; color: var(--muted); font: 400 0.76rem/1.3 var(--f-mono); }
+.bar-track { position: relative; height: 22px; border-left: 1px solid var(--muted); }
+.bar-track .gl { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.bar { position: absolute; left: 0; top: 2px; bottom: 2px; background: var(--accent); border-radius: 0 4px 4px 0; }
+.bar.ref { background: var(--bar-muted); }
+.bar-row .val { font: 500 0.92rem/1 var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.axis { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr) 3.5rem; gap: 14px; }
+.axis .ticks { position: relative; height: 16px; font: 400 0.72rem/1 var(--f-mono); color: var(--muted); }
+.axis .ticks span { position: absolute; transform: translateX(-50%); }
+.bar-row:hover .bar { filter: brightness(1.1); }
+.tip { position: absolute; z-index: 5; right: 4.5rem; top: -6px; transform: translateY(-100%); background: var(--ink); color: var(--bg); font-size: 0.8rem; padding: 6px 9px; border-radius: 3px; pointer-events: none; white-space: nowrap; }
+.bar-row:not(:hover):not(:focus-within) .tip { display: none; }
+.bar-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.86rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.stacked { display: flex; gap: 2px; height: 22px; }
+.stacked .seg { height: 100%; min-width: 2px; position: relative; }
+.stacked .seg:last-child { border-radius: 0 4px 4px 0; }
+.seg.s-run { background: var(--accent); } .seg.s-stuck { background: var(--bar-muted); }
+.seg.s-crash { background: var(--warn); } .seg.s-halt { background: var(--raspberry); }
+.stacked .seg:hover { filter: brightness(1.12); }
+.seg .tip { right: auto; left: 50%; transform: translate(-50%, -100%); top: -6px; }
+.seg:not(:hover) .tip { display: none; }
+
+/* psctrl */
+.tabs-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.tabs-strip span { font: 500 0.82rem/1 var(--f-mono); padding: 7px 10px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); }
+.tabs-strip span:first-child { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.badges { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.badge-card { display: grid; gap: 8px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); min-width: 0; align-content: start; }
+.pill { font: 500 0.74rem/1 var(--f-mono); padding: 5px 8px; border-radius: 999px; justify-self: start; border: 1px solid currentColor; }
+.pill.live { color: var(--accent); } .pill.defer { color: var(--warn); } .pill.boot { color: var(--raspberry); } .pill.box { color: var(--muted); }
+.badge-card p { font-size: 0.93rem; color: var(--muted); }
+.keys { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 24px; }
+.key { display: flex; gap: 12px; align-items: baseline; font-size: 0.94rem; }
+kbd { font: 500 0.8rem/1 var(--f-mono); padding: 4px 7px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; background: var(--surface); white-space: nowrap; }
+
+footer { border-top: 1px solid var(--line); padding-block: 40px 56px; color: var(--muted); font-size: 0.92rem; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: space-between; }
+.discord { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.discord code { user-select: all; }
+
+@media (max-width: 900px) {
+  .hero .wrap, .apj { grid-template-columns: 1fr; }
+  .stack { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .layer:nth-child(2) { border-right: 0; }
+  .layer:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .features, .repos, .three, .badges { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hw, .routes, .two { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .nav ul { margin-left: 0; gap: 4px 14px; }
+  .stack, .features, .repos, .three, .badges, .hero-num { grid-template-columns: 1fr; }
+  .layer, .hero-num > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .layer:last-child, .hero-num > div:last-child { border-bottom: 0; }
+  ol.steps > li { grid-template-columns: 40px minmax(0, 1fr); gap: 4px 14px; }
+  ol.steps > li::before { width: 36px; height: 36px; font-size: 1.2rem; }
+  section.block { padding-block: 52px; }
+  .hero { padding-block: 40px; }
+  .desk .win { font-size: 0.55rem; }
+  .bar-row, .axis { grid-template-columns: 6.5rem minmax(0, 1fr) 3rem; gap: 10px; }
+}
+</style>
+</head>
+<body>
+
+
+<nav class="nav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="#home">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M13 5v16M8 7c0 7-2 11-3 14M18 7c0 7 2 11 3 14" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round"/></svg>
+      PiSTorm Atari JIT
+    </a>
+    <ul>
+      <li><a href="#home" data-link="home">Home</a></li>
+      <li><a href="#install" data-link="home">Install</a></li>
+      <li><a href="#config" data-link="config">Config</a></li>
+      <li><a href="#psctrl" data-link="psctrl">PSCTRL</a></li>
+      <li><a href="#stbox" data-link="stbox">ST Box</a></li>
+      <li><a href="#benchmarks" data-link="benchmarks">Benchmarks</a></li>
+      <li><a href="#apjos" data-link="home">APJ-OS</a></li>
+      <li><a href="https://github.com/gotaproblem/pistorm-atari-jit">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+<div class="devbar"><div class="wrap"><b>In active development</b><span>Everything here works and is tested on real hardware, and all of it is still changing. Check the repo for the latest.</span></div></div>
+
+<!-- ============================================================ HOME -->
+<div data-page="home">
+<header class="hero" id="home">
+  <div class="wrap">
+    <div class="copy">
+      <span class="eyebrow">68000 socket · ARM64 JIT</span>
+      <h1>Your Atari ST, running on a <em>Raspberry&nbsp;Pi&nbsp;4</em>.</h1>
+      <p class="lede">A PiSTorm board sits in the 68000 socket. The Pi runs the CPU as a JIT 68040 with FPU and talks to the real ST, STe or Mega ST over the bus.</p>
+      <div class="cta">
+        <a class="btn primary" href="#install">Install guide</a>
+        <a class="btn" href="#benchmarks">See the benchmarks</a>
+      </div>
+      <div class="specline">
+        <span class="chip"><b>●</b> Raspberry Pi 4</span>
+        <span class="chip">382× an 8 MHz ST</span>
+        <span class="chip">RPi OS Lite · Trixie · aarch64</span>
+        <span class="chip">MIT licence</span>
+      </div>
+    </div>
+    <div class="gem" aria-label="Example session">
+      <div class="gem-bar"><span class="closer"></span><span class="ttl">pistorm@pi4: ~/pistorm-atari-jit</span><span></span></div>
+<pre class="term"><span class="c"># check the Pi can see the Atari</span>
+<span class="p">$</span> sudo ./ataritest --reset
+<span class="p">$</span> sudo ./ataritest --memory tests=rw
+
+<span class="c"># start the launcher: the setup page comes</span>
+<span class="c"># up on the ST monitor and on HDMI</span>
+<span class="p">$</span> sh run-pistorm.sh
+
+<span class="c"># or boot the last build straight away</span>
+<span class="p">$</span> sh run-pistorm.sh --no-setup</pre>
+    </div>
+  </div>
+</header>
+
+<section class="block" id="how">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">How it works</span>
+      <h2>The Pi replaces the CPU. The rest of the ST stays real.</h2>
+      <p>Your keyboard, floppy, shifter and sound chip are still the Atari's own. The processor moves to the Pi, and the Pi adds what the ST never had: fast RAM, HDMI graphics, networking and host-side media.</p>
+    </div>
+    <div class="stack" role="list">
+      <div class="layer" role="listitem"><span class="tag">Atari</span><h3>ST, STe or Mega ST</h3><p>The original motherboard, chipset and peripherals. The 68000 comes out of its socket.</p></div>
+      <div class="layer" role="listitem"><span class="tag">Interface</span><h3>PiSTorm board</h3><p>A CPLD bridges the 68000 bus to the Pi's GPIO header and handles bus timing.</p></div>
+      <div class="layer pi" role="listitem"><span class="tag">Raspberry Pi 4</span><h3>Emulator and JIT</h3><p>Two cores run emulation, two are left for Linux. The ARM64 JIT turns 68k code into native code.</p></div>
+      <div class="layer" role="listitem"><span class="tag">Software</span><h3>TOS, MiNT, APJ-OS</h3><p>Boot EmuTOS or TOS as normal, or the APJ-OS desktop at up to 1920×1080 over HDMI.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Features</span>
+      <h2>What's in the emulator today</h2>
+    </div>
+
+    <div class="feat-group">
+      <h3>CPU and memory</h3>
+      <div class="features">
+        <div class="feat"><h4>JIT 68040 with FPU</h4><p>Based on the Amiberry ARM64 JIT with hardware FPU. Any CPU from 68000 to 68060, or the interpreter when you need exact behaviour.</p></div>
+        <div class="feat"><h4>Direct ST-RAM access</h4><p><code>stram_cache</code> keeps a copy of ST-RAM on the Pi and writes through only what the hardware must see. <code>stram_direct</code> lets the JIT use it inline.</p></div>
+        <div class="feat"><h4>128 MB TT-RAM</h4><p>Fast RAM at <code>$01000000</code>, in the Pi's memory. MiNT and the JIT both want it.</p></div>
+      </div>
+    </div>
+
+    <div class="feat-group">
+      <h3>Video</h3>
+      <div class="features">
+        <div class="feat"><h4>fVDI on HDMI</h4><p>GEM at 640×480 up to 1920×1080 in 8, 16 or 32-bit colour, rendered by the Pi.</p></div>
+        <div class="feat"><h4>Falcon Videl and SuperVidel</h4><p>PSVIDEL gives Falcon and SuperVidel software their video modes, 112 MB of video RAM and the SuperBlitter, on HDMI.</p></div>
+        <div class="feat"><h4>ET4000 and ST mirror</h4><p>An ET4000AX card for NOVA, XVDI, NVDI or fVDI drivers, and a mirror of ST low, medium and high on HDMI.</p></div>
+      </div>
+    </div>
+
+    <div class="feat-group">
+      <h3>Sound and media</h3>
+      <div class="features">
+        <div class="feat"><h4>Falcon DSP56001</h4><p>A clean-room 56001 core with host port, SSI, sound matrix, 16-bit DMA and CODEC.</p></div>
+        <div class="feat"><h4>YM2149 and DMA sound on HDMI</h4><p>Chip music and STe DMA audio played through the Pi alongside the real chip.</p></div>
+        <div class="feat"><h4>MP3, video and recording</h4><p>Host MP3 playback, MP4/MKV/AVI playback with hardware H.264, and A/V screen recording.</p></div>
+      </div>
+    </div>
+
+    <div class="feat-group">
+      <h3>Input, drives and network</h3>
+      <div class="features">
+        <div class="feat"><h4>Xbox and USB gamepads</h4><p>Wired or Bluetooth pads as ST joysticks and STe joypads, in GEM, games and the ST Box. One line: <code>usb gamepad</code>.</p></div>
+        <div class="feat"><h4>USB keyboard and mouse</h4><p>Merged into the IKBD stream. The real ST keyboard and mouse keep working.</p></div>
+        <div class="feat"><h4>Floppy, IDE, ACSI, HOSTFS</h4><p>WD1772 floppy emulation, IDE and ACSI disk images, and folders on the Pi as GEMDOS drives.</p></div>
+        <div class="feat"><h4>Networking</h4><p>FreeMiNT networking over the Pi's WiFi or Ethernet, through the NatFeat Ethernet driver.</p></div>
+        <div class="feat"><h4>Emulated blitter</h4><p>The ST BLiTTER in software over the RAM copy, with or without a real chip fitted.</p></div>
+        <div class="feat"><h4>ST Box</h4><p>A sandboxed 68000 ST or STe in a GEM window under APJ-OS, for games that want a plain machine. <a href="#stbox">More</a></p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="hardware">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Hardware</span>
+      <h2>What you need</h2>
+      <p>Comfort with Linux helps. If you'd rather not build anything, flash the APJ-OS SD card image.</p>
+    </div>
+    <div class="hw">
+      <div class="panel">
+        <h3>Host</h3>
+        <dl class="spec">
+          <dt>Board</dt><dd>Raspberry Pi 4, 2&nbsp;GB or more. The Pi 3B is tested with the APJ-OS install script.</dd>
+          <dt>OS</dt><dd>Raspberry Pi OS Lite, Trixie, 64-bit. Lite is required: a desktop holds the display and takes the isolated cores.</dd>
+          <dt>Cores</dt><dd>2 for emulation, 2 for Linux. Build with <code>make -j2</code>.</dd>
+          <dt>Display</dt><dd>A monitor on the Pi's HDMI, connected at boot, for HDMI output.</dd>
+        </dl>
+        <p class="note">The Pi 3A+ and Pi Zero 2 W have 512&nbsp;MB of RAM and can't fit the memory layout. The Pi 5's GPIO sits behind the RP1 chip, which is too slow for bus work.</p>
+      </div>
+      <div class="panel">
+        <h3>Atari</h3>
+        <dl class="spec">
+          <dt>Tested</dt><dd>STfm, STe, Mega ST</dd>
+          <dt>DIL 68000</dt><dd>STfm, Mega ST: a PiStorm board made for the Amiga A500</dd>
+          <dt>STe</dt><dd>A custom STe board, available online or from users on the Discord</dd>
+        </dl>
+        <p class="note">Bus arbitration in the CPLD doesn't work yet, so the real blitter chip and real DMA devices can't be driven. The emulated blitter, floppy and ACSI cover them.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="install">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Install</span>
+      <h2>Two ways in</h2>
+    </div>
+    <div class="routes">
+      <div class="panel route">
+        <span class="badge">Easiest</span>
+        <h3>Flash the APJ-OS image</h3>
+        <p class="muted">Download <code>apj-os-&lt;version&gt;.img.xz</code> from the APJ-OS releases and write it to a 16&nbsp;GB or larger card with Raspberry Pi Imager. Fill in <code>wifi.txt</code> on the boot partition for WiFi. The first boot expands the filesystem, then the Atari boots straight into APJ-OS.</p>
+        <a href="https://github.com/gotaproblem/apj-os">gotaproblem/apj-os</a>
+      </div>
+      <div class="panel route">
+        <span class="badge">From source</span>
+        <h3>Build the emulator yourself</h3>
+        <p class="muted">Start from a fresh Raspberry Pi OS Lite 64-bit, logged in as your normal user (ideally <code>pistorm</code>). The installer calls <code>sudo</code> itself. Steps below.</p>
+      </div>
+    </div>
+    <ol class="steps">
+      <li>
+        <h3>Update the Pi</h3>
+        <p>The installer adds every package the build needs, so a current OS is all you need first.</p>
+        <div class="cmd"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">sudo apt update && sudo apt upgrade
+sudo apt install git</pre></div>
+      </li>
+      <li>
+        <h3>Clone the repository</h3>
+        <p>This creates <code>pistorm-atari-jit/</code> in your home directory.</p>
+        <div class="cmd"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">cd ~
+git clone https://github.com/gotaproblem/pistorm-atari-jit.git</pre></div>
+      </li>
+      <li>
+        <h3>Run the installer and reboot</h3>
+        <p>It checks the OS, installs dependencies, merges the boot firmware settings, builds the emulator and puts the file tree in place. It asks about the autostart service, a Samba share and the web browser engine.</p>
+        <div class="cmd"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">cd ~/pistorm-atari-jit
+./install-full.sh
+sudo reboot</pre></div>
+      </li>
+      <li>
+        <h3>Test the hardware</h3>
+        <p>If these fail, fix the hardware first. Nothing else will work until they pass.</p>
+        <div class="cmd"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">cd ~/pistorm-atari-jit
+sudo ./ataritest --reset
+sudo ./ataritest --memory tests=rw</pre></div>
+      </li>
+      <li>
+        <h3>Boot from the setup page</h3>
+        <p>The launcher shows your builds with a countdown on the last one. <kbd>Enter</kbd> boots, <kbd>E</kbd> edits. See <a href="#config">Config</a> for what each setting does.</p>
+        <div class="cmd"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">sh run-pistorm.sh</pre></div>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="block" id="apjos">
+  <div class="wrap">
+    <div class="apj">
+      <div style="min-width:0">
+        <a href="apjos-desktop.png" class="shot"><img src="apjos-desktop.png" width="1920" height="1080" alt="APJ-OS 1.0 desktop at 1920×1080 with drive icons, the taskbar showing CPU 8%, 59.8°C, 68040+FPU, Pi4B 2GB, and PSCTRL's benchmark tab open"></a>
+        <p class="caption">APJ-OS 1.0 on a Pi 4B 2 GB at 1920×1080, with PSCTRL's benchmark results. A screen dump from the machine.</p>
+      </div>
+      <div style="display:grid;gap:22px;min-width:0">
+        <span class="eyebrow">APJ-OS 1.0</span>
+        <h2>A modern desktop for the accelerated ST</h2>
+        <p class="lede">A ready-to-flash distribution: the emulator plus FreeMiNT, XaAES and the Bespoke Desktop, at up to 1920×1080 in 32-bit colour over HDMI.</p>
+        <ul class="list">
+          <li><strong>Fluent theme</strong><span>Flat window chrome, themed menus and dialogs, anti-aliased text, a live PiStorm taskbar and four virtual desktops.</span></li>
+          <li><strong>Apps that use the Pi</strong><span>PDFGEM reads PDFs and WEBGEM browses the web, both rendered on the Pi. MP3GEM and VIDGEM play audio and video.</span></li>
+          <li><strong>Control and monitoring</strong><span><a href="#psctrl">PSCTRL</a> changes settings on the running machine. PSMON shows the JIT, memory and the Pi's clock and temperature.</span></li>
+          <li><strong>Old software still runs</strong><span>Legacy GEM programs keep their layout. The theme restyles them without resizing anything.</span></li>
+        </ul>
+        <div class="cta"><a class="btn primary" href="https://github.com/gotaproblem/apj-os">Get APJ-OS</a></div>
+      </div>
+    </div>
+    <div class="repos">
+      <a class="repo" href="https://github.com/gotaproblem/pistorm-atari-jit"><span class="n">pistorm-atari-jit</span><span class="b">main</span><p>The emulator, JIT and NatFeats.</p></a>
+      <a class="repo" href="https://github.com/gotaproblem/apj-os"><span class="n">apj-os</span><span class="b">main</span><p>The distribution and SD image build.</p></a>
+      <a class="repo" href="https://github.com/gotaproblem/apj-os-tools"><span class="n">apj-os-tools</span><span class="b">main</span><p>PSCTRL, PSMON, PDFGEM, WEBGEM, MP3GEM, VIDGEM, skins.</p></a>
+      <a class="repo" href="https://github.com/gotaproblem/freemint/tree/apj-os-fluent"><span class="n">freemint</span><span class="b">apj-os-fluent</span><p>XaAES with the Fluent renderer and window chrome.</p></a>
+      <a class="repo" href="https://github.com/gotaproblem/teradesk/tree/apj-os-fluent"><span class="n">teradesk</span><span class="b">apj-os-fluent</span><p>The Bespoke Desktop: taskbar, themes, workspaces.</p></a>
+      <a class="repo" href="https://github.com/gotaproblem/toswin2/tree/apj-os-fluent"><span class="n">toswin2</span><span class="b">apj-os-fluent</span><p>Terminal windows with themed text.</p></a>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="next">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Next</span>
+      <h2>What's being worked on</h2>
+      <p>New work lands on its own branch first and joins <code>main</code> once it has run on real hardware.</p>
+    </div>
+    <div class="three">
+      <div class="panel"><h3>JIT code quality</h3><p class="muted">Register allocation and flag handling, and a smaller footprint in the Pi's 48&nbsp;KB instruction cache.</p></div>
+      <div class="panel"><h3>One interrupt controller</h3><p class="muted">A single virtual MFP that merges real and virtual interrupt sources in priority order.</p></div>
+      <div class="panel"><h3>Regression tests</h3><p class="muted">A <code>make check</code> that boots a matrix of CPU, JIT and machine settings before hardware time is spent.</p></div>
+    </div>
+  </div>
+</section>
+</div>
+
+<!-- ============================================================ CONFIG -->
+<div data-page="config">
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Configuration</span>
+    <h1>One file, any number of machines</h1>
+    <p class="lede">Everything lives in <code>configs/psctrl.cfg</code>. Each <code>[section]</code> is a build: a complete machine. You rarely need to edit it by hand, because the setup page and PSCTRL both write it.</p>
+  </div>
+</header>
+
+<section class="block">
+  <div class="wrap two">
+    <div class="prose">
+      <h2>Shape of the file</h2>
+      <p>A <code>[psctrl]</code> block holds the setup page's own settings. Every other section is a build, and the emulator loads exactly one of them: the one you pick on the page, or the <code>boot</code> key.</p>
+      <p>Nothing is inherited between builds. Each says everything it needs. Lines are <code>key value</code>, <code>#</code> starts a comment, and a key on its own means on. Sizes are in KB unless you add <code>M</code> or <code>G</code>.</p>
+      <p>A build whose name starts with <code>apj</code> gets the APJ-OS-only keys on the page. The installer copies the default file in once and never overwrites yours.</p>
+    </div>
+    <div class="gem">
+      <div class="gem-bar"><span class="closer"></span><span class="ttl">configs/psctrl.cfg</span><span></span></div>
+<pre class="term"><span class="p">[psctrl]</span>
+countdown 5
+boot apj-os
+rom_path ../roms
+disk_path ../dkimages
+
+<span class="p">[apj-os]</span>
+cpu 68040
+fpu
+ttram 128M
+jit_cache 16384
+vga ET4000AX FVDI
+native_hdmi enabled
+machine ste
+kbd usb
+usb gamepad
+ym2149
+rom emutos-aranym.rom
+ide
+hdd 0:apj-os.img
+fdd A:720k.st
+hostfs S /home/pistorm/atari-share</pre>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Setup page</span>
+      <h2>Pick a machine before the 68k boots</h2>
+      <p>Drawn by the Pi on the ST's own video and mirrored to HDMI. It works with the ST keyboard, a USB keyboard or a gamepad. Nothing is written until you save or boot.</p>
+    </div>
+    <div class="keys">
+      <div class="key"><kbd>Enter</kbd><span>Boot the build under the cursor</span></div>
+      <div class="key"><kbd>E</kbd><span>Edit it</span></div>
+      <div class="key"><kbd>N</kbd><span>New build, empty or a copy</span></div>
+      <div class="key"><kbd>D</kbd><span>Delete a build</span></div>
+      <div class="key"><kbd>S</kbd><span>Save</span></div>
+      <div class="key"><kbd>F12</kbd><span>Screen dump (Help on the ST)</span></div>
+      <div class="key"><kbd>Esc</kbd><span>Leave and boot the last build</span></div>
+      <div class="key"><kbd>C</kbd> <kbd>M</kbd><span>Clock and date format</span></div>
+    </div>
+    <p class="caption">The editor has seven tabs: Machine, Video, Sound, Input, Drives, Network and Tuning. Skip the page with <code>countdown 0</code> or <code>--no-setup</code>.</p>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Keys</span>
+      <h2>The settings you'll reach for</h2>
+      <p>A selection. <a href="https://github.com/gotaproblem/pistorm-atari-jit/blob/main/PSCTRL-CFG.md">PSCTRL-CFG.md</a> documents every key, its values and its environment overrides.</p>
+    </div>
+
+    <h3 class="tbl-title">Machine</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Key</th><th>Values</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td class="k">cpu</td><td class="v">68000 … 68060</td><td>The CPU the guest sees. 68000 and 68010 are 24-bit and can't have TT-RAM or the JIT. 68040 is the fastest with the JIT.</td></tr>
+        <tr><td class="k">fpu</td><td class="v">on / off</td><td>An FPU, on 68020 and up.</td></tr>
+        <tr><td class="k">jit</td><td class="v">on / off</td><td>The JIT compiler, on by default. Off runs the interpreter: several times slower, but exact.</td></tr>
+        <tr><td class="k">jit_power</td><td class="v">0 – 6</td><td>The compiled-chain budget, 256 &lt;&lt; (N−1): 1 = 256 (default) up to 6 = 8192. 0 turns the JIT off. Step it down if MiNT beeps or the mouse gets erratic.</td></tr>
+        <tr><td class="k">jit_cache</td><td class="v">KB, default 8192</td><td>The translation cache. 16384 for big applications.</td></tr>
+        <tr><td class="k">machine</td><td class="v">st ste megast falcon</td><td>What the guest is told it is, and the hardware modelled around it.</td></tr>
+        <tr><td class="k">ttram</td><td class="v">size, 128M</td><td>TT-RAM in the Pi's memory. Needs a 32-bit CPU.</td></tr>
+        <tr><td class="k">stram_size</td><td class="v">512K … 4M</td><td>The ST-RAM the guest sees, matched against the board's real DRAM.</td></tr>
+        <tr><td class="k">stram_cache</td><td class="v">on / off</td><td>Serve CPU reads from a copy of ST-RAM on the Pi. Much faster.</td></tr>
+        <tr><td class="k">stram_direct</td><td class="v">on / off</td><td>Let the JIT read and write that copy inline. Faster again, and breaks some software.</td></tr>
+        <tr><td class="k">mmu</td><td class="v">on / off</td><td>Full MMU emulation for Basilisk II, MagiCMac and MiNT memory protection. Interpreter only.</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3 class="tbl-title">Video and sound</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Key</th><th>Values</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td class="k">vga</td><td class="v">ET4000AX NOVA | XVDI | NVDI | FVDI</td><td>An ET4000AX card on HDMI, built for that Atari driver. FVDI is APJ-OS's.</td></tr>
+        <tr><td class="k">native_hdmi</td><td class="v">on / off</td><td>Mirror ST low, medium and high to HDMI at each real VBL.</td></tr>
+        <tr><td class="k">hdmi_only</td><td class="v">on / off</td><td>HDMI is the only display, so screen flips stay off the bus.</td></tr>
+        <tr><td class="k">psvidel</td><td class="v">on / off</td><td>Falcon Videl and SuperVidel on HDMI. Armed by <code>PSVIDEL.PRG</code> in AUTO.</td></tr>
+        <tr><td class="k">ym2149</td><td class="v">on / off</td><td>The PSG on HDMI, alongside the real chip.</td></tr>
+        <tr><td class="k">dma_sound</td><td class="v">on / off</td><td>STe DMA sound on HDMI.</td></tr>
+        <tr><td class="k">falcon_dsp</td><td class="v">on / off</td><td>The DSP56001, sound matrix, DMA and CODEC.</td></tr>
+        <tr><td class="k">blitter</td><td class="v">on / real / off</td><td>Emulated blitter, pass-through to a real one, or none. Defaults by machine.</td></tr>
+      </tbody>
+    </table></div>
+
+    <h3 class="tbl-title">Input, drives and network</h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Key</th><th>Values</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td class="k">kbd</td><td class="v">usb [nograb] [merge|standalone] [mousediv N]</td><td>USB or Bluetooth keyboard and mouse, injected into the IKBD stream. F12 toggles the grab.</td></tr>
+        <tr><td class="k">usb</td><td class="v">gamepad</td><td>Xbox and other pads as joysticks and STe joypads. Pad 0 is joystick 1 and pad A.</td></tr>
+        <tr><td class="k">ide / hdd</td><td class="v">N:image</td><td>IDE disk images, up to 8. The first should be bootable.</td></tr>
+        <tr><td class="k">acsi</td><td class="v">N:image</td><td>Emulated ACSI targets beside real devices. <code>.hfs</code> volumes for Spectre.</td></tr>
+        <tr><td class="k">fdd</td><td class="v">A:image B:image</td><td>Floppy drives: <code>.st</code> read-write, <code>.msa</code> read-only. F11 swaps disks.</td></tr>
+        <tr><td class="k">hostfs</td><td class="v">drive path [ro]</td><td>A Pi folder as a GEMDOS drive. The installed share is S:.</td></tr>
+        <tr><td class="k">network</td><td class="v">on / off</td><td>FreeMiNT networking over a TAP device, set up by <code>netstart.sh</code>.</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+</div>
+
+<!-- ============================================================ PSCTRL -->
+<div data-page="psctrl">
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">PSCTRL · desk accessory</span>
+    <h1>Change the running machine from the Atari</h1>
+    <p class="lede">PSCTRL puts every switch and tunable the emulator has in one window, and applies changes while your program runs. It ships as <code>PSCTRL.ACC</code> and <code>PSCTRL.PRG</code> in apj-os-tools.</p>
+  </div>
+</header>
+
+<section class="block">
+  <div class="wrap two">
+    <div class="prose">
+      <h2>Why an accessory</h2>
+      <p>An accessory sits in the Desk menu of every application under TOS and XaAES, so you can open it while a game or the ST Box is running. That's the point: <code>jit_power</code> is worth moving against the game you're actually playing.</p>
+      <p>Put <code>PSCTRL.ACC</code> in the root of the boot drive and the skins in <code>C:\GEMSYS\SKINS\</code>. It follows the desktop's Fluent theme at 100, 125 or 175% scale. Without a skin it still runs on plain controls.</p>
+      <h2 style="margin-top:20px">It describes itself</h2>
+      <p>No control is compiled into the program. At startup it asks the emulator for every setting, with its key, title, tab, kind, range and current value, and builds the tabs from the answers. A new emulator switch shows up without rebuilding PSCTRL.</p>
+    </div>
+    <div class="panel">
+      <h3>Tabs</h3>
+      <div class="tabs-strip"><span>JIT</span><span>Bench</span><span>CPU</span><span>Video</span><span>Audio</span><span>Input</span><span>ST Box</span><span>Floppy</span><span>Network</span><span>Debug</span><span>Advanced</span></div>
+      <h3 style="margin-top:8px">Controls</h3>
+      <div class="tbl-wrap"><table style="min-width:0">
+        <tbody>
+          <tr><td>On / off</td><td class="muted">a checkbox</td></tr>
+          <tr><td>A few short choices</td><td class="muted">radio buttons</td></tr>
+          <tr><td>Longer lists</td><td class="muted">a pop-up list</td></tr>
+          <tr><td>Numbers</td><td class="muted">a slider with the value</td></tr>
+          <tr><td>Files</td><td class="muted">a field that lists the Pi's images</td></tr>
+          <tr><td>Live readouts</td><td class="muted">refreshed twice a second</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">When a change applies</span>
+      <h2>Every setting says when it takes effect</h2>
+      <p>The badge beside each control tells you, and the status line confirms what happened after you change it.</p>
+    </div>
+    <div class="badges">
+      <div class="badge-card"><span class="pill live">live</span><p>Read again by the emulator straight away. In effect before you let go of the mouse.</p></div>
+      <div class="badge-card"><span class="pill defer">defer</span><p>Applied at the next JIT block boundary. Used for anything that flushes or resizes the translation cache.</p></div>
+      <div class="badge-card"><span class="pill boot">boot</span><p>Part of the machine's shape. Saved and applied on the next restart.</p></div>
+      <div class="badge-card"><span class="pill box">box</span><p>Takes effect the next time the ST Box starts.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap two">
+    <div class="prose">
+      <span class="eyebrow">Built-in benchmark</span>
+      <h2>Measure, change a setting, measure again</h2>
+      <p>The Bench tab runs a benchmark as 68k code inside the accessory, so it measures what programs get on the settings in force now. It takes about twenty seconds and shows the previous run beside the new one.</p>
+      <p>The first pass is thrown away, because that's when the JIT compiles the benchmark. Dhrystone runs its own self-check, so a mistranslation shows up as a failure rather than a suspiciously good score. <a href="#benchmarks">Results and what each figure means</a>.</p>
+    </div>
+    <div class="panel">
+      <h3>Keys</h3>
+      <div class="keys" style="grid-template-columns:1fr">
+        <div class="key"><kbd>←</kbd> <kbd>→</kbd><span>Previous or next tab</span></div>
+        <div class="key"><kbd>↑</kbd> <kbd>↓</kbd><span>Scroll</span></div>
+        <div class="key"><kbd>B</kbd><span>Run the benchmark</span></div>
+        <div class="key"><kbd>S</kbd><span>Save to the config file</span></div>
+        <div class="key"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd><span>Skin scale 100, 125, 175%</span></div>
+        <div class="key"><kbd>Esc</kbd><span>Close</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap two">
+    <div class="prose">
+      <span class="eyebrow">PSMON</span>
+      <h2>Its companion: the monitor</h2>
+      <p>PSMON shows the live JIT figures (speed as a multiple of an 8&nbsp;MHz ST, JIT hit rate, idle time, cache use, compiles), guest memory, and the Pi underneath: board, RAM, ARM clock, temperature and throttle state.</p>
+      <p>The throttle row matters. A Pi that is thermally capped runs the JIT slower, and nothing on the Atari side would otherwise tell you why a figure dropped.</p>
+    </div>
+    <div class="panel">
+      <h3>Get them</h3>
+      <p class="muted">Both are on the APJ-OS boot disk, and in <a href="https://github.com/gotaproblem/apj-os-tools">apj-os-tools</a> with their sources. They need the PSCTRL NatFeat in the emulator, which is in <code>main</code>.</p>
+      <div class="cmd"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">cd apj-os-tools/psctrl && make
+cd ../psmon && make</pre></div>
+    </div>
+  </div>
+</section>
+</div>
+
+<!-- ============================================================ STBOX -->
+<div data-page="stbox">
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">ST Box · STBOX.PRG</span>
+    <h1>A real-speed ST in a window</h1>
+    <p class="lede">Games written for an 8&nbsp;MHz 68000 want ST timing, not a JIT 68040 under FreeMiNT. The ST Box is a second, private Atari ST inside the emulator, running at 8.02&nbsp;MHz in a GEM window on the APJ-OS desktop.</p>
+  </div>
+</header>
+
+<section class="block" style="border-top:0;padding-top:0">
+  <div class="wrap two">
+    <div class="prose">
+      <h2>How it's built</h2>
+      <p>The box has its own ST-RAM, its own TOS ROM, and its own models of the Shifter, MFP, PSG, ACIA and floppy controller. A Musashi 68000 core runs it, paced against the Pi's clock to exactly 8.021248&nbsp;MHz and a 50.05&nbsp;Hz PAL frame.</p>
+      <p>It runs on core 3 in small, bounded slices between the main machine's interrupt work, so the APJ-OS desktop keeps running alongside it. Its picture goes to a spare HDMI overlay plane laid exactly over the GEM window, so video playback and the box can share the screen.</p>
+      <p>Nothing the box does touches the real ST. Its memory, disks and hardware are all its own.</p>
+    </div>
+    <div class="gem">
+      <div class="gem-bar"><span class="closer"></span><span class="ttl">STBOX — TOS 2.06 · STE · 4 MB</span><span></span></div>
+      <div style="aspect-ratio:16/10;max-width:100%;background:#0000a8;display:grid;place-items:center;position:relative;overflow:hidden" role="img" aria-label="Illustration of an ST desktop running inside the ST Box window">
+        <div style="position:absolute;inset:0 0 auto 0;height:9%;background:#fff;color:#000;font:500 0.72rem/1 var(--f-mono);display:flex;align-items:center;gap:16px;padding-inline:10px">Desk&nbsp;&nbsp;File&nbsp;&nbsp;View&nbsp;&nbsp;Options</div>
+        <div style="position:absolute;left:5%;top:16%;display:grid;gap:14px;justify-items:center;color:#fff;font:500 0.66rem/1 var(--f-mono)">
+          <span style="width:30px;height:24px;background:#fff;border:2px solid #000;display:block"></span>FLOPPY A
+          <span style="width:30px;height:24px;background:#fff;border:2px solid #000;display:block"></span>FLOPPY B
+        </div>
+        <div style="background:#fff;color:#000;border:2px solid #000;width:58%;font:500 0.7rem/1.5 var(--f-mono);margin-left:12%">
+          <div style="border-bottom:2px solid #000;padding:3px 8px;text-align:center">A:\</div>
+          <div style="padding:8px 10px;display:grid;grid-template-columns:1fr 1fr;gap:4px 12px"><span>XENON2.PRG</span><span>AUTO</span><span>DESKTOP.INF</span><span>GAME.DAT</span></div>
+        </div>
+      </div>
+      <p class="caption" style="padding:0 14px 12px">Illustration. ESC moves the mouse between the box and the desktop.</p>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Using it</span>
+      <h2>Start a box</h2>
+      <p>STBOX.PRG is installed in <code>apj-os/STBox/</code> with your <code>.st</code> and <code>.msa</code> images. Run it with no arguments for a file selector that browses the HOSTFS share, or name an image to boot it straight away.</p>
+    </div>
+    <div class="two">
+      <div class="panel">
+        <h3>In the config</h3>
+        <div class="tbl-wrap"><table style="min-width:0">
+          <tbody>
+            <tr><td class="k">stbox_tos</td><td>The box's TOS: 1.04, 2.06, or a 192K or 256K EmuTOS. The Aranym EmuTOS of the main machine won't boot it.</td></tr>
+            <tr><td class="k">stbox_machine</td><td><code>st</code> (default) or <code>ste</code>. An STE box needs an STE-aware TOS.</td></tr>
+            <tr><td class="k">stbox_plane</td><td>Force an HDMI overlay plane. Leave it out for automatic.</td></tr>
+          </tbody>
+        </table></div>
+        <p class="caption">These keys appear on the setup page for any build whose name starts with <code>apj</code>. <code>PISTORM_STBOX_TOS</code> overrides <code>stbox_tos</code>.</p>
+      </div>
+      <div class="panel">
+        <h3>At launch</h3>
+        <div class="tbl-wrap"><table style="min-width:0">
+          <tbody>
+            <tr><td class="k">STBOX.PRG</td><td>File selector, then boot the chosen image</td></tr>
+            <tr><td class="k">STBOX.PRG game.st</td><td>Boot that image</td></tr>
+            <tr><td class="k">… st / ste</td><td>Override <code>stbox_machine</code> for this launch</td></tr>
+          </tbody>
+        </table></div>
+        <div class="keys" style="grid-template-columns:1fr;margin-top:6px">
+          <div class="key"><kbd>Esc</kbd><span>Capture or release keyboard and mouse</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Hardware</span>
+      <h2>What the box models</h2>
+    </div>
+    <div class="feat-group">
+      <h3>Every box</h3>
+      <div class="features">
+        <div class="feat"><h4>Shifter and MFP</h4><p>All three ST video modes, Timer B counting display lines like the real chip, and the video address counter following the display window.</p></div>
+        <div class="feat"><h4>WD1772 floppy</h4><p>Type I, II and III commands, DMA, side select and index pulse. READ TRACK is built from sector data with real CRCs. <code>.st</code> and <code>.msa</code> images.</p></div>
+        <div class="feat"><h4>PSG sound</h4><p>The YM2149 mixed into the Pi's audio output.</p></div>
+        <div class="feat"><h4>Memory sizing</h4><p>MMU bank aliasing, so TOS sizes 512K, 1M, 2M and 4M correctly.</p></div>
+        <div class="feat"><h4>Input</h4><p>USB keyboard and mouse, the real ST keyboard, mouse and joystick, and Xbox or USB gamepads, routed to whichever has focus.</p></div>
+        <div class="feat"><h4>Crash reports</h4><p>A double bus fault halts the box with a 64K PC trace, a disassembly of the scene and write watchpoints.</p></div>
+      </div>
+    </div>
+    <div class="feat-group">
+      <h3>STE tier, when you ask for it</h3>
+      <div class="features">
+        <div class="feat"><h4>STE Shifter</h4><p>12-bit palette, fine horizontal scroll, line width and the low byte of the screen base.</p></div>
+        <div class="feat"><h4>BLiTTER</h4><p>The main machine's blitter engine, run in steps at the real chip's throughput. Tested against it over 20,000 random blits.</p></div>
+        <div class="feat"><h4>DMA sound and joypads</h4><p>Play and repeat, 6 to 50&nbsp;kHz, microwire volume, and the STe joypad ports fed from your gamepads.</p></div>
+      </div>
+    </div>
+    <p class="caption">In an ST box none of the STE registers are decoded, so TOS 2.06's STE probe finds a plain ST, just as on the real machine.</p>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Compatibility</span>
+      <h2>40 games, tested headless</h2>
+      <p>The ST Box core builds and runs on any computer. A harness boots each image for 60 guest-seconds, presses keys and fire every 3 seconds, and reports what happened. The whole collection takes about 75 seconds. Results from 9 September 2026.</p>
+    </div>
+    <figure class="chart" style="margin:0" aria-labelledby="sb-title">
+      <div class="chart-title">
+        <h3 id="sb-title">Outcome by TOS and machine</h3>
+        <p class="muted" style="font-size:0.9rem">Number of the 40 images in each state after 60 guest-seconds.</p>
+      </div>
+      <div class="legend" id="sb-legend"></div>
+      <div class="bars" id="sb-bars"></div>
+      <figcaption class="caption">Stuck means the screen stopped changing for 10 seconds, usually a title screen waiting for input the harness can't give. It's unknown, not broken.</figcaption>
+    </figure>
+
+    <div class="tbl-wrap" style="margin-top:24px"><table>
+      <thead><tr><th>Configuration</th><th>Running</th><th>Stuck</th><th>Crash</th><th>Halt</th></tr></thead>
+      <tbody>
+        <tr><td>TOS 1.04, ST</td><td class="num">13</td><td class="num">21</td><td class="num">0</td><td class="num">6</td></tr>
+        <tr><td>TOS 2.06, ST</td><td class="num">29</td><td class="num">5</td><td class="num">1</td><td class="num">5</td></tr>
+        <tr><td>TOS 2.06, STE</td><td class="num">30</td><td class="num">5</td><td class="num">1</td><td class="num">4</td></tr>
+      </tbody>
+    </table></div>
+
+    <div class="two" style="margin-top:32px">
+      <div class="panel">
+        <h3>Running on TOS 2.06</h3>
+        <p class="muted">Arkanoid II, Barbarian II, Battle Chess, Black Tiger, Blasteroids, Blood Money, Bubble Bobble, Buggy Boy, Cannon Fodder, Crazy Cars, Defender of the Crown, The Great Giana Sisters, Indiana Jones and the Fate of Atlantis, Indiana Jones and the Last Crusade, Just Buggin', Kick Off 2, Lotus III, Populous, Rampage, Rick Dangerous, Shadow of the Beast, Shufflepuck Cafe, Wizball, Xenon 2, Jet Set Willy, and more. Space Harrier runs as an STE.</p>
+      </div>
+      <div class="panel">
+        <h3>Still failing</h3>
+        <p class="muted">Chaos Strikes Back, Dark Side of the Spoon, Sensible Soccer, Rainbow Islands and Gauntlet II (on TOS 2.06). Each has a crash report from the harness, and they're the next targets.</p>
+        <p class="muted">Fixed in that round: the WD1772 interrupt clearing on a new command, 68000 trace mode, and the video address counter. No title that ran before broke.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap two">
+    <div class="prose">
+      <span class="eyebrow">Testing</span>
+      <h2>Regression-test the whole games collection</h2>
+      <p><code>tools/stbox-harness/</code> builds a variant of the box, runs every image through it and compares variants side by side. Switch individual fixes off with build flags to see which change fixed or broke which title.</p>
+      <p>Write watchpoints, PC history, disassembly at a fault and an FDC sector map are all a variable away.</p>
+    </div>
+    <div class="cmd" style="align-self:start"><button class="copy-btn" type="button">Copy</button>
+<pre class="term">tools/stbox-harness/build.sh cur
+ROMS=roms GAMES=games \
+  tools/stbox-harness/batch.sh tos206uk 60 cur
+HARNESS_STE=1 ROMS=roms GAMES=games \
+  tools/stbox-harness/batch.sh tos206uk 60 cur</pre></div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Limits</span>
+      <h2>Not there yet</h2>
+    </div>
+    <div class="three">
+      <div class="panel"><h3>Disk writes</h3><p class="muted">Writes stay in memory and aren't saved back to the image. No GEMDOS hard disk in the box yet.</p></div>
+      <div class="panel"><h3>Raster effects</h3><p class="muted">The palette is taken once per frame, so mid-frame colour changes smear. Scanline-level Shifter tricks aren't modelled.</p></div>
+      <div class="panel"><h3>Real joystick mode</h3><p class="muted">A game's IKBD commands reach the box's keyboard model, not the real one. A real joystick reports in whatever mode the main machine left it. USB pads aren't affected.</p></div>
+    </div>
+  </div>
+</section>
+</div>
+
+<!-- ============================================================ BENCHMARKS -->
+<div data-page="benchmarks">
+<header class="page-head">
+  <div class="wrap">
+    <span class="eyebrow">Benchmarks</span>
+    <h1>How fast is it?</h1>
+    <p class="lede">PSCTRL's benchmark on APJ-OS 1.0: a JIT 68040 with FPU on a Raspberry Pi 4B 2&nbsp;GB at its stock 1.5&nbsp;GHz, with <code>jit_power 6</code> (8192 chain budget). Run on 8 October 2026.</p>
+  </div>
+</header>
+
+<section class="block" style="border-top:0;padding-top:0">
+  <div class="wrap" style="display:grid;gap:28px">
+    <div class="hero-num">
+      <div><span class="big">382×</span><span class="lbl">an 8&nbsp;MHz ST, by Dhrystone 2.1</span></div>
+      <div><span class="big">305</span><span class="lbl">DMIPS (535,296 Dhry/s)</span></div>
+      <div><span class="big">1056</span><span class="lbl">CoreMark, 020+ build</span></div>
+    </div>
+
+    <div class="res-grid">
+      <div class="tbl-wrap"><table>
+        <thead><tr><th colspan="2">Processor</th></tr></thead>
+        <tbody>
+          <tr><td>Dhrystone 2.1</td><td class="num">304.66 DMIPS</td></tr>
+          <tr><td>CoreMark</td><td class="num">1056.24</td></tr>
+          <tr><td>ALU</td><td class="num">1316.70 MIPS</td></tr>
+          <tr><td>FPU</td><td class="num">408.53 MFLOPS</td></tr>
+          <tr><td>Tight loop</td><td class="num">145.21 MIPS</td></tr>
+        </tbody>
+      </table></div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th colspan="2">Memory</th></tr></thead>
+        <tbody>
+          <tr><td>Mixed</td><td class="num">254.86 MIPS</td></tr>
+          <tr><td>ST-RAM</td><td class="num">81.92 MIPS</td></tr>
+          <tr><td>ALU op</td><td class="num">6 ns</td></tr>
+          <tr><td>+ load/store</td><td class="num">15 ns</td></tr>
+          <tr><td>+ branch / jsr / movem</td><td class="num">22 / 52 / 70 ns</td></tr>
+        </tbody>
+      </table></div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th colspan="2">Graphics, 160×120 32-bit</th></tr></thead>
+        <tbody>
+          <tr><td>Frame rate</td><td class="num">1613.4 fps</td></tr>
+          <tr><td>Per frame</td><td class="num">619 µs</td></tr>
+          <tr><td>Rasterise / blit</td><td class="num">70% / 29%</td></tr>
+          <tr><td>Triangles</td><td class="num">91.0 M/s</td></tr>
+          <tr><td>Pixels</td><td class="num">13.2 M/s</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <p class="caption">CoreMark 1.0 : 1056.245049 / GCC12.3.0 -O2 -m68020-60 / STACK, 18.9 s. The tight loop costs about 6.1 ns per JIT block exit. Blits go through fVDI at 407,547 KB/s. PSCTRL noted 7 JIT cache flushes during this run.</p>
+
+    <figure style="margin:0">
+      <a href="apjos-desktop.png" class="shot"><img src="apjos-desktop.png" width="1920" height="1080" alt="PSCTRL's Bench tab on the APJ-OS desktop showing the results in the tables above"></a>
+      <figcaption class="caption">The run itself: PSCTRL's Bench tab on the APJ-OS desktop, <code>jit_power 6</code>, at 59.8&nbsp;°C.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap" style="display:grid;gap:28px">
+    <div class="sec-head" style="margin-bottom:0">
+      <span class="eyebrow">Tuning history</span>
+      <h2>What the chain budget is worth</h2>
+      <p>CoreMark in 68000 mode at 1.5&nbsp;GHz, from the performance tuning work on 7 September 2026. Raising <code>jit_power</code> from 3 to 5 added 4.3%. The 8 October run above uses 6, the maximum.</p>
+    </div>
+    <figure class="chart" style="margin:0" aria-labelledby="cm-title">
+      <div class="chart-title">
+        <h3 id="cm-title">CoreMark by chain budget</h3>
+        <p class="muted" style="font-size:0.9rem">Pi 4 at 1.5 GHz, 68000 mode, 7 Sep 2026. Higher is better.</p>
+      </div>
+      <div class="bars" id="cm-bars"></div>
+      <div class="axis" aria-hidden="true"><span></span><div class="ticks" id="cm-ticks"></div><span></span></div>
+      <figcaption class="caption">The plateau hasn't been reached at 4096. Keep the higher setting if MiNT input and sound playback stay clean.</figcaption>
+    </figure>
+
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Setting</th><th>Chain budget</th><th>CoreMark</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td class="k">jit_power 3</td><td class="num">1024</td><td class="num">783</td><td class="num">baseline</td></tr>
+        <tr><td class="k">jit_power 4</td><td class="num">2048</td><td class="num">803</td><td class="num">+2.6%</td></tr>
+        <tr><td class="k">jit_power 5</td><td class="num">4096</td><td class="num">817</td><td class="num">+4.3%</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Where the time goes</span>
+      <h2>What the Pi's counters say</h2>
+      <p>Measured with <code>perf-tlb.sh</code> while CoreMark ran in 68040 and 68060 mode.</p>
+    </div>
+    <div class="three">
+      <div class="panel"><h3>IPC 2.0</h3><p class="muted">The Cortex-A72 retires two instructions per cycle. The core isn't stalling on memory.</p></div>
+      <div class="panel"><h3>Under 1% in page walks</h3><p class="muted">About one TLB refill per 10,000 instructions. Huge pages wouldn't help, which is why they're moot on the stock kernel.</p></div>
+      <div class="panel"><h3>4–5% in instruction fetch</h3><p class="muted">Translated code and the dispatch loop overflow the 48&nbsp;KB L1 instruction cache. The next gains are in JIT code size and quality.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Tuning</span>
+      <h2>The cheap wins, and what they're expected to do</h2>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Change</th><th>Expected</th><th>Measured</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td><code>jit_power 4</code> / <code>5</code></td><td class="num">+1–2%</td><td class="num">+2.6% / +4.3%</td><td>A wider window before interrupts are taken</td></tr>
+        <tr><td><code>jit_cache 16384</code></td><td class="num">0–3% on GEM and MiNT</td><td class="muted">not measured on its own</td><td>8 MB of RAM. CoreMark fits in 8 MB and won't move.</td></tr>
+        <tr><td><code>arm_freq=2100</code> + <code>over_voltage=6</code></td><td class="num">+35–40%</td><td class="muted">not yet run</td><td>Heat. Needs a heatsink and ideally a fan.</td></tr>
+        <tr><td>2&nbsp;MB huge pages</td><td class="num">+3–6%</td><td class="num">0</td><td>None. The stock kernel has huge pages off.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">The overclock lines are already in <code>configs/config.txt</code>, commented out. Check <code>vcgencmd get_throttled</code> after a long session: 0x0 means it never throttled.</p>
+  </div>
+</section>
+
+<section class="block">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Run your own</span>
+      <h2>The PSCTRL benchmark</h2>
+      <p>Open PSCTRL's Bench tab and press <kbd>B</kbd>. Pick the 68000 or 020+ CoreMark build first. It runs inside the accessory and reports each figure next to your previous run.</p>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Figure</th><th>What runs</th><th>What it tells you</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Dhrystone 2.1</strong></td><td>Weicker's published source, unchanged loop, with its self-check</td><td>The headline. Compared with 1400 Dhry/s for a stock 1040 ST at 8 MHz, shown as ×N.</td></tr>
+        <tr><td><strong>CoreMark</strong></td><td>Built twice, for 68000 and for 020-and-up; at least 10 seconds</td><td>What the larger instruction set is worth on the same machine.</td></tr>
+        <tr><td><strong>MIPS mixed</strong></td><td>ALU, branches, ST-RAM load and store, jsr/rts, movem</td><td>The one to watch. Closest to a game's inner loop, and the one <code>jit_power</code> moves.</td></tr>
+        <tr><td><strong>MIPS ALU</strong></td><td>Register-only arithmetic</td><td>Raw translation quality.</td></tr>
+        <tr><td><strong>MIPS ST-RAM</strong></td><td><code>move.l (a0)+,(a1)+</code> over 32 KB of ST-RAM</td><td>The bus path: <code>stram_cache</code>, <code>stram_direct</code>, TT-RAM placement.</td></tr>
+        <tr><td><strong>MFLOPS</strong></td><td>An fmul/fadd chain, when an FPU is present</td><td>The FPU model and JIT FPU.</td></tr>
+        <tr><td><strong>3D</strong></td><td>A shaded solid spun for a fixed time</td><td>Rasterising and blitting timed apart, because a slow frame means different things depending on which one cost the time.</td></tr>
+        <tr><td><strong>BogoMIPS</strong></td><td><code>dbra</code> and nothing else</td><td>A ceiling, not a speed. The JIT folds the loop away.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">Timing uses the 200 Hz counter at <code>$4BA</code>, driven by the MFP rather than anything the JIT does. Compile flags are fixed so results stay comparable between releases.</p>
+  </div>
+</section>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <p><strong style="color:var(--ink)">PiSTorm Atari JIT</strong> · MIT licence · by gotaproblem</p>
+      <p>JIT based on Amiberry. NatFeats from ARAnyM. PiStorm hardware by the PiStorm project.</p>
+    </div>
+    <div class="discord">
+      <span>Atari PiSTorm Discord</span>
+      <code>https://discord.gg/KEtg2QfxQE</code>
+      <a href="https://discord.gg/KEtg2QfxQE">Join</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  /* CoreMark chart: one series, one scale */
+  var data = [
+    { lab: 'jit_power 3', sub: '1024', v: 783 },
+    { lab: 'jit_power 4', sub: '2048', v: 803 },
+    { lab: 'jit_power 5', sub: '4096', v: 817 }
+  ];
+  var max = 1000, ticks = [0, 250, 500, 750, 1000];
+  var bars = document.getElementById('cm-bars');
+  var tk = document.getElementById('cm-ticks');
+  var base = data[0].v;
+  data.forEach(function (d) {
+    var row = document.createElement('div');
+    row.className = 'bar-row'; row.tabIndex = 0;
+    var pct = ((d.v - base) / base * 100).toFixed(1);
+    row.setAttribute('aria-label', d.lab + ', chain budget ' + d.sub + ': CoreMark ' + d.v);
+    var grid = ticks.slice(1).map(function (t) { return '<span class="gl" style="left:' + (t / max * 100) + '%"></span>'; }).join('');
+    row.innerHTML = '<span class="lab">' + d.lab + '<small>' + d.sub + '</small></span>' +
+      '<div class="bar-track">' + grid + '<div class="bar" style="width:' + (d.v / max * 100) + '%"></div></div>' +
+      '<span class="val">' + d.v + '</span>' +
+      '<span class="tip">' + d.lab + ' · ' + d.v + (d.v === base ? ' · baseline' : ' · +' + pct + '%') + '</span>';
+    bars.appendChild(row);
+  });
+  ticks.forEach(function (t) {
+    var s = document.createElement('span'); s.style.left = (t / max * 100) + '%'; s.textContent = t; tk.appendChild(s);
+  });
+
+  /* ST Box compatibility: one stacked bar per configuration, out of 40 */
+  var states = [
+    { k: 'run', name: 'Running' }, { k: 'stuck', name: 'Stuck' },
+    { k: 'crash', name: 'Crash' }, { k: 'halt', name: 'Halt' }
+  ];
+  var sb = [
+    { lab: 'TOS 1.04', sub: 'ST', v: [13, 21, 0, 6] },
+    { lab: 'TOS 2.06', sub: 'ST', v: [29, 5, 1, 5] },
+    { lab: 'TOS 2.06', sub: 'STE', v: [30, 5, 1, 4] }
+  ];
+  var lg = document.getElementById('sb-legend');
+  states.forEach(function (s) { lg.insertAdjacentHTML('beforeend', '<span><i class="seg s-' + s.k + '"></i>' + s.name + '</span>'); });
+  var sbb = document.getElementById('sb-bars');
+  sb.forEach(function (d) {
+    var segs = d.v.map(function (n, i) {
+      if (!n) return '';
+      return '<div class="seg s-' + states[i].k + '" style="flex:' + n + ' 1 0"><span class="tip">' + d.lab + ' ' + d.sub + ' · ' + states[i].name + ': ' + n + '</span></div>';
+    }).join('');
+    var row = document.createElement('div');
+    row.className = 'bar-row';
+    row.setAttribute('aria-label', d.lab + ' ' + d.sub + ': ' + d.v.map(function (n, i) { return states[i].name + ' ' + n; }).join(', '));
+    row.innerHTML = '<span class="lab">' + d.lab + '<small>' + d.sub + '</small></span><div class="stacked">' + segs + '</div><span class="val">' + d.v[0] + '/40</span>';
+    sbb.appendChild(row);
+  });
+
+  /* pages */
+  var pages = {};
+  document.querySelectorAll('[data-page]').forEach(function (p) { pages[p.getAttribute('data-page')] = p; });
+  function route() {
+    var h = (location.hash || '#home').slice(1) || 'home';
+    var page = pages[h] ? h : 'home';
+    if (!pages[h]) {
+      var el = document.getElementById(h);
+      if (el) { var host = el.closest('[data-page]'); if (host) page = host.getAttribute('data-page'); }
+    }
+    Object.keys(pages).forEach(function (k) { pages[k].hidden = (k !== page); });
+    document.querySelectorAll('.nav a[data-link]').forEach(function (a) {
+      var target = a.getAttribute('href').slice(1);
+      var on = (target === h) || (pages[h] && a.getAttribute('data-link') === h && target === h);
+      if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    });
+    if (pages[h]) window.scrollTo(0, 0);
+    else { var t = document.getElementById(h); if (t) t.scrollIntoView(); }
+  }
+  window.addEventListener('hashchange', route);
+  route();
+
+  /* copy buttons */
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var pre = btn.parentElement.querySelector('pre');
+      var reset = function () { setTimeout(function () { btn.textContent = 'Copy'; }, 1600); };
+      var fallback = function () {
+        var r = document.createRange(); r.selectNodeContents(pre);
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        btn.textContent = 'Selected'; reset();
+      };
+      try { navigator.clipboard.writeText(pre.textContent).then(function () { btn.textContent = 'Copied'; reset(); }, fallback); }
+      catch (e) { fallback(); }
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
