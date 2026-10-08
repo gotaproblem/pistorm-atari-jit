@@ -17,8 +17,18 @@ overlay plane positioned over a GEM window, controlled through NatFeats.
 | Host side: ROM load, DRM plane, render thread | `platforms/atari/stbox/stbox_host.c` |
 | Core-3 hook | `emulator.c`, ipl_task housekeeping slot: `stbox_slice()` |
 | Control plane | `NF_FEATURE_STBOX` in `platforms/atari/network/atari_natfeat.cpp` |
-| Input routing | `platforms/atari/kbd_usb.c`: USB `send_key()` / `mouse_flush()` and the real-IKBD byte stream (`stbox_divert_real_byte()`, reached from the USB ACIA shims and from the native `kbd_native_rx_filter()` path alike) divert to the box while its window is focused; **ESC toggles routing** (the mouse is captured, so ESC is how you get the desktop pointer back). The health line (every 5 s) shows `focus= route=` and per-type input counters. |
+| Input routing | `platforms/atari/kbd_usb.c`: USB `send_key()` / `mouse_flush()` and the real-IKBD byte stream (`stbox_divert_real_byte()`, reached from the USB ACIA shims and from the native `kbd_native_rx_filter()` path alike) divert to the box while its window is focused; **ESC toggles routing** (the mouse is captured, so ESC is how you get the desktop pointer back). With `PISTORM_STBOX_DBG=1` the health line (every 5 s) shows `focus= route=` and per-type input counters. |
 | GEM front-end | STBOX.PRG, prebuilt at `configs/gem-binaries/STBOX.PRG` (source kept out of the repo with the rest of cdev/; builds with m68k-atari-mint-gcc + gemlib) |
+
+## Console output
+
+By default the box prints only what a user needs: `started` (TOS, RAM, ST/STE),
+the disk inserted, `stopped`, errors, the first three guest exceptions as one
+line each, and on a double bus fault the halt line plus the TOS crash vault.
+`PISTORM_STBOX_DBG=1` brings back everything else: the 5-second health,
+scheduler and IRQ lines, trace exceptions, plane/zpos/commit details, input
+routing and focus changes, every guest exception with registers and code, the
+full halt report (PC trace, disassembly) and the PC-window telemetry.
 
 ## Execution model
 

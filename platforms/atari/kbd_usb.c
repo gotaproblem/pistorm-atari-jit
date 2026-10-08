@@ -1207,7 +1207,7 @@ static int stbox_divert_real_byte(uint8_t v)
         {
             stbox_route_enabled = !stbox_route_enabled;
             stbox_note_route(stbox_route_enabled);
-            fprintf(stderr, "[STBOX] input routing %s (real IKBD ESC)\n",
+            STBOX_DBG("[STBOX] input routing %s (real IKBD ESC)\n",
                     stbox_route_enabled ? "ON (ESC releases)" : "OFF");
             return 1;
         }
@@ -1762,7 +1762,7 @@ static void send_key(uint8_t scan, int pressed)
         {
             stbox_route_enabled = !stbox_route_enabled;
             stbox_note_route(stbox_route_enabled);
-            fprintf(stderr, "[STBOX] input routing %s\n",
+            STBOX_DBG("[STBOX] input routing %s\n",
                     stbox_route_enabled ? "ON (ESC releases)" : "OFF");
         }
         return;

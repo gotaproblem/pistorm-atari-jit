@@ -60,6 +60,7 @@ static volatile int g_rx, g_ry, g_rw = -1, g_rh = -1;
 static volatile int g_cx, g_cy, g_cw = -1, g_ch = -1;
 static volatile int g_focus;
 static volatile int g_route = 1;        /* kbd_usb.c ESC toggle, for logs */
+static unsigned g_exc_shown;           /* guest exceptions printed (short form) */
 
 /* DRM */
 static int g_fd = -1;
@@ -169,7 +170,7 @@ static void raise_above_guest(uint32_t guest_plane)
                                      gzp, glo);
         theirs = plane_zpos_of(guest_plane);
     }
-    fprintf(stderr, "[STBOX] zpos: box plane %u = %ld, guest plane %u = %ld\n",
+    STBOX_DBG("[STBOX] zpos: box plane %u = %ld, guest plane %u = %ld\n",
             g_plane, mine, guest_plane, theirs);
     if (mine >= 0 && theirs >= 0 && mine <= theirs)
         fprintf(stderr, "[STBOX] WARNING: still at or below the guest plane - "
@@ -259,7 +260,7 @@ static int pick_plane(void)
         g_atomic = pr_fb && pr_crtc && pr_cx && pr_cy && pr_cw && pr_ch &&
                    pr_sx && pr_sy && pr_sw && pr_sh;
     }
-    fprintf(stderr, "[STBOX] plane %u (%s), present: %s\n", g_plane,
+    STBOX_DBG("[STBOX] plane %u (%s), present: %s\n", g_plane,
             g_fourcc == DRM_FORMAT_XRGB8888 ? "XRGB8888" : "ARGB8888",
             g_atomic ? "non-blocking atomic" : "blocking SetPlane");
     return 0;
@@ -568,11 +569,12 @@ static void *render_main(void *arg)
     uint32_t last_frame = (uint32_t)-1;
     /* health line every 5 s while running: pace, plus the input state -
      * focus/routing and what actually reached the sandbox IKBD - so a
-     * "mouse does nothing" report can be read off the log. */
+     * "mouse does nothing" report can be read off the log. Developer
+     * output: only with PISTORM_STBOX_DBG=1. */
     time_t health_at = time(NULL) + 5;
     uint32_t last_frame_h = stbox_shared.frame;
     while (g_run) {
-        if (time(NULL) >= health_at) {
+        if (stbox_log_verbose() && time(NULL) >= health_at) {
             health_at += 5;
             uint32_t in[6];
             stbox_input_stats(in);
@@ -655,6 +657,23 @@ static void *render_main(void *arg)
                 unsigned from = (n - seen > STBOX_EXC_RING) ? n - STBOX_EXC_RING : seen;
                 for (unsigned i = from; i != n; i++) {
                     stbox_exc_info_t e = stbox_exc_ring[i & (STBOX_EXC_RING - 1)];
+                    const char *what =
+                        e.vector == 2 ? "bus error" : e.vector == 3 ? "address error" :
+                        e.vector == 4 ? "illegal instruction" : "privilege violation";
+                    if (!stbox_log_verbose()) {
+                        /* A user wants to know a program crashed and where;
+                         * a few lines, then quiet - some games fault
+                         * deliberately and would flood the console. */
+                        if (g_exc_shown < 3)
+                            fprintf(stderr, "[STBOX] guest %s at pc=%06X\n",
+                                    what, e.ppc);
+                        else if (g_exc_shown == 3)
+                            fprintf(stderr, "[STBOX] more guest exceptions - "
+                                    "not shown (PISTORM_STBOX_DBG=1 for all, "
+                                    "with registers and code)\n");
+                        g_exc_shown++;
+                        continue;
+                    }
                     char d1[80]; d1[0] = 0;
                     m68k_disassemble(d1, e.ppc, M68K_CPU_TYPE_68000);
                     fprintf(stderr, "[STBOX] EXCEPTION #%u vec %u (%s) at guest cycle %llu:"
@@ -691,12 +710,15 @@ static void *render_main(void *arg)
                     stbox_halt_info.fault1, stbox_halt_info.fault2,
                     stbox_halt_info.pc, stbox_halt_info.ppc,
                     stbox_halt_info.sr, stbox_halt_info.sp);
-            fprintf(stderr, "[STBOX] last PCs (oldest first):");
             unsigned idx = stbox_pc_ring_idx;
+            int full = stbox_log_verbose();
+            if (full) {
+            fprintf(stderr, "[STBOX] last PCs (oldest first):");
             for (unsigned i = 0; i < STBOX_PC_RING; i++)
                 fprintf(stderr, "%s%06x", (i % 8) ? " " : "\n[STBOX]   ",
                         stbox_pc_ring[(idx + i) & (STBOX_PC_RING - 1)]);
             fprintf(stderr, "\n");
+            }
 
             /* The box is halted, its RAM is stable, and we link the
              * disassembler: print every 256-byte code page the ring
@@ -740,6 +762,9 @@ static void *render_main(void *arg)
                         (penum == 2 || penum == 3) ? (fault_addr & 0xFFFFFF) : 0);
             }
 
+            if (!full)
+                fprintf(stderr, "[STBOX] full crash report (PC trace, "
+                        "disassembly): run with PISTORM_STBOX_DBG=1\n");
             uint32_t pages[5]; int npages = 0;
             if (crash_pc)
                 pages[npages++] = (crash_pc & 0xFFFFFF) & ~0xFFu;
@@ -751,7 +776,7 @@ static void *render_main(void *arg)
                     if (pages[j] == pg) seen = 1;
                 if (!seen) pages[npages++] = pg;
             }
-            for (int j = 0; j < npages; j++) {
+            for (int j = 0; full && j < npages; j++) {
                 fprintf(stderr, "[STBOX] --- disassembly @ %06x ---\n",
                         pages[j]);
                 uint32_t pc2 = pages[j];
@@ -817,7 +842,7 @@ static void *render_main(void *arg)
         }
         int cr = commit(b->fb, sx, sy, vw, vh, dx, dy, dw, dh);
         static int commit_log = 3;     /* first three: say what happened */
-        if (commit_log > 0) {
+        if (commit_log > 0 && stbox_log_verbose()) {
             commit_log--;
             fprintf(stderr, "[STBOX] commit fb=%u src=%u,%u %ux%u -> dst=%d,%d "
                     "%dx%d rc=%d errno=%d (frame %u, res %d, vidbase %06x)\n",
@@ -1071,6 +1096,7 @@ int stbox_start(const stbox_cfg_t *cfg)
 {
     if (g_started) return -1;
     g_cfg = *cfg;
+    g_exc_shown = 0;
     if (!g_cfg.ram_kb) g_cfg.ram_kb = 4096;
     uint32_t ram_size = g_cfg.ram_kb * 1024u;
 
@@ -1164,9 +1190,13 @@ int stbox_start(const stbox_cfg_t *cfg)
         stbox_dmasnd_start();
     if (g_cfg.floppy_a[0])
         stbox_disk_insert_path(g_cfg.floppy_a);
-    fprintf(stderr, "[STBOX] running: %s, %u KB, %s (build %s %s)\n",
-            path, g_cfg.ram_kb, g_cfg.machine_ste ? "STE" : "ST",
-            __DATE__, __TIME__);
+    {
+        const char *base = strrchr(path, '/');
+        fprintf(stderr, "[STBOX] started: %s, %u KB, %s\n",
+                base ? base + 1 : path, g_cfg.ram_kb,
+                g_cfg.machine_ste ? "STE" : "ST");
+        STBOX_DBG("[STBOX]   TOS %s (build %s %s)\n", path, __DATE__, __TIME__);
+    }
     return 0;
 }
 
@@ -1199,7 +1229,7 @@ void stbox_set_clip(int x, int y, int w, int h)
 void stbox_set_focus(int focused)
 {
     if (g_focus != focused)
-        fprintf(stderr, "[STBOX] focus %d -> %d (routing %s)\n",
+        STBOX_DBG("[STBOX] focus %d -> %d (routing %s)\n",
                 g_focus, focused, g_route ? "on" : "off");
     g_focus = focused;
 }

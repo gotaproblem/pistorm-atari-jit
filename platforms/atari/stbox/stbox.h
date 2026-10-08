@@ -23,6 +23,7 @@
 #define PISTORM_STBOX_H
 
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,6 +67,16 @@ void stbox_set_rect(int x, int y, int w, int h);
 void stbox_set_clip(int x, int y, int w, int h);
 void stbox_set_focus(int focused);
 int  stbox_get_focus(void);
+
+/* CONSOLE OUTPUT. By default the box says only what a user needs: that it
+ * started and stopped, which disk went in, errors, and a short report when a
+ * guest program crashes. Everything a developer wants - the 5-second health
+ * lines, plane/zpos/commit details, input routing, full crash dumps with
+ * disassembly - is behind PISTORM_STBOX_DBG=1 (which also turns on the PC
+ * telemetry the health line shows). Read once; cheap to call anywhere. */
+int stbox_log_verbose(void);
+#define STBOX_DBG(...) \
+    do { if (stbox_log_verbose()) fprintf(stderr, __VA_ARGS__); } while (0)
 
 /* stats for PSMON/NatFeat: guest MIPS-ish, frames, slice overruns */
 void stbox_get_stats(uint32_t out[4]);

@@ -287,6 +287,7 @@ volatile uint32_t stbox_dbg_pc_lo = 0xFFFFFFFFu, stbox_dbg_pc_hi;   /* window */
 volatile uint32_t stbox_dbg_last_hwr, stbox_dbg_last_hwr_pc;        /* last HW read addr + PC */
 static int g_dbg = -1;             /* PISTORM_STBOX_DBG: publish PC telemetry */
 static int dbg_on(void){ if (g_dbg<0){const char*e=getenv("PISTORM_STBOX_DBG"); g_dbg=(e&&*e=='1');} return g_dbg; }
+int stbox_log_verbose(void) { return dbg_on(); }
 
 static void psg_snoop(uint8_t reg, uint8_t val)
 {
@@ -1175,7 +1176,7 @@ static void mfp_write(uint32_t a, uint8_t v)
             uint8_t on = (uint8_t)(v & ~mfp.ierb);
             if ((mfp.iprb & ~v) & (1u << MFP_CH_ACIA)) {
                 static int shown;
-                if (shown++ < 8)
+                if (dbg_on() && shown++ < 8)
                     fprintf(stderr, "[STBOX] guest disabled MFP ch6 with its "
                             "interrupt pending (IERB %02X->%02X) at pc=%06X\n",
                             mfp.ierb, v,
@@ -1184,7 +1185,7 @@ static void mfp_write(uint32_t a, uint8_t v)
             mfp.ierb = v; mfp.iprb &= v;
             if ((on & (1u << MFP_CH_ACIA)) && (acia.sr & 0x01)) {
                 static int shown2;
-                if (shown2++ < 8)
+                if (dbg_on() && shown2++ < 8)
                     fprintf(stderr, "[STBOX] ch6 enabled with an ACIA byte "
                             "waiting - interrupt re-raised (pc=%06X)\n",
                             (unsigned)m68k_get_reg(NULL, M68K_REG_PPC));
@@ -1803,7 +1804,8 @@ void stbox_core_arm(uint64_t now, uint64_t cntfrq)
     g_cntfrq  = cntfrq;
     g_fp_step = ((uint64_t)ST_CPU_HZ << 32) / cntfrq;
     g_slice_cap_ticks = ((uint64_t)slice_cap_ns() * cntfrq) / 1000000000ull;
-    fprintf(stderr, "[STBOX] slice cap %d ns = %llu ticks (cntfrq %llu)\n",
+    /* settle the log flag here, on a host thread, so core 3 never reads env */
+    STBOX_DBG("[STBOX] slice cap %d ns = %llu ticks (cntfrq %llu)\n",
             slice_cap_ns(), (unsigned long long)g_slice_cap_ticks,
             (unsigned long long)cntfrq);
     g_last_ticks = now;

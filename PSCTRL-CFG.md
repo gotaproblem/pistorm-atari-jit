@@ -211,6 +211,7 @@ set them in `run-pistorm.sh` or with `sudo env VAR=... sh run-pistorm.sh`.
 | `PISTORM_ET4000_DIRTY=0` | HDMI: render and present every frame even when nothing changed |
 | `PISTORM_DMASND_GPIP7=0/1` | STE DMA sound: withhold / force the GPIP7 frame pulses (default: only to a handler in RAM) |
 | `PISTORM_STBOX_TOS`, `PISTORM_STBOX_PLANE` | see `stbox_*` |
+| `PISTORM_STBOX_DBG=1` | ST Box developer output: health lines every 5 s, plane and input details, full crash reports. Off, the box logs only start/stop, disks, errors and short crash lines |
 | `PISTORM_DUMP_ADDR=addr[,addr]` | dump guest memory at these addresses when the guest dies |
 
 `PERF-TUNING.md` has the performance-related ones.

@@ -140,7 +140,7 @@ int stbox_psg_start(void)
     }
     g_render_t = 0;
     atomic_store(&g_on, 1);
-    fprintf(stderr, "[STBOX] PSG -> SDL mixer ready\n");
+    STBOX_DBG("[STBOX] PSG -> SDL mixer ready\n");
     return 0;
 }
 

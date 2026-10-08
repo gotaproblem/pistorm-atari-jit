@@ -115,7 +115,7 @@ int stbox_dmasnd_start(void)
     g_primed = 0;
     stbox_dma_tail = stbox_dma_head;
     atomic_store(&g_on, 1);
-    fprintf(stderr, "[STBOX] STE DMA sound -> SDL mixer ready\n");
+    STBOX_DBG("[STBOX] STE DMA sound -> SDL mixer ready\n");
     return 0;
 }
 
