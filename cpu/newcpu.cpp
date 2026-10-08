@@ -4805,6 +4805,48 @@ static void pistorm_bad_opcode_dump(int nr)
 		}
 		fprintf(stderr, "\n");
 	}
+	fprintf(stderr, "[CPU]   D0-7:");
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, " %08X", (unsigned)m68k_dreg(regs, i));
+	fprintf(stderr, "\n[CPU]   A0-7:");
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, " %08X", (unsigned)m68k_areg(regs, i));
+	fprintf(stderr, "\n");
+	if (pc == 0x30u)
+		/* TOS maps the ROM's first longs at 0: BRA.S $30, so a jump to
+		 * 0 (a NULL function pointer) ends at $30; the jump's return
+		 * address, if it was a JSR, is the top of the stack */
+		fprintf(stderr, "[CPU]   pc $30: the program jumped to address 0\n");
+	{
+		/* the running program: _sysbase -> OS header (ROM) -> p_run ->
+		 * basepage. RAM is read from the host mirror, the ROM header
+		 * through the memory banks */
+#define PS_L(a) ((uae_u32)natmem_offset[(a)] << 24 | (uae_u32)natmem_offset[(a) + 1] << 16 | \
+		 (uae_u32)natmem_offset[(a) + 2] << 8 | natmem_offset[(a) + 3])
+		uae_u32 osh = PS_L(0x4F2u);
+		uae_u32 prun = (osh >= 0x00E00000u && osh < 0x00F00000u) ? get_long(osh + 0x28) : 0;
+		uae_u32 bp = (prun >= 0x400u && prun < top) ? PS_L(prun) : 0;
+		if (bp >= 0x400u && bp < top - 0x20u)
+			fprintf(stderr, "[CPU]   basepage %08X text %08X+%X data %08X+%X bss %08X+%X\n",
+				(unsigned)bp, (unsigned)PS_L(bp + 8), (unsigned)PS_L(bp + 12),
+				(unsigned)PS_L(bp + 16), (unsigned)PS_L(bp + 20),
+				(unsigned)PS_L(bp + 24), (unsigned)PS_L(bp + 28));
+#undef PS_L
+	}
+	{
+		void pistorm_fpu_ring_dump(void);   /* cpu/fpp.cpp, PISTORM_FPU_RING=1 */
+		pistorm_fpu_ring_dump();
+	}
+#if CPU_PC_RING
+	/* the last 256 instruction PCs, oldest first. Filled by the
+	 * interpreter loops only: with the JIT on, compiled blocks leave
+	 * no entries, so run with the JIT off to see the path here */
+	fprintf(stderr, "[CPU]   last 256 pcs, oldest first:");
+	for (unsigned k = 0; k < 256; k++)
+		fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[CPU]   ",
+			pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255]);
+	fprintf(stderr, "\n");
+#endif
 }
 
 void REGPARAM2 Exception(int nr)

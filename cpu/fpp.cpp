@@ -3583,6 +3583,31 @@ static void fpuop_arithmetic2 (uae_u32 opcode, uae_u16 extra)
 	fpu_noinst (opcode, pc);
 }
 
+/* PISTORM_FPU_RING=1: a ring of the last 64 FPU general ops the
+ * interpreter ran (JIT-compiled FPU ops do not come through here), with
+ * the register named by the extension word's bits 9-7 as a double and
+ * the FPSR after the op. For fcmp/ftst that register is the one being
+ * compared; for fmove <ea>,fpN it is the value loaded. Printed by the
+ * illegal-instruction dump in newcpu.cpp. Off: one test per op. */
+struct ps_fpu_rec { uae_u32 pc, hi, lo, fpsr; uae_u16 op, ext; };
+static struct ps_fpu_rec ps_fpu_ring[64];
+static unsigned ps_fpu_ring_i;
+static int ps_fpu_ring_on = -1;
+
+void pistorm_fpu_ring_dump(void)
+{
+	if (ps_fpu_ring_on <= 0 || !ps_fpu_ring_i)
+		return;
+	unsigned n = ps_fpu_ring_i < 64 ? ps_fpu_ring_i : 64;
+	fprintf(stderr, "[FPU]   last %u FPU ops, oldest first: pc op ext  fp(ext>>7&7) as double  fpsr\n", n);
+	for (unsigned k = 0; k < n; k++) {
+		const struct ps_fpu_rec *r = &ps_fpu_ring[(ps_fpu_ring_i - n + k) & 63];
+		fprintf(stderr, "[FPU]   %08X %04X %04X fp%u=%08X%08X %08X\n",
+			(unsigned)r->pc, r->op, r->ext, (unsigned)((r->ext >> 7) & 7),
+			(unsigned)r->hi, (unsigned)r->lo, (unsigned)r->fpsr);
+	}
+}
+
 void fpuop_arithmetic (uae_u32 opcode, uae_u16 extra)
 {
 	regs.fpu_state = 1;
@@ -3594,6 +3619,18 @@ void fpuop_arithmetic (uae_u32 opcode, uae_u16 extra)
 	fpuop_arithmetic2 (opcode, extra);
 	if (fpu_mmu_fixup) {
 		mmufixup[0].reg = -1;
+	}
+	if (ps_fpu_ring_on < 0) {
+		const char *e = getenv("PISTORM_FPU_RING");
+		ps_fpu_ring_on = (e && *e == '1') ? 1 : 0;
+	}
+	if (ps_fpu_ring_on) {
+		struct ps_fpu_rec *r = &ps_fpu_ring[ps_fpu_ring_i++ & 63];
+		r->pc = regs.instruction_pc;
+		r->op = (uae_u16)opcode;
+		r->ext = extra;
+		fpp_from_double(&regs.fp[(extra >> 7) & 7], &r->hi, &r->lo);
+		r->fpsr = regs.fpsr;   /* raw: fpp_get_fpsr() rewrites it under the JIT */
 	}
 }
 

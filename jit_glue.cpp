@@ -331,6 +331,17 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
 
     if (disable_fpu)
         currprefs.fpu_mode = changed_prefs.fpu_mode = 0;
+    else {
+        /* PISTORM_FPU_SOFT=1: the 80-bit softfloat FPU (fpp_softfloat.cpp)
+         * instead of host doubles, with FPU ops interpreted (the JIT's FPU
+         * code assumes doubles). Slower; for comparing results. */
+        const char *e = getenv("PISTORM_FPU_SOFT");
+        if (e && *e == '1') {
+            currprefs.fpu_mode = changed_prefs.fpu_mode = 1;
+            currprefs.compfpu = changed_prefs.compfpu = false;
+            fprintf(stderr, "[JITGLUE] FPU: 80-bit softfloat, FPU ops interpreted (PISTORM_FPU_SOFT=1)\n");
+        }
+    }
 
     if (cpu_clock_multiplier < 0)
         cpu_clock_multiplier = 0;
