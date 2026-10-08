@@ -68,6 +68,12 @@ tracked at 2 457 600 Hz via fixed point. IKBD bytes paced at 7812.5 baud.
 4. **Signed pacing debt.** Musashi overshoots the slice budget by up to
    one instruction; unsigned debt wraps, the clamp gifts a frame, and the
    box runs 2.56× fast.
+5. **A zero DMA sector count transfers nothing.** EmuTOS 1.3's floppy
+   setup issues READ TRACK with the count at 0 and the DMA address at
+   $1004. The model used to default to 13 sectors, wrote 6.5 KB over
+   EmuTOS's BSS (IKBD/MIDI handler pointers at $25A4), and the next
+   keyboard interrupt jumped into the fill pattern - box stuck on the
+   "EmuTOS Version 1.3" crash screen whenever a disk was in drive A.
 
 ## STE tier
 

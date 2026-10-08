@@ -608,8 +608,15 @@ static void fdc_complete(void)
          * it and find their sectors. */
         if (!diska.present) { fdc.status = 0x90; fdc_intrq(); return; }
         int side = fdc_side();
-        uint32_t want = (uint32_t)(fdc.sector_count ? fdc.sector_count : 13)
-                        * 512u;
+        /* The DMA chip only moves data while its sector count is non-zero,
+         * so a READ TRACK issued with a count of 0 reads the track and
+         * transfers nothing. EmuTOS 1.3's floppy setup does exactly that
+         * with the DMA address at $1004; transferring a default 13 sectors
+         * here instead wrote 6.5 KB over its BSS, including the IKBD/MIDI
+         * handler pointers at $25A4, and the next keyboard interrupt jumped
+         * into the fill pattern (box stuck on the "EmuTOS Version 1.3"
+         * crash screen). */
+        uint32_t want = (uint32_t)fdc.sector_count * 512u;
         uint32_t dst = fdc.dma_addr, end = fdc.dma_addr + want;
         uint8_t hdr[8], dam[4] = { 0xA1, 0xA1, 0xA1, 0xFB };
         for (int i = 0; i < 60 && dst < end; i++) fdc_ram_put(&dst, 0x4E);
