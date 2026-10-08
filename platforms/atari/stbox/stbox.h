@@ -79,6 +79,10 @@ void stbox_get_stats(uint32_t out[4]);
  * framebuffer copy entirely when it is 0. Any thread except core 3. */
 int  stbox_capture_pending(void);
 int  stbox_capture_blend(void *dst, int dst_stride, int dst_w, int dst_h);
+/* As above, and on a return of 1 also reports the rect written (x0, y0,
+ * x1, y1 inclusive, framebuffer pixels). rect may be NULL. */
+int  stbox_capture_blend_rect(void *dst, int dst_stride, int dst_w, int dst_h,
+                              int rect[4]);
 
 /* ------------------------------------------------------------------ */
 /* sandbox PSG audio (stbox_psg.c renders; stbox.c produces)          */

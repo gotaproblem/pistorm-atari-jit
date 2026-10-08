@@ -2493,6 +2493,12 @@ int vidplay_capture_pending(void)
 
 int vidplay_capture_blend(void *dstv, int dst_stride, int dst_w, int dst_h)
 {
+    return vidplay_capture_blend_rect(dstv, dst_stride, dst_w, dst_h, NULL);
+}
+
+int vidplay_capture_blend_rect(void *dstv, int dst_stride, int dst_w, int dst_h,
+                               int rect[4])
+{
     int mw = (int)vidplane_mode_w();
     int mh = (int)vidplane_mode_h();
     int dx, dy, dw, dh, sx, sy, sw, sh;
@@ -2567,6 +2573,10 @@ int vidplay_capture_blend(void *dstv, int dst_stride, int dst_w, int dst_h)
         sws_scale(g_cap_sws, (const uint8_t * const *)f->data, f->linesize,
                   0, f->height, dst_planes, dst_lines);
         rc = 1;
+        if (rect) {
+            rect[0] = dx;          rect[1] = dy;
+            rect[2] = dx + dw - 1; rect[3] = dy + dh - 1;
+        }
     }
     pthread_mutex_unlock(&g_cap_lock);
     return rc;

@@ -25,6 +25,22 @@ void avrecord_arm(const char *dir, int seconds);
 void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
                           int dx0, int dy0, int dx1, int dy1);
 
+/* Overlay planes (a film, the ST Box) are not in fb: the display controller
+ * composites them at scanout. Pass a blend callback while one is on screen
+ * and the recorder calls it on its OWN copy of the frame, right after the
+ * dirty-rect copy and under the same lock - no full-framebuffer copy on the
+ * render thread. The callback draws into dst (ARGB8888, stride in bytes),
+ * returns 1 if it drew and sets rect to the union it wrote (x0, y0, x1, y1
+ * inclusive). The recorder re-copies that rect from fb on the next frame, so
+ * a picture that moves, shrinks or goes leaves nothing behind. NULL when no
+ * overlay is up. While one is, frames are taken no faster than the writer
+ * encodes them, so the blend is not paid for frames that would be dropped. */
+typedef int (*avrecord_blend_fn)(void *dst, int dst_stride, int w, int h,
+                                 int rect[4]);
+void avrecord_video_frame_ov(const void *fb, int stride_bytes, int w, int h,
+                             int dx0, int dy0, int dx1, int dy1,
+                             avrecord_blend_fn blend);
+
 /* SDL postmix tap (audio thread): device-format float samples. */
 void avrecord_audio_push_f32(const float *buf, int nsamples);
 

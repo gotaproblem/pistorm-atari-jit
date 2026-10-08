@@ -852,6 +852,12 @@ int stbox_capture_pending(void)
 
 int stbox_capture_blend(void *dstv, int dst_stride, int dst_w, int dst_h)
 {
+    return stbox_capture_blend_rect(dstv, dst_stride, dst_w, dst_h, NULL);
+}
+
+int stbox_capture_blend_rect(void *dstv, int dst_stride, int dst_w, int dst_h,
+                             int rect[4])
+{
     static uint32_t *xmap, *row;
     static int xmap_n, row_n;
     int rc = 0;
@@ -923,6 +929,10 @@ int stbox_capture_blend(void *dstv, int dst_stride, int dst_w, int dst_h)
                 d[i] = row[xmap[i]] | 0xFF000000u;   /* XRGB -> opaque ARGB */
         }
         rc = 1;
+        if (rect) {
+            rect[0] = x0;     rect[1] = y0;
+            rect[2] = x1 - 1; rect[3] = y1 - 1;
+        }
     }
 out:
     pthread_mutex_unlock(&g_cap_lock);

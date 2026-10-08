@@ -678,6 +678,13 @@ static void *writer_thread(void *arg)
  * borders, nearest-neighbour, whole-number scale when enlarging so pixels
  * stay square and sharp. Render thread only, like the rest of this file. */
 static int  g_was_fitted = 0;    /* last frame was fitted: next native one is copied whole */
+
+/* Overlay area blended into g_latest last time (inclusive), or none. It is not
+ * in fb, so the guest's dirty rect never covers it: it is re-copied from fb on
+ * the next frame before the blend runs again. Render thread only. */
+static int  g_ov_valid = 0;
+static int  g_ov_x0, g_ov_y0, g_ov_x1, g_ov_y1;
+static uint64_t g_ov_last_ns = 0;
 static int *g_fit_xmap = NULL;   /* dest column -> source column */
 static int  g_fit_xmap_w = 0, g_fit_xmap_sw = 0;
 
@@ -725,6 +732,7 @@ static void fit_frame(const void *fb, int stride_bytes, int w, int h)
             dr[x] = sr[g_fit_xmap[x]];
     }
     g_pend_valid = 0;                    /* the whole buffer is current */
+    g_ov_valid = 0;                      /* ...and has no overlay in it */
     pthread_mutex_unlock(&g_fmx);
 
     if (!g_was_fitted)
@@ -735,6 +743,35 @@ static void fit_frame(const void *fb, int stride_bytes, int w, int h)
 
 void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
                           int dx0, int dy0, int dx1, int dy1)
+{
+    avrecord_video_frame_ov(fb, stride_bytes, w, h, dx0, dy0, dx1, dy1, NULL);
+}
+
+static uint64_t rec_now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
+/* merge a rect into the deferred one (render thread) */
+static void pend_merge(int x0, int y0, int x1, int y1)
+{
+    if (!g_pend_valid) {
+        g_pend_x0 = x0; g_pend_y0 = y0;
+        g_pend_x1 = x1; g_pend_y1 = y1;
+        g_pend_valid = 1;
+    } else {
+        if (x0 < g_pend_x0) g_pend_x0 = x0;
+        if (y0 < g_pend_y0) g_pend_y0 = y0;
+        if (x1 > g_pend_x1) g_pend_x1 = x1;
+        if (y1 > g_pend_y1) g_pend_y1 = y1;
+    }
+}
+
+void avrecord_video_frame_ov(const void *fb, int stride_bytes, int w, int h,
+                             int dx0, int dy0, int dx1, int dy1,
+                             avrecord_blend_fn blend)
 {
     if (!fb || w <= 0 || h <= 0)
         return;
@@ -800,6 +837,8 @@ void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
             return;
         }
         g_thr_up = 1;
+        g_ov_valid = 0;
+        g_ov_last_ns = 0;
         g_pend_valid = 1;                       /* first copy must be full */
         g_pend_x0 = 0; g_pend_y0 = 0;
         g_pend_x1 = w - 1; g_pend_y1 = h - 1;
@@ -826,22 +865,41 @@ void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
     if (dx1 >= w || dx1 < dx0) dx1 = w - 1;
     if (dy1 >= h || dy1 < dy0) dy1 = h - 1;
 
+    /* PACE AGAINST THE WRITER while an overlay is up. Frames arrive at the
+     * render rate (up to 60) but the writer samples g_latest at g_fps and
+     * everything in between is overwritten; a blend - a film scaled by
+     * swscale, the box scaled from its buffer - is real work to throw away.
+     * So take a frame only once per writer interval (half an interval of
+     * slack: the two ticks are not phase-locked) and defer the rest. The
+     * picture can be up to one interval old when sampled, which is what the
+     * writer would have seen anyway. */
+    if (blend && g_fps > 0) {
+        uint64_t now = rec_now_ns();
+        uint64_t step = 1000000000u / (unsigned)g_fps;
+        if (g_ov_last_ns && now - g_ov_last_ns < step - step / 2) {
+            pend_merge(dx0, dy0, dx1, dy1);
+            return;
+        }
+    }
+
     /* NEVER block the render thread: if the writer holds the buffer (it holds
      * it only for the encoder copy), defer this rect and merge it next time.
      * The IKBD/mouse constraint is absolute - starving the CPU thread with
      * render-side stalls loses ACIA bytes and desyncs the mouse protocol. */
     if (pthread_mutex_trylock(&g_fmx) != 0) {
-        if (!g_pend_valid) {
-            g_pend_x0 = dx0; g_pend_y0 = dy0;
-            g_pend_x1 = dx1; g_pend_y1 = dy1;
-            g_pend_valid = 1;
-        } else {
-            if (dx0 < g_pend_x0) g_pend_x0 = dx0;
-            if (dy0 < g_pend_y0) g_pend_y0 = dy0;
-            if (dx1 > g_pend_x1) g_pend_x1 = dx1;
-            if (dy1 > g_pend_y1) g_pend_y1 = dy1;
-        }
+        pend_merge(dx0, dy0, dx1, dy1);
         return;
+    }
+    if (blend)
+        g_ov_last_ns = rec_now_ns();
+
+    /* the area last frame's overlay covered comes back from fb first */
+    if (g_ov_valid) {
+        if (g_ov_x0 < dx0) dx0 = g_ov_x0;
+        if (g_ov_y0 < dy0) dy0 = g_ov_y0;
+        if (g_ov_x1 > dx1) dx1 = g_ov_x1;
+        if (g_ov_y1 > dy1) dy1 = g_ov_y1;
+        g_ov_valid = 0;
     }
 
     /* merge any deferred rect, then copy only the dirty region */
@@ -860,6 +918,19 @@ void avrecord_video_frame(const void *fb, int stride_bytes, int w, int h,
         for (int y = dy0; y <= dy1; y++)
             memcpy(dst + (size_t)y * w * 4 + xoff,
                    src + (size_t)y * stride_bytes + xoff, xlen);
+    }
+
+    /* overlays on top, into the recorder's own copy - never into fb, which
+     * would put them on the real Atari monitor */
+    if (blend) {
+        int r[4] = { 0, 0, -1, -1 };
+        if (blend(g_latest, w * 4, w, h, r) > 0 && r[2] >= r[0] && r[3] >= r[1]) {
+            g_ov_x0 = r[0] < 0 ? 0 : r[0];
+            g_ov_y0 = r[1] < 0 ? 0 : r[1];
+            g_ov_x1 = r[2] >= w ? w - 1 : r[2];
+            g_ov_y1 = r[3] >= h ? h - 1 : r[3];
+            g_ov_valid = 1;
+        }
     }
     pthread_mutex_unlock(&g_fmx);
 }

@@ -69,6 +69,12 @@ void vidplay_set_clip(int x, int y, int w, int h);
  * dst is ARGB8888, dst_stride in BYTES. Safe to call from another thread. */
 int vidplay_capture_blend(void *dst, int dst_stride, int dst_w, int dst_h);
 
+/* As above, and on a return of 1 also reports the framebuffer rect it wrote
+ * (x0, y0, x1, y1 inclusive) - the recorder needs it to restore that area
+ * from the framebuffer once the picture moves or goes. rect may be NULL. */
+int vidplay_capture_blend_rect(void *dst, int dst_stride, int dst_w, int dst_h,
+                               int rect[4]);
+
 /* 1 while there is a picture on screen worth blending, 0 when there is not,
  * and -1 when there is one but this decode path cannot be read by the CPU.
  * The -1 lets a caller skip the framebuffer copy entirely and still say once

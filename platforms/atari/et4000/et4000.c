@@ -873,7 +873,8 @@ static void et4000_start_screenrecord(int seconds)
     printf("[ET4K] Recording %d seconds -> %s\n", seconds, g_screenrecord_dir);
 }
 
-/* THE OVERLAYS ARE NOT IN THE FRAMEBUFFER.
+/* THE OVERLAYS ARE NOT IN THE FRAMEBUFFER. (PNG capture mode only: the live
+ * recorder blends into its own copy instead - see et4000_record_blend.)
  *
  * s->fb_mem is the Atari screen. A film plays on a separate DRM plane which the
  * display controller composites above it at scanout, so a recording taken
@@ -1044,6 +1045,49 @@ static void et4000_do_screendump(ET4000State *s)
 }
 
 
+/* Live recorder overlays. avrecord calls et4000_record_blend() on its own
+ * copy of the frame, so nothing here copies the framebuffer. */
+static int et4000_record_overlays_pending(void)
+{
+    int vp = vidplay_capture_pending();
+    if (vp < 0) {
+        static int said = 0;
+        if (!said) {
+            said = 1;
+            fprintf(stderr, "[AVREC] this film decodes straight into the "
+                            "display hardware (zero-copy HEVC), so the CPU "
+                            "cannot read its frames - the recording will have "
+                            "sound but no picture where the film is.\n");
+        }
+    }
+    return vp > 0 || stbox_capture_pending();
+}
+
+static int et4000_record_blend(void *dst, int dst_stride, int w, int h,
+                               int rect[4])
+{
+    int r[4], drawn = 0;
+
+    if (vidplay_capture_pending() > 0 &&
+        vidplay_capture_blend_rect(dst, dst_stride, w, h, r) > 0) {
+        rect[0] = r[0]; rect[1] = r[1]; rect[2] = r[2]; rect[3] = r[3];
+        drawn = 1;
+    }
+    if (stbox_capture_pending() &&
+        stbox_capture_blend_rect(dst, dst_stride, w, h, r) > 0) {
+        if (!drawn) {
+            rect[0] = r[0]; rect[1] = r[1]; rect[2] = r[2]; rect[3] = r[3];
+        } else {
+            if (r[0] < rect[0]) rect[0] = r[0];
+            if (r[1] < rect[1]) rect[1] = r[1];
+            if (r[2] > rect[2]) rect[2] = r[2];
+            if (r[3] > rect[3]) rect[3] = r[3];
+        }
+        drawn = 1;
+    }
+    return drawn;
+}
+
 static void et4000_record_frame(ET4000State *s)
 {
     if (!g_screenrecord_active)
@@ -1058,20 +1102,22 @@ static void et4000_record_frame(ET4000State *s)
          * thread and ffmpeg do the rest. Audio arrives via the SDL3 postmix
          * tap in dmasnd_hdmi.c. */
         /* pass the frame's dirty rect (fvdi publishes it) so the recorder
-         * copies only what changed; full frame when unknown, and always when
-         * a film has been composited in */
-        int rec_full = 0;
-        const void *rec_fb = et4000_record_compose(s, &rec_full);
+         * copies only what changed; full frame when unknown. Overlays (a
+         * film, the ST Box) are blended by the recorder into its own copy
+         * after that copy - no full-framebuffer copy here. */
+        avrecord_blend_fn ov = et4000_record_overlays_pending()
+                               ? et4000_record_blend : NULL;
 
-        if (g_fvdi_up_partial && !rec_full)
-            avrecord_video_frame(rec_fb, (int)s->fb_stride,
-                                 (int)s->fb_width, (int)s->fb_height,
-                                 (int)g_fvdi_up_x0, (int)g_fvdi_up_y0,
-                                 (int)g_fvdi_up_x1, (int)g_fvdi_up_y1);
+        if (g_fvdi_up_partial)
+            avrecord_video_frame_ov(s->fb_mem, (int)s->fb_stride,
+                                    (int)s->fb_width, (int)s->fb_height,
+                                    (int)g_fvdi_up_x0, (int)g_fvdi_up_y0,
+                                    (int)g_fvdi_up_x1, (int)g_fvdi_up_y1, ov);
         else
-            avrecord_video_frame(rec_fb, (int)s->fb_stride,
-                                 (int)s->fb_width, (int)s->fb_height,
-                                 0, 0, (int)s->fb_width - 1, (int)s->fb_height - 1);
+            avrecord_video_frame_ov(s->fb_mem, (int)s->fb_stride,
+                                    (int)s->fb_width, (int)s->fb_height,
+                                    0, 0, (int)s->fb_width - 1,
+                                    (int)s->fb_height - 1, ov);
         /* The writer self-stops at the duration (works even if the display
          * idles); this finalizes the files as soon as we notice. */
         if (et4000_wall_us() >= g_screenrecord_end_us || !avrecord_ok() ||
