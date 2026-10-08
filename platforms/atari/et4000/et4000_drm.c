@@ -107,15 +107,30 @@ static void compute_dst(void)
         g_dst_x = g_dst_y = 0; g_dst_w = mw; g_dst_h = mh;
         return;
     }
+    /* Pixel aspect, as Hatari does it: Falcon pixels are 2^n wide/tall
+     * (half/quarter pixels, line doubling, interlace), so a picture more
+     * than twice as wide as it is tall has double-height lines and one
+     * taller than wide has double-width pixels. A demo's 384x100 with
+     * line doubling (Sonolumineszenz) is a 384x200 picture on the
+     * monitor; shown square it was a squashed band a quarter of the
+     * screen high. ST and VGA modes (320x200, 640x400, 640x480 ...) are
+     * left as they were. */
+    int zx = 1, zy = 1;
+    while (zx * sw < sh && 2 * zx * sw <= mw)
+        zx *= 2;
+    while (2 * zy * sh < sw && 2 * zy * sh <= mh)
+        zy *= 2;
     if (mode_stretch) {
         g_dst_x = g_dst_y = 0; g_dst_w = mw; g_dst_h = mh;
-    } else if (mode_integer && sw <= mw && sh <= mh) {
-        int n = mw / sw;
-        if (mh / sh < n) n = mh / sh;
+    } else if (mode_integer && sw * zx <= mw && sh * zy <= mh) {
+        int n = mw / (sw * zx);
+        if (mh / (sh * zy) < n) n = mh / (sh * zy);
         if (n < 1) n = 1;
-        g_dst_w = sw * n; g_dst_h = sh * n;
+        g_dst_w = sw * zx * n; g_dst_h = sh * zy * n;
         g_dst_x = (mw - g_dst_w) / 2; g_dst_y = (mh - g_dst_h) / 2;
     } else {
+        sw *= zx;
+        sh *= zy;
         /* Source bigger than the display, or aspect mode: fit and centre. */
         long w = mw, h = (long)mw * sh / sw;
         if (h > mh) { h = mh; w = (long)mh * sw / sh; }
@@ -130,6 +145,9 @@ static void compute_dst(void)
                     g_src_w, g_src_h, g_dst_w, g_dst_h, g_dst_x, g_dst_y,
                     mode_stretch ? "stretch" :
                     (g_dst_w % sw == 0 && g_dst_h % sh == 0) ? "integer" : "aspect");
+            if (zx > 1 || zy > 1)
+                fprintf(stderr, "[DRM]   pixel aspect %dx%d (double-%s)\n", zx, zy,
+                        zy > 1 ? "height lines" : "width pixels");
         }
     }
 }
