@@ -85,7 +85,9 @@ CFILES += platforms/atari/psctrl/psctrl_tunables.c \
           platforms/atari/stbox/stbox_psg.c \
           platforms/atari/stbox/stbox_realfdc.c \
           platforms/atari/stbox/stbox_blit.c \
-          platforms/atari/stbox/stbox_dmasnd.c
+          platforms/atari/stbox/stbox_dmasnd.c \
+          platforms/atari/stbox/stbox_psgfx.c \
+          platforms/atari/stbox/stbox_psgfx_hook.c
 
 # -----------------------------------------------------------------
 # C++ source.

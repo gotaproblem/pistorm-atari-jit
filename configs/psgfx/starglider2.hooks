@@ -1,0 +1,24 @@
+# Starglider 2 (Rainbird/Argonaut, 1988) - PSGFX hook profile for STBOX.
+# Written by psgfx-scan (projection idiom + read watch, see psgfx-scan-design.md
+# sections 5 and 5d). Arms only when every expect= matches the code in box RAM.
+#lift sg2
+# frame: $4036 calls the draw-list renderer (a6 = 3D view: draw buffer, centre,
+# viewport clip); $403A = the frame's list is complete
+004036 40 expect=6100229013FC : a6 ; L[a6] ; W[a6+0x194] ; W[a6+0x196] ; W[a6+0xe4] ; W[a6+0xe8] ; W[a6+0xe6] ; W[a6+0xea]
+00403A 41 expect=13FC000D0000 : 0
+0050C8 24 expect=302E01E45340 : a6 ; W[a6+0x4c] ; W[a6+0x50] ; W[a6+0x54]
+0050E8 20 expect=26CC38FC7FE0 : a4 ; W[a5-2] ; a5
+005208 21 expect=B67C2EE06D0E : d4&0xffff ; sw(d1) ; sw(d2) ; sw(d3)
+005278 22 expect=38C138C251C8 : d4&0xffff ; sw(d1) ; sw(d2)
+005280 23 expect=38FCFFFF302E : a4
+02ED28 25 expect=30FCFFFF30EE : W[a6+0x7b0] ; sw(d4) ; sw(d5) ; sw(d6) ; sw(d7)
+004DA0 30 expect=38DD301D6B2E : W[a5] ; a4
+004DB6 31 expect=341A38C2BC42 : d0&0xffff ; W[a6+0x21e+(d0&0xffff)] ; W[a6+0x220+(d0&0xffff)] ; W[a6+0x222+(d0&0xffff)] ; W[a2] ; W[a2+2]
+004DD4 32 expect=0246FFF00247 : a4
+004E2A 36 expect=4CDF300043F9 : 0
+004ED4 33 expect=38F9000052C0 : W[0x52c0]
+004EEC 34 expect=4C9A000ED643 : W[a2] ; W[a2+2] ; W[a2+4]
+004F48 37 expect=38C138C251CF : sw(d1) ; sw(d2)
+004F78 35 expect=38FCFFFF0C79 : a4
+004CF0 39 expect=382E00E43A2E : a0 ; a1 ; a2 ; a3 ; a4 ; a5 ; d0
+004E50 38 expect=45EE021ED4C0 : d0&0xffff ; W[a6+0x21e+(d0&0xffff)] ; W[a6+0x220+(d0&0xffff)] ; W[a6+0x222+(d0&0xffff)]

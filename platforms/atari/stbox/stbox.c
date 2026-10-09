@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include "stbox.h"
+#include "stbox_psgfx.h"
 #include "../../../third_party/musashi/m68k.h"
 
 /* ------------------------------------------------------------------ */
@@ -1084,7 +1085,9 @@ volatile unsigned stbox_pc_ring_idx;
 void stbox_pc_hook(unsigned int pc)
 {
     stbox_pc_ring[stbox_pc_ring_idx++ & (STBOX_PC_RING - 1)] = pc;
+    stbox_psgfx_pc(pc);              /* PSGFX: one flag load unless a profile is armed */
 }
+stbox_cap_meta_t stbox_cap_meta[STBOX_CAP_BUFS];
 
 static int g_berr_nest;              /* inside bus-error processing    */
 static volatile int g_halted;        /* 0 run, 1 halted, 2 unreported  */
@@ -2148,6 +2151,8 @@ void stbox_slice(uint64_t now)
                  * write to $FF8201/03 during a frame takes effect at the
                  * next one, as on the Shifter */
                 stbox_cap[g_cap_w].rows = stbox_shared.vis_lines;
+                stbox_cap_meta[g_cap_w].base = g_disp_base;   /* PSGFX: which screen it showed */
+                stbox_cap_meta[g_cap_w].vbl = stbox_shared.frame;
                 __atomic_thread_fence(__ATOMIC_RELEASE);
                 stbox_shared.cap_idx = g_cap_w;
                 g_cap_w = (g_cap_w + 1u) % STBOX_CAP_BUFS;

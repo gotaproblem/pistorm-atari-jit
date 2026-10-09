@@ -36,6 +36,7 @@
 #include <drm_fourcc.h>
 
 #include "stbox.h"
+#include "stbox_psgfx.h"
 #include "../et4000/et4000_drm.h"
 #include "../../../third_party/musashi/m68k.h"   /* m68k_disassemble */
 
@@ -107,8 +108,11 @@ static int g_atomic;
 static uint32_t pr_fb, pr_crtc, pr_cx, pr_cy, pr_cw, pr_ch,
                 pr_sx, pr_sy, pr_sw, pr_sh;
 
-#define SRC_W 640                      /* buffer is always 640x400      */
-#define SRC_H 400
+/* Buffers are 1280x800: the ST picture uses the top-left 320x200/640x200/
+ * 640x400 of it as before (the plane scales the source rect), and PSGFX
+ * (stbox_psgfx.c) draws its GPU render at 4x into the whole buffer. */
+#define SRC_W 1280
+#define SRC_H 800
 
 /* ------------------------------------------------------------------ */
 /* plane + buffers                                                    */
@@ -571,9 +575,21 @@ static void default_rect(int sw, int sh, int *dx, int *dy, int *dw, int *dh)
     *dx = (g_mode_w - *dw) / 2; *dy = (g_mode_h - *dh) / 2;
 }
 
+static double now_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
 static void *render_main(void *arg)
 {
     (void)arg;
+    /* PSGFX pacing: the GPU path draws at the output rate (50/60 Hz) on the
+     * host clock, at a box time interpolated between box VBLs - so it stays
+     * smooth when the box itself runs below 50 VBL/s under load */
+    uint32_t bt_frame = (uint32_t)-1;
+    double bt_t = 0, bt_period = 0.02, next_out = 0;
 
     uint32_t last_frame = (uint32_t)-1;
     /* health line every 5 s while running: pace, plus the input state -
@@ -655,6 +671,11 @@ static void *render_main(void *arg)
                         pc, dis, stbox_dbg_pc_lo, stbox_dbg_pc_hi,
                         stbox_dbg_last_hwr, stbox_dbg_last_hwr_pc);
                 stbox_dbg_pc_lo = 0xFFFFFFFFu; stbox_dbg_pc_hi = 0;
+            }
+            {
+                char ps[192];
+                stbox_psgfx_stats(ps, sizeof ps);
+                fprintf(stderr, "[STBOX]   %s\n", ps);
             }
             last_frame_h = stbox_shared.frame;
         }
@@ -797,15 +818,36 @@ static void *render_main(void *arg)
                 }
             }
         }
+        stbox_psgfx_poll();
         uint32_t fr = stbox_shared.frame;
-        if (fr == last_frame) { usleep(2000); continue; }
+        double tnow = now_s();
+        if (fr != bt_frame) {
+            if (bt_frame != (uint32_t)-1 && fr - bt_frame < 10) {
+                double per = (tnow - bt_t) / (double)(fr - bt_frame);
+                if (per > 0.005 && per < 0.2) bt_period += 0.1 * (per - bt_period);
+            }
+            bt_frame = fr; bt_t = tnow;
+        }
+        int ps = stbox_psgfx_active();
+        double box_t = 0;
+        if (ps) {
+            double per_out = 1.0 / stbox_psgfx_hz();
+            if (tnow < next_out) { usleep(1000); continue; }
+            next_out += per_out;
+            if (next_out < tnow) next_out = tnow + per_out;
+            double frac = (tnow - bt_t) / bt_period;
+            box_t = bt_frame + (frac < 0 ? 0 : frac > 0.999 ? 0.999 : frac);
+        } else if (fr == last_frame) { usleep(2000); continue; }
         last_frame = fr;
 
         pthread_mutex_lock(&g_cap_lock);
         struct sbuf *b = &g_buf[g_cur];
         int sw, sh;
         int res_dbg = stbox_shared.shift_res;
-        convert(b->map, b->pitch, &sw, &sh);
+        if (ps && stbox_psgfx_render(box_t, b->map, SRC_W, SRC_H, (int)b->pitch, 1) == 0) {
+            sw = SRC_W; sh = SRC_H;            /* GPU render, 4x */
+        } else
+            convert(b->map, b->pitch, &sw, &sh);
 
         /* The front-end reports rect/clip in GUEST DESKTOP pixels - all a
          * GEM app can know. The presenter integer-scales and centres the
@@ -873,6 +915,7 @@ static void *render_main(void *arg)
     g_cap_valid = 0;
     pthread_mutex_unlock(&g_cap_lock);
     commit(0, 0, 0, 0, 0, 0, 0, 0, 0);         /* hide on exit */
+    stbox_psgfx_thread_exit();                 /* GL context off this thread */
     return NULL;
 }
 
@@ -1162,6 +1205,7 @@ int stbox_start(const stbox_cfg_t *cfg)
     }
 
     if (pick_plane()) { free(g_ram); g_ram = NULL; return -1; }
+    stbox_psgfx_init();                        /* PSGFX hook profiles, if any */
     for (int i = 0; i < NBUF; i++)
         if (buf_alloc(&g_buf[i])) {
             fprintf(stderr, "[STBOX] buffer alloc failed\n");
@@ -1230,6 +1274,7 @@ void stbox_stop(void)
     stbox_core_disarm();
     g_run = 0;
     pthread_join(g_thread, NULL);
+    stbox_psgfx_shutdown();
     for (int i = 0; i < NBUF; i++) buf_free(&g_buf[i]);
     free(g_ram); g_ram = NULL;
     free(g_disk_cur); g_disk_cur = NULL;

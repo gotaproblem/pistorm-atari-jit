@@ -47,6 +47,117 @@ static uint32_t screen_hash(void)
     return fnv(stbox_shared.ram + vb, 32000) ^ (uint32_t)stbox_shared.shift_res;
 }
 
+/* ---- input script and frame dumps (PSGFX work) -------------------------
+ * script lines, frames = box VBL count (stbox_shared.frame):
+ *   K f0 f1 scancode        key down at f0, up at f1
+ *   J f0 f1 hex             joystick (port 1) state from f0, released at f1
+ *   M f0 f1 buttons         mouse buttons (bit1 L, bit0 R) down f0, up f1
+ *   D f0 f1 dx dy           mouse moves dx,dy every frame from f0 to f1
+ */
+typedef struct { char t; uint32_t f0, f1; int a, b; } scr_ev;
+static scr_ev g_scr[4096]; static int g_nscr;
+static void script_load(const char *path)
+{
+    FILE *f = fopen(path, "r"); char ln[256];
+    if (!f) { perror(path); exit(2); }
+    while (fgets(ln, sizeof ln, f) && g_nscr < 4096) {
+        scr_ev e = {0}; char t;
+        if (ln[0] == '#' || sscanf(ln, " %c", &t) != 1) continue;
+        e.t = t;
+        if (t == 'J') { unsigned v; if (sscanf(ln + 1, "%u %u %x", &e.f0, &e.f1, &v) == 3) { e.a = (int)v; g_scr[g_nscr++] = e; } }
+        else if (t == 'D') { if (sscanf(ln + 1, "%u %u %d %d", &e.f0, &e.f1, &e.a, &e.b) == 4) g_scr[g_nscr++] = e; }
+        else if (sscanf(ln + 1, "%u %u %d", &e.f0, &e.f1, &e.a) == 3) g_scr[g_nscr++] = e;
+    }
+    fclose(f);
+}
+static void script_frame(uint32_t fr)
+{
+    static int mbut;
+    for (int i = 0; i < g_nscr; i++) {
+        scr_ev *e = &g_scr[i];
+        switch (e->t) {
+        case 'K': if (fr == e->f0) stbox_key_event((uint8_t)e->a, 1); if (fr == e->f1) stbox_key_event((uint8_t)e->a, 0); break;
+        case 'J': if (fr == e->f0) stbox_joy_event(1, (uint8_t)e->a); if (fr == e->f1) stbox_joy_event(1, 0); break;
+        case 'M': if (fr == e->f0) { mbut = e->a; stbox_mouse_rel(0, 0, mbut); }
+                  if (fr == e->f1) { mbut = 0; stbox_mouse_rel(0, 0, 0); } break;
+        case 'D': if (fr >= e->f0 && fr <= e->f1) stbox_mouse_rel(e->a, e->b, mbut); break;
+        }
+    }
+}
+/* the newest complete captured frame as 320x200 RGB (low res only) */
+static const uint8_t lvl8[8] = { 0, 36, 73, 109, 146, 182, 219, 255 };
+int harness_cap_rgb(uint8_t *rgb)
+{
+    uint32_t idx = stbox_shared.cap_idx;
+    if (idx >= STBOX_CAP_BUFS) return 0;
+    const stbox_cap_t *c = &stbox_cap[idx];
+    if (c->res != 0) return 0;
+    for (int y = 0; y < 200; y++) {
+        const uint8_t *s = c->pix + (size_t)y * STBOX_CAP_PITCH;
+        for (int g = 0; g < 20; g++, s += 8) {
+            uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3], p2 = (s[4] << 8) | s[5], p3 = (s[6] << 8) | s[7];
+            for (int b = 15; b >= 0; b--) {
+                int ci = ((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) | (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3);
+                uint16_t p = c->pal[y][ci]; uint8_t *d = rgb + ((size_t)y * 320 + g * 16 + 15 - b) * 3;
+                d[0] = lvl8[(p >> 8) & 7]; d[1] = lvl8[(p >> 4) & 7]; d[2] = lvl8[p & 7];
+            }
+        }
+    }
+    return 1;
+}
+static void dump_ppm(const char *dir, uint32_t fr)
+{
+    static uint8_t rgb[320 * 200 * 3];
+    if (!harness_cap_rgb(rgb)) return;
+    char p[512]; snprintf(p, sizeof p, "%s/f%06u.ppm", dir, fr);
+    FILE *f = fopen(p, "wb"); if (!f) return;
+    fprintf(f, "P6\n320 200\n255\n"); fwrite(rgb, 1, sizeof rgb, f); fclose(f);
+}
+
+#ifdef HARNESS_PSGFX
+/* PSGFX in the harness: the render-thread code runs here on the harness
+ * thread once per box VBL (EGL surfaceless - llvmpipe on a PC, V3D on a Pi)
+ * and writes the GPU frames (1280x800 RGBA) and the box's own picture
+ * (320x200 RGB) for comparison. HARNESS_PSGFX_OUT=prefix, _FROM/_TO frames. */
+#include "stbox_psgfx.h"
+static void harness_psgfx_frame(uint32_t fr)
+{
+    static int init = -1; static FILE *ff; static uint8_t *buf, *pane; static uint32_t from, to, n;
+    if (init < 0) {
+        init = stbox_psgfx_init();
+        const char *o = getenv("HARNESS_PSGFX_OUT");          /* .mp4: ST | GPU side by side */
+        from = getenv("HARNESS_PSGFX_FROM") ? (uint32_t)atoi(getenv("HARNESS_PSGFX_FROM")) : 0;
+        to = getenv("HARNESS_PSGFX_TO") ? (uint32_t)atoi(getenv("HARNESS_PSGFX_TO")) : 0xffffffffu;
+        if (o) {
+            char cmd[1024];
+            snprintf(cmd, sizeof cmd, "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgba -s 2560x800 -r 50 -i - "
+                     "-vf scale=1920:600:flags=lanczos -c:v libx264 -crf 18 -pix_fmt yuv420p '%s'", o);
+            ff = popen(cmd, "w");
+        }
+        buf = malloc(1280 * 800 * 4); pane = malloc(2560 * 800 * 4);
+    }
+    if (!init) return;
+    stbox_psgfx_poll();
+    if (fr < from || fr > to || !ff) goto stats;
+    {
+        static uint8_t st[320 * 200 * 3];
+        int ok = stbox_psgfx_active() && stbox_psgfx_render((double)fr, buf, 1280, 800, 1280 * 4, 0) == 0;
+        if (!ok) memset(buf, 0, 1280 * 800 * 4);
+        harness_cap_rgb(st);
+        for (int y = 0; y < 800; y++) {
+            uint8_t *d = pane + (size_t)y * 2560 * 4;
+            for (int x = 0; x < 1280; x++) { const uint8_t *c = st + ((y / 4) * 320 + x / 4) * 3; d[x * 4] = c[0]; d[x * 4 + 1] = c[1]; d[x * 4 + 2] = c[2]; d[x * 4 + 3] = 255; }
+            memcpy(d + 1280 * 4, buf + (size_t)y * 1280 * 4, 1280 * 4);
+        }
+        fwrite(pane, 1, (size_t)2560 * 800 * 4, ff);
+        n += ok;
+        if (fr == to) { pclose(ff); ff = NULL; }
+    }
+stats:
+    if (fr % 500 == 0) { char sb[192]; stbox_psgfx_stats(sb, sizeof sb); printf("  frame %u %s (%u GPU frames)\n", fr, sb, n); }
+}
+#endif
+
 static const char *vecname(uint32_t v)
 {
     switch (v) { case 2: return "BUS"; case 3: return "ADDR"; case 4: return "ILLEGAL";
@@ -56,7 +167,8 @@ static const char *vecname(uint32_t v)
 int main(int argc, char **argv)
 {
     const char *tos = NULL, *disk = NULL;
-    int ste = 0, secs = 60, ram_kb = 1024, keys = 1, verbose = 0;
+    int ste = 0, secs = 60, ram_kb = 1024, keys = 1, verbose = 0, dump_every = 50;
+    const char *dump_dir = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--tos") && i + 1 < argc) tos = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
@@ -65,6 +177,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--ram") && i + 1 < argc) ram_kb = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nokeys")) keys = 0;
         else if (!strcmp(argv[i], "-v")) verbose = 1;
+        else if (!strcmp(argv[i], "--script") && i + 1 < argc) script_load(argv[++i]);
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump_dir = argv[++i];
+        else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) dump_every = atoi(argv[++i]);
         else { fprintf(stderr, "bad arg %s\n", argv[i]); return 2; }
     }
     if (!tos) { fprintf(stderr, "need --tos\n"); return 2; }
@@ -117,8 +232,17 @@ int main(int argc, char **argv)
         uint32_t target = sec * 50;
         unsigned long guard = 0;
         while (stbox_shared.frame < target) {
+            uint32_t fr_before = stbox_shared.frame;
             stbox_slice(now);
             now += TICKS_PER_CALL;
+            if (stbox_shared.frame != fr_before) {
+                uint32_t fr = stbox_shared.frame;
+                if (g_nscr) script_frame(fr);
+                if (dump_dir && dump_every > 0 && fr % (uint32_t)dump_every == 0) dump_ppm(dump_dir, fr);
+#ifdef HARNESS_PSGFX
+                harness_psgfx_frame(fr);
+#endif
+            }
             {
                 unsigned wi = stbox_watch_idx;
                 for (unsigned i = watch_seen; i != wi; i++) {

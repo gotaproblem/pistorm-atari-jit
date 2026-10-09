@@ -104,6 +104,42 @@ render thread maps them through `drmpres_dst_x/y/w/h`,`drmpres_src_w/h`
 every frame. cfg `stbox_plane <id>` (or env `PISTORM_STBOX_PLANE`, which
 wins) forces a plane.
 
+## PSGFX: GPU re-rendering of the game's own 3D (branch psgfx-stbox)
+
+A game whose 3D has been lifted by psgfx-scan (see the Graphics project docs,
+`psgfx-scan-design.md` §5/5d) can be drawn by the Pi's GPU instead of the
+box's own picture, at 4x resolution and at the display rate, with the game
+itself untouched. First title: **Starglider 2** (`configs/psgfx/starglider2.hooks`).
+
+| Piece | Where | Rule |
+|---|---|---|
+| Hook test | `stbox_pc_hook()` → `stbox_psgfx_pc()` (stbox_psgfx.h) | one flag load per instruction while no profile is armed; when armed, one bit test per instruction (1 bit per even PC) |
+| Hook fire | `stbox_psgfx_fire()` (stbox_psgfx_hook.c), core 3 | on a hit: read 16 registers, evaluate the profile's expressions (bounded stack machine, reads clamped to box RAM) into a lock-free ring; ring full = record dropped and counted. Starglider 2: ~240 hits per game frame |
+| Displayed-screen tag | `stbox_cap_meta[]` (stbox.c, next to `stbox_cap[]`) | two stores per VBL: the screen base and VBL the captured frame showed |
+| Arming | render thread, `ph_verify` every 8 passes | a profile arms only while its `expect=` code bytes are at every hooked PC |
+| Lift | stbox_psgfx.c, render thread | faces in camera space per game frame; waits until the box displays that frame's buffer; face colours, background (sky/ground band edges as straight segments), overlay and cockpit from that displayed picture; objects/vertices matched to the previous game frame. ~4-5 ms per game frame on a PC |
+| Draw | stbox_psgfx.c, render thread | GLES 3.1 through EGL surfaceless, libEGL loaded with dlopen (no build dependency; without libegl1/libgles2 the box stays on the normal path). 1280x800, depth buffer, 4x MSAA, lighting, fog; vertices interpolated between game frames; read back into the plane's dumb buffer (now 1280x800 for every path) |
+| Pacing | `render_main()` | while PSGFX is active the loop draws at `PISTORM_STBOX_PSGFX_HZ` (default 50, 60 for a 60 Hz desktop) on the host clock, at a box time interpolated between box VBLs, so the output stays smooth even when the box runs below 50 VBL/s; otherwise one convert per box frame as before |
+
+Output is one game frame behind the game (Starglider 2: ~110 ms at full box
+speed). The box keeps drawing its own screen (shadow mode), so emulated timing
+is unchanged; menus, death screens and anything the profile does not cover
+fall back to the normal picture within 2 seconds of the last lifted frame.
+
+Environment: `PISTORM_STBOX_PSGFX` = a `.hooks` file or directory (default
+`configs/psgfx` under the emulator's working directory; `0` = off),
+`PISTORM_STBOX_PSGFX_HZ`. The health line (`PISTORM_STBOX_DBG=1`) gains a
+`psgfx:` line: profile, frames lifted, interpolated faces, ring drops, lift and
+draw time, hook hits per frame.
+
+Harness: `tools/stbox-harness/build.sh ps -DHARNESS_PSGFX` builds the harness
+with the render side; `HARNESS_PSGFX_OUT=out.mp4 HARNESS_PSGFX_FROM=a
+HARNESS_PSGFX_TO=b` writes the box's picture next to the GPU render (needs
+ffmpeg and libEGL; llvmpipe works). `--script FILE` drives input (`K f0 f1
+scancode`, `J f0 f1 hex`, `M f0 f1 buttons`, `D f0 f1 dx dy`, frames = box
+VBLs), `--dump DIR --dump-every N` writes PPMs of the captured frames.
+`tools/stbox-harness/glcheck.c` checks stbox_gl.h's constants against Mesa's headers.
+
 ## NatFeat protocol ("STBOX")
 
 START(path,ram_kb,flags) STOP RESET STATUS RECT(x,y,w,h) CLIP(x,y,w,h)
