@@ -10,7 +10,7 @@
  */
 #include "stbox_psgfx.h"
 #include "stbox.h"
-#include "m68k.h"
+#include "../../../third_party/musashi/m68k.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
