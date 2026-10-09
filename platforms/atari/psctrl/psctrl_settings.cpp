@@ -89,6 +89,26 @@ static void boot_seed(void)
   g_boot_ready = 1;
 }
 
+/* Box-class settings ("next time the ST Box starts") live in the shadow
+ * too, but the box is started without a restart, so stbox_start() has to
+ * read them HERE - the running config only changes at the next emulator
+ * start, and reading it made a new Box TOS or plane look ignored until
+ * then. NULL / 0 when PSCTRL has not touched the settings this session,
+ * so the caller falls back to the running config. Both run on the CPU
+ * thread (NatFeat handlers), as does every write to g_boot. */
+extern "C" const char *psctrl_box_stbox_tos(void)
+{
+  return g_boot_ready ? g_boot.stbox_tos : NULL;
+}
+
+extern "C" int psctrl_box_stbox_plane(int *plane)
+{
+  if (!g_boot_ready || !plane)
+    return 0;
+  *plane = g_boot.stbox_plane;
+  return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* deferred queue                                                      */
 /* ------------------------------------------------------------------ */

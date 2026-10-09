@@ -44,6 +44,12 @@
  * above. Declare the two accessors we need instead. */
 extern const char *emulator_config_stbox_tos(void);   /* "" if unset */
 extern int emulator_config_stbox_plane(void);         /* 0 if unset  */
+extern const char *emulator_config_rom_path(void);    /* "" if unset */
+/* PSCTRL's box-class values (psctrl_settings.cpp): what the user chose in
+ * the settings window this session, which the running config does not
+ * see until the emulator restarts. NULL / 0 = PSCTRL has not been used. */
+extern const char *psctrl_box_stbox_tos(void);
+extern int psctrl_box_stbox_plane(int *plane);
 
 /* ------------------------------------------------------------------ */
 /* state                                                              */
@@ -211,8 +217,11 @@ static int pick_plane(void)
 
     /* forced plane: env overrides cfg overrides auto-pick */
     const char *force = getenv("PISTORM_STBOX_PLANE");
+    int box_plane = 0;
+    if (!psctrl_box_stbox_plane(&box_plane))
+        box_plane = emulator_config_stbox_plane();
     uint32_t want = force && *force ? (uint32_t)strtoul(force, NULL, 0)
-                                    : (uint32_t)emulator_config_stbox_plane();
+                                    : (uint32_t)box_plane;
 
     drmModePlaneRes *pr = drmModeGetPlaneResources(g_fd);
     if (!pr) return -1;
@@ -1103,7 +1112,9 @@ int stbox_start(const stbox_cfg_t *cfg)
     /* ROM, most explicit first:
      *   1. the path STBOX.PRG passed for THIS launch (a TOS on its
      *      command line);
-     *   2. the .cfg's stbox_tos - the user's own choice in PSCTRL, and
+     *   2. the Box TOS chosen in PSCTRL this session (its box-class value,
+     *      which the running config only picks up at the next emulator
+     *      start), else the .cfg's stbox_tos - the user's own choice, and
      *      the whole point of that field. It only overrode nothing before
      *      because it sat BELOW the env, so the service's install default
      *      won every time and the setting looked ignored;
@@ -1112,8 +1123,20 @@ int stbox_start(const stbox_cfg_t *cfg)
      * emulator_config_stbox_tos() is already resolved against rom_path at
      * load, so a bare "tos104uk.rom" from the picker becomes ~/roms/... */
     const char *path = g_cfg.tos_path[0] ? g_cfg.tos_path : NULL;
-    if (!path || !*path)
-        path = emulator_config_stbox_tos();
+    static char box_tos[512];
+    if (!path || !*path) {
+        const char *p = psctrl_box_stbox_tos();
+        if (p && *p && !strchr(p, '/')) {
+            /* a bare file name from the picker: under rom_path, as the
+             * .cfg loader resolves it */
+            const char *rp = emulator_config_rom_path();
+            if (rp && *rp) {
+                snprintf(box_tos, sizeof box_tos, "%s/%s", rp, p);
+                p = box_tos;
+            }
+        }
+        path = (p && *p) ? p : emulator_config_stbox_tos();
+    }
     if (!path || !*path)
         path = getenv("PISTORM_STBOX_TOS");
     if (!path || !*path) {
