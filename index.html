@@ -182,6 +182,7 @@ td.v { font-family: var(--f-mono); font-size: 0.86rem; color: var(--muted); }
 .desk .taskbar span:last-child { margin-left: auto; font-variant-numeric: tabular-nums; }
 .shot { display: block; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; max-width: 100%; box-shadow: 0 12px 32px -18px rgb(0 0 0 / 0.45); }
 .shot img { display: block; width: 100%; height: auto; }
+table.cmp tr.grp td { font: 500 0.76rem/1.4 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); background: var(--accent-soft); }
 .res-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
 .res-grid .tbl-wrap table { min-width: 0; }
 @media (max-width: 900px) { .res-grid { grid-template-columns: 1fr; } }
@@ -315,7 +316,7 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
       </div>
       <div class="specline">
         <span class="chip"><b>●</b> Raspberry Pi 4</span>
-        <span class="chip">382× an 8 MHz ST</span>
+        <span class="chip">Up to 531× an 8 MHz ST</span>
         <span class="chip">RPi OS Lite · Trixie · aarch64</span>
         <span class="chip">Open source · MIT and GPL</span>
       </div>
@@ -973,56 +974,54 @@ HARNESS_STE=1 ROMS=roms GAMES=games \
   <div class="wrap">
     <span class="eyebrow">Benchmarks</span>
     <h1>How fast is it?</h1>
-    <p class="lede">PSCTRL's benchmark on APJ-OS 1.0: a JIT 68040 with FPU on a Raspberry Pi 4B 2&nbsp;GB at its stock 1.5&nbsp;GHz, with <code>jit_power 6</code> (8192 chain budget). Run on 8 October 2026.</p>
+    <p class="lede">PSCTRL's benchmark on APJ-OS 1.0: a JIT 68040 with FPU on a Raspberry Pi 4B 2&nbsp;GB, at its stock 1.5&nbsp;GHz and overclocked to 2.1&nbsp;GHz. Run on 8 October 2026.</p>
   </div>
 </header>
 
 <section class="block" style="border-top:0;padding-top:0">
   <div class="wrap" style="display:grid;gap:28px">
     <div class="hero-num">
-      <div><span class="big">382×</span><span class="lbl">an 8&nbsp;MHz ST, by Dhrystone 2.1</span></div>
-      <div><span class="big">305</span><span class="lbl">DMIPS (535,296 Dhry/s)</span></div>
-      <div><span class="big">1056</span><span class="lbl">CoreMark, 020+ build</span></div>
+      <div><span class="big">531×</span><span class="lbl">an 8&nbsp;MHz ST by Dhrystone 2.1, at 2.1&nbsp;GHz (382× stock)</span></div>
+      <div><span class="big">424</span><span class="lbl">DMIPS at 2.1&nbsp;GHz (305 stock)</span></div>
+      <div><span class="big">1488</span><span class="lbl">CoreMark, 020+ build, at 2.1&nbsp;GHz (1056 stock)</span></div>
     </div>
 
-    <div class="res-grid">
-      <div class="tbl-wrap"><table>
-        <thead><tr><th colspan="2">Processor</th></tr></thead>
-        <tbody>
-          <tr><td>Dhrystone 2.1</td><td class="num">304.66 DMIPS</td></tr>
-          <tr><td>CoreMark</td><td class="num">1056.24</td></tr>
-          <tr><td>ALU</td><td class="num">1316.70 MIPS</td></tr>
-          <tr><td>FPU</td><td class="num">408.53 MFLOPS</td></tr>
-          <tr><td>Tight loop</td><td class="num">145.21 MIPS</td></tr>
-        </tbody>
-      </table></div>
-      <div class="tbl-wrap"><table>
-        <thead><tr><th colspan="2">Memory</th></tr></thead>
-        <tbody>
-          <tr><td>Mixed</td><td class="num">254.86 MIPS</td></tr>
-          <tr><td>ST-RAM</td><td class="num">81.92 MIPS</td></tr>
-          <tr><td>ALU op</td><td class="num">6 ns</td></tr>
-          <tr><td>+ load/store</td><td class="num">15 ns</td></tr>
-          <tr><td>+ branch / jsr / movem</td><td class="num">22 / 52 / 70 ns</td></tr>
-        </tbody>
-      </table></div>
-      <div class="tbl-wrap"><table>
-        <thead><tr><th colspan="2">Graphics, 160×120 32-bit</th></tr></thead>
-        <tbody>
-          <tr><td>Frame rate</td><td class="num">1613.4 fps</td></tr>
-          <tr><td>Per frame</td><td class="num">619 µs</td></tr>
-          <tr><td>Rasterise / blit</td><td class="num">70% / 29%</td></tr>
-          <tr><td>Triangles</td><td class="num">91.0 M/s</td></tr>
-          <tr><td>Pixels</td><td class="num">13.2 M/s</td></tr>
-        </tbody>
-      </table></div>
-    </div>
-    <p class="caption">CoreMark 1.0 : 1056.245049 / GCC12.3.0 -O2 -m68020-60 / STACK, 18.9 s. The tight loop costs about 6.1 ns per JIT block exit. Blits go through fVDI at 407,547 KB/s. PSCTRL noted 7 JIT cache flushes during this run.</p>
+    <div class="tbl-wrap"><table class="cmp">
+      <thead><tr><th>Test</th><th>1.5&nbsp;GHz (stock)</th><th>2.1&nbsp;GHz</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr class="grp"><td colspan="4">Processor</td></tr>
+        <tr><td>Dhrystone 2.1</td><td class="num">304.66 DMIPS</td><td class="num">423.55 DMIPS</td><td class="num">+39%</td></tr>
+        <tr><td>&nbsp;&nbsp;vs an 8&nbsp;MHz ST</td><td class="num">×382.3</td><td class="num">×531.5</td><td class="num">+39%</td></tr>
+        <tr><td>CoreMark (020+ build)</td><td class="num">1056.24</td><td class="num">1487.54</td><td class="num">+41%</td></tr>
+        <tr><td>ALU</td><td class="num">1316.70 MIPS</td><td class="num">1848.45 MIPS</td><td class="num">+40%</td></tr>
+        <tr><td>FPU</td><td class="num">408.53 MFLOPS</td><td class="num">576.14 MFLOPS</td><td class="num">+41%</td></tr>
+        <tr><td>Tight loop</td><td class="num">145.21 MIPS</td><td class="num">201.52 MIPS</td><td class="num">+39%</td></tr>
+        <tr><td>&nbsp;&nbsp;per JIT block exit</td><td class="num">~6.1 ns</td><td class="num">~4.4 ns</td><td class="num">−28%</td></tr>
+        <tr class="grp"><td colspan="4">Memory</td></tr>
+        <tr><td>Mixed (ALU, branch, ld/st, jsr)</td><td class="num">254.86 MIPS</td><td class="num">345.44 MIPS</td><td class="num">+36%</td></tr>
+        <tr><td>ST-RAM (<code>move.l</code>)</td><td class="num">81.92 MIPS</td><td class="num">113.21 MIPS</td><td class="num">+38%</td></tr>
+        <tr><td>Mix parts: alu / +ld/st / +br / +jsr / +movem</td><td class="num">6 / 15 / 22 / 52 / 70 ns</td><td class="num">4 / 10 / 15 / 36 / 50 ns</td><td class="num"></td></tr>
+        <tr class="grp"><td colspan="4">Graphics, 160×120 32-bit</td></tr>
+        <tr><td>Frame rate</td><td class="num">1613.4 fps</td><td class="num">2249.6 fps</td><td class="num">+39%</td></tr>
+        <tr><td>Per frame</td><td class="num">619 µs</td><td class="num">444 µs</td><td class="num">−28%</td></tr>
+        <tr><td>Rasterise / blit</td><td class="num">70% / 29%</td><td class="num">67% / 32%</td><td class="num"></td></tr>
+        <tr><td>Triangles</td><td class="num">91.0 M/s</td><td class="num">131.4 M/s</td><td class="num">+44%</td></tr>
+        <tr><td>Pixels</td><td class="num">13.2 M/s</td><td class="num">19.1 M/s</td><td class="num">+44%</td></tr>
+        <tr><td>fVDI blit throughput</td><td class="num">407,547 KB/s</td><td class="num">525,283 KB/s</td><td class="num">+29%</td></tr>
+      </tbody>
+    </table></div>
+    <p class="caption">The clock went up 40%, and nearly every figure followed it: the JIT is compute-bound, not waiting on memory. The mixed loop gains a little less because part of it goes through ST-RAM on the real bus, which doesn't speed up with the Pi. CoreMark 1.0 : 1487.541837 / GCC12.3.0 -O2 -m68020-60 / STACK, 13.4&nbsp;s at 2.1&nbsp;GHz (1056.245049, 18.9&nbsp;s stock). PSCTRL noted 7 JIT cache flushes in both runs.</p>
 
-    <figure style="margin:0">
-      <a href="apjos-desktop.png" class="shot"><img src="apjos-desktop.png" width="1920" height="1080" alt="PSCTRL's Bench tab on the APJ-OS desktop showing the results in the tables above"></a>
-      <figcaption class="caption">The run itself: PSCTRL's Bench tab on the APJ-OS desktop, <code>jit_power 6</code>, at 59.8&nbsp;°C.</figcaption>
-    </figure>
+    <div class="two">
+      <figure style="margin:0;min-width:0">
+        <a href="apjos-desktop.png" class="shot"><img src="apjos-desktop.png" width="1920" height="1080" alt="PSCTRL's Bench tab at the stock 1.5 GHz clock"></a>
+        <figcaption class="caption">1.5&nbsp;GHz stock, <code>jit_power 6</code>, 59.8&nbsp;°C.</figcaption>
+      </figure>
+      <figure style="margin:0;min-width:0">
+        <a href="bench-2100.png" class="shot"><img src="bench-2100.png" width="1920" height="1080" alt="PSCTRL's Bench tab with the Pi overclocked to 2.1 GHz"></a>
+        <figcaption class="caption">2.1&nbsp;GHz (<code>arm_freq=2100</code>, <code>over_voltage=6</code>), 67.6&nbsp;°C.</figcaption>
+      </figure>
+    </div>
   </div>
 </section>
 
@@ -1031,7 +1030,7 @@ HARNESS_STE=1 ROMS=roms GAMES=games \
     <div class="sec-head" style="margin-bottom:0">
       <span class="eyebrow">Tuning history</span>
       <h2>What the chain budget is worth</h2>
-      <p>CoreMark in 68000 mode at 1.5&nbsp;GHz, from the performance tuning work on 7 September 2026. Raising <code>jit_power</code> from 3 to 5 added 4.3%. The 8 October run above uses 6, the maximum.</p>
+      <p>CoreMark in 68000 mode at 1.5&nbsp;GHz, from the performance tuning work on 7 September 2026. Raising <code>jit_power</code> from 3 to 5 added 4.3%. The 8 October runs above use 6, the maximum.</p>
     </div>
     <figure class="chart" style="margin:0" aria-labelledby="cm-title">
       <div class="chart-title">
@@ -1080,7 +1079,7 @@ HARNESS_STE=1 ROMS=roms GAMES=games \
       <tbody>
         <tr><td><code>jit_power 4</code> / <code>5</code></td><td class="num">+1–2%</td><td class="num">+2.6% / +4.3%</td><td>A wider window before interrupts are taken</td></tr>
         <tr><td><code>jit_cache 16384</code></td><td class="num">0–3% on GEM and MiNT</td><td class="muted">not measured on its own</td><td>8 MB of RAM. CoreMark fits in 8 MB and won't move.</td></tr>
-        <tr><td><code>arm_freq=2100</code> + <code>over_voltage=6</code></td><td class="num">+35–40%</td><td class="muted">not yet run</td><td>Heat. Needs a heatsink and ideally a fan.</td></tr>
+        <tr><td><code>arm_freq=2100</code> + <code>over_voltage=6</code></td><td class="num">+35–40%</td><td class="num">+36–44% (PSCTRL, 8 Oct)</td><td>Heat: 67.6&nbsp;°C vs 59.8&nbsp;°C stock. Needs a heatsink and ideally a fan.</td></tr>
         <tr><td>2&nbsp;MB huge pages</td><td class="num">+3–6%</td><td class="num">0</td><td>None. The stock kernel has huge pages off.</td></tr>
       </tbody>
     </table></div>
