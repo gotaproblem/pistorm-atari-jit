@@ -3631,6 +3631,9 @@ static bool fvdi_blit_rows_rop(uaecptr src_mfdb, uaecptr dst_mfdb,
 
 /* Which path the last fvdi_blit_area took (PISTORM_FVDI_BLIT_TRACE). */
 static const char *g_fvdi_blit_path = "-";
+/* blits of 64K+ pixels: count, time, pixels, the last path (PSDOS stats) */
+static uint64_t g_big_blit_n, g_big_blit_us, g_big_blit_px;
+static const char *g_big_blit_path = "-";
 
 static uae_u32 fvdi_blit_area(uaecptr src_mfdb, uaecptr dst_mfdb,
                               int32_t src_x, int32_t src_y,
@@ -4370,8 +4373,15 @@ static uae_u32 nf_call_fvdi_inner(uae_u32 subid, uaecptr params)
       if (fvdi_mfdb_is_screen(dst))
         blit_m |= fvdi_mouse_obscure_rect(dst_x, dst_y, w, h);
       const uint64_t wc1 = trace ? pistorm_fvdi_write_count() : 0;
+      const uint64_t bt0 = (int64_t)w * h >= 65536 ? get_time_us() : 0;
       uae_u32 blit_r = fvdi_blit_area(src, dst, src_x, src_y, dst_x, dst_y,
                                       w, h, op);
+      if (bt0) {                        /* big ones, for the PSDOS stats */
+        g_big_blit_n++;
+        g_big_blit_us += get_time_us() - bt0;
+        g_big_blit_px += (uint64_t)w * (uint64_t)h;
+        g_big_blit_path = g_fvdi_blit_path;
+      }
       const uint64_t wc2 = trace ? pistorm_fvdi_write_count() : 0;
       fvdi_mouse_unobscure(blit_m);
       /* PISTORM_FVDI_BLIT_TRACE=1: every raster copy, with what each side
@@ -6270,6 +6280,50 @@ static uae_u32 nf_call_psweb(uae_u32 subid, uaecptr params)
  * ring, reads a few words the connector thread keeps current, or copies
  * one damage band of pixels out of shared memory. Nothing waits. Safe
  * under the JIT invariant. */
+/*
+ * Every 5 s while the DOS window is open: how DOSGEM's loop is doing.
+ * ticks = its POLLs, taken = FETCHes that got a frame, fetch = the host
+ * copy into its buffer, after = from a taken FETCH to the next POLL (the
+ * blit and GEM's redraw bookkeeping), big blits = fVDI copies of 64K+
+ * pixels (the frame going to the screen) and the path they took.
+ */
+static void psdos_dosgem_stats(int what, uint64_t us)
+{
+  static uint64_t since, polls, takes, fetch_us, after_sum, after_max, t_take;
+  static uint64_t blit_n0, blit_us0, blit_px0;
+  const uint64_t now = get_time_us();
+  if (what == 0) {                         /* POLL */
+    polls++;
+    if (t_take) {
+      uint64_t d = now - t_take;
+      after_sum += d;
+      if (d > after_max) after_max = d;
+      t_take = 0;
+    }
+  } else {                                 /* a FETCH that took a frame */
+    takes++;
+    fetch_us += us;
+    t_take = now;
+  }
+  if (!since) {
+    since = now;
+    blit_n0 = g_big_blit_n; blit_us0 = g_big_blit_us; blit_px0 = g_big_blit_px;
+    return;
+  }
+  if (now - since < 5000000)
+    return;
+  const double el = (now - since) / 1e6;
+  const uint64_t bn = g_big_blit_n - blit_n0;
+  fprintf(stderr, "[PSDOS] dosgem: ticks %.1f/s, taken %.1f/s, fetch %.2f ms, "
+          "after %.1f ms avg %.1f max, big blits %.1f/s %.2f ms avg %.0f Kpx (%s)\n",
+          polls / el, takes / el, takes ? fetch_us / 1e3 / takes : 0.0,
+          takes ? after_sum / 1e3 / takes : 0.0, after_max / 1e3,
+          bn / el, bn ? (g_big_blit_us - blit_us0) / 1e3 / bn : 0.0,
+          bn ? (g_big_blit_px - blit_px0) / 1e3 / bn : 0.0, g_big_blit_path);
+  since = now; polls = takes = fetch_us = after_sum = after_max = 0;
+  blit_n0 = g_big_blit_n; blit_us0 = g_big_blit_us; blit_px0 = g_big_blit_px;
+}
+
 static uae_u32 nf_call_psdos(uae_u32 subid, uaecptr params)
 {
   char str[PSDOS_STR_MAX];
@@ -6322,6 +6376,8 @@ static uae_u32 nf_call_psdos(uae_u32 subid, uaecptr params)
       uaecptr out = nf_get_param(params, 0);
       struct psdos_pollstate st;
       int rc = psdos_poll(&st);
+      if (psdos_view_open())
+        psdos_dosgem_stats(0, 0);
       if (out) {
         nf_write_long(out + 0,  st.frame_serial);
         nf_write_long(out + 4,  st.flags);
@@ -6353,7 +6409,10 @@ static uae_u32 nf_call_psdos(uae_u32 subid, uaecptr params)
                "(use Mxalloc(size, 1) for TT-RAM)\n", (unsigned)dest);
         return (uae_u32)PSDOS_ERR;
       }
+      const uint64_t ft0 = get_time_us();
       int n = psdos_fetch(p, stride, rows, rect);
+      if (n > 0)
+        psdos_dosgem_stats(1, get_time_us() - ft0);
       if (n > 0 && rectp)
         for (int i = 0; i < 4; i++)
           nf_write_long(rectp + (uaecptr)i * 4, (uae_u32)rect[i]);
