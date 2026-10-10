@@ -270,7 +270,8 @@ int main(int argc, char **argv)
         cmd(PSDOS_CMD_VIEW_SIZE, w, h, 0, NULL);
         pump(0.3);
       }
-    } else if (!strncmp(a, "pause:", 6)) { cmd(PSDOS_CMD_STATE, atoi(a + 6) ? 0 : 3, 0, 0, NULL); pump(0.1); }
+    } else if (!strncmp(a, "load:", 5)) { cmd(PSDOS_CMD_LOAD, 0, 0, 0, a[5] ? a + 5 : NULL); pump(1.0); }
+    else if (!strncmp(a, "pause:", 6)) { cmd(PSDOS_CMD_STATE, atoi(a + 6) ? 0 : 3, 0, 0, NULL); pump(0.1); }
   }
   if (total > 0) {
     double left = total - (now_s() - t0);

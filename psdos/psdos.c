@@ -92,6 +92,8 @@ static int g_core_exit;            /* the core asked to shut down           */
 static double g_fps = 60.0;
 static double g_sample_rate;       /* the core's audio rate, Hz              */
 static int g_failed;               /* the last LOAD was refused             */
+static int g_used;                 /* this process has run a game already   */
+static char **g_argv;
 static double g_aspect;            /* <= 0: use w/h                         */
 static enum retro_pixel_format g_pixfmt = RETRO_PIXEL_FORMAT_0RGB1555;
 static retro_keyboard_event_t g_kbd_cb;
@@ -545,8 +547,10 @@ static int core_open(void)
 
 /* deinit too: only at exit. DOSBox Pure does not survive retro_deinit()
  * followed by a second retro_init() in the same process (segfault in the
- * second load, found with tools/dosbench), so the core is initialised once
- * and each new game is unload_game + load_game. */
+ * second load), and unload_game + load_game leaves the old DOS machine's
+ * state behind (a program spinning with the PC speaker on kept sounding
+ * into the next game) - both found with tools/dosbench. So each game after
+ * the first gets a fresh process: see reexec_for_load(). */
 static void core_unload_ex(int deinit)
 {
   if (g_loaded) {
@@ -595,6 +599,7 @@ static int core_load(const char *path)
     return -1;
   }
   g_loaded = 1;
+  g_used = 1;
   /* the core may answer the keyboard only after a game is loaded */
   C.set_controller_port_device(0, RETRO_DEVICE_JOYPAD);
   C.set_controller_port_device(1, RETRO_DEVICE_JOYPAD);
@@ -886,6 +891,82 @@ static void view_free(void)
   V.visible = 0;
 }
 
+/* A second game in this process: replace the process image, keeping the
+ * client connection, the listening socket and the shared memory (the
+ * emulator's mapping of the memfd stays valid - it is the same object), and
+ * hand the view and the path to load over in the environment. */
+static void reexec_for_load(const char *path)
+{
+  char buf[64];
+  int fds[3] = { g_client_fd, g_listen_fd, g_shm_fd };
+  for (int i = 0; i < 3; i++)
+    if (fds[i] >= 0)
+      fcntl(fds[i], F_SETFD, 0);          /* survive the exec */
+  snprintf(buf, sizeof buf, "%d,%d,%d,%d,%d,%d,%d,%d", g_client_fd, g_listen_fd,
+           g_shm_fd, V.active, V.w, V.h, V.bpp, V.visible);
+  setenv("PSDOS_RESUME", buf, 1);
+  setenv("PSDOS_RESUME_LOAD", path ? path : "", 1);
+  setenv("PSDOS_RESUME_SOCK", g_listen_inherited ? "" : g_sock_path, 1);
+  if (g_audio)
+    g_audio->rate = 0;
+  SAY("fresh process for %s", path && *path ? path : "(DOS prompt)");
+  execv("/proc/self/exe", g_argv);
+  SAY("re-exec failed (%s) - loading in this process", strerror(errno));
+  for (int i = 0; i < 3; i++)
+    if (fds[i] >= 0)
+      fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+  unsetenv("PSDOS_RESUME");
+}
+
+/* the other half: called first thing in main() */
+static int resume_from_exec(void)
+{
+  const char *r = getenv("PSDOS_RESUME");
+  if (!r || !*r)
+    return 0;
+  int cfd, lfd, sfd, act, w, h, bpp, vis;
+  if (sscanf(r, "%d,%d,%d,%d,%d,%d,%d,%d", &cfd, &lfd, &sfd, &act, &w, &h, &bpp, &vis) != 8)
+    return 0;
+  struct stat st;
+  if (sfd < 0 || fstat(sfd, &st) < 0)
+    return 0;
+  g_shm_fd = sfd;
+  g_shm_size = (size_t)st.st_size;
+  g_shm = mmap(NULL, g_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
+  if (g_shm == MAP_FAILED) {
+    g_shm = NULL;
+    return 0;
+  }
+  struct psdos_shm_hdr *hd = (struct psdos_shm_hdr *)g_shm;
+  g_surf = (struct psdos_surface *)(g_shm + hd->surface_off);
+  g_pixels = g_shm + hd->pixels_off;
+  g_audio = (struct psdos_audio *)(g_shm + hd->audio_off);
+  g_client_fd = cfd;
+  g_listen_fd = lfd;
+  const char *sp = getenv("PSDOS_RESUME_SOCK");
+  if (sp && *sp)
+    snprintf(g_sock_path, sizeof g_sock_path, "%s", sp);
+  else
+    g_listen_inherited = 1;
+  int fds[3] = { cfd, lfd, sfd };
+  for (int i = 0; i < 3; i++)
+    if (fds[i] >= 0)
+      fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+  V.active = act; V.w = w; V.h = h; V.bpp = bpp; V.visible = vis;
+  V.full = 1;
+  g_surf->consumed = g_surf->serial;
+  char path[PATH_MAX];
+  const char *lp = getenv("PSDOS_RESUME_LOAD");
+  snprintf(path, sizeof path, "%s", lp ? lp : "");
+  unsetenv("PSDOS_RESUME");
+  unsetenv("PSDOS_RESUME_LOAD");
+  unsetenv("PSDOS_RESUME_SOCK");
+  if (core_open() == 0)
+    g_failed = core_load(path) < 0;
+  g_flags_sent = 0xFFFFFFFFu;          /* say everything again */
+  return 1;
+}
+
 static void handle_cmd(const struct psdos_cmd *c, const char *str)
 {
   switch (c->type) {
@@ -933,6 +1014,8 @@ static void handle_cmd(const struct psdos_cmd *c, const char *str)
       break;
     }
     case PSDOS_CMD_LOAD:
+      if (g_used)
+        reexec_for_load(str);           /* returns only if exec failed */
       g_failed = core_load(str) < 0;
       break;
     case PSDOS_CMD_KEY:
@@ -1188,7 +1271,8 @@ int main(int argc, char **argv)
     return selftest(argc > 2 ? argv[2] : NULL, secs);
   }
 
-  if (shm_create() < 0 || listen_setup() < 0)
+  g_argv = argv;
+  if (!resume_from_exec() && (shm_create() < 0 || listen_setup() < 0))
     return 1;
   if (core_open() < 0)
     SAY("continuing without a core: the client is told so");
