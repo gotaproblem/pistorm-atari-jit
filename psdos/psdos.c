@@ -121,7 +121,8 @@ static unsigned g_src_w, g_src_h, g_src_pitch, g_src_bpp;   /* bpp 2 or 4 */
 static int g_src_fresh;            /* a frame arrived since the last publish */
 static unsigned g_prev_w, g_prev_h;
 static uint32_t g_dropped;
-static uint32_t g_frames_1s, g_fps_x100;
+static uint32_t g_shown;                /* frames handed to the client     */
+static uint32_t g_frames_1s, g_fps_x100, g_frames_total;
 static double g_fps_t0;
 static uint32_t g_core_us;
 
@@ -429,6 +430,7 @@ static bool RETRO_CALLCONV environment(unsigned cmd, void *data)
 static void RETRO_CALLCONV video_refresh(const void *data, unsigned w, unsigned h, size_t pitch)
 {
   g_frames_1s++;
+  g_frames_total++;
   if (!data || data == RETRO_HW_FRAME_BUFFER_VALID || !w || !h)
     return;                            /* a dupe: nothing changed */
   unsigned bpp = g_pixfmt == RETRO_PIXEL_FORMAT_XRGB8888 ? 4 : 2;
@@ -776,6 +778,7 @@ static void publish(void)
   (void)t;
   __sync_synchronize();
   g_surf->serial++;
+  g_shown++;
 }
 
 /* ------------------------------------------------------- shared memory -- */
@@ -1296,11 +1299,50 @@ static void make_dirs(void)
 static void on_signal(int s) { (void)s; g_quit = 1; }
 
 /* one frame: run the core, publish what it drew, keep the fps figure */
+/* every 5 s while a game runs: where the time goes. fps below what the
+ * core wants with retro_run near the budget = the emulated PC is too slow
+ * for the Pi (lower cycles / resolution); many dropped = the Atari side
+ * (DOSGEM's blit) is not keeping up; late = psdos itself is starved of
+ * CPU (another busy process on its core). */
+static void stats_tick(double t0, double t1)
+{
+  static double since, run_sum, run_max;
+  static uint32_t runs, frames0, drop0, shown0, late;
+  static double expect;
+  double us = t1 - t0;
+  if (expect > 0 && t0 - expect > 1.0) {   /* was paused: start over */
+    since = 0; run_sum = run_max = 0; runs = 0; late = 0; expect = 0;
+  }
+  run_sum += us;
+  if (us > run_max) run_max = us;
+  runs++;
+  if (expect > 0 && t0 - expect > 0.5 / g_fps)
+    late++;                              /* started half a frame late */
+  expect = t0 + 1.0 / g_fps;
+  if (since == 0) {
+    since = t0;
+    frames0 = g_frames_total; drop0 = g_dropped; shown0 = g_shown;
+    return;
+  }
+  if (t1 - since < 5.0)
+    return;
+  double el = t1 - since;
+  SAY("stats: core %.1f fps (wants %.1f), retro_run avg %.1f ms max %.1f ms "
+      "(budget %.1f), shown %.1f/s, not taken %.1f/s, late starts %u",
+      (g_frames_total - frames0) / el, g_fps, run_sum / runs * 1e3,
+      run_max * 1e3, 1e3 / g_fps, (g_shown - shown0) / el,
+      (g_dropped - drop0) / el, late);
+  since = t1; run_sum = run_max = 0; runs = 0; late = 0;
+  frames0 = g_frames_total; drop0 = g_dropped; shown0 = g_shown;
+}
+
 static void frame(void)
 {
   double t = now_s();
   C.run();
-  g_core_us = (uint32_t)((now_s() - t) * 1e6);
+  double t1 = now_s();
+  g_core_us = (uint32_t)((t1 - t) * 1e6);
+  stats_tick(t, t1);
   if (t - g_fps_t0 >= 1.0) {
     g_fps_x100 = (uint32_t)(g_frames_1s * 100.0 / (t - g_fps_t0));
     g_frames_1s = 0;
