@@ -43,3 +43,9 @@ __pycache__/
 tools/atariclean/tests/out/
 Claude outputs/
 psweb-phase0-out/
+psdos/psdos
+psdos/dosbox_pure_libretro.so
+psdos/dosbox-pure-*/
+psdos/*.ppm
+tools/dosbench/dosbench
+tools/dosbench/*.ppm
