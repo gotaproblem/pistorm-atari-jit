@@ -414,6 +414,26 @@ static bool RETRO_CALLCONV environment(unsigned cmd, void *data)
     case RETRO_ENVIRONMENT_GET_LANGUAGE:
       *(unsigned *)data = RETRO_LANGUAGE_ENGLISH;
       return true;
+    case RETRO_ENVIRONMENT_SET_MESSAGE_EXT: {
+      /* notifications: as before (the core logged them itself when this
+       * was refused); status lines - dosbox_pure_perfstats' "Speed: ..." -
+       * go to the log once every 5 s, there is no OSD to put them on */
+      const struct retro_message_ext *m = data;
+      if (!m || !m->msg)
+        return true;
+      if (m->type == RETRO_MESSAGE_TYPE_STATUS) {
+        static double last;
+        double t = now_s();
+        if (t - last >= 5.0) {
+          last = t;
+          SAY("core: %s", m->msg);
+        }
+      } else {
+        SAY("core: %s", m->msg);
+        snprintf(g_status, sizeof g_status, "%s", m->msg);
+      }
+      return true;
+    }
     case RETRO_ENVIRONMENT_SET_MESSAGE: {
       const struct retro_message *m = data;
       if (m && m->msg) {
