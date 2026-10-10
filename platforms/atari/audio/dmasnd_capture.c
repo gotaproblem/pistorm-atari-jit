@@ -730,8 +730,24 @@ static void *pump_thread(void *arg)
                         last_mode = m;
                     }
                     dmasnd_note_frame_len(e - s);
-                    for (k = 0; k < behind; k++)
-                        dmasnd_write_bytes(&natmem_offset[s], e - s);
+                    /* First time the queue cap trips (dmasnd_hdmi.c),
+                     * say what the capture side was doing: the frame and
+                     * how many boundaries this one wake copied. */
+                    {
+                        static int said;
+                        unsigned before = dmasnd_xruns();
+                        for (k = 0; k < behind; k++)
+                            dmasnd_write_bytes(&natmem_offset[s], e - s);
+                        if (!said && dmasnd_xruns() != before) {
+                            said = 1;
+                            fprintf(stderr, "[dmasnd]   capture: frame "
+                                    "%06X..%06X len=%u x%u this wake, "
+                                    "mode=0x%02X ctrl=0x%02X repeat=%d "
+                                    "(PISTORM_DMASND_DEBUG=2 for 1/s "
+                                    "rates)\n", s, e, e - s, behind, m,
+                                    reg[0x01], atomic_load(&g_repeat));
+                        }
+                    }
                     if (dmasnd_dbg())
                         fprintf(stderr, "[dmasnd] accept s=0x%06X e=0x%06X len=%u x%u "
                                 "%s %uHz\n", s, e, e - s, behind,
