@@ -250,7 +250,7 @@ const char *sp_row_label(const char *key, const char *val)
 {
     if (!strcasecmp(key, "kbd"))
         return "usb kbd/mouse";
-    if (!strcasecmp(key, "usb") && val && !strncasecmp(val, "gamepad", 7))
+    if (!strcasecmp(key, "usb"))       /* "gamepad" is the only class */
         return "usb gamepad";
     return key;
 }

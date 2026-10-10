@@ -811,7 +811,10 @@ void kbd_usb_tx_snoop(uint8_t v)
             const int was_quarantined = quarantined();
             atomic_store(&probe_saw_clean, 0);
             atomic_store(&reset_probe_due, now_us() + RESET_ANSWER_US);
-            atomic_store(&reset_probe_armed, 1);
+            /* only auto-detect resolves a probe; armed under a forced
+             * mode it would never close (and would hold back the native
+             * mouse threshold, which waits for it) */
+            atomic_store(&reset_probe_armed, kbd_usb_force_mode == 0);
             atomic_store(&real_good_run, 0);
             atomic_store(&rate_hot_wins, 0);
             atomic_store(&rate_win_bytes, 0);
@@ -2321,6 +2324,16 @@ int kbd_usb_init(int grab, int devices)
         return 0;
 
     dev_mask = devices;
+    if (!(dev_mask & KBD_USB_DEV_KBDMOUSE))
+    {
+        /* "usb gamepad" alone: the ST's own keyboard and mouse ARE the
+         * input. Nothing here may judge them - presence detection reads
+         * a fast native mouse as a noisy line and quarantines the real
+         * ACIA, which kills the keyboard and mouse the user is holding.
+         * The pads' packets are merged into the real stream, always. */
+        kbd_usb_force_mode = 1;
+        atomic_store(&real_state, IKBD_PRESENT);
+    }
     if (dev_mask & KBD_USB_DEV_GAMEPAD)
     {
         static const joy_usb_emit_hooks h = {
@@ -2352,7 +2365,8 @@ int kbd_usb_init(int grab, int devices)
            (dev_mask & KBD_USB_DEV_KBDMOUSE) ? "keyboard+mouse" : "",
            dev_mask == (KBD_USB_DEV_KBDMOUSE | KBD_USB_DEV_GAMEPAD) ? ", " : "",
            (dev_mask & KBD_USB_DEV_GAMEPAD)  ? "gamepads" : "",
-           grab ? " (devices grabbed, F12 releases)" : "");
+           (grab && (dev_mask & KBD_USB_DEV_KBDMOUSE)) ? " (devices grabbed, F12 releases)"
+         : !(dev_mask & KBD_USB_DEV_KBDMOUSE) ? " (ST keyboard+mouse merged, never quarantined)" : "");
     return 0;
 }
 
