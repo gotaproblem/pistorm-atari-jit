@@ -238,10 +238,13 @@ int sp_row_on(const char *key, const char *val)
  * A few .cfg keys read badly as key + value, because the key names the
  * subsystem and the value names what is being switched on:
  *
- *   kbd usb            -> "usb kbd/mouse    usb"   (config_file.c: kbd usb
+ *   kbd usb            -> "kbd/mouse (usb/bt) usb"   (config_file.c: kbd usb
  *                         [nograb] [merge|standalone] injects the USB
  *                         keyboard AND mouse into the IKBD stream)
- *   usb gamepad        -> "usb gamepad      enabled"
+ *   usb gamepad        -> "gamepads (usb/bt) enabled"
+ *                         (the file keywords say "usb", but Linux hands
+ *                         Bluetooth pads, keyboards and mice over the same
+ *                         way: both rows cover both)
  *   hostfs S /path     -> "hostfs           S: /path"
  *
  * Only the display changes; the file keeps the emulator's own spelling.
@@ -249,9 +252,9 @@ int sp_row_on(const char *key, const char *val)
 const char *sp_row_label(const char *key, const char *val)
 {
     if (!strcasecmp(key, "kbd"))
-        return "usb kbd/mouse";
+        return "kbd/mouse (usb/bt)";
     if (!strcasecmp(key, "usb"))       /* "gamepad" is the only class */
-        return "usb gamepad";
+        return "gamepads (usb/bt)";
     return key;
 }
 
