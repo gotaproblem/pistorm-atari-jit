@@ -56,6 +56,16 @@ int drmpres_set_source(uint32_t w, uint32_t h);
 #define DRMPRES_SRC_FVDI  1
 void drmpres_set_source_kind(int kind);
 
+/* How an fVDI screen is scaled onto HDMI - the live PSCTRL / .cfg tunable
+ * `fvdi_scale fit|integer|stretch|fit_sharp` (psctrl_tunables.c). Declared
+ * here rather than in psctrl_tunables.h so adding it rebuilds the presenter
+ * and the settings table, not everything that includes the tunables. */
+#define PST_FVDI_SCALE_FIT       0   /* fill keeping aspect, smooth if fractional */
+#define PST_FVDI_SCALE_INTEGER   1   /* whole multiple only, centred (old default) */
+#define PST_FVDI_SCALE_STRETCH   2   /* fill the display, ignore aspect */
+#define PST_FVDI_SCALE_FIT_SHARP 3   /* fill keeping aspect, nearest-neighbour */
+extern volatile int pst_fvdi_scale;
+
 uint8_t *drmpres_backbuffer(void);   /* current render target (native size) */
 uint32_t drmpres_src_pitch(void);    /* bytes per scanline of the source     */
 uint32_t drmpres_src_w(void);

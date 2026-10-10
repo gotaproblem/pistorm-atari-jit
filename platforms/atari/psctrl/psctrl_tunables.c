@@ -6,6 +6,7 @@
 // after that goes through the settings descriptor table.
 
 #include "platforms/atari/psctrl/psctrl_tunables.h"
+#include "platforms/atari/et4000/et4000_drm.h"   /* pst_fvdi_scale */
 
 #include <stdlib.h>
 #include <strings.h>

@@ -51,13 +51,6 @@ extern volatile int pst_compfpu;
 extern volatile int pst_fps;              /* 10..60, host present pace   */
 extern volatile int pst_drm_dirtyband;    /* 0/1                          */
 extern volatile int pst_drm_async;        /* 0/1, boot only               */
-/* How an fVDI screen is scaled onto HDMI (et4000_drm.c compute_dst). Live.
- * .cfg: `fvdi_scale fit|integer|stretch|fit_sharp`. */
-#define PST_FVDI_SCALE_FIT       0   /* fill keeping aspect, smooth if fractional */
-#define PST_FVDI_SCALE_INTEGER   1   /* whole multiple only, centred (old default) */
-#define PST_FVDI_SCALE_STRETCH   2   /* fill the display, ignore aspect */
-#define PST_FVDI_SCALE_FIT_SHARP 3   /* fill keeping aspect, nearest-neighbour */
-extern volatile int pst_fvdi_scale;
 
 /* --- blitter ------------------------------------------------------- */
 /* ns per bus access; 0 = instant. There is no separate "instant" switch:

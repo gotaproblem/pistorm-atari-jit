@@ -607,7 +607,9 @@ static const char L_ttram[]    = "off\0" "16M\0" "32M\0" "64M\0" "128M\0" "256M\
 static const char L_cache[]    = "off\0" "2048K\0" "4096K\0" "8192K\0" "16384K\0";
 static const char L_kbd[]      = "disabled\0usb auto\0usb merge\0usb standalone\0";
 static const char L_frames[]   = "512\0" "1024\0" "2048\0" "4096\0" "8192\0";
-/* index == PST_FVDI_SCALE_*; these strings are also the .cfg values */
+/* index == PST_FVDI_SCALE_* (et4000_drm.h); these strings are also the
+ * .cfg values. The tunable lives in psctrl_tunables.c. */
+extern "C" volatile int pst_fvdi_scale;
 static const char L_fvdiscale[] = "fit\0" "integer\0" "stretch\0" "fit_sharp\0";
 static const char L_dmasnd[]   = "off\0verbose\0summary\0";
 static const char L_hostfsd[]  = "follow cfg\0off\0on\0";
