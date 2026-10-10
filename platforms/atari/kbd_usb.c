@@ -48,6 +48,8 @@
 
 /* real-IKBD -> STBOX divert, defined with the routing block further down */
 static int stbox_divert_real_byte(uint8_t v);
+static void send_key_main(uint8_t scan, int pressed);
+static int raw_main_pending;     /* defined, = -1, with the STBOX/PSDOS routing */
 static int stbox_divert_next(void);
 
 /* Per-second [KBD] state line: off unless explicitly built in. */
@@ -737,7 +739,12 @@ void kbd_native_tx_snoop(uint8_t v)
 #define IKBD_DIVERTED_BYTE 0x80
 uint8_t kbd_native_rx_filter(uint8_t v)
 {
-    if (stbox_divert_real_byte(v))
+    if (raw_main_pending >= 0)
+    {
+        v = (uint8_t)raw_main_pending;   /* decided already: the main guest's */
+        raw_main_pending = -1;
+    }
+    else if (stbox_divert_real_byte(v))
     {
         mouse_pkt_left = 0;            /* scaler restarts at the next header */
         return IKBD_DIVERTED_BYTE;
@@ -1199,16 +1206,33 @@ static int raw_sink_wanted(void)
     return stbox_wants_input() ? 1 : 0;
 }
 
+/* Framing is tracked whenever a sandbox or the DOS window is OPEN, not
+ * only while one has the input: capture can start between a packet's
+ * header and its data bytes (a mouse moving while the window is clicked),
+ * and owner decisions are only right at packet boundaries. A gap longer
+ * than any packet's byte spacing (1.28 ms at 7812.5 baud) re-syncs. */
 static int raw_divert_possible(void)
 {
-    return stbox_running() || psdos_wants_input() || stbox_raw_left;
+    return stbox_running() || psdos_view_open();
+}
+
+static uint64_t raw_last_us;
+static uint8_t  raw_key_owner[128];  /* who got each key's make: its break follows */
+static int      raw_main_pending = -1;   /* popped early, but the main guest's */
+
+static void raw_resync(void)
+{
+    uint64_t now = now_us();
+    if (stbox_raw_left && now - raw_last_us > 4000)
+        stbox_raw_left = 0;
 }
 
 /* Will the NEXT real byte be taken (so a status shim may pop it early)? */
 static int stbox_divert_next(void)
 {
-    if (!raw_divert_possible())
+    if (raw_main_pending >= 0 || !raw_divert_possible())
         return 0;
+    raw_resync();
     return stbox_raw_left ? stbox_raw_to_box : raw_sink_wanted();
 }
 
@@ -1219,8 +1243,11 @@ static int stbox_divert_real_byte(uint8_t v)
     if (!raw_divert_possible())
     {
         stbox_raw_left = 0;            /* re-sync framing on the next start */
+        memset(raw_key_owner, 0, sizeof raw_key_owner);
         return 0;
     }
+    raw_resync();
+    raw_last_us = now_us();
     if (stbox_raw_left == 0)
     {
         if (v == 0x01 && stbox_running() && stbox_get_focus() &&
@@ -1234,6 +1261,23 @@ static int stbox_divert_real_byte(uint8_t v)
         }
         stbox_raw_left   = stbox_raw_pkt_len(v);
         stbox_raw_to_box = raw_sink_wanted();
+        if (stbox_raw_left == 0)
+        {
+            /* a key: its break goes wherever its make went, so a key held
+             * across a capture change is never left down on either side */
+            uint8_t sc = v & 0x7F;
+            if (!(v & 0x80))
+                raw_key_owner[sc] = (uint8_t)stbox_raw_to_box;
+            else
+            {
+                stbox_raw_to_box = raw_key_owner[sc];
+                raw_key_owner[sc] = 0;
+            }
+        }
+        /* an owner that has gone away gets nothing */
+        if ((stbox_raw_to_box == 1 && !stbox_running()) ||
+            (stbox_raw_to_box == 2 && !psdos_view_open()))
+            stbox_raw_to_box = 0;
     }
     else
         stbox_raw_left--;
@@ -1251,7 +1295,7 @@ static int stbox_divert_real_byte(uint8_t v)
  * when neither USB injection nor the native mouse threshold is on. */
 int kbd_ikbd_divert_active(void)
 {
-    return stbox_running() || psdos_wants_input();
+    return stbox_running() || psdos_view_open() || raw_main_pending >= 0;
 }
 
 static void real_drain(uint8_t rs)
@@ -1324,9 +1368,14 @@ static uint8_t status_shim_inner(uint8_t real)
         uint8_t v = ps_acia_kbd_read8(KBD_ACIA_DATA_ADDR);
         real_byte_consumed(real);
         kbd_usb_note_real_rx();
-        (void)stbox_divert_real_byte(v);     /* always taken: see _next */
-        real &= (uint8_t)~(ACIA_RDRF | ACIA_ERRS | ACIA_IRQ);
+        if (stbox_divert_real_byte(v))
+            real &= (uint8_t)~(ACIA_RDRF | ACIA_ERRS | ACIA_IRQ);
+        else
+            raw_main_pending = v;   /* the break of a key the Atari pressed:
+                                     * it is handed over at the next data read */
     }
+    if (raw_main_pending >= 0)
+        real |= (ACIA_RDRF | ACIA_IRQ);
 
     if (quarantined())
     {
@@ -1391,6 +1440,12 @@ static uint8_t data_shim_inner(int *fresh)
         mouse_thresh_pump();
 
     *fresh = 1;
+    if (raw_main_pending >= 0)
+    {
+        uint8_t v = (uint8_t)raw_main_pending;   /* popped by the status shim */
+        raw_main_pending = -1;
+        return joy_usb_real_rx_filter(mouse_scale_byte(v));
+    }
     if (kbd_usb_rx_priority())
         return kbd_usb_rx_read();
 
@@ -1780,7 +1835,8 @@ static void send_key(uint8_t scan, int pressed)
      * event died before reaching this function. ESC (ST scancode $01)
      * always arrives. The cost: while captured, ESC itself never reaches
      * the game - release and re-top the window if a game needs it. */
-    if (scan == 0x01 /* ESC */ && stbox_running() && stbox_get_focus())
+    if (scan == 0x01 /* ESC */ && stbox_running() && stbox_get_focus() &&
+        !psdos_wants_input())
     {
         if (pressed)
         {
@@ -1801,6 +1857,12 @@ static void send_key(uint8_t scan, int pressed)
         stbox_key_event(scan, pressed);
         return;
     }
+    send_key_main(scan, pressed);
+}
+
+/* the main machine's IKBD, whoever has the input */
+static void send_key_main(uint8_t scan, int pressed)
+{
     pthread_mutex_lock(&ikbd.lock);
     int ok = !ikbd.paused;
     pthread_mutex_unlock(&ikbd.lock);
@@ -2065,10 +2127,38 @@ static void handle_event(const struct input_event *ev, int is_mouse)
     /* DOS window captured: the whole PC keyboard goes to psdos by Linux
      * key code (F11, F12, PgUp, End, Insert, keypad, right Ctrl/Alt - the
      * keys the ST table folds away). Scroll Lock releases the capture. */
-    if (psdos_wants_input())
     {
-        psdos_key_linux(ev->code, pressed);
-        return;
+        /* a key's release goes where its press went, so nothing is left
+         * held down on either side when the capture changes */
+        static uint8_t usb_key_dos[KEY_MAX + 1];
+        if (ev->code <= KEY_MAX)
+        {
+            if (pressed && psdos_wants_input())
+            {
+                usb_key_dos[ev->code] = 1;
+                psdos_key_linux(ev->code, 1);
+                return;
+            }
+            if (!pressed && usb_key_dos[ev->code])
+            {
+                usb_key_dos[ev->code] = 0;
+                psdos_key_linux(ev->code, 0);
+                return;
+            }
+            if (pressed)
+                usb_key_dos[ev->code] = 0;
+            if (!pressed && psdos_wants_input())
+            {
+                /* pressed for the Atari before the capture: release it there */
+                if (ev->code != KEY_F12 && ev->code != KEY_F11)
+                {
+                    uint8_t sc = st_scan[ev->code];
+                    if (sc != ST_NONE)
+                        send_key_main(sc, 0);
+                }
+                return;
+            }
+        }
     }
 
     if (ev->code == KEY_F12)                     /* grab toggle           */

@@ -6343,7 +6343,10 @@ static uae_u32 nf_call_psdos(uae_u32 subid, uaecptr params)
       uae_u8 *p;
       int32_t rect[4] = { 0, 0, 0, 0 };
 
-      if (!dest || !stride || !rows)
+      /* a view is at most 1920x1080x4: refuse anything that is not a
+       * plausible screen buffer before multiplying */
+      if (!dest || !stride || !rows || stride > PSDOS_MAX_W * 4u + 64u ||
+          rows > PSDOS_MAX_H)
         return (uae_u32)PSDOS_ERR;
       if (!nf_host_ram_ptr(dest, stride * rows, &p)) {
         printf("[PSDOS] fetch buffer at %08x is not host RAM "
@@ -6358,7 +6361,7 @@ static uae_u32 nf_call_psdos(uae_u32 subid, uaecptr params)
     }
 
     case PSDOS_KEY:
-      psdos_key_st((uint8_t)nf_get_param(params, 1), (int)nf_get_param(params, 0));
+      psdos_key_gem((uint8_t)nf_get_param(params, 1), (int)nf_get_param(params, 0));
       return PSDOS_OK;
 
     case PSDOS_CAPTURE:

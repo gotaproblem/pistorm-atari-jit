@@ -76,7 +76,7 @@ static volatile uint32_t g_frames_fetched;
 /* input routing */
 static volatile int g_capture;
 static volatile int g_focus;
-static volatile uint32_t g_capture_serial;
+static uint32_t g_capture_serial;     /* __atomic ops */
 static unsigned g_audio_rate;
 
 static void link_err(const char *what, const char *detail)
@@ -95,13 +95,26 @@ static const char *sock_path(void)
 
 /* ------------------------------------------------------- connector ------ */
 
+/* The CPU thread may be in the middle of a FETCH when the link drops, so
+ * the mapping is never taken away from under it: it is replaced in place
+ * by zeroed anonymous memory (serial == consumed == 0, so the handler sees
+ * "no new frame"), and the next session maps its surface over the same
+ * address. */
+static uint8_t *g_dead;            /* the replaced range, reused next time */
+static size_t g_dead_size;
+
 static void shm_detach(void)
 {
   g_surf = NULL;
   g_pixels = NULL;
   g_audio = NULL;
+  __sync_synchronize();
   if (g_shm) {
-    munmap(g_shm, g_shm_size);
+    if (mmap(g_shm, g_shm_size, PROT_READ | PROT_WRITE,
+             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED) {
+      g_dead = g_shm;
+      g_dead_size = g_shm_size;
+    }
     g_shm = NULL;
   }
 }
@@ -114,14 +127,23 @@ static int shm_attach(size_t size)
     link_err("psdos sent no surface", NULL);
     return -1;
   }
-  uint8_t *m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  uint8_t *m;
+  if (g_dead && g_dead_size == size)
+    m = mmap(g_dead, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+  else
+    m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
+  if (m != MAP_FAILED && m == g_dead)
+    g_dead = NULL;                          /* reused */
   if (m == MAP_FAILED) {
     link_err("cannot map psdos's surface", strerror(errno));
     return -1;
   }
   struct psdos_shm_hdr *h = (struct psdos_shm_hdr *)m;
-  if (h->magic != PSDOS_SHM_MAGIC || h->version != PSDOS_PROTO_VERSION || h->size != size) {
+  if (h->magic != PSDOS_SHM_MAGIC || h->version != PSDOS_PROTO_VERSION || h->size != size ||
+      (size_t)h->surface_off + sizeof(struct psdos_surface) > size ||
+      (size_t)h->pixels_off + h->pixels_bytes > size ||
+      (size_t)h->audio_off + sizeof(struct psdos_audio) > size) {
     link_err("psdos's surface header does not match this emulator", NULL);
     munmap(m, size);
     return -1;
@@ -180,8 +202,17 @@ static void drain_audio(void)
   if (!a || !a->rate)
     return;
   if (a->rate != g_audio_rate) {
-    if (dmasnd_ext_open(a->rate) != 0)
+    static unsigned failed_rate;
+    if (a->rate == failed_rate) {           /* tried, no device: drop it */
+      a->rpos = a->wpos;
       return;
+    }
+    if (dmasnd_ext_open(a->rate) != 0) {
+      failed_rate = a->rate;
+      fprintf(stderr, "[PSDOS] no sound device for DOS audio at %u Hz\n", a->rate);
+      return;
+    }
+    failed_rate = 0;
     g_audio_rate = a->rate;
   }
   uint32_t w = a->wpos, r = a->rpos;
@@ -334,13 +365,17 @@ static void *connector(void *arg)
         session();
         g_connected = 0;
         g_view_ready = 0;
+        pthread_mutex_lock(&g_prod);
         g_capture = 0;
-        g_capture_serial++;
+        __atomic_add_fetch(&g_capture_serial, 1, __ATOMIC_SEQ_CST);
+        pthread_mutex_unlock(&g_prod);
         shm_detach();
         close(fd);
         g_fd = -1;
         if (g_hello_fd >= 0) { close(g_hello_fd); g_hello_fd = -1; }
+        pthread_mutex_lock(&g_prod);
         g_ring_tail = g_ring_head;            /* what was queued is stale */
+        pthread_mutex_unlock(&g_prod);
         fprintf(stderr, "[PSDOS] disconnected from psdos\n");
       } else {
         if (errno != ENOENT) {
@@ -410,16 +445,36 @@ static int start_thread(void)
 
 /* ------------------------------------------------ handler-side API ------ */
 
+/* lock held by the caller */
+static int push_locked(uint32_t type, int32_t a, int32_t b, int32_t c, const char *str);
+
 static int push(uint32_t type, int32_t a, int32_t b, int32_t c, const char *str)
 {
   if (!g_connected)
     return PSDOS_NOTCONN;
   pthread_mutex_lock(&g_prod);
+  int r = push_locked(type, a, b, c, str);
+  pthread_mutex_unlock(&g_prod);
+  return r;
+}
+
+/* real input: only while captured, checked under the same lock that
+ * drops the capture, so no key-down can land after the KEYS_UP */
+static int push_input(uint32_t type, int32_t a, int32_t b, int32_t c)
+{
+  if (!g_connected)
+    return PSDOS_NOTCONN;
+  pthread_mutex_lock(&g_prod);
+  int r = g_capture ? push_locked(type, a, b, c, NULL) : PSDOS_ERR;
+  pthread_mutex_unlock(&g_prod);
+  return r;
+}
+
+static int push_locked(uint32_t type, int32_t a, int32_t b, int32_t c, const char *str)
+{
   unsigned head = g_ring_head;
-  if (head - g_ring_tail >= RING_N) {
-    pthread_mutex_unlock(&g_prod);
+  if (head - g_ring_tail >= RING_N)
     return PSDOS_BUSY;
-  }
   struct ring_entry *en = &g_ring[head % RING_N];
   memset(&en->cmd, 0, sizeof en->cmd);
   en->cmd.type = type;
@@ -431,7 +486,6 @@ static int push(uint32_t type, int32_t a, int32_t b, int32_t c, const char *str)
   }
   __sync_synchronize();
   g_ring_head = head + 1;
-  pthread_mutex_unlock(&g_prod);
   uint64_t one = 1;
   if (write(g_efd, &one, sizeof one) < 0) { /* the thread polls anyway */ }
   return PSDOS_OK;
@@ -441,7 +495,8 @@ int psdos_status(void)
 {
   start_thread();
   int s = 0;
-  if (access(sock_path(), F_OK) == 0) s |= PSDOS_ST_SOCKET;
+  /* the socket check is a syscall: only while there is no link */
+  if (g_connected || access(sock_path(), F_OK) == 0) s |= PSDOS_ST_SOCKET;
   if (g_connected) s |= PSDOS_ST_CONN;
   if (g_connected && g_view_ready) s |= PSDOS_ST_VIEW;
   if (g_connected && (g_flags & PSDOS_FL_LOADED)) s |= PSDOS_ST_LOADED;
@@ -466,7 +521,7 @@ int psdos_poll(struct psdos_pollstate *out)
 {
   memset(out, 0, sizeof *out);
   out->capture = g_capture;
-  out->capture_serial = g_capture_serial;
+  out->capture_serial = __atomic_load_n(&g_capture_serial, __ATOMIC_SEQ_CST);
   if (!g_connected)
     return PSDOS_NOTCONN;
   struct psdos_surface *s = g_surf;
@@ -546,13 +601,22 @@ void psdos_set_capture(int on)
   on = on ? 1 : 0;
   if (on && !(g_connected && g_view_ready && g_focus))
     on = 0;                               /* nothing to give it to */
-  if (on == g_capture)
+  pthread_mutex_lock(&g_prod);
+  if (on == g_capture) {
+    pthread_mutex_unlock(&g_prod);
     return;
+  }
   g_capture = on;
-  g_capture_serial++;
+  __atomic_add_fetch(&g_capture_serial, 1, __ATOMIC_SEQ_CST);
   if (!on && g_connected)
-    push(PSDOS_CMD_KEYS_UP, 0, 0, 0, NULL);   /* nothing stays held down */
-  fprintf(stderr, "[PSDOS] input %s\n", on ? "captured (Undo / Scroll Lock releases)" : "released");
+    push_locked(PSDOS_CMD_KEYS_UP, 0, 0, 0, NULL);   /* nothing stays held */
+  pthread_mutex_unlock(&g_prod);
+  fprintf(stderr, "[PSDOS] input %s\n", on ? "captured (Undo / Scroll Lock / Ctrl+Alt+F12 releases)" : "released");
+}
+
+int psdos_view_open(void)
+{
+  return g_connected && g_view_ready;
 }
 
 void psdos_set_focus(int focused)
@@ -679,25 +743,42 @@ void psdos_key_st(uint8_t scan, int down)
   }
   unsigned k = st_to_retrok[scan];
   if (k)
+    push_input(PSDOS_CMD_KEY, down ? 1 : 0, (int32_t)k, 0);
+}
+
+/* DOSGEM's fallback while NOT captured: GEM key presses */
+void psdos_key_gem(uint8_t scan, int down)
+{
+  unsigned k = st_to_retrok[scan & 0x7F];
+  if (k)
     push(PSDOS_CMD_KEY, down ? 1 : 0, (int32_t)k, 0, NULL);
 }
 
 void psdos_key_linux(unsigned code, int down)
 {
-  if (code == KEY_SCROLLLOCK) {
+  /* Ctrl+Alt+F12: the release for keyboards with no Scroll Lock */
+  static int ctrl_l, ctrl_r, alt_l, alt_r;
+  switch (code) {
+    case KEY_LEFTCTRL:  ctrl_l = down; break;
+    case KEY_RIGHTCTRL: ctrl_r = down; break;
+    case KEY_LEFTALT:   alt_l = down; break;
+    case KEY_RIGHTALT:  alt_r = down; break;
+  }
+  if (code == KEY_SCROLLLOCK ||
+      (code == KEY_F12 && (ctrl_l || ctrl_r) && (alt_l || alt_r))) {
     if (down)
       psdos_set_capture(0);
     return;
   }
   unsigned k = linux_to_retrok(code);
   if (k)
-    push(PSDOS_CMD_KEY, down ? 1 : 0, (int32_t)k, 0, NULL);
+    push_input(PSDOS_CMD_KEY, down ? 1 : 0, (int32_t)k, 0);
 }
 
 void psdos_mouse(int dx, int dy, int st_buttons)
 {
   int b = ((st_buttons & 2) ? 1 : 0) | ((st_buttons & 1) ? 2 : 0);
-  push(PSDOS_CMD_MOUSE, dx, dy, b, NULL);
+  push_input(PSDOS_CMD_MOUSE, dx, dy, b);
 }
 
 /* ST port 1 is the first joystick (pad 0), port 0 the second */
@@ -713,7 +794,7 @@ void psdos_joy(int st_port, uint8_t st, uint8_t stpad)
   if (stpad & 0x04) m |= 1 << RETRO_DEVICE_ID_JOYPAD_Y;
   if (stpad & 0x08) m |= 1 << RETRO_DEVICE_ID_JOYPAD_X;
   if (stpad & 0x10) m |= 1 << RETRO_DEVICE_ID_JOYPAD_START;
-  push(PSDOS_CMD_JOY, st_port == 1 ? 0 : 1, m, 0, NULL);
+  push_input(PSDOS_CMD_JOY, st_port == 1 ? 0 : 1, m, 0);
 }
 
 /* The real IKBD stream while captured: kbd_usb.c frames the packets and
@@ -721,7 +802,6 @@ void psdos_joy(int st_port, uint8_t st, uint8_t stpad)
  * Called on the CPU thread only. */
 static uint8_t g_pkt[8];
 static int g_pkt_len, g_pkt_need;
-static uint8_t g_joy_st[2];
 
 static int ikbd_pkt_len(uint8_t h)
 {
@@ -758,9 +838,7 @@ void psdos_ikbd_byte(uint8_t v)
     return;
   }
   if (h == 0xFE || h == 0xFF) {           /* joystick 0 / 1 event */
-    int port = h & 1;
-    g_joy_st[port] = g_pkt[1];
-    psdos_joy(port, g_pkt[1], 0);
+    psdos_joy(h & 1, g_pkt[1], 0);
     return;
   }
   if (h == 0xFD) {                        /* both sticks */

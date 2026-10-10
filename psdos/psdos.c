@@ -53,6 +53,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -93,7 +94,9 @@ static double g_fps = 60.0;
 static double g_sample_rate;       /* the core's audio rate, Hz              */
 static int g_failed;               /* the last LOAD was refused             */
 static int g_used;                 /* this process has run a game already   */
+static char g_last_path[PATH_MAX]; /* what LOAD last asked for ("" = prompt) */
 static char **g_argv;
+static int g_resume_pending_input; /* commands carried across a re-exec */
 static double g_aspect;            /* <= 0: use w/h                         */
 static enum retro_pixel_format g_pixfmt = RETRO_PIXEL_FORMAT_0RGB1555;
 static retro_keyboard_event_t g_kbd_cb;
@@ -106,7 +109,7 @@ static char g_sysdir[PATH_MAX], g_savedir[PATH_MAX];
 /* core options: defaults from the core, our defaults, then the .conf, then
  * OPTION commands; GET_VARIABLE answers the last one set */
 #define MAX_OPT 128
-static struct opt { char key[64]; char val[96]; } g_opt[MAX_OPT];
+static struct opt { char key[64]; char val[96]; int from_cmd; } g_opt[MAX_OPT];
 static int g_nopt;
 static int g_opt_dirty;
 
@@ -189,6 +192,8 @@ static void opt_set(const char *key, const char *val, int dirty)
     if (dirty)
       g_opt_dirty = 1;
   }
+  if (dirty)
+    o->from_cmd = 1;                    /* survives a re-exec */
 }
 
 /* "key = value" or "key=value"; '#' starts a comment */
@@ -576,6 +581,7 @@ static int core_load(const char *path)
     return -1;
   core_unload();
   g_core_exit = 0;
+  snprintf(g_last_path, sizeof g_last_path, "%s", path ? path : "");
   if (!g_core_inited) {
     C.set_environment(environment);
     C.set_video_refresh(video_refresh);
@@ -670,6 +676,10 @@ static inline uint32_t src_px(const uint8_t *row, int x)
   if (g_src_bpp == 4)
     return ((const uint32_t *)row)[x] & 0xFFFFFFu;
   uint16_t p = ((const uint16_t *)row)[x];
+  if (g_pixfmt == RETRO_PIXEL_FORMAT_0RGB1555) {
+    uint32_t r = (p >> 10) & 31, g = (p >> 5) & 31, b = p & 31;
+    return ((r << 3 | r >> 2) << 16) | ((g << 3 | g >> 2) << 8) | (b << 3 | b >> 2);
+  }
   uint32_t r = (p >> 11) & 31, g = (p >> 5) & 63, b = p & 31;
   return ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
 }
@@ -899,9 +909,29 @@ static void reexec_for_load(const char *path)
 {
   char buf[64];
   int fds[3] = { g_client_fd, g_listen_fd, g_shm_fd };
+  /* everything the core opened (a game's ZIP, an ISO) must NOT ride
+   * along into the next game's process; only our three do */
+#ifdef SYS_close_range
+  syscall(SYS_close_range, 3u, ~0u, 4u /* CLOSE_RANGE_CLOEXEC */);
+#endif
   for (int i = 0; i < 3; i++)
     if (fds[i] >= 0)
       fcntl(fds[i], F_SETFD, 0);          /* survive the exec */
+  /* commands that arrived behind the LOAD, and options set at run time */
+  {
+    static char hex[sizeof g_inbuf * 2 + 1];
+    for (size_t i = 0; i < g_inlen && i < sizeof g_inbuf; i++)
+      snprintf(hex + i * 2, 3, "%02x", g_inbuf[i]);
+    hex[g_inlen * 2] = 0;
+    setenv("PSDOS_RESUME_IN", hex, 1);
+    static char opts[MAX_OPT * 170];
+    size_t n = 0;
+    opts[0] = 0;
+    for (int i = 0; i < g_nopt; i++)
+      if (g_opt[i].from_cmd && n + 170 < sizeof opts)
+        n += (size_t)snprintf(opts + n, sizeof opts - n, "%s=%s\n", g_opt[i].key, g_opt[i].val);
+    setenv("PSDOS_RESUME_OPTS", opts, 1);
+  }
   snprintf(buf, sizeof buf, "%d,%d,%d,%d,%d,%d,%d,%d", g_client_fd, g_listen_fd,
            g_shm_fd, V.active, V.w, V.h, V.bpp, V.visible);
   setenv("PSDOS_RESUME", buf, 1);
@@ -928,26 +958,55 @@ static int resume_from_exec(void)
   if (sscanf(r, "%d,%d,%d,%d,%d,%d,%d,%d", &cfd, &lfd, &sfd, &act, &w, &h, &bpp, &vis) != 8)
     return 0;
   struct stat st;
-  if (sfd < 0 || fstat(sfd, &st) < 0)
-    return 0;
-  g_shm_fd = sfd;
-  g_shm_size = (size_t)st.st_size;
-  g_shm = mmap(NULL, g_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, g_shm_fd, 0);
-  if (g_shm == MAP_FAILED) {
+  const char *spth = getenv("PSDOS_RESUME_SOCK");
+  if (sfd < 0 || fstat(sfd, &st) < 0 ||
+      (g_shm = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0)) == MAP_FAILED) {
+    /* cannot resume: drop the old client (the emulator reconnects) and
+     * the old listener unless systemd owns it, then start afresh */
     g_shm = NULL;
+    if (cfd >= 0) close(cfd);
+    if (sfd >= 0) close(sfd);
+    if (lfd >= 0 && spth && *spth) close(lfd);
+    unsetenv("PSDOS_RESUME");
     return 0;
   }
+  g_shm_fd = sfd;
+  g_shm_size = (size_t)st.st_size;
   struct psdos_shm_hdr *hd = (struct psdos_shm_hdr *)g_shm;
   g_surf = (struct psdos_surface *)(g_shm + hd->surface_off);
   g_pixels = g_shm + hd->pixels_off;
   g_audio = (struct psdos_audio *)(g_shm + hd->audio_off);
   g_client_fd = cfd;
   g_listen_fd = lfd;
-  const char *sp = getenv("PSDOS_RESUME_SOCK");
-  if (sp && *sp)
-    snprintf(g_sock_path, sizeof g_sock_path, "%s", sp);
+  if (spth && *spth)
+    snprintf(g_sock_path, sizeof g_sock_path, "%s", spth);
   else
     g_listen_inherited = 1;
+  {
+    const char *hx = getenv("PSDOS_RESUME_IN");
+    g_inlen = 0;
+    for (; hx && hx[0] && hx[1] && g_inlen < sizeof g_inbuf; hx += 2) {
+      unsigned v;
+      if (sscanf(hx, "%2x", &v) != 1)
+        break;
+      g_inbuf[g_inlen++] = (uint8_t)v;
+    }
+    const char *op = getenv("PSDOS_RESUME_OPTS");
+    char line[256];
+    while (op && *op) {
+      size_t l = strcspn(op, "\n");
+      if (l < sizeof line) {
+        memcpy(line, op, l);
+        line[l] = 0;
+        opt_parse_line(line, 1);
+      }
+      op += l;
+      if (*op) op++;
+    }
+    g_opt_dirty = 0;                    /* the core reads them fresh */
+    unsetenv("PSDOS_RESUME_IN");
+    unsetenv("PSDOS_RESUME_OPTS");
+  }
   int fds[3] = { cfd, lfd, sfd };
   for (int i = 0; i < 3; i++)
     if (fds[i] >= 0)
@@ -964,6 +1023,7 @@ static int resume_from_exec(void)
   if (core_open() == 0)
     g_failed = core_load(path) < 0;
   g_flags_sent = 0xFFFFFFFFu;          /* say everything again */
+  g_resume_pending_input = g_inlen > 0;
   return 1;
 }
 
@@ -984,7 +1044,9 @@ static void handle_cmd(const struct psdos_cmd *c, const char *str)
     case PSDOS_CMD_VIEW_NEW:
     case PSDOS_CMD_VIEW_SIZE: {
       int w = c->a, h = c->b, bpp = c->type == PSDOS_CMD_VIEW_NEW ? c->c : V.bpp;
-      if (w < 16 || h < 16 || w > PSDOS_MAX_W || h > PSDOS_MAX_H || (bpp != 16 && bpp != 32)) {
+      if (w > PSDOS_MAX_W) w = PSDOS_MAX_W;     /* a bigger window: DOSGEM centres */
+      if (h > PSDOS_MAX_H) h = PSDOS_MAX_H;
+      if (w < 16 || h < 16 || (bpp != 16 && bpp != 32)) {
         send_evt(PSDOS_EVT_VIEW, 0, 0, NULL);
         return;
       }
@@ -1018,6 +1080,7 @@ static void handle_cmd(const struct psdos_cmd *c, const char *str)
         reexec_for_load(str);           /* returns only if exec failed */
       g_failed = core_load(str) < 0;
       break;
+    /* RESET of a machine that shut down (or never loaded): load it again */
     case PSDOS_CMD_KEY:
       key_event(c->a, (unsigned)c->b);
       break;
@@ -1031,8 +1094,15 @@ static void handle_cmd(const struct psdos_cmd *c, const char *str)
         g_joy[c->a] = (uint16_t)c->b;
       break;
     case PSDOS_CMD_RESET:
-      if (g_loaded)
+      if (g_loaded && !g_core_exit)
         C.reset();
+      else {
+        char again[PATH_MAX];
+        snprintf(again, sizeof again, "%s", g_last_path);
+        if (g_used)
+          reexec_for_load(again);
+        g_failed = core_load(again) < 0;
+      }
       break;
     case PSDOS_CMD_OPTION:
       if (str) {
@@ -1065,6 +1135,8 @@ static void client_drop(void)
   SAY("client gone");
 }
 
+static void client_parse(void);
+
 static void client_read(void)
 {
   ssize_t n = recv(g_client_fd, g_inbuf + g_inlen, sizeof g_inbuf - g_inlen, 0);
@@ -1075,6 +1147,11 @@ static void client_read(void)
   if (n < 0)
     return;
   g_inlen += (size_t)n;
+  client_parse();
+}
+
+static void client_parse(void)
+{
   for (;;) {
     if (g_inlen < sizeof(struct psdos_cmd))
       break;
@@ -1091,9 +1168,13 @@ static void client_read(void)
     char str[PSDOS_STR_MAX + 1];
     memcpy(str, g_inbuf + sizeof c, c.len);
     str[c.len] = 0;
-    handle_cmd(&c, c.len ? str : NULL);
+    /* drop the record BEFORE acting on it: a LOAD or RESET may re-exec,
+     * and what is left in g_inbuf then travels to the new process */
     memmove(g_inbuf, g_inbuf + need, g_inlen - need);
     g_inlen -= need;
+    handle_cmd(&c, c.len ? str : NULL);
+    if (g_client_fd < 0)
+      return;
   }
 }
 
@@ -1274,6 +1355,8 @@ int main(int argc, char **argv)
   g_argv = argv;
   if (!resume_from_exec() && (shm_create() < 0 || listen_setup() < 0))
     return 1;
+  if (g_resume_pending_input && g_client_fd >= 0)
+    client_parse();                     /* what followed the LOAD */
   if (core_open() < 0)
     SAY("continuing without a core: the client is told so");
   g_idle_since = now_s();

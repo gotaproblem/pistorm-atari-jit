@@ -79,10 +79,12 @@ int  psdos_fetch(uint8_t *dst, uint32_t dst_stride, uint32_t dst_rows, int32_t r
 int  psdos_getstr(int which, char *out, int len);
 void psdos_set_capture(int on);
 void psdos_set_focus(int focused);
-void psdos_key_st(uint8_t scan, int down);        /* also the GEM fallback */
+void psdos_key_gem(uint8_t scan, int down);       /* DOSGEM, not captured */
 
 /* ---- input routing (kbd_usb.c, CPU and input threads) ---- */
 int  psdos_wants_input(void);       /* connected, view, focused, captured */
+int  psdos_view_open(void);         /* connected with a view: track IKBD framing */
+void psdos_key_st(uint8_t scan, int down);        /* real IKBD / ST scancodes */
 void psdos_key_linux(unsigned code, int down);    /* evdev KEY_* */
 void psdos_mouse(int dx, int dy, int st_buttons); /* ST bits: 2 left, 1 right */
 void psdos_joy(int st_port, uint8_t st_state, uint8_t stpad);
