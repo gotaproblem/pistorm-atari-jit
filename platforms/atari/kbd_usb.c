@@ -2149,8 +2149,8 @@ static void handle_event(const struct input_event *ev, int is_mouse)
 
     /* DOS window captured: the whole PC keyboard goes to psdos by Linux
      * key code (F11, F12, PgUp, End, Insert, keypad, right Ctrl/Alt - the
-     * keys the ST table folds away). Scroll Lock, Ctrl+Alt+F12 or the middle
-     * mouse button releases the capture. */
+     * keys the ST table folds away). Ctrl+Alt+G, Scroll Lock, Ctrl+Alt+F12
+     * or the middle mouse button releases the capture. */
     {
         /* a key's release goes where its press went, so nothing is left
          * held down on either side when the capture changes */

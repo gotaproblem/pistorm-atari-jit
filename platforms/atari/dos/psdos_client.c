@@ -646,7 +646,7 @@ void psdos_set_capture(int on)
   if (!on && g_connected)
     push_locked(PSDOS_CMD_KEYS_UP, 0, 0, 0, NULL);   /* nothing stays held */
   pthread_mutex_unlock(&g_prod);
-  fprintf(stderr, "[PSDOS] input %s\n", on ? "captured (middle mouse button, Scroll Lock, Ctrl+Alt+F12 or ST Undo releases)" : "released");
+  fprintf(stderr, "[PSDOS] input %s\n", on ? "captured (Ctrl+Alt+G, Scroll Lock, middle mouse button or ST Undo releases)" : "released");
 }
 
 int psdos_view_open(void)
@@ -802,7 +802,10 @@ void psdos_key_gem(uint8_t scan, int down)
 
 void psdos_key_linux(unsigned code, int down)
 {
-  /* Ctrl+Alt+F12: the release for keyboards with no Scroll Lock */
+  /* Releases for keyboards with no Scroll Lock: Ctrl+Alt+G (QEMU's; on a
+   * Mac keyboard Ctrl+Option+G - F12 there is a volume key unless fn is
+   * held) and Ctrl+Alt+F12. The Ctrl/Alt presses already went to DOS;
+   * the KEYS_UP the release sends lets go of them. */
   static int ctrl_l, ctrl_r, alt_l, alt_r;
   switch (code) {
     case KEY_LEFTCTRL:  ctrl_l = down; break;
@@ -811,7 +814,7 @@ void psdos_key_linux(unsigned code, int down)
     case KEY_RIGHTALT:  alt_r = down; break;
   }
   if (code == KEY_SCROLLLOCK ||
-      (code == KEY_F12 && (ctrl_l || ctrl_r) && (alt_l || alt_r))) {
+      ((code == KEY_F12 || code == KEY_G) && (ctrl_l || ctrl_r) && (alt_l || alt_r))) {
     if (down)
       psdos_set_capture(0);
     return;
