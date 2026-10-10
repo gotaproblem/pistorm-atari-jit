@@ -103,6 +103,7 @@ image picker lists.
 | `psvidel` | boolean | the Falcon's Videl and the SuperVidel on HDMI - Falcon and SV video modes, 112 MB of video RAM at `$A1000000`, the SuperBlitter, the Falcon video XBIOS. Armed by `PSVIDEL.PRG` in AUTO. Needs `ttram` or `addr32` for the video RAM. See `PSVIDEL.md` |
 | `stbox_tos` | ROM image | TOS for STBOX, the sandboxed 68000 ST in a GEM window (APJ-OS): TOS 1.04/2.06 or a 192/256K EmuTOS. The Aranym EmuTOS of the main machine will not boot the box. The whole rest of the line is the path (spaces allowed). Env: `PISTORM_STBOX_TOS` |
 | `stbox_machine` | `st` `ste` | the box's default machine; STBOX.PRG's own `st`/`ste` argument overrides per launch. An STE box wants an STE-aware TOS |
+| `fvdi_scale` | `fit` `integer` `stretch` `fit_sharp` | how an fVDI screen fills HDMI. `fit` (default): as large as the display allows keeping the aspect ratio, centred, smoothed when the ratio is not a whole number so text rows stay even. `integer`: whole multiples only, so most fVDI modes sit 1:1 in a black border (the old behaviour). `stretch`: fill the whole display. `fit_sharp`: as `fit` but never smoothed. Live from PSCTRL. Env: `PISTORM_FVDI_SCALE`; `PISTORM_VGA_SCALE` still overrides everything |
 | `stbox_plane` | number | force a DRM overlay plane for the box's video; 0 or absent is auto. Env: `PISTORM_STBOX_PLANE` |
 
 ## Sound

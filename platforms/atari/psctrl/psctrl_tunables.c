@@ -8,6 +8,7 @@
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 
 #include <stdlib.h>
+#include <strings.h>
 #include <stdio.h>
 
 /* --- storage -------------------------------------------------------- */
@@ -17,6 +18,7 @@ volatile int pst_pissoff_mult    = 1024;
 volatile int pst_fps             = 0;      /* 0 = follow the .cfg          */
 volatile int pst_drm_dirtyband   = 1;
 volatile int pst_drm_async       = 0;
+volatile int pst_fvdi_scale      = PST_FVDI_SCALE_FIT;
 
 volatile int pst_blit_timed_ns   = 0;
 
@@ -137,6 +139,18 @@ void psctrl_tunables_init(void)
 
   pst_drm_dirtyband  = env_bool("PISTORM_DRM_DIRTYBAND",   pst_drm_dirtyband);
   pst_drm_async      = env_bool("PISTORM_DRM_ASYNC",       pst_drm_async);
+  {
+    /* PISTORM_FVDI_SCALE takes the .cfg names or their index */
+    static const char *const names[] = { "fit", "integer", "stretch", "fit_sharp" };
+    const char *e = getenv("PISTORM_FVDI_SCALE");
+    if (e && *e) {
+      int k;
+      for (k = 0; k < 4; k++)
+        if (!strcasecmp(e, names[k])) { pst_fvdi_scale = k; break; }
+      if (k == 4 && e[0] >= '0' && e[0] <= '3' && !e[1])
+        pst_fvdi_scale = e[0] - '0';
+    }
+  }
 
   pst_blit_timed_ns  = env_int ("PISTORM_BLIT_TIMED_NS",   pst_blit_timed_ns, 0, 100000);
 

@@ -37,6 +37,12 @@ static const char *ttram[]   = { "disabled", "32M", "64M", "128M", "256M" };
 static const char *stbox[]   = { "st", "ste" };
 /* audio_frames: the SDL buffer ladder (psctrl_settings.cpp L_frames) */
 static const char *frames[]  = { "512", "1024", "2048", "4096", "8192" };
+/* fvdi_scale: how an fVDI screen fills HDMI (psctrl_settings.cpp L_fvdiscale) */
+static const char *fvdiscale[]  = { "fit", "integer", "stretch", "fit_sharp" };
+static const char *fvdiscale_l[]= { "fit - fill keeping aspect (default)",
+                                    "integer - whole multiples only, centred",
+                                    "stretch - fill, ignore aspect",
+                                    "fit_sharp - fill keeping aspect, no smoothing" };
 /* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
  * log2 ladder, 256 << (n-1), so 3 is the 1024 default (psctrl_settings.cpp) */
 static const char *jitpow[]  = { "0", "1", "2", "3", "4", "5", "6" };
@@ -115,6 +121,7 @@ static const struct table tables[] = {
     TL("blitter", blitter, blitter_l), T("monitor", monitor), T("vga", vga),
     T("jit_cache", cache), T("ttram", ttram), T("stbox_machine", stbox),
     T("audio_frames", frames),
+    TL("fvdi_scale", fvdiscale, fvdiscale_l),
     TL("jit_power", jitpow, jitpow_l),
     TL("stram_size", stram, stram_l),
     TL("falcon_stram", fstram, fstram_l),
@@ -268,6 +275,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "stbox_plane",    SE_TAB_VIDEO,   SE_K_INT,    "0"       },
     { "drm_dirtyband",  SE_TAB_VIDEO,   SE_K_SWITCH, "1"       },
     { "drm_async",      SE_TAB_VIDEO,   SE_K_SWITCH, "1"       },
+    { "fvdi_scale",     SE_TAB_VIDEO,   SE_K_LIST,   "fit"     },
     { "vbl_refract_ns", SE_TAB_VIDEO,   SE_K_INT,    "5000000" },
     /* Sound */
     { "ym2149",         SE_TAB_SOUND,   SE_K_SWITCH, "enabled" },

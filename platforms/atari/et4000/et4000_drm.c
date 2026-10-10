@@ -88,8 +88,41 @@ static int g_last_committed = -1;/* buffer index of the previous successful comm
  *   integer   largest whole multiple that fits, centred  (default)
  *   aspect    fit preserving the source aspect ratio, centred
  *   stretch   fill the display - the old behaviour
+ *
+ * fVDI is the exception. Its modes are chosen to suit the panel (1280x720,
+ * 1600x900 ...), so whole multiples rarely fit and integer scaling left most
+ * of them as a 1:1 island in a black frame. Nearest-neighbour at a fractional
+ * ratio is what made text unreadable - not overscan (config.txt already sets
+ * disable_overscan=1) - so for an fVDI source the default is to FILL the
+ * height or width keeping the aspect ratio, and to switch the plane to the
+ * HVS's smoothing filter whenever the ratio is not a whole number. Every
+ * glyph row then comes out the same height (slightly soft) instead of some
+ * rows doubled and some tripled. Whole-number ratios stay nearest-neighbour.
+ *
+ * The fVDI policy is the PSCTRL / .cfg tunable `fvdi_scale` (pst_fvdi_scale):
+ *   fit        fill keeping aspect, smooth when fractional        (default)
+ *   integer    the old behaviour: whole multiple only, centred
+ *   stretch    fill the display, ignore aspect (smooth when fractional)
+ *   fit_sharp  fill keeping aspect, always nearest-neighbour
+ * PISTORM_VGA_SCALE, when set, still overrides everything as before.
  */
 static int g_dst_x, g_dst_y, g_dst_w, g_dst_h;
+
+/* What the current source is (drmpres_set_source_kind). */
+static int g_src_kind = DRMPRES_SRC_OTHER;
+
+/* Plane SCALING_FILTER: property id and enum values, found once at open.
+ * g_filt_want is what compute_dst asks for, g_filt_cur what the plane has. */
+static uint32_t g_filt_prop;
+static uint64_t g_filt_nearest, g_filt_smooth;
+static int g_filt_have_nearest, g_filt_have_smooth;
+static int g_filt_cur = -1;      /* 0 nearest, 1 smooth, -1 unknown */
+static int g_filt_want = 0;
+
+void drmpres_set_source_kind(int kind)
+{
+    g_src_kind = kind;
+}
 
 static void compute_dst(void)
 {
@@ -98,11 +131,21 @@ static void compute_dst(void)
     int mw = (int)g_mode.hdisplay, mh = (int)g_mode.vdisplay;
     int sw = (int)g_src_w, sh = (int)g_src_h;
     int mode_integer = 1, mode_stretch = 0;
+    int smooth_ok = 0;           /* may use the smooth filter when fractional */
 
     if (e && *e) {
         if (!strcasecmp(e, "stretch"))     { mode_stretch = 1; mode_integer = 0; }
         else if (!strcasecmp(e, "aspect")) { mode_integer = 0; }
+    } else if (g_src_kind == DRMPRES_SRC_FVDI) {
+        switch (pst_fvdi_scale) {          /* live: PSCTRL may change it */
+        case PST_FVDI_SCALE_INTEGER:   break;
+        case PST_FVDI_SCALE_STRETCH:   mode_stretch = 1; mode_integer = 0;
+                                       smooth_ok = 1; break;
+        case PST_FVDI_SCALE_FIT_SHARP: mode_integer = 0; break;
+        default:                       mode_integer = 0; smooth_ok = 1; break;
+        }
     }
+    g_filt_want = 0;
     if (mw <= 0 || mh <= 0 || sw <= 0 || sh <= 0) {
         g_dst_x = g_dst_y = 0; g_dst_w = mw; g_dst_h = mh;
         return;
@@ -137,14 +180,19 @@ static void compute_dst(void)
         g_dst_w = (int)w; g_dst_h = (int)h;
         g_dst_x = (mw - g_dst_w) / 2; g_dst_y = (mh - g_dst_h) / 2;
     }
+    /* smooth only when some axis is a fractional ratio of the source */
+    if (smooth_ok && (g_dst_w % (int)g_src_w || g_dst_h % (int)g_src_h))
+        g_filt_want = 1;
     if (!said || 1) {
         static int lw, lh, lx, ly;
         if (lw != g_dst_w || lh != g_dst_h || lx != g_dst_x || ly != g_dst_y) {
             lw = g_dst_w; lh = g_dst_h; lx = g_dst_x; ly = g_dst_y; said = 1;
-            fprintf(stderr, "[DRM] guest %ux%u -> %dx%d at %d,%d (%s)\n",
+            fprintf(stderr, "[DRM] guest %ux%u -> %dx%d at %d,%d (%s%s%s)\n",
                     g_src_w, g_src_h, g_dst_w, g_dst_h, g_dst_x, g_dst_y,
                     mode_stretch ? "stretch" :
-                    (g_dst_w % sw == 0 && g_dst_h % sh == 0) ? "integer" : "aspect");
+                    (g_dst_w % sw == 0 && g_dst_h % sh == 0) ? "integer" : "aspect",
+                    g_src_kind == DRMPRES_SRC_FVDI ? ", fvdi" : "",
+                    g_filt_want ? ", smooth" : "");
             if (zx > 1 || zy > 1)
                 fprintf(stderr, "[DRM]   pixel aspect %dx%d (double-%s)\n", zx, zy,
                         zy > 1 ? "height lines" : "width pixels");
@@ -269,17 +317,24 @@ static void plane_set_nearest(int fd, uint32_t plane_id)
         if (strcmp(p->name, "SCALING_FILTER") == 0) {
             uint64_t val = 0;
             int found = 0;
-            for (int e = 0; e < p->count_enums; e++)
+            for (int e = 0; e < p->count_enums; e++) {
                 if (strcmp(p->enums[e].name, "Nearest Neighbor") == 0) {
                     val = p->enums[e].value;
                     found = 1;
-                    break;
+                    g_filt_nearest = val;
+                    g_filt_have_nearest = 1;
+                } else if (strcmp(p->enums[e].name, "Default") == 0) {
+                    g_filt_smooth = p->enums[e].value;
+                    g_filt_have_smooth = 1;
                 }
+            }
+            g_filt_prop = p->prop_id;
             if (found &&
                 drmModeObjectSetProperty(fd, plane_id, DRM_MODE_OBJECT_PLANE,
-                                         p->prop_id, val) == 0)
+                                         p->prop_id, val) == 0) {
+                g_filt_cur = 0;
                 PS_INFO("[DRM] plane scaling filter = Nearest Neighbor\n");
-            else
+            } else
                 fprintf(stderr, "[DRM] SCALING_FILTER present but set failed: %s\n",
                         strerror(errno));
             drmModeFreeProperty(p);
@@ -291,6 +346,24 @@ static void plane_set_nearest(int fd, uint32_t plane_id)
     drmModeFreeObjectProperties(pr);
     fprintf(stderr, "[DRM] no SCALING_FILTER property - scaled modes use the "
                     "HVS default (smooth) filter\n");
+}
+
+/* The filter compute_dst() asked for, as a SCALING_FILTER value; returns 0
+ * when nothing needs changing (already set, or the plane lacks the enum). */
+static int filter_change(uint64_t *val)
+{
+    if (!g_filt_prop || g_filt_want == g_filt_cur)
+        return 0;
+    if (g_filt_want ? !g_filt_have_smooth : !g_filt_have_nearest)
+        return 0;
+    *val = g_filt_want ? g_filt_smooth : g_filt_nearest;
+    return 1;
+}
+
+static void filter_note(void)
+{
+    PS_INFO("[DRM] plane scaling filter = %s\n",
+            g_filt_want ? "Default (smooth)" : "Nearest Neighbor");
 }
 
 /* Pick a plane usable on our CRTC that accepts XRGB8888: overlay preferred
@@ -692,6 +765,10 @@ void drmpres_flip(void)
         drmModeAtomicAddProperty(req, g_plane_id, p_src_y,   0);
         drmModeAtomicAddProperty(req, g_plane_id, p_src_w,   (uint64_t)g_src_w << 16);
         drmModeAtomicAddProperty(req, g_plane_id, p_src_h,   (uint64_t)g_src_h << 16);
+        uint64_t fval;
+        int fchg = filter_change(&fval);
+        if (fchg)
+            drmModeAtomicAddProperty(req, g_plane_id, g_filt_prop, fval);
         /* First commit enables the plane on the CRTC: allow-modeset + blocking.
          * All later commits are the fast non-blocking flips with completion events. */
         uint32_t flags = g_first_flip
@@ -700,6 +777,7 @@ void drmpres_flip(void)
         int r = drmModeAtomicCommit(g_fd, req, flags, NULL);
         drmModeAtomicFree(req);
         if (r == 0) {
+            if (fchg) { g_filt_cur = g_filt_want; filter_note(); }
             if (g_first_flip)
                 g_first_flip = 0;   /* blocking commit: no completion event pending */
             else
@@ -729,6 +807,15 @@ void drmpres_flip(void)
     /* legacy blocking present (default): SetPlane latches at vblank. */
     int back = g_back;
     compute_dst();
+    {
+        uint64_t fval;
+        if (filter_change(&fval)) {
+            if (drmModeObjectSetProperty(g_fd, g_plane_id, DRM_MODE_OBJECT_PLANE,
+                                         g_filt_prop, fval) == 0)
+                filter_note();
+            g_filt_cur = g_filt_want;   /* one try per change, no retry storm */
+        }
+    }
     if (drmModeSetPlane(g_fd, g_plane_id, g_crtc_id, g_src[back].fb, 0,
                         g_dst_x, g_dst_y, g_dst_w, g_dst_h,
                         0, 0, g_src_w << 16, g_src_h << 16) < 0) {

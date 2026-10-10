@@ -607,6 +607,8 @@ static const char L_ttram[]    = "off\0" "16M\0" "32M\0" "64M\0" "128M\0" "256M\
 static const char L_cache[]    = "off\0" "2048K\0" "4096K\0" "8192K\0" "16384K\0";
 static const char L_kbd[]      = "disabled\0usb auto\0usb merge\0usb standalone\0";
 static const char L_frames[]   = "512\0" "1024\0" "2048\0" "4096\0" "8192\0";
+/* index == PST_FVDI_SCALE_*; these strings are also the .cfg values */
+static const char L_fvdiscale[] = "fit\0" "integer\0" "stretch\0" "fit_sharp\0";
 static const char L_dmasnd[]   = "off\0verbose\0summary\0";
 static const char L_hostfsd[]  = "follow cfg\0off\0on\0";
 static const char L_card[]     = "none\0ET4000AX\0ATI\0Matrox\0";
@@ -735,6 +737,8 @@ RO_INT("throttled", "Firmware throttle bits", PS_TAB_CPU, PS_U_NONE, ig_thr),
 LIVE_INT("vbl_refract_ns", "VBL refractory", PS_TAB_VIDEO, PS_U_NS,
          0, 20000000, 100000, &pst_vbl_refract_ns, apply_ipl),
 LIVE_BOOL("drm_dirtyband", "DRM dirty band", PS_TAB_VIDEO, &pst_drm_dirtyband, NULL),
+ITEM("fvdi_scale", "fVDI scaling", PS_TAB_VIDEO, PS_K_ENUM, PS_C_LIVE,
+     PS_U_NONE, 0, 3, 1, L_fvdiscale, 4, 0, &pst_fvdi_scale, gen_get, gen_set, NULL),
 ITEM("drm_async", "DRM async page flip", PS_TAB_VIDEO, PS_K_BOOL, PS_C_BOOT,
      PS_U_NONE, 0, 1, 1, L_OFFON, 2, 0, &pst_drm_async, gen_get, gen_set, NULL),
 BOOT_B("native_hdmi", "Native HDMI", PS_TAB_VIDEO, native_hdmi),

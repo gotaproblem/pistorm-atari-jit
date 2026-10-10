@@ -755,6 +755,8 @@ static int sdl_open(ET4000State *s, const char *unused_dev)
  * the streaming texture to match (recreating only on change), and set the
  * renderer's logical size to the display shape disp_w x disp_h so the GPU
  * scales + aspect-letterboxes to the HDMI output. */
+static int g_logical_kind = DRMPRES_SRC_OTHER;   /* one-shot, see below */
+
 static void sdl_set_logical(ET4000State *s, uint32_t w, uint32_t h,
                             uint32_t disp_w, uint32_t disp_h)
 {
@@ -767,6 +769,11 @@ static void sdl_set_logical(ET4000State *s, uint32_t w, uint32_t h,
 
     if (g_drm_mode)
     {
+        /* Scaling policy follows the source: blit_fvdi_linear() sets
+         * g_logical_kind for its own call, every other caller gets OTHER. */
+        drmpres_set_source_kind(g_logical_kind);
+        g_logical_kind = DRMPRES_SRC_OTHER;
+
         /* Phase 2: render into the padded staging buffer (identical layout to
          * the fbdev path, so et4000_engine_render_direct's left-pad/stride
          * assumptions hold). sdl_present copies the visible w x h into the DRM
@@ -3030,6 +3037,9 @@ static bool blit_fvdi_linear(ET4000State *s, bool *updated)
     if (bpp != 8 && bpp != 16 && bpp != 32)
         return false;
 
+    /* fVDI follows the fvdi_scale policy (fill keeping aspect by default);
+     * sdl_set_logical() puts the kind back to OTHER for every other source */
+    g_logical_kind = DRMPRES_SRC_FVDI;
     sdl_set_logical(s, w, h, w, h);
 
     /* 8bpp: a palette write changes every pixel without writing one */

@@ -48,6 +48,14 @@ int drmpres_open(void);
  * a full carry so both buffers converge. */
 int drmpres_set_source(uint32_t w, uint32_t h);
 
+/* What the source is, for the scaling policy (see compute_dst in
+ * et4000_drm.c). fVDI follows the `fvdi_scale` tunable and fills the display
+ * keeping aspect by default; everything else keeps integer scaling. Set it
+ * before each drmpres_set_source(); it is read at every flip. */
+#define DRMPRES_SRC_OTHER 0
+#define DRMPRES_SRC_FVDI  1
+void drmpres_set_source_kind(int kind);
+
 uint8_t *drmpres_backbuffer(void);   /* current render target (native size) */
 uint32_t drmpres_src_pitch(void);    /* bytes per scanline of the source     */
 uint32_t drmpres_src_w(void);
