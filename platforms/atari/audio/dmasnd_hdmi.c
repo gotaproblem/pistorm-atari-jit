@@ -289,10 +289,41 @@ void dmasnd_set_mode(unsigned rate_hz, int stereo)
     SDL_SetAudioStreamFormat(g_ste, &spec, NULL);   /* NULL dst = keep device fmt */
 }
 
+/* The STE stream is unbounded: SDL3 grows it for as long as data is put.
+ * Real-time capture can never legitimately run more than a fraction of a
+ * second ahead of the device (the consumer pre-roll is ~0.5 s), so anything
+ * beyond DMASND_QUEUE_MAX_S seconds is a producer gone wrong - and before
+ * this cap it was an emulator killed by the kernel: DOSBox (SDL 1.2 MiNT
+ * audio) drove the capture at ~32 MB/s into this stream, 1.5 GB in under a
+ * minute, OOM, exit 137 with nothing on the console. Over the cap the new
+ * data is dropped (audible as a gap, not a dead machine) and the first
+ * overflow is reported once, with what the producer was doing. */
+#define DMASND_QUEUE_MAX_S 2u
+
+static atomic_uint g_drops;          /* writes dropped at the cap */
+
 void dmasnd_write_bytes(const void *src, unsigned n)
 {
     if (!g_ste || !src || n == 0)
         return;
+
+    unsigned rate = atomic_load(&cur_rate);
+    int      st   = atomic_load(&cur_stereo);
+    unsigned bps  = (rate ? rate : 50066u) * (st == 0 ? 1u : 2u);  /* S8 */
+    unsigned cap  = bps * DMASND_QUEUE_MAX_S;
+    int      q    = SDL_GetAudioStreamQueued(g_ste);
+
+    if (q > 0 && (unsigned)q + n > cap) {
+        unsigned d = atomic_fetch_add(&g_drops, 1u);
+        if (d == 0 || (d & 0xFFFFu) == 0)
+            fprintf(stderr, "[dmasnd] STE stream overflow: %d bytes queued "
+                    "(cap %u = %us at %u Hz %s), dropping a %u-byte write "
+                    "- the producer is running ahead of real time "
+                    "(drops so far %u)\n",
+                    q, cap, DMASND_QUEUE_MAX_S, rate,
+                    st == 0 ? "mono" : "stereo", n, d + 1u);
+        return;
+    }
     SDL_PutAudioStreamData(g_ste, src, (int)n);
 }
 
@@ -301,7 +332,9 @@ unsigned dmasnd_ring_used(void)
     return g_ste ? (unsigned)SDL_GetAudioStreamQueued(g_ste) : 0;
 }
 
-unsigned dmasnd_xruns(void) { return 0; }
+/* dropped writes at the queue cap (was a constant 0: there was no ring
+ * to overrun, only an unbounded SDL stream) */
+unsigned dmasnd_xruns(void) { return atomic_load(&g_drops); }
 
 void dmasnd_note_frame_len(unsigned bytes) { (void)bytes; }
 
