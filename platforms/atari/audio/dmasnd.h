@@ -46,6 +46,12 @@ const void *dmasnd_mp3_art(long *len);        /* ID3 cover, encoded; NULL if non
 int  dmasnd_mp3_volume(int percent);          /* -1 queries; 0..200                */
 long dmasnd_mp3_filelen(const char *host_path); /* seconds, -2 not yet, -1 unreadable; never blocks */
 
+/* ---- external PCM source: psdos DOS games (dmasnd_hdmi.c) ---- */
+int      dmasnd_ext_open(unsigned rate_hz);           /* int16 stereo; brings the device up */
+void     dmasnd_ext_write(const int16_t *pcm, unsigned frames);   /* drops past 150 ms */
+void     dmasnd_ext_close(void);
+unsigned dmasnd_ext_drops(void);
+
 /* ---- capture (dmasnd_capture.c) ---- */
 int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF8925?      */
 /* MFP snoop/arbitration/IACK/read-shims: mfp_hub.h (channels 13 + 15). */

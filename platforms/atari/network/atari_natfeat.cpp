@@ -12,6 +12,8 @@
 #include "platforms/atari/pdf/pspdf.h"
 #include "platforms/atari/web/psweb_proto.h"
 #include "platforms/atari/web/psweb_client.h"
+#include "platforms/atari/dos/psdos_proto.h"
+#include "platforms/atari/dos/psdos_client.h"
 #include "platforms/atari/psvidel/psvidel.h"
 #include "platforms/atari/falcon/falcon.h"
 #include "platforms/atari/falcon/falcon_tos.h"
@@ -118,6 +120,7 @@ enum nf_feature_index {
   NF_FEATURE_PSWEB,
   NF_FEATURE_FVDICON,
   NF_FEATURE_PSVIDEL,
+  NF_FEATURE_PSDOS,
   NF_FEATURE_COUNT
 };
 
@@ -295,7 +298,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "PSPDF",
   "PSWEB",
   "FVDICON",
-  "PSVIDEL"
+  "PSVIDEL",
+  "PSDOS"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -6261,6 +6265,138 @@ static uae_u32 nf_call_psweb(uae_u32 subid, uaecptr params)
   }
 }
 
+/* PSDOS: DOS games (platforms/atari/dos/psdos_client.c, psdos-design.md).
+ * psdos runs DOSBox Pure on the Pi; every call here pushes a record into a
+ * ring, reads a few words the connector thread keeps current, or copies
+ * one damage band of pixels out of shared memory. Nothing waits. Safe
+ * under the JIT invariant. */
+static uae_u32 nf_call_psdos(uae_u32 subid, uaecptr params)
+{
+  char str[PSDOS_STR_MAX];
+
+  switch (subid) {
+    case PSDOS_VERSION:
+      return PSDOS_API_VERSION;
+
+    case PSDOS_STATUS:
+      return (uae_u32)psdos_status();
+
+    case PSDOS_VIEW_NEW: {
+      int r = psdos_cmd(PSDOS_CMD_VIEW_NEW, (int32_t)nf_get_param(params, 0),
+                        (int32_t)nf_get_param(params, 1),
+                        (int32_t)nf_get_param(params, 2), NULL);
+      return (uae_u32)(r == PSDOS_OK ? 1 : r);
+    }
+
+    case PSDOS_VIEW_FREE:
+      return (uae_u32)psdos_cmd(PSDOS_CMD_VIEW_FREE, 0, 0, 0, NULL);
+
+    case PSDOS_VIEW_SIZE:
+      return (uae_u32)psdos_cmd(PSDOS_CMD_VIEW_SIZE, (int32_t)nf_get_param(params, 0),
+                                (int32_t)nf_get_param(params, 1), 0, NULL);
+
+    case PSDOS_STATE: {
+      int bits = (int)nf_get_param(params, 0);
+      psdos_set_focus((bits & 2) != 0);
+      return (uae_u32)psdos_cmd(PSDOS_CMD_STATE, bits, 0, 0, NULL);
+    }
+
+    case PSDOS_LOAD: {
+      /* a GEMDOS path the Pi can read (HOSTFS) -> host path; none or "" =
+       * the bare DOS prompt. A trailing backslash (a folder) is kept. */
+      uaecptr sp = nf_get_param(params, 0);
+      char host[PSDOS_STR_MAX];
+      str[0] = 0;
+      if (sp)
+        nf_read_string(sp, str, sizeof(str));
+      if (!str[0])
+        return (uae_u32)psdos_cmd(PSDOS_CMD_LOAD, 0, 0, 0, NULL);
+      if (!mp3_gemdos_to_host(str, host, sizeof host)) {
+        printf("[PSDOS] %s is not on a HOSTFS drive - the Pi cannot read it\n", str);
+        return (uae_u32)PSDOS_ERR;
+      }
+      return (uae_u32)psdos_cmd(PSDOS_CMD_LOAD, 0, 0, 0, host);
+    }
+
+    case PSDOS_POLL: {
+      uaecptr out = nf_get_param(params, 0);
+      struct psdos_pollstate st;
+      int rc = psdos_poll(&st);
+      if (out) {
+        nf_write_long(out + 0,  st.frame_serial);
+        nf_write_long(out + 4,  st.flags);
+        nf_write_long(out + 8,  st.fps_x100);
+        nf_write_long(out + 12, st.src_w);
+        nf_write_long(out + 16, st.src_h);
+        nf_write_long(out + 20, st.capture);
+        nf_write_long(out + 24, st.title_serial);
+        nf_write_long(out + 28, st.capture_serial);
+      }
+      return (uae_u32)rc;
+    }
+
+    case PSDOS_FETCH: {
+      uaecptr dest = nf_get_param(params, 0);
+      uae_u32 stride = nf_get_param(params, 1);
+      uae_u32 rows = nf_get_param(params, 2);
+      uaecptr rectp = nf_get_param(params, 3);
+      uae_u8 *p;
+      int32_t rect[4] = { 0, 0, 0, 0 };
+
+      if (!dest || !stride || !rows)
+        return (uae_u32)PSDOS_ERR;
+      if (!nf_host_ram_ptr(dest, stride * rows, &p)) {
+        printf("[PSDOS] fetch buffer at %08x is not host RAM "
+               "(use Mxalloc(size, 1) for TT-RAM)\n", (unsigned)dest);
+        return (uae_u32)PSDOS_ERR;
+      }
+      int n = psdos_fetch(p, stride, rows, rect);
+      if (n > 0 && rectp)
+        for (int i = 0; i < 4; i++)
+          nf_write_long(rectp + (uaecptr)i * 4, (uae_u32)rect[i]);
+      return (uae_u32)n;
+    }
+
+    case PSDOS_KEY:
+      psdos_key_st((uint8_t)nf_get_param(params, 1), (int)nf_get_param(params, 0));
+      return PSDOS_OK;
+
+    case PSDOS_CAPTURE:
+      psdos_set_capture((int)nf_get_param(params, 0));
+      return (uae_u32)((psdos_status() & PSDOS_ST_CAPTURE) ? 1 : 0);
+
+    case PSDOS_GETSTR: {
+      int which = (int)nf_get_param(params, 0);
+      uaecptr buf = nf_get_param(params, 1);
+      int len = (int)nf_get_param(params, 2);
+      if (!buf || len <= 0)
+        return (uae_u32)PSDOS_ERR;
+      if (len > (int)sizeof(str)) len = (int)sizeof(str);
+      int n = psdos_getstr(which, str, len);
+      if (n < 0)
+        return (uae_u32)n;
+      nf_write_string(buf, (uae_u32)len, str);
+      return (uae_u32)n;
+    }
+
+    case PSDOS_RESET:
+      return (uae_u32)psdos_cmd(PSDOS_CMD_RESET, 0, 0, 0, NULL);
+
+    case PSDOS_OPTION: {
+      uaecptr sp = nf_get_param(params, 0);
+      str[0] = 0;
+      if (sp)
+        nf_read_string(sp, str, sizeof(str));
+      if (!str[0])
+        return (uae_u32)PSDOS_ERR;
+      return (uae_u32)psdos_cmd(PSDOS_CMD_OPTION, 0, 0, 0, str);
+    }
+
+    default:
+      return (uae_u32)PSDOS_ERR;
+  }
+}
+
 /* -----------------------------------------------------------------------
  * FVDICON: the TOS text console on the fVDI screen.
  *
@@ -6822,6 +6958,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_fvdicon(subid, params);
     case NF_FEATURE_PSVIDEL:
       return nf_call_psvidel(subid, params);
+    case NF_FEATURE_PSDOS:
+      return nf_call_psdos(subid, params);
   }
 
   return 0;

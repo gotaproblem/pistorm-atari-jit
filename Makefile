@@ -56,6 +56,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/kbd_usb.c \
          platforms/atari/joy_usb.c \
          platforms/atari/web/psweb_client.c \
+         platforms/atari/dos/psdos_client.c \
          platforms/atari/mfp_hub.c \
          platforms/atari/setup/shifter_setup.c \
          platforms/atari/setup/setup_input.c \

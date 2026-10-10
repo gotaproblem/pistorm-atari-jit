@@ -263,9 +263,11 @@ int dmasnd_out_channels(void) { return g_devspec.channels; }
  * dmasnd.h. 0 until dmasnd_init() has opened the device. */
 unsigned dmasnd_device_id(void) { return (unsigned)g_dev; }
 
+void dmasnd_ext_close(void);
 void dmasnd_close(void)
 {
     dmasnd_mp3_stop();
+    dmasnd_ext_close();
     if (g_ste) { SDL_DestroyAudioStream(g_ste); g_ste = NULL; }
     if (g_dev) { SDL_CloseAudioDevice(g_dev); g_dev = 0; }
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
@@ -795,3 +797,69 @@ const char *dmasnd_mp3_meta(int which)
         return "";
     return mp3_meta[which];
 }
+
+/* ---------------------------------------- external PCM: psdos (DOS) ---- *
+ * psdos (platforms/atari/dos/psdos_client.c) produces int16 stereo at the
+ * DOS machine's rate; its connector thread drains it here every 10 ms. One
+ * more stream bound to the same device, mixed by SDL3 with the STE and MP3
+ * streams. The device is brought up on first use when no Atari sound
+ * hardware asked for it at boot (an ST config with no YM line still gets
+ * DOS sound). Capped at DMASND_EXT_MAX_MS queued: past that the write is
+ * dropped - a gap, never growth (the dmasnd-queue-cap lesson). */
+#define DMASND_EXT_MAX_MS 150u
+
+static SDL_AudioStream *g_ext = NULL;
+static unsigned         g_ext_rate;
+static atomic_uint      g_ext_drops;
+
+int dmasnd_ext_open(unsigned rate_hz)
+{
+    if (rate_hz < 4000 || rate_hz > 192000)
+        return -1;
+    if (!g_dev && dmasnd_init(NULL) != 0)
+        return -1;
+    SDL_AudioSpec src;
+    src.format   = SDL_AUDIO_S16LE;
+    src.channels = 2;
+    src.freq     = (int)rate_hz;
+    if (g_ext) {
+        if (rate_hz != g_ext_rate)
+            SDL_SetAudioStreamFormat(g_ext, &src, NULL);
+        g_ext_rate = rate_hz;
+        return 0;
+    }
+    g_ext = SDL_CreateAudioStream(&src, &g_devspec);
+    if (!g_ext || !SDL_BindAudioStream(g_dev, g_ext)) {
+        fprintf(stderr, "[dmasnd] DOS stream bind failed: %s\n", SDL_GetError());
+        if (g_ext) { SDL_DestroyAudioStream(g_ext); g_ext = NULL; }
+        return -1;
+    }
+    g_ext_rate = rate_hz;
+    PS_INFO("[dmasnd] DOS sound stream %u Hz\n", rate_hz);
+    return 0;
+}
+
+void dmasnd_ext_write(const int16_t *pcm, unsigned frames)
+{
+    if (!g_ext || !pcm || !frames)
+        return;
+    unsigned cap = g_ext_rate * 4u * DMASND_EXT_MAX_MS / 1000u;   /* bytes */
+    int q = SDL_GetAudioStreamQueued(g_ext);
+    if (q > 0 && (unsigned)q + frames * 4u > cap) {
+        atomic_fetch_add(&g_ext_drops, 1u);
+        return;
+    }
+    SDL_PutAudioStreamData(g_ext, pcm, (int)(frames * 4u));
+}
+
+void dmasnd_ext_close(void)
+{
+    if (g_ext) {
+        SDL_UnbindAudioStream(g_ext);
+        SDL_DestroyAudioStream(g_ext);
+        g_ext = NULL;
+    }
+    g_ext_rate = 0;
+}
+
+unsigned dmasnd_ext_drops(void) { return atomic_load(&g_ext_drops); }

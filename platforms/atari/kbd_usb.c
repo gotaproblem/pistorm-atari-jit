@@ -1144,6 +1144,7 @@ static void real_byte_consumed(uint8_t rs)
  * box there is no other way to click outside its window. F12 keeps its
  * existing main-machine grab meaning. */
 #include "stbox/stbox.h"
+#include "dos/psdos_client.h"
 static int stbox_route_enabled = 1;
 
 static int stbox_wants_input(void)
@@ -1184,26 +1185,46 @@ static int stbox_raw_pkt_len(uint8_t h)
     }
 }
 
+/* --- PSDOS: the DOS window (platforms/atari/dos/psdos_client.c) ------
+ * A third owner for the real IKBD stream, beside the main machine and
+ * the STBOX sandbox. While the DOS window has captured the input (a click
+ * in it; Undo or Scroll Lock releases, never ESC - DOS games need ESC),
+ * whole packets go to psdos: key make/break, relative mouse, joysticks.
+ * The USB paths below take the same branch. Owner codes for
+ * stbox_raw_to_box: 0 main, 1 STBOX, 2 DOS. */
+static int raw_sink_wanted(void)
+{
+    if (psdos_wants_input())
+        return 2;
+    return stbox_wants_input() ? 1 : 0;
+}
+
+static int raw_divert_possible(void)
+{
+    return stbox_running() || psdos_wants_input() || stbox_raw_left;
+}
+
 /* Will the NEXT real byte be taken (so a status shim may pop it early)? */
 static int stbox_divert_next(void)
 {
-    if (!stbox_running())
+    if (!raw_divert_possible())
         return 0;
-    return stbox_raw_left ? stbox_raw_to_box : stbox_wants_input();
+    return stbox_raw_left ? stbox_raw_to_box : raw_sink_wanted();
 }
 
 /* One byte just popped from the real ACIA. 1 = taken by the sandbox (or
  * swallowed as the ESC toggle), 0 = belongs to the main guest. */
 static int stbox_divert_real_byte(uint8_t v)
 {
-    if (!stbox_running())
+    if (!raw_divert_possible())
     {
         stbox_raw_left = 0;            /* re-sync framing on the next start */
         return 0;
     }
     if (stbox_raw_left == 0)
     {
-        if (v == 0x01 && stbox_get_focus())
+        if (v == 0x01 && stbox_running() && stbox_get_focus() &&
+            !psdos_wants_input())
         {
             stbox_route_enabled = !stbox_route_enabled;
             stbox_note_route(stbox_route_enabled);
@@ -1212,14 +1233,17 @@ static int stbox_divert_real_byte(uint8_t v)
             return 1;
         }
         stbox_raw_left   = stbox_raw_pkt_len(v);
-        stbox_raw_to_box = stbox_wants_input();
+        stbox_raw_to_box = raw_sink_wanted();
     }
     else
         stbox_raw_left--;
 
     if (!stbox_raw_to_box)
         return 0;
-    stbox_ikbd_byte(v);
+    if (stbox_raw_to_box == 2)
+        psdos_ikbd_byte(v);
+    else
+        stbox_ikbd_byte(v);
     return 1;
 }
 
@@ -1227,7 +1251,7 @@ static int stbox_divert_real_byte(uint8_t v)
  * when neither USB injection nor the native mouse threshold is on. */
 int kbd_ikbd_divert_active(void)
 {
-    return stbox_running();
+    return stbox_running() || psdos_wants_input();
 }
 
 static void real_drain(uint8_t rs)
@@ -1767,6 +1791,11 @@ static void send_key(uint8_t scan, int pressed)
         }
         return;
     }
+    if (psdos_wants_input())
+    {
+        psdos_key_st(scan, pressed);
+        return;
+    }
     if (stbox_wants_input())
     {
         stbox_key_event(scan, pressed);
@@ -1795,6 +1824,11 @@ static _Atomic int joy_last_pkt[2] = { -1, -1 };   /* declared above     */
 
 static int joy_send(int st_port, uint8_t state, uint8_t pad_buttons)
 {
+    if (psdos_wants_input())
+    {
+        psdos_joy(st_port, state, pad_buttons);
+        return 1;
+    }
     if (stbox_wants_input())
     {
         stbox_joypad_event(st_port, state, pad_buttons);
@@ -1841,7 +1875,7 @@ static void joy_send_key(uint8_t st_scan, int pressed)
 
 static void joy_send_raw(const uint8_t *bytes, int n)
 {
-    if (!stbox_wants_input())
+    if (!stbox_wants_input() && !psdos_wants_input())
         ring_push_packet(bytes, n);
 }
 
@@ -1852,6 +1886,20 @@ static int joy_standalone(void)
 
 static void mouse_flush(void)
 {
+    if (psdos_wants_input())
+    {
+        /* the DOS window: motion and buttons as they are, then clear the
+         * accumulators so nothing reaches the Atari's pointer */
+        static uint8_t dos_last_buttons;
+        if (in_state.dx || in_state.dy ||
+            in_state.buttons != dos_last_buttons)
+        {
+            psdos_mouse(in_state.dx, in_state.dy, in_state.buttons);
+            dos_last_buttons = (uint8_t)in_state.buttons;
+            in_state.dx = in_state.dy = 0;
+        }
+        return;
+    }
     if (stbox_wants_input())
     {
         /* forward accumulated motion and button changes, then clear the
@@ -2013,6 +2061,15 @@ static void handle_event(const struct input_event *ev, int is_mouse)
     }
     if (ev->code == BTN_MIDDLE)
         return;
+
+    /* DOS window captured: the whole PC keyboard goes to psdos by Linux
+     * key code (F11, F12, PgUp, End, Insert, keypad, right Ctrl/Alt - the
+     * keys the ST table folds away). Scroll Lock releases the capture. */
+    if (psdos_wants_input())
+    {
+        psdos_key_linux(ev->code, pressed);
+        return;
+    }
 
     if (ev->code == KEY_F12)                     /* grab toggle           */
     {
