@@ -501,9 +501,9 @@ static void run_labels(void)
     char buf[SC_LINE_LEN];
     printf("row labels:\n");
 
-    CHECK(!strcmp(sp_row_label("kbd", "usb"), "kbd/mouse (usb/bt)"),
+    CHECK(!strcmp(sp_row_label("kbd", "usb"), "usb/bt kbd/mouse"),
           "kbd reads as \"%s\"", sp_row_label("kbd", "usb"));
-    CHECK(!strcmp(sp_row_label("usb", "gamepad"), "gamepads (usb/bt)"),
+    CHECK(!strcmp(sp_row_label("usb", "gamepad"), "usb/bt gamepad"),
           "usb gamepad reads as \"%s\"", sp_row_label("usb", "gamepad"));
     CHECK(!strcmp(sp_row_label("cpu", "68040"), "cpu"), "cpu was relabelled");
     CHECK(!strcmp(sp_row_label("hostfs", "S /x"), "hostfs"),
