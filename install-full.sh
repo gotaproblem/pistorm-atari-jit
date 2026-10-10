@@ -98,7 +98,8 @@ uninstall() {
   fi
 
   # the other units this script installs
-  for u in psweb.socket psweb.service atariclean.timer atariclean.service \
+  for u in psweb.socket psweb.service psdos.socket psdos.service \
+           atariclean.timer atariclean.service \
            apj-wifi.service apj-sshkeys.service; do
     if [ -e "/etc/systemd/system/$u" ]; then
       say "Removing $u"
@@ -106,7 +107,9 @@ uninstall() {
       sudo rm -f "/etc/systemd/system/$u"
     fi
   done
-  sudo rm -f /usr/local/sbin/apj-wifi /usr/local/bin/psweb /usr/local/bin/atariclean
+  sudo rm -f /usr/local/sbin/apj-wifi /usr/local/bin/psweb /usr/local/bin/atariclean \
+             /usr/local/bin/psdos
+  sudo rm -rf /usr/local/lib/psdos
   sudo systemctl daemon-reload
 
   # Samba share
@@ -160,6 +163,7 @@ Non-interactive env overrides (1/y/yes = yes, anything else = no):
   SERVICE=1   auto-start on boot (pistorm.service)
   CADGUARD=1  mask Ctrl+Alt+Del console reboot (default yes)
   WEB=1       psweb + WPE WebKit browser engine
+  DOS=1       psdos + DOSBox Pure (DOS games in DOSGEM, ~30 min build)
   MACFIX=1    atariclean + nightly timer + Samba Apple settings (default yes)
   SAMBA=1     guest [pistorm] Samba share
   KILLGUI=1   disable a desktop environment if one is found
@@ -333,7 +337,7 @@ chmod +x "$HERE/capmux.sh" 2>/dev/null || true
 # is listed although it is not built yet (atari-tools/setmch, make on the
 # cross toolchain) - the warning below is how that shows.
 GEM_APPS="PSCTRL.ACC PSCTRL.PRG PSMON.ACC PSMON.PRG MP3GEM.PRG VIDGEM.PRG \
-          PDFGEM.PRG WEBGEM.PRG PSCLEAN.PRG \
+          PDFGEM.PRG WEBGEM.PRG DOSGEM.PRG PSCLEAN.PRG \
           FVDIMODE.PRG FVDIMODE.ACC FVDICON.PRG PSVIDEL.PRG SETMCH.PRG"
 GEM_DEST="$ROOT/atari-share/apj-os/natfeats"
 if [ -d "$HERE/configs/gem-binaries" ]; then
@@ -640,6 +644,98 @@ UNIT
 fi
 
 # --------------------------------------------------------------------------
+# 5c2. Optional: DOS games. psdos (psdos/) runs the DOSBox Pure libretro
+#      core - with its ARM64 recompiler - on the Pi and hands frames, sound
+#      and input to the PSDOS NatFeat; DOSGEM.PRG on the Atari is the
+#      window. Socket-activated like psweb: nothing runs until DOSGEM opens,
+#      and psdos exits after ten idle minutes. See psdos-design.md.
+#      The core is built from source (DOSBox Pure 1.0-preview6): ~30 min on
+#      the two Linux cores.
+#      Non-interactive: DOS=1 ./install-full.sh
+# --------------------------------------------------------------------------
+if ask DOS "Install DOS games (psdos + DOSBox Pure, builds for ~30 minutes)?" n; then
+  say "Building psdos"
+  make -C "$HERE/psdos" psdos || die "psdos did not build - see psdos/Makefile"
+  if [ ! -e "$HERE/psdos/dosbox_pure_libretro.so" ]; then
+    say "Building the DOSBox Pure core (about 30 minutes on two cores)"
+    make -C "$HERE/psdos" core JOBS=2 \
+      || die "DOSBox Pure did not build - see psdos/Makefile (make core)"
+  fi
+  sudo install -d /usr/local/lib/psdos
+  sudo install -m 755 "$HERE/psdos/psdos" /usr/local/lib/psdos/psdos
+  sudo install -m 644 "$HERE/psdos/dosbox_pure_libretro.so" /usr/local/lib/psdos/
+  sudo ln -sf /usr/local/lib/psdos/psdos /usr/local/bin/psdos
+
+  # psdos runs as the owner of atari-share: DOS games write their saves
+  # and settings into their own folders on the HOSTFS drive
+  DOS_USER=$(stat -c %U "$ROOT/atari-share" 2>/dev/null || echo "${SUDO_USER:-$USER}")
+  DOS_HOME=$(getent passwd "$DOS_USER" | cut -d: -f6)
+  [ -n "$DOS_HOME" ] || DOS_HOME="/home/$DOS_USER"
+  sudo install -d -o "$DOS_USER" "$DOS_HOME/.psdos"
+  sudo mkdir -p /etc/psdos
+  if [ ! -e /etc/psdos/psdos.conf ]; then
+    sudo tee /etc/psdos/psdos.conf >/dev/null <<'CONF'
+# psdos.conf - DOSBox Pure core options for psdos (psdos-design.md 3.1).
+# One "dosbox_pure_<option> = <value>" per line; these override psdos's
+# defaults (cpu_core dynamic, cycles auto, machine svga, svga_s3,
+# memory_size 16, sblaster sb16, audiorate 48000, aspect_correction true).
+#
+# dosbox_pure_cycles = max
+# dosbox_pure_mouse_speed_factor = 1.5
+# dosbox_pure_memory_size = 32
+CONF
+  fi
+  mkdir -p "$ROOT/atari-share/dosgames"
+
+  say "Installing psdos.socket / psdos.service"
+  sudo tee /etc/systemd/system/psdos.socket >/dev/null <<UNIT
+[Unit]
+Description=PiSTorm DOS service socket
+
+[Socket]
+ListenStream=/run/psdos/psdos.sock
+SocketUser=$DOS_USER
+SocketMode=0666
+RuntimeDirectory=psdos
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=sockets.target
+UNIT
+  sudo tee /etc/systemd/system/psdos.service >/dev/null <<UNIT
+[Unit]
+Description=PiSTorm DOS service (DOSBox Pure)
+Requires=psdos.socket
+After=psdos.socket
+
+[Service]
+Type=simple
+User=$DOS_USER
+ExecStart=/usr/local/bin/psdos
+Environment=PSDOS_HOME=$DOS_HOME/.psdos
+Environment=PSDOS_CONF=/etc/psdos/psdos.conf
+Environment=PSDOS_CPUS=2
+Environment=PSDOS_IDLE_S=600
+CPUAffinity=1
+Nice=5
+OOMScoreAdjust=700
+Restart=on-failure
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl stop psdos.service 2>/dev/null || true
+  sudo systemctl enable $NOW psdos.socket
+  sudo systemctl restart psdos.socket
+  say "psdos.socket is listening; DOSGEM.PRG connects through the emulator when it opens"
+  say "Self-test:  /usr/local/bin/psdos --selftest   (5 s of the DOS prompt, prints the fps)"
+fi
+
+# --------------------------------------------------------------------------
 # 5d. Optional: Samba share (drop games/images onto the Pi from another machine)
 #     Before the Mac fixes below, so a fresh install gets the Apple settings
 #     in the smb.conf it has just created.
@@ -771,6 +867,11 @@ echo "      Running without the service? export PISTORM_STBOX_TOS yourself."
 echo
 if [ -e /etc/systemd/system/psweb.socket ]; then
   echo "  Web browser  : psweb.socket enabled; run WEBGEM.PRG from the HOSTFS drive"
+  echo
+fi
+if [ -e /etc/systemd/system/psdos.socket ]; then
+  echo "  DOS games    : psdos.socket enabled; put games in $ROOT/atari-share/dosgames"
+  echo "                 (a folder or a .ZIP each) and open them with DOSGEM.PRG"
   echo
 fi
 echo "  Media on another PC or NAS? cifs-utils is installed. Mount the share"
