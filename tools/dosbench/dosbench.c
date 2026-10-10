@@ -12,6 +12,8 @@
 // Script words, in order:  wait:S   key:NAME   type:TEXT   shot:FILE.ppm
 //   NAME = enter esc space up down left right f1..f10 or a single character
 //   type:TEXT presses each character (a-z 0-9 space . \ : - /)
+//   pad:PORT,MASK[,LX,LY,RX,RY,L2,R2]  a whole pad (PSDOS_CMD_PAD; MASK =
+//            RETRO_DEVICE_ID_JOYPAD bits) held 0.15 s, then released
 //
 // Prints frames received, damage rows, fps the core reported, audio frames
 // drained, the rate and the peak level.
@@ -59,6 +61,20 @@ static void cmd(uint32_t type, int a, int b, int c, const char *str)
   k.len = str ? (uint32_t)strlen(str) : 0;
   if (write(g_fd, &k, sizeof k) != (ssize_t)sizeof k ||
       (k.len && write(g_fd, str, k.len) != (ssize_t)k.len)) {
+    perror("write");
+    exit(1);
+  }
+}
+
+static void cmd_pad(int port, int mask, const int ax[6])
+{
+  struct psdos_cmd k;
+  memset(&k, 0, sizeof k);
+  k.type = PSDOS_CMD_PAD; k.a = port; k.b = mask;
+  k.c = (int32_t)(((uint32_t)(uint16_t)ax[0] << 16) | (uint16_t)ax[1]);
+  k.d = (int32_t)(((uint32_t)(uint16_t)ax[2] << 16) | (uint16_t)ax[3]);
+  k.e = (int32_t)(((uint32_t)(uint16_t)ax[4] << 16) | (uint16_t)ax[5]);
+  if (write(g_fd, &k, sizeof k) != (ssize_t)sizeof k) {
     perror("write");
     exit(1);
   }
@@ -253,6 +269,14 @@ int main(int argc, char **argv)
     char *a = argv[i];
     if (!strncmp(a, "wait:", 5)) pump(atof(a + 5));
     else if (!strncmp(a, "key:", 4)) press(keycode(a + 4), 0);
+    else if (!strncmp(a, "pad:", 4)) {
+      int v[8] = {0}, zero[6] = {0};
+      sscanf(a + 4, "%d,%i,%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+      cmd_pad(v[0], v[1], v + 2);
+      pump(0.15);
+      cmd_pad(v[0], 0, zero);
+      pump(0.15);
+    }
     else if (!strncmp(a, "type:", 5)) {
       for (char *p = a + 5; *p; p++) {
         char s[2] = { *p, 0 };

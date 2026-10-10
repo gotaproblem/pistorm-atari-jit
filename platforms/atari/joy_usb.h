@@ -77,7 +77,34 @@ typedef struct {
     void (*send_raw)(const uint8_t *bytes, int n);
     /* 1 when no real IKBD is answering, so nobody else will report. */
     int  (*standalone)(void);
+    /* The DOS window (PSDOS) is on top: the pads are its, whole - every
+     * button, both sticks, the triggers - and the Atari gets nothing from
+     * them (a direction held at the switch is released first). */
+    int  (*dos_owns)(void);
+    /* Full pad state for DOS. buttons = JOYB_* bits; ax = left X, left Y,
+     * right X, right Y (-32768..32767), left/right trigger (0..32767).
+     * 0 = not taken (queue full): it is offered again next tick. */
+    int  (*dos_pad)(int pad, unsigned buttons, const int16_t ax[6]);
 } joy_usb_emit_hooks;
+
+/* the pad's buttons as dos_pad reports them (Xbox names) */
+#define JOYB_A       0x00001
+#define JOYB_B       0x00002
+#define JOYB_X       0x00004
+#define JOYB_Y       0x00008
+#define JOYB_LB      0x00010
+#define JOYB_RB      0x00020
+#define JOYB_START   0x00040
+#define JOYB_SELECT  0x00080
+#define JOYB_DUP     0x00100
+#define JOYB_DDOWN   0x00200
+#define JOYB_DLEFT   0x00400
+#define JOYB_DRIGHT  0x00800
+#define JOYB_TRIG    0x01000   /* BTN_TRIGGER: a classic joystick's fire */
+#define JOYB_L3      0x02000
+#define JOYB_R3      0x04000
+#define JOYB_LT      0x08000   /* digital trigger (TL2), or the analogue one past half */
+#define JOYB_RT      0x10000
 void joy_usb_set_hooks(const joy_usb_emit_hooks *h);
 
 /* The IKBD (re)entered joystick event mode ($14): a real IKBD forgets its

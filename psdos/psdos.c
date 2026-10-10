@@ -141,6 +141,8 @@ static struct {
 static uint8_t g_keys[RETROK_LAST];
 static int g_mouse_dx, g_mouse_dy, g_mouse_btn;
 static uint16_t g_joy[2];
+static int16_t g_stick[2][4];           /* lx, ly, rx, ry: -32768..32767 */
+static int16_t g_trig[2][2];            /* l2, r2: 0..32767              */
 
 /* shared memory */
 static int g_shm_fd = -1;
@@ -485,7 +487,6 @@ static void RETRO_CALLCONV input_poll(void) { }
 
 static int16_t RETRO_CALLCONV input_state(unsigned port, unsigned device, unsigned index, unsigned id)
 {
-  (void)index;
   switch (device & RETRO_DEVICE_MASK) {
     case RETRO_DEVICE_KEYBOARD:
       return (port == 0 && id < RETROK_LAST) ? g_keys[id] : 0;
@@ -506,6 +507,20 @@ static int16_t RETRO_CALLCONV input_state(unsigned port, unsigned device, unsign
       if (id == RETRO_DEVICE_ID_JOYPAD_MASK)
         return (int16_t)g_joy[port];
       return id < 16 ? (g_joy[port] >> id) & 1 : 0;
+    case RETRO_DEVICE_ANALOG:
+      if (port > 1)
+        return 0;
+      if (index == RETRO_DEVICE_INDEX_ANALOG_LEFT || index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) {
+        if (id > RETRO_DEVICE_ID_ANALOG_Y)
+          return 0;
+        return g_stick[port][(index == RETRO_DEVICE_INDEX_ANALOG_RIGHT ? 2 : 0) + id];
+      }
+      if (index == RETRO_DEVICE_INDEX_ANALOG_BUTTON) {
+        if (id == RETRO_DEVICE_ID_JOYPAD_L2 && g_trig[port][0]) return g_trig[port][0];
+        if (id == RETRO_DEVICE_ID_JOYPAD_R2 && g_trig[port][1]) return g_trig[port][1];
+        return (id < 16 && ((g_joy[port] >> id) & 1)) ? 32767 : 0;
+      }
+      return 0;
     default:
       return 0;
   }
@@ -569,6 +584,8 @@ static void core_unload_ex(int deinit)
   memset(g_keys, 0, sizeof g_keys);
   g_mouse_dx = g_mouse_dy = g_mouse_btn = 0;
   g_joy[0] = g_joy[1] = 0;
+  memset(g_stick, 0, sizeof g_stick);
+  memset(g_trig, 0, sizeof g_trig);
   g_src_fresh = 0;
   g_title[0] = 0;
 }
@@ -892,6 +909,8 @@ static void keys_up(void)
       key_event(0, k);
   g_mouse_btn = 0;
   g_joy[0] = g_joy[1] = 0;
+  memset(g_stick, 0, sizeof g_stick);
+  memset(g_trig, 0, sizeof g_trig);
 }
 
 static void view_free(void)
@@ -1070,8 +1089,9 @@ static void handle_cmd(const struct psdos_cmd *c, const char *str)
         V.full = 1;
         g_src_fresh = g_src_w != 0;
       }
-      if (!vis)
-        keys_up();
+      if (!vis || !(c->a & 2))
+        keys_up();                      /* nothing held off-screen or
+                                         * behind another window */
       V.visible = vis;
       break;
     }
@@ -1092,6 +1112,18 @@ static void handle_cmd(const struct psdos_cmd *c, const char *str)
     case PSDOS_CMD_JOY:
       if (c->a == 0 || c->a == 1)
         g_joy[c->a] = (uint16_t)c->b;
+      break;
+    case PSDOS_CMD_PAD:
+      if (c->a == 0 || c->a == 1) {
+        int p = c->a;
+        g_joy[p] = (uint16_t)c->b;
+        g_stick[p][0] = (int16_t)((uint32_t)c->c >> 16);
+        g_stick[p][1] = (int16_t)(c->c & 0xffff);
+        g_stick[p][2] = (int16_t)((uint32_t)c->d >> 16);
+        g_stick[p][3] = (int16_t)(c->d & 0xffff);
+        g_trig[p][0]  = (int16_t)((uint32_t)c->e >> 16);
+        g_trig[p][1]  = (int16_t)(c->e & 0xffff);
+      }
       break;
     case PSDOS_CMD_RESET:
       if (g_loaded && !g_core_exit)

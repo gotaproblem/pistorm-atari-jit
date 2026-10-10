@@ -31,6 +31,7 @@
 #include "psdos/libretro.h"
 #include "psdos_proto.h"
 #include "psdos_client.h"
+#include "platforms/atari/joy_usb.h"
 #include "platforms/atari/audio/dmasnd.h"
 
 /* ------------------------------------------------------------ ring ------ */
@@ -470,7 +471,8 @@ static int push_input(uint32_t type, int32_t a, int32_t b, int32_t c)
   return r;
 }
 
-static int push_locked(uint32_t type, int32_t a, int32_t b, int32_t c, const char *str)
+static int push_entry(uint32_t type, int32_t a, int32_t b, int32_t c,
+                      int32_t d, int32_t e, const char *str)
 {
   unsigned head = g_ring_head;
   if (head - g_ring_tail >= RING_N)
@@ -479,6 +481,7 @@ static int push_locked(uint32_t type, int32_t a, int32_t b, int32_t c, const cha
   memset(&en->cmd, 0, sizeof en->cmd);
   en->cmd.type = type;
   en->cmd.a = a; en->cmd.b = b; en->cmd.c = c;
+  en->cmd.d = d; en->cmd.e = e;
   en->cmd.len = 0;
   if (str && *str) {
     snprintf(en->str, sizeof en->str, "%s", str);
@@ -489,6 +492,38 @@ static int push_locked(uint32_t type, int32_t a, int32_t b, int32_t c, const cha
   uint64_t one = 1;
   if (write(g_efd, &one, sizeof one) < 0) { /* the thread polls anyway */ }
   return PSDOS_OK;
+}
+
+static int push_locked(uint32_t type, int32_t a, int32_t b, int32_t c, const char *str)
+{
+  return push_entry(type, a, b, c, 0, 0, str);
+}
+
+static int push_locked_de(uint32_t type, int32_t a, int32_t b, int32_t c,
+                          int32_t d, int32_t e)
+{
+  return push_entry(type, a, b, c, d, e, NULL);
+}
+
+/* pads: while the DOS window is on top, captured or not (a pad cannot
+ * steer the desktop, so it needs no click first) */
+static int pads_wanted(void)
+{
+  return g_connected && g_view_ready && g_focus;
+}
+
+static int push_pad(uint32_t type, int32_t a, int32_t b, int32_t c,
+                    int32_t d, int32_t e)
+{
+  if (!g_connected)
+    return PSDOS_NOTCONN;
+  pthread_mutex_lock(&g_prod);
+  int r = PSDOS_ERR;
+  if (pads_wanted()) {
+    r = push_locked_de(type, a, b, c, d, e);
+  }
+  pthread_mutex_unlock(&g_prod);
+  return r;
 }
 
 int psdos_status(void)
@@ -611,7 +646,7 @@ void psdos_set_capture(int on)
   if (!on && g_connected)
     push_locked(PSDOS_CMD_KEYS_UP, 0, 0, 0, NULL);   /* nothing stays held */
   pthread_mutex_unlock(&g_prod);
-  fprintf(stderr, "[PSDOS] input %s\n", on ? "captured (Undo / Scroll Lock / Ctrl+Alt+F12 releases)" : "released");
+  fprintf(stderr, "[PSDOS] input %s\n", on ? "captured (middle mouse button, Scroll Lock, Ctrl+Alt+F12 or ST Undo releases)" : "released");
 }
 
 int psdos_view_open(void)
@@ -621,9 +656,20 @@ int psdos_view_open(void)
 
 void psdos_set_focus(int focused)
 {
-  g_focus = focused ? 1 : 0;
-  if (!g_focus)
-    psdos_set_capture(0);
+  focused = focused ? 1 : 0;
+  pthread_mutex_lock(&g_prod);
+  int lost = g_focus && !focused;
+  g_focus = focused;
+  if (lost && g_connected && !g_capture)   /* pads held at the switch */
+    push_locked(PSDOS_CMD_KEYS_UP, 0, 0, 0, NULL);
+  pthread_mutex_unlock(&g_prod);
+  if (!focused)
+    psdos_set_capture(0);                 /* KEYS_UP too, if it was on */
+}
+
+int psdos_pads_wanted(void)
+{
+  return pads_wanted();
 }
 
 int psdos_wants_input(void)
@@ -794,7 +840,43 @@ void psdos_joy(int st_port, uint8_t st, uint8_t stpad)
   if (stpad & 0x04) m |= 1 << RETRO_DEVICE_ID_JOYPAD_Y;
   if (stpad & 0x08) m |= 1 << RETRO_DEVICE_ID_JOYPAD_X;
   if (stpad & 0x10) m |= 1 << RETRO_DEVICE_ID_JOYPAD_START;
-  push_input(PSDOS_CMD_JOY, st_port == 1 ? 0 : 1, m, 0);
+  push_pad(PSDOS_CMD_JOY, st_port == 1 ? 0 : 1, m, 0, 0, 0);
+}
+
+/* A whole USB pad (joy_usb.c, JOYB_* bits, Xbox names) as a libretro
+ * RetroPad: positions, not names - Xbox A (bottom) is RetroPad B, B
+ * (right) is A, X (left) is Y, Y (top) is X. 1 = queued. */
+int psdos_pad(int pad, unsigned b, const int16_t ax[6])
+{
+  static const struct { unsigned joyb; int id; } map[] = {
+    { JOYB_A,      RETRO_DEVICE_ID_JOYPAD_B },
+    { JOYB_TRIG,   RETRO_DEVICE_ID_JOYPAD_B },
+    { JOYB_B,      RETRO_DEVICE_ID_JOYPAD_A },
+    { JOYB_X,      RETRO_DEVICE_ID_JOYPAD_Y },
+    { JOYB_Y,      RETRO_DEVICE_ID_JOYPAD_X },
+    { JOYB_LB,     RETRO_DEVICE_ID_JOYPAD_L },
+    { JOYB_RB,     RETRO_DEVICE_ID_JOYPAD_R },
+    { JOYB_LT,     RETRO_DEVICE_ID_JOYPAD_L2 },
+    { JOYB_RT,     RETRO_DEVICE_ID_JOYPAD_R2 },
+    { JOYB_L3,     RETRO_DEVICE_ID_JOYPAD_L3 },
+    { JOYB_R3,     RETRO_DEVICE_ID_JOYPAD_R3 },
+    { JOYB_START,  RETRO_DEVICE_ID_JOYPAD_START },
+    { JOYB_SELECT, RETRO_DEVICE_ID_JOYPAD_SELECT },
+    { JOYB_DUP,    RETRO_DEVICE_ID_JOYPAD_UP },
+    { JOYB_DDOWN,  RETRO_DEVICE_ID_JOYPAD_DOWN },
+    { JOYB_DLEFT,  RETRO_DEVICE_ID_JOYPAD_LEFT },
+    { JOYB_DRIGHT, RETRO_DEVICE_ID_JOYPAD_RIGHT },
+  };
+  int32_t m = 0;
+  for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
+    if (b & map[i].joyb)
+      m |= 1 << map[i].id;
+  if (pad < 0 || pad > 1)
+    return 1;                             /* psdos has two ports: dropped */
+#define PK(hi, lo) ((int32_t)(((uint32_t)(uint16_t)(hi) << 16) | (uint16_t)(lo)))
+  return push_pad(PSDOS_CMD_PAD, pad, m, PK(ax[0], ax[1]), PK(ax[2], ax[3]),
+                  PK(ax[4], ax[5])) == PSDOS_OK;
+#undef PK
 }
 
 /* The real IKBD stream while captured: kbd_usb.c frames the packets and

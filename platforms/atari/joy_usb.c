@@ -45,20 +45,27 @@ bool JOY_USB_enabled = false;
 #define BTN_DPAD_RIGHT 0x223
 #endif
 
-/* pressed evdev buttons, input-thread private */
-#define B_A      0x0001
-#define B_B      0x0002
-#define B_X      0x0004
-#define B_Y      0x0008
-#define B_LB     0x0010
-#define B_RB     0x0020
-#define B_START  0x0040
-#define B_SELECT 0x0080
-#define B_DUP    0x0100
-#define B_DDOWN  0x0200
-#define B_DLEFT  0x0400
-#define B_DRIGHT 0x0800
-#define B_TRIG   0x1000
+/* pressed evdev buttons, input-thread private (= the JOYB_* bits) */
+#define B_A      JOYB_A
+#define B_B      JOYB_B
+#define B_X      JOYB_X
+#define B_Y      JOYB_Y
+#define B_LB     JOYB_LB
+#define B_RB     JOYB_RB
+#define B_START  JOYB_START
+#define B_SELECT JOYB_SELECT
+#define B_DUP    JOYB_DUP
+#define B_DDOWN  JOYB_DDOWN
+#define B_DLEFT  JOYB_DLEFT
+#define B_DRIGHT JOYB_DRIGHT
+#define B_TRIG   JOYB_TRIG
+#define B_L3     JOYB_L3
+#define B_R3     JOYB_R3
+#define B_LT     JOYB_LT
+#define B_RT     JOYB_RT
+
+/* the analogue axes DOS gets: sticks and triggers */
+enum { AX_LX, AX_LY, AX_RX, AX_RY, AX_LT, AX_RT, AX_N };
 
 typedef struct {
     int  fd;                   /* -1 = slot free                        */
@@ -74,6 +81,12 @@ typedef struct {
     /* emission bookkeeping (input thread) */
     int  last_sent;            /* -1 = nothing sent yet                  */
     int  start_sent;
+    /* the whole pad, for DOS (psdos): raw axis values and their ranges */
+    struct { int code, min, max, ok; } an[AX_N];
+    int  raw[AX_N];
+    int  dos;                  /* DOS owned the pad at the last tick     */
+    unsigned dos_btn;          /* what DOS was last sent                 */
+    int16_t  dos_ax[AX_N];
 } joypad;
 
 static joypad pads[JOY_USB_MAX_PADS] = {
@@ -164,6 +177,48 @@ static void axis_setup(int fd, int code, joypad *p, int i)
     p->ax[i].off = (half * 35) / 100;     /* 35 %                      */
 }
 
+/* one analogue axis for DOS: its range if the pad has it */
+static void an_setup(int fd, joypad *p, int ax, int code)
+{
+    struct input_absinfo ai;
+    memset(&ai, 0, sizeof ai);
+    p->an[ax].code = code;
+    p->an[ax].ok = 0;
+    if (code < 0 || ioctl(fd, EVIOCGABS(code), &ai) < 0 || ai.maximum <= ai.minimum)
+        return;
+    p->an[ax].min = ai.minimum;
+    p->an[ax].max = ai.maximum;
+    p->an[ax].ok = 1;
+    p->raw[ax] = ai.value;
+}
+
+/* Which evdev axes are the right stick and the triggers. xpad (wired) and
+ * hid-sony: right stick ABS_RX/RY, triggers ABS_Z/RZ. xpadneo / hid-
+ * microsoft over Bluetooth: triggers ABS_BRAKE/GAS. A generic HID pad
+ * with no RX/RY uses Z/RZ as its right stick and has no analogue
+ * triggers. */
+static void an_map(int fd, joypad *p)
+{
+    unsigned long ab[(ABS_MAX + 8 * sizeof(long)) / (8 * sizeof(long))];
+    memset(ab, 0, sizeof ab);
+    ioctl(fd, EVIOCGBIT(EV_ABS, sizeof ab), ab);
+    const int rxy = has_bit(ab, ABS_RX) && has_bit(ab, ABS_RY);
+    an_setup(fd, p, AX_LX, ABS_X);
+    an_setup(fd, p, AX_LY, ABS_Y);
+    an_setup(fd, p, AX_RX, rxy ? ABS_RX : (has_bit(ab, ABS_Z)  ? ABS_Z  : -1));
+    an_setup(fd, p, AX_RY, rxy ? ABS_RY : (has_bit(ab, ABS_RZ) ? ABS_RZ : -1));
+    if (rxy && has_bit(ab, ABS_BRAKE) && has_bit(ab, ABS_GAS)) {
+        an_setup(fd, p, AX_LT, ABS_BRAKE);
+        an_setup(fd, p, AX_RT, ABS_GAS);
+    } else if (rxy) {
+        an_setup(fd, p, AX_LT, has_bit(ab, ABS_Z)  ? ABS_Z  : -1);
+        an_setup(fd, p, AX_RT, has_bit(ab, ABS_RZ) ? ABS_RZ : -1);
+    } else {
+        an_setup(fd, p, AX_LT, -1);
+        an_setup(fd, p, AX_RT, -1);
+    }
+}
+
 int joy_usb_dev_open(int fd, const char *name)
 {
     for (int i = 0; i < JOY_USB_MAX_PADS; i++)
@@ -177,6 +232,7 @@ int joy_usb_dev_open(int fd, const char *name)
         snprintf(p->name, sizeof p->name, "%s", name ? name : "?");
         axis_setup(fd, ABS_X, p, 0);
         axis_setup(fd, ABS_Y, p, 1);
+        an_map(fd, p);
         atomic_store(&p->joy, 0);
         atomic_store(&p->pad, 0);
         atomic_fetch_add(&n_pads, 1);
@@ -266,6 +322,9 @@ void joy_usb_handle_event(int pad, const struct input_event *ev)
 
     if (ev->type == EV_ABS)
     {
+        for (int a = 0; a < AX_N; a++)       /* every axis DOS reads */
+            if (p->an[a].ok && p->an[a].code == ev->code)
+                p->raw[a] = ev->value;
         switch (ev->code)
         {
             case ABS_X: stick_update(p, 0, ev->value); break;
@@ -298,6 +357,10 @@ void joy_usb_handle_event(int pad, const struct input_event *ev)
             case BTN_DPAD_LEFT:  bit = B_DLEFT;  break;
             case BTN_DPAD_RIGHT: bit = B_DRIGHT; break;
             case BTN_TRIGGER:    bit = B_TRIG;   break;
+            case BTN_THUMBL:     bit = B_L3;     break;
+            case BTN_THUMBR:     bit = B_R3;     break;
+            case BTN_TL2:        bit = B_LT;     break;
+            case BTN_TR2:        bit = B_RT;     break;
             default: return;
         }
         if (ev->value == 2)                 /* autorepeat: not for us */
@@ -313,6 +376,72 @@ void joy_usb_handle_event(int pad, const struct input_event *ev)
 /* ------------------------------------------------------------------ */
 /* emission (input thread tick)                                        */
 /* ------------------------------------------------------------------ */
+
+/* -32768..32767 for a stick, 0..32767 for a trigger */
+static int16_t an_norm(const joypad *p, int a)
+{
+    if (!p->an[a].ok)
+        return 0;
+    long lo = p->an[a].min, hi = p->an[a].max, v = p->raw[a];
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    if (a >= AX_LT)
+        return (int16_t)((v - lo) * 32767L / (hi - lo));
+    long c2 = lo + hi;                      /* twice the centre */
+    long r = ((2 * v - c2) * 32767L) / (hi - lo);
+    if (r > 32767) r = 32767;
+    if (r < -32768) r = -32768;
+    return (int16_t)r;
+}
+
+/*
+ * The DOS window owns the pads while it is on top (no capture needed: a
+ * pad cannot steer the desktop). On the way in, whatever the Atari was
+ * holding is released; on the way out, the Atari is sent the pad as it is
+ * now. Sends only on a change: a button, or a stick moving more than 1%.
+ * Returns 1 when the pad is DOS's (the Atari emission is skipped).
+ */
+static int dos_tick(joypad *p, int i, int dos)
+{
+    if (!dos) {
+        if (p->dos) {
+            p->dos = 0;
+            p->last_sent = -1;             /* the Atari gets it afresh   */
+        }
+        return 0;
+    }
+    if (!p->dos) {
+        const int st_port = (i == 0) ? 1 : 0;
+        if (p->last_sent > 0 && hooks.send_joy)
+            hooks.send_joy(st_port, 0, 0); /* the Atari's: let go of it  */
+        if (p->start_sent && hooks.send_key) {
+            hooks.send_key(0x39, 0);
+            p->start_sent = 0;
+        }
+        p->last_sent = 0;
+        p->dos = 1;
+        p->dos_btn = ~0u;                  /* force the first report    */
+    }
+    if (!hooks.dos_pad)
+        return 1;
+    int16_t ax[AX_N];
+    unsigned btn = p->fd >= 0 ? p->btn : 0;
+    int changed = btn != p->dos_btn;
+    for (int a = 0; a < AX_N; a++) {
+        ax[a] = p->fd >= 0 ? an_norm(p, a) : 0;
+        int d = ax[a] - p->dos_ax[a];
+        if (d > 327 || d < -327 || (ax[a] == 0) != (p->dos_ax[a] == 0))
+            changed = 1;
+    }
+    /* an analogue trigger past half counts as the digital one too */
+    if (ax[AX_LT] > 16384) btn |= B_LT;
+    if (ax[AX_RT] > 16384) btn |= B_RT;
+    if (changed && hooks.dos_pad(i, btn, ax)) {
+        p->dos_btn = p->fd >= 0 ? p->btn : 0;
+        memcpy(p->dos_ax, ax, sizeof ax);
+    }
+    return 1;
+}
 
 void joy_usb_resend(void)
 {
@@ -348,13 +477,17 @@ void joy_usb_tick(void)
         return;                            /* nothing else is reported  */
     }
 
+    const int dos = hooks.dos_owns && hooks.dos_owns();
     for (int i = 0; i < JOY_USB_MAX_PADS; i++)
     {
         joypad *p = &pads[i];
-        if (p->fd < 0 && p->last_sent <= 0)
+        if (p->fd < 0 && p->last_sent <= 0 && !p->dos)
             continue;                      /* free and already released */
         if (p->dirty)
             publish(p);                    /* SYN-less device           */
+
+        if (dos_tick(p, i, dos))
+            continue;                      /* the DOS window has it     */
 
         const int joy = atomic_load_explicit(&p->joy, memory_order_relaxed);
         const int pad = atomic_load_explicit(&p->pad, memory_order_relaxed);

@@ -1261,6 +1261,11 @@ static int stbox_divert_real_byte(uint8_t v)
         }
         stbox_raw_left   = stbox_raw_pkt_len(v);
         stbox_raw_to_box = raw_sink_wanted();
+        /* the real ST joystick ports follow the USB pads: DOS's while
+         * its window is on top, captured or not */
+        if (stbox_raw_to_box == 0 && (v == 0xFE || v == 0xFF) &&
+            psdos_pads_wanted())
+            stbox_raw_to_box = 2;
         if (stbox_raw_left == 0)
         {
             /* a key: its break goes wherever its make went, so a key held
@@ -1886,12 +1891,10 @@ static _Atomic int joy_last_pkt[2] = { -1, -1 };   /* declared above     */
 
 static int joy_send(int st_port, uint8_t state, uint8_t pad_buttons)
 {
-    if (psdos_wants_input())
-    {
-        psdos_joy(st_port, state, pad_buttons);
-        return 1;
-    }
-    if (stbox_wants_input())
+    /* USB pads never come here for DOS: joy_usb hands the whole pad to
+     * psdos_pad() while the DOS window is on top (joy_dos_owns), and what
+     * does come here then is the Atari's release - it goes to the Atari. */
+    if (stbox_wants_input() && !psdos_pads_wanted())
     {
         stbox_joypad_event(st_port, state, pad_buttons);
         return 1;
@@ -1932,7 +1935,20 @@ static void joy_set_rbutton(int down)
 
 static void joy_send_key(uint8_t st_scan, int pressed)
 {
-    send_key(st_scan, pressed);
+    if (psdos_pads_wanted())
+        send_key_main(st_scan, pressed);   /* the Start->Space release */
+    else
+        send_key(st_scan, pressed);
+}
+
+static int joy_dos_owns(void)
+{
+    return psdos_pads_wanted();
+}
+
+static int joy_dos_pad(int pad, unsigned buttons, const int16_t ax[6])
+{
+    return psdos_pad(pad, buttons, ax);
 }
 
 static void joy_send_raw(const uint8_t *bytes, int n)
@@ -2122,11 +2138,19 @@ static void handle_event(const struct input_event *ev, int is_mouse)
         return;
     }
     if (ev->code == BTN_MIDDLE)
+    {
+        /* the DOS window's mouse release: the one key every USB mouse
+         * has, and no Atari or common DOS use for it (End/PgDn are the
+         * ST's Undo here, but DOS games need them, so they go to DOS) */
+        if (pressed && psdos_wants_input())
+            psdos_set_capture(0);
         return;
+    }
 
     /* DOS window captured: the whole PC keyboard goes to psdos by Linux
      * key code (F11, F12, PgUp, End, Insert, keypad, right Ctrl/Alt - the
-     * keys the ST table folds away). Scroll Lock releases the capture. */
+     * keys the ST table folds away). Scroll Lock, Ctrl+Alt+F12 or the middle
+     * mouse button releases the capture. */
     {
         /* a key's release goes where its press went, so nothing is left
          * held down on either side when the capture changes */
@@ -2305,6 +2329,8 @@ int kbd_usb_init(int grab, int devices)
             .send_key        = joy_send_key,
             .send_raw        = joy_send_raw,
             .standalone      = joy_standalone,
+            .dos_owns        = joy_dos_owns,
+            .dos_pad         = joy_dos_pad,
         };
         joy_usb_set_hooks(&h);
     }

@@ -88,6 +88,10 @@ void psdos_key_st(uint8_t scan, int down);        /* real IKBD / ST scancodes */
 void psdos_key_linux(unsigned code, int down);    /* evdev KEY_* */
 void psdos_mouse(int dx, int dy, int st_buttons); /* ST bits: 2 left, 1 right */
 void psdos_joy(int st_port, uint8_t st_state, uint8_t stpad);
+/* pads: the DOS window is on top (focused; no capture needed) */
+int  psdos_pads_wanted(void);
+/* a whole USB pad, JOYB_* bits (joy_usb.h); 1 = queued */
+int  psdos_pad(int pad, unsigned joyb, const int16_t ax[6]);
 void psdos_ikbd_byte(uint8_t v);    /* one raw real-IKBD byte, packets whole */
 
 void psdos_shutdown(void);

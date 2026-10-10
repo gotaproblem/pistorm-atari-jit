@@ -71,6 +71,27 @@ served from the same state. Fixed on the way: the box had joystick events
 OFF at power-on and after reset (a real IKBD has them on), never silenced
 the mouse on `$14`, and answered `$16` with zeros.
 
+## DOS (psdos / DOSGEM)
+
+While the DOSGEM window is on top the pads are DOS's - no click to
+capture needed, a pad cannot steer the desktop. `joy_usb_tick` hands the
+whole pad (`dos_pad` hook: every button incl. L3/R3, both sticks,
+analogue triggers; `JOYB_*` bits) to `psdos_pad()`, which sends it to
+psdos as one `PSDOS_CMD_PAD`; psdos answers the core's
+`RETRO_DEVICE_JOYPAD` and `RETRO_DEVICE_ANALOG` reads from it. Buttons go
+by position as a RetroPad: Xbox A/B/X/Y = RetroPad B/A/Y/X. The Atari is
+sent a release when DOS takes the pad and the pad afresh when it gives it
+back; psdos lets go of everything when the window loses the top. The real
+ST joystick ports ($FE/$FF packets) follow the same rule. Pad 0 / ST port
+1 is DOS port 1, pad 1 / ST port 0 DOS port 2.
+
+DOSBox Pure decides what the pad does: a game in its database gets its
+own mapping, anything else the Generic Keyboard preset (d-pad/left stick
+= arrows, A = Ctrl, B = Alt, X = Shift, Y = Space, Start = Enter,
+Back = Esc). Its start menu (L/R tabs) has the Gamepad Mapper for other
+presets (joystick, Gravis, mouse on a stick) and per-button edits, saved
+with the game.
+
 ## Pi side
 
 Wired: the stock Pi kernel has `xpad` – just plug in (360, One, Series X|S).

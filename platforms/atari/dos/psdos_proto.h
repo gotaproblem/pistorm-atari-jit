@@ -51,7 +51,10 @@ enum psdos_cmd_type {
   PSDOS_CMD_RESET,
   PSDOS_CMD_OPTION,      /* str = "dosbox_pure_x=value"                       */
   PSDOS_CMD_KEYS_UP,     /* release every held key/button (capture dropped)   */
-  PSDOS_CMD_QUIT
+  PSDOS_CMD_QUIT,
+  PSDOS_CMD_PAD          /* a whole pad: a = port 0/1, b = JOYPAD bit mask,
+                          * c = lx<<16 | (ly & 0xffff), d = rx<<16 | (ry & 0xffff),
+                          * e = l2<<16 | r2 (0..32767); sticks -32768..32767 */
 };
 
 struct psdos_cmd {
