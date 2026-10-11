@@ -1035,6 +1035,33 @@ static void hdc_sync_pull(void)
         }
     }
     FDD_DBG("HDC sync pull: %u sectors @ 0x%06X", fdc.hdc_count, fdc.hdc_base);
+
+    /* PISTORM_HDC_TRACE: fingerprint what was pulled, and read the real
+     * window a second time to catch reads that do not repeat. A boot that
+     * works and one that crashes can then be compared transfer by transfer:
+     * same sum = same data reached the guest. */
+    if (hdc_trc == 1 && ht_lines < HT_MAX) {
+        uint32_t sum = 2166136261u, diff = 0, first = 0xFFFFFFFFu;
+        uint8_t  v[512];
+        for (uint32_t off = 0; off < len; off += 512u) {
+            pistorm_dma_from_stram(fdc.hdc_base + off, v, 512u);  /* mirror */
+            for (uint32_t i = 0; i < 512u; i++) {
+                sum = (sum ^ v[i]) * 16777619u;
+                if (ps_read_8(fdc.hdc_base + off + i) != v[i]) {
+                    if (first == 0xFFFFFFFFu)
+                        first = off + i;
+                    diff++;
+                }
+            }
+        }
+        ht_lines++;
+        if (diff)
+            FDD_LOG("HDC pull check: %u B @0x%06X sum %08X  REREAD DIFFERS in "
+                    "%u bytes (first at +%u)", len, fdc.hdc_base, sum, diff, first);
+        else
+            FDD_LOG("HDC pull check: %u B @0x%06X sum %08X  reread ok",
+                    len, fdc.hdc_base, sum);
+    }
 }
 
 static void hdc_sync_push(void)
