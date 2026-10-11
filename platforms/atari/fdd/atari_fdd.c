@@ -950,6 +950,53 @@ static void hdc_wait_dma_done(uint32_t base, uint32_t len)
     }
 }
 
+/* PISTORM_HDC_TRACE: decode the first sector of each pull the way a
+ * driver would - MBR partition table for LBA 0, BPB for anything that looks
+ * like a FAT boot sector - so "is the disk really empty, or did the sector
+ * arrive damaged" can be answered from the log. */
+static uint32_t le16(const uint8_t *p) { return p[0] | (p[1] << 8); }
+static uint32_t le32(const uint8_t *p) { return le16(p) | (le16(p + 2) << 16); }
+
+static void hdc_trace_sector(const uint8_t *b)
+{
+    if (ht_lines >= HT_MAX)
+        return;
+    ht_lines++;
+
+    /* LBA and target from the CDB the trace saw (6-byte, or ICD $1F + 10) */
+    uint32_t lba = 0, tgt = ht.cdb[0] >> 5;
+    if ((ht.cdb[0] & 0x1F) == 0x1F && ht.n >= 7)
+        lba = ((uint32_t)ht.cdb[3] << 24) | ((uint32_t)ht.cdb[4] << 16) |
+              ((uint32_t)ht.cdb[5] << 8) | ht.cdb[6];
+    else if (ht.n >= 4)
+        lba = ((uint32_t)(ht.cdb[1] & 0x1F) << 16) |
+              ((uint32_t)ht.cdb[2] << 8) | ht.cdb[3];
+
+    FDD_LOG("HDC sector t%u LBA %u: %02X %02X %02X %02X %02X %02X %02X %02X "
+            "%02X %02X %02X %02X %02X %02X %02X %02X  sig %02X%02X",
+            tgt, lba, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+            b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+            b[510], b[511]);
+
+    if (lba == 0 && b[510] == 0x55 && b[511] == 0xAA)
+        for (int i = 0; i < 4; i++) {
+            const uint8_t *e = b + 0x1BE + 16 * i;
+            if (e[4])
+                FDD_LOG("HDC   MBR part %d: type %02X boot %02X start %u "
+                        "size %u", i, e[4], e[0], le32(e + 8), le32(e + 12));
+        }
+
+    /* BPB: 512-byte sectors and a sane cluster size = boot sector */
+    uint32_t bps = le16(b + 0x0B), spc = b[0x0D];
+    if (bps && !(bps & 0x1FF) && spc && !(spc & (spc - 1))) {
+        uint32_t tot = le16(b + 0x13) ? le16(b + 0x13) : le32(b + 0x20);
+        FDD_LOG("HDC   BPB: bps %u spc %u res %u fats %u rootents %u "
+                "total %u fatsz %u media %02X  oem '%.8s'",
+                bps, spc, le16(b + 0x0E), b[0x10], le16(b + 0x11),
+                tot, le16(b + 0x16), b[0x15], (const char *)b + 3);
+    }
+}
+
 static void hdc_sync_pull(void)
 {
     fdc.hdc_pending = false;
@@ -962,6 +1009,9 @@ static void hdc_sync_pull(void)
         for (uint32_t i = 0; i < 512u; i++)
             buf[i] = ps_read_8(fdc.hdc_base + off + i);
         pistorm_dma_to_stram(fdc.hdc_base + off, buf, 512u);
+
+        if (hdc_trc == 1 && off == 0)
+            hdc_trace_sector(buf);
 
         /* Show what the guest will actually see, for the first few pulls:
          * enough of the sector to judge an MBR/AHDI root by eye (partition
