@@ -49,6 +49,148 @@ static int acsi_dbg_count;
 
 
 #include "acsi.h"
+#include <time.h>
+
+/* =========================================================================
+ * PISTORM_HDC_TRACE=1 - one line per REAL-ACSI command (passthrough path)
+ *
+ * Question it answers: when the guest reads the ACSI status byte, has the
+ * device actually finished? It logs, per command:
+ *   - the CDB as the guest sent it
+ *   - how long after the last CDB byte the guest read the status byte
+ *   - the first GPIP5-low the guest saw after the last CDB byte, how long
+ *     after it, and WHO pulled it:  R = the real line (the device's /IRQ),
+ *     F = emulated floppy INTRQ, A = emulated ACSI target, I = emulated IDE
+ *   - the first DMA mode write ($8606) after the last CDB byte (a driver
+ *     reprogramming the DMA chip ends any transfer still in progress)
+ *   - how far the DMA address counter actually moved by the status read
+ * Bounded (HT_MAX lines); silent and free when unset.
+ * ========================================================================= */
+static int hdc_trc = -1;
+
+static int hdc_trace_on(void)
+{
+    if (hdc_trc < 0) {
+        const char *e = getenv("PISTORM_HDC_TRACE");
+        hdc_trc = (e && *e && *e != '0') ? 1 : 0;
+        if (hdc_trc)
+            FDD_LOG("HDC trace on (PISTORM_HDC_TRACE)");
+    }
+    return hdc_trc;
+}
+
+static uint64_t ht_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+#define HT_MAX 200
+static unsigned ht_lines;
+static struct {
+    int      live;          /* first CDB byte seen, status not read yet */
+    unsigned n;             /* CDB bytes so far                         */
+    uint8_t  cdb[17];
+    uint64_t t_last;        /* most recent CDB byte                     */
+    uint32_t base;          /* DMA base when the command started        */
+    uint64_t t_low;         /* first GPIP5 low after t_last (0 = none)  */
+    char     src;
+    unsigned polls;         /* GPIP reads since t_last                  */
+    uint64_t t_mode;        /* first $8606 write since t_last (0 = none)*/
+} ht;
+
+static void ht_cdb(const char *tag)
+{
+    char buf[3 * 17 + 1];
+    int  k = 0;
+    for (unsigned i = 0; i < ht.n && i < sizeof ht.cdb; i++)
+        k += snprintf(buf + k, sizeof buf - k, "%02X ", ht.cdb[i]);
+    buf[k ? k - 1 : 0] = 0;
+    FDD_LOG("HDC %s [%s]", tag, buf);
+}
+
+static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
+{
+    if (!hdc_trace_on())
+        return;
+    if (first) {
+        if (ht.live && ht_lines < HT_MAX) {
+            ht_lines++;
+            ht_cdb("ABANDONED - new command before any status read");
+        }
+        ht.live = 1;
+        ht.n    = 0;
+        ht.base = base;
+    }
+    if (!ht.live)
+        return;
+    if (ht.n < sizeof ht.cdb)
+        ht.cdb[ht.n] = v;
+    ht.n++;
+    ht.t_last = ht_now_us();
+    ht.t_low  = 0;
+    ht.t_mode = 0;
+    ht.polls  = 0;
+}
+
+static void hdc_trace_gpip(int low, char src)
+{
+    if (hdc_trc != 1 || !ht.live)
+        return;
+    ht.polls++;
+    if (low && !ht.t_low) {
+        ht.t_low = ht_now_us();
+        ht.src   = src;
+    }
+}
+
+/* called from pistorm_natmem.cpp's GPIP shim when the emulated IDE INTRQ
+ * pulls GPIP5 (that is applied after fdd_gpip, so fdd_gpip cannot see it) */
+void hdc_trace_gpip_ide(void)
+{
+    hdc_trace_gpip(1, 'I');
+}
+
+static void hdc_trace_mode_write(void)
+{
+    if (hdc_trc == 1 && ht.live && !ht.t_mode)
+        ht.t_mode = ht_now_us();
+}
+
+static void hdc_trace_status(uint32_t status)
+{
+    if (hdc_trc != 1 || !ht.live)
+        return;
+    ht.live = 0;
+    if (ht_lines >= HT_MAX)
+        return;
+    ht_lines++;
+
+    uint64_t now  = ht_now_us();
+    uint32_t addr = ((uint32_t)ps_read_8(0xFF8609u) << 16) |
+                    ((uint32_t)ps_read_8(0xFF860Bu) << 8)  |
+                     (uint32_t)ps_read_8(0xFF860Du);
+    char low[48], mode[32];
+
+    if (ht.t_low)
+        snprintf(low, sizeof low, "%c +%lluus/%upolls", ht.src,
+                 (unsigned long long)(ht.t_low - ht.t_last), ht.polls);
+    else
+        snprintf(low, sizeof low, "never (%u polls)", ht.polls);
+    if (ht.t_mode)
+        snprintf(mode, sizeof mode, "+%lluus",
+                 (unsigned long long)(ht.t_mode - ht.t_last));
+    else
+        snprintf(mode, sizeof mode, "none");
+
+    char tag[160];
+    snprintf(tag, sizeof tag,
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B",
+             status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
+             (int)(addr - ht.base));
+    ht_cdb(tag);
+}
 
 /* When the floppy itself is NOT emulated (no "fdd" cfg lines) but
  * emulated ACSI targets are attached, this file still owns the DMA-port
@@ -588,14 +730,19 @@ uint8_t fdd_gpip(uint8_t other_gpip)
      * When our FDC is idle, the real line passes through untouched (the
      * real WD1772 receives no commands from us, so its INTRQ stays quiet;
      * anything else on the line is real and belongs to the guest). */
-    if (acsi_irq_active())
+    if (acsi_irq_active()) {
+        hdc_trace_gpip(1, 'A');
         return other_gpip & ~(1u << 5);   /* emulated ACSI target asserts */
+    }
 
     if (fdc.selected_drive >= 0 &&
         fdc.drives[fdc.selected_drive].disk_inserted &&
-        fdd_irq_active())
+        fdd_irq_active()) {
+        hdc_trace_gpip(1, (other_gpip & (1u << 5)) ? 'F' : 'R');
         return other_gpip & ~(1u << 5);   /* our FDC asserts */
+    }
 
+    hdc_trace_gpip(!(other_gpip & (1u << 5)), 'R');
     return other_gpip;                    /* real line as-is (ACSI visible) */
 }
 
@@ -848,6 +995,7 @@ uint32_t fdd_io_read(uint32_t addr, int size)
                     val = acsi_status_read();  /* emulated status byte */
                 else {
                     val = bus_read(addr, size);   /* ACSI status byte */
+                    hdc_trace_status(val);
                     if (fdc.hdc_pending)
                         hdc_sync_pull();      /* end-of-command handshake:
                                                  bring the mirror up to date */
@@ -896,6 +1044,8 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
             addr == DMA_BASE_HIGH || addr == DMA_BASE_MID ||
             addr == DMA_BASE_LOW) {
             /* shared plumbing: latch locally AND program the real chip */
+            if (addr == DMA_MODE_REG)
+                hdc_trace_mode_write();
             dma_write_addr(addr, val, size);
             bus_write(addr, val, size);
         } else if (addr == FDC_DATA_REG) {
@@ -918,6 +1068,7 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
                     hdc_count_fresh = 0;
                     fdc.hdc_pending = false;
                 } else {
+                    hdc_trace_cmd_byte((uint8_t)val, first, fdc.dma_base_addr);
                     hdc_claim_count();            /* real ACSI device  */
                     bus_write(addr, val, size);
                 }

@@ -3208,6 +3208,7 @@ static inline void hw_blitter_bput(uaecptr a, uae_u32 v)
 }
 
 extern "C" uint8_t IDE_intrq_pending(void);
+extern "C" void    hdc_trace_gpip_ide(void);   /* fdd/atari_fdd.c */
 extern "C" uae_u32 pistorm_guest_pc(void);      /* cpu/newcpu.cpp */
 
 extern "C" int ps_acia_kbd_pending(void);   /* gpio/ps_protocol.c */
@@ -3221,8 +3222,11 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
      * emulated disk was ever seen ("needed to enable fdd" field case). */
     if (FDD_enabled || acsi_enabled())
         v = fdd_gpip(v);
-    if (IDE_intrq_pending())
+    if (IDE_intrq_pending()) {
+        if (v & 0x20)
+            hdc_trace_gpip_ide();  /* PISTORM_HDC_TRACE: IDE pulled it */
         v &= (uae_u8)~0x20;      /* GPIP5 low = disk interrupt (active low) */
+    }
     /* bytes rescued from the keyboard ACIA are still waiting: its IRQ
      * is, as far as the guest can tell, still asserted (GPIP4 low).
      * Before the USB shim, whose quarantine hides the real ACIA. */
