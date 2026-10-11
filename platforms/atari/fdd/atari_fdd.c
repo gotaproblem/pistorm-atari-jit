@@ -889,12 +889,74 @@ static int hdc_window_ok(uint32_t base, uint32_t len)
     return 1;
 }
 
+/* The DMA chip's address counter ($FF8609/0B/0D, real bus). */
+static uint32_t hdc_dma_counter(void)
+{
+    return ((uint32_t)ps_read_8(0xFF8609u) << 16) |
+           ((uint32_t)ps_read_8(0xFF860Bu) << 8)  |
+            (uint32_t)ps_read_8(0xFF860Du);
+}
+
+/* Let the DMA chip finish writing RAM before the mirror is pulled.
+ *
+ * The device raises /IRQ (status phase) the moment its LAST byte has gone
+ * into the DMA chip's FIFO. The chip then still has to win the bus and
+ * flush that 16-byte chunk to RAM - a few microseconds. A 68000 driver
+ * never notices: it reads the status byte and only touches the buffer much
+ * later. We pull the window into the mirror AT the status read, so without
+ * this the last chunk is taken stale - field trace: "DMA moved 496 B" on
+ * every 512-byte read, i.e. the boot sector's $55AA signature missing, and
+ * EmuTOS showing the partition as an empty drive.
+ *
+ * Done = the counter reaches base+len, or stops moving for ~15 us (a
+ * transfer shorter than the window - INQUIRY, READ CAPACITY - never
+ * reaches the end, and its tail under 16 bytes stays in the FIFO for good;
+ * the ST cannot move it either). Bounded at 2 ms. */
+static void hdc_wait_dma_done(uint32_t base, uint32_t len)
+{
+    uint64_t t0    = ht_now_us();
+    uint32_t end   = base + len;
+    uint32_t prev  = hdc_dma_counter();
+    uint32_t first = prev;
+    int      still = 0;
+
+    while (prev != end) {
+        uint64_t t = ht_now_us();
+        while (ht_now_us() - t < 5u)
+            ;                                   /* ~5 us between samples */
+        uint32_t now = hdc_dma_counter();
+        if (now == prev) {
+            if (++still >= 3)
+                break;                          /* quiet ~15 us: done   */
+        } else
+            still = 0;
+        prev = now;
+        if (ht_now_us() - t0 > 2000u) {
+            static int shown;
+            if (shown < 8) {
+                shown++;
+                FDD_LOG("HDC pull: DMA counter still moving after 2 ms "
+                        "(0x%06X -> 0x%06X, want 0x%06X) - pulling anyway",
+                        first, prev, end);
+            }
+            break;
+        }
+    }
+    if (hdc_trc == 1 && ht_lines < HT_MAX) {
+        ht_lines++;
+        FDD_LOG("HDC pull waited %lluus: counter +%d -> +%d of %u",
+                (unsigned long long)(ht_now_us() - t0),
+                (int)(first - base), (int)(prev - base), len);
+    }
+}
+
 static void hdc_sync_pull(void)
 {
     fdc.hdc_pending = false;
     uint32_t len = (uint32_t)fdc.hdc_count * 512u;
     if (!hdc_window_ok(fdc.hdc_base, len))
         return;
+    hdc_wait_dma_done(fdc.hdc_base, len);
     uint8_t buf[512];
     for (uint32_t off = 0; off < len; off += 512u) {
         for (uint32_t i = 0; i < 512u; i++)
