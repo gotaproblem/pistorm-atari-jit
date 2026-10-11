@@ -959,13 +959,18 @@ static uint32_t le32(const uint8_t *p) { return le16(p) | (le16(p + 2) << 16); }
 
 static void hdc_trace_sector(const uint8_t *b)
 {
+    /* sectors only: READ(6) $08 or ICD-wrapped READ(10) $1F $28. INQUIRY,
+     * REQUEST SENSE etc. are pulled too but are not disk sectors. */
+    int icd = (ht.cdb[0] & 0x1F) == 0x1F;
+    if (!((!icd && (ht.cdb[0] & 0x1F) == 0x08) || (icd && ht.cdb[1] == 0x28)))
+        return;
     if (ht_lines >= HT_MAX)
         return;
     ht_lines++;
 
     /* LBA and target from the CDB the trace saw (6-byte, or ICD $1F + 10) */
     uint32_t lba = 0, tgt = ht.cdb[0] >> 5;
-    if ((ht.cdb[0] & 0x1F) == 0x1F && ht.n >= 7)
+    if (icd && ht.n >= 7)
         lba = ((uint32_t)ht.cdb[3] << 24) | ((uint32_t)ht.cdb[4] << 16) |
               ((uint32_t)ht.cdb[5] << 8) | ht.cdb[6];
     else if (ht.n >= 4)
