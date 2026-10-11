@@ -184,11 +184,18 @@ static void hdc_trace_status(uint32_t status)
     else
         snprintf(mode, sizeof mode, "none");
 
-    char tag[160];
+    /* firmware 254 DIAG sticky flags (raw GPIO19 / GPIO18): has BGACK ever
+     * been asserted, and has a grant ever ended on BR alone. Meaningless on
+     * any other firmware. */
+    uint32_t sr = ps_read_status_reg();
+
+    char tag[200];
     snprintf(tag, sizeof tag,
-             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B",
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B"
+             "  fw-diag bgack=%u bronly=%u",
              status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
-             (int)(addr - ht.base));
+             (int)(addr - ht.base),
+             (sr >> 19) & 1u, (sr >> 18) & 1u);
     ht_cdb(tag);
 }
 
