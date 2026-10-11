@@ -47,6 +47,42 @@ static uint32_t rl(uint32_t a)
            ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
 }
 
+/* A real jar: every tag is four printable ASCII bytes (all TOS/MiNT/EmuTOS
+ * cookies are), and the OS's own _CPU or _VDO is present - both are put in
+ * by every TOS that has a jar (1.06 on) and by EmuTOS. TOS 1.04 and older
+ * have NO jar: $5A0 is then just a long in low RAM that games use freely,
+ * and "patching" whatever it points at wrote 16 bytes into running game
+ * code/data - random crashes and resets once a game was running (field
+ * log: "[MCH] cookie jar full (cap 1320684748)" = $4EB80CCC, a JSR, just
+ * before the game jumped to the reset vector). */
+#define C_CPU 0x5F435055u   /* '_CPU' */
+#define C_VDO 0x5F56444Fu   /* '_VDO' */
+
+static int jar_looks_real(uint32_t jar, uint32_t *entries)
+{
+    uint32_t a = jar, i;
+    int os_cookie = 0;
+
+    for (i = 0; i < JAR_MAX_SLOTS; i++, a += 8) {
+        uint32_t tag = rl(a);
+        if (tag == 0)
+            break;
+        for (int b = 0; b < 32; b += 8) {
+            uint32_t c = (tag >> b) & 0xFFu;
+            if (c < 0x20u || c > 0x7Eu)
+                return 0;               /* not a cookie tag */
+        }
+        if (tag == C_CPU || tag == C_VDO)
+            os_cookie = 1;
+    }
+    if (i >= JAR_MAX_SLOTS || i == 0 || !os_cookie)
+        return 0;
+    if (rl(a + 4) > JAR_MAX_SLOTS * 4u || rl(a + 4) <= i)
+        return 0;                       /* capacity must be plausible */
+    *entries = i;
+    return 1;
+}
+
 static void wl(uint32_t a, uint32_t v)
 {
     unsigned char *p = natmem_offset + a;
@@ -79,12 +115,16 @@ void machine_cookie_tick(void)
         (jar & 1u))
         return;                     /* no plausible jar yet */
 
-    /* require a terminator within bounds before considering it settled */
-    a = jar;
-    for (i = 0; i < JAR_MAX_SLOTS && rl(a) != 0; i++)
-        a += 8;
-    if (i >= JAR_MAX_SLOTS)
-        return;                     /* unterminated: still being built */
+    /* require a REAL jar (terminated, cookie-shaped tags, the OS's own
+     * _CPU/_VDO present) before considering it settled - see
+     * jar_looks_real(). No jar (TOS < 1.06): never touch anything. */
+    {
+        uint32_t n;
+        if (!jar_looks_real(jar, &n)) {
+            g_settled = 0;
+            return;
+        }
+    }
     if (g_settled < 2) {            /* two consecutive stable looks */
         g_settled++;
         return;
@@ -121,8 +161,8 @@ void machine_cookie_tick(void)
             }
         } else if (!g_logged) {
             g_logged = 1;
-            fprintf(stderr, "[MCH] cookie jar full (cap %u) - cannot "
-                    "force _MCH\n", cap);
+            fprintf(stderr, "[MCH] cookie jar full (cap %u, %u used) - "
+                    "cannot force _MCH\n", cap, used);
         }
     }
 }
