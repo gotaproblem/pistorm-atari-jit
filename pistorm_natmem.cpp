@@ -1161,6 +1161,8 @@ static inline uae_u32 stram_be32(uaecptr a)
  * exception vectors, the sysvars, the stack, and a scan for the wild
  * value so the corrupted slot names itself. Async-signal safety is
  * knowingly ignored: we are printing on the way to _exit(). */
+extern "C" unsigned pistorm_pc_ring_get(unsigned k);   /* cpu/newcpu.cpp */
+
 extern "C" void pistorm_crash_dump_guest(void)
 {
     if (!natmem_offset)
@@ -1228,6 +1230,30 @@ extern "C" void pistorm_crash_dump_guest(void)
             stram_be32(0x420), natmem_offset[0x424], stram_be32(0x42E),
             (unsigned)((natmem_offset[0x43E] << 8) | natmem_offset[0x43F]),
             stram_be32(0x44E), stram_be32(0x4BA));
+    /* TOS BIOS/XBIOS trap dispatcher state. The dispatcher saves the
+     * caller's registers through savptr ($4A2), a pointer that walks DOWN a
+     * small area as calls nest, and restores them from it on the way out.
+     * A wild savptr - or one walked off the end by deep nesting - is what
+     * fills every register with garbage at once. */
+    {
+        uae_u32 sp_ = stram_be32(0x4A2);
+        fprintf(stderr, "[GUEST] savptr($4A2)=%08X", sp_);
+        if (sp_ >= 46 && sp_ < ST_RAM_SIZE) {
+            fprintf(stderr, " ->");
+            for (uae_u32 j = 0; j < 46; j += 2)
+                fprintf(stderr, " %04X",
+                        (unsigned)((natmem_offset[sp_ + j] << 8) |
+                                   natmem_offset[sp_ + j + 1]));
+        }
+        fprintf(stderr, "\n");
+    }
+    {
+        fprintf(stderr, "[GUEST] last 64 pcs, oldest first:");
+        for (unsigned k = 0; k < 64; k++)
+            fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[GUEST]   ",
+                    pistorm_pc_ring_get(192 + k));
+        fprintf(stderr, "\n");
+    }
     fprintf(stderr, "[STRAM] alias=%d memcfg=$%02X act=%uK+%uK cfg=%uK+%uK\n",
             g_stram_alias, g_stram_memcfg,
             g_stram_act[0] >> 10, g_stram_act[1] >> 10,

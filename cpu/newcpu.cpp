@@ -4730,6 +4730,12 @@ extern "C" void pistorm_reset_state_dump(void)
 	fflush(stderr);
 }
 
+/* k = 0..255, oldest first - for the crash dump in pistorm_natmem.cpp */
+extern "C" unsigned pistorm_pc_ring_get(unsigned k)
+{
+	return pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255];
+}
+
 void pistorm_exc_ring_dump(void)
 {
 	if (!pistorm_exc_ring_i)
