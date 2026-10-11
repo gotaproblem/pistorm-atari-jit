@@ -1924,6 +1924,32 @@ static inline void fc_prog(void) { fc = regs.s ? 0x6 : 0x2; } // 6 = supervisor 
  * (JIT_HAS_BUS_ERROR_RECOVERY), in the interpreter it THROWs — either way it
  * does NOT return here. g_buserr is sticky, so clear it before raising. */
 extern volatile uint8_t g_buserr;
+/* MFP GPIP ($FFFA01) read with a retry on bus error.
+ *
+ * A real ST never bus-errors an MFP read. On the PiStorm one can come back
+ * flagged when the read overlaps the DMA chip taking the bus: firmware
+ * 252/253 report PI_BERR if BGACK appears during our cycle, because the
+ * data that cycle latched is the DMA's, not the MFP's. GPIP is exactly what
+ * an ACSI driver polls in a tight loop WHILE the DMA runs (Putnik's driver:
+ * BTST #5,$FFFFFA01 at $12AE6), so that is where it lands - as two bombs,
+ * intermittently, mid-boot. The cycle is safe to repeat (GPIP has no read
+ * side effects), so repeat it; only a BERR that survives three retries is
+ * passed on to the guest as a real one. */
+static unsigned mfp_gpip_berr_retries;
+
+static inline uae_u8 mfp_gpip_read(uaecptr a)
+{
+    uae_u8 v = ps_read_8(a);
+    for (int i = 0; g_buserr && i < 3; i++) {
+        if (mfp_gpip_berr_retries++ < 8)
+            fprintf(stderr, "[MFP] GPIP read bus error (arbitration overlap?) "
+                    "- retrying, %u so far\n", mfp_gpip_berr_retries);
+        g_buserr = 0;
+        v = ps_read_8(a);
+    }
+    return v;
+}
+
 static inline void pistorm_buserr(uaecptr a, uae_u32 v, bool read, int size)
 {
     if (g_buserr)
@@ -2458,7 +2484,7 @@ static uae_u32 io_wget(uaecptr a)
     {
         if (a == MFP_GPIP)
         {
-            uae_u16 v = fdd_gpip(ps_read_8(a));
+            uae_u16 v = fdd_gpip(mfp_gpip_read(a));
             if (DMA_Sound_enabled)
                 v = dmasnd_gpip_shim((uae_u8)v);
             pistorm_buserr(a, 0, true, sz_word);
@@ -2504,7 +2530,7 @@ static uae_u32 io_bget(uaecptr a)
     {
         if (a == MFP_GPIP)
         {
-            uae_u8 v = fdd_gpip(ps_read_8(a));
+            uae_u8 v = fdd_gpip(mfp_gpip_read(a));
             if (DMA_Sound_enabled)
                 v = dmasnd_gpip_shim(v);
             pistorm_buserr(a, 0, true, sz_byte);
@@ -2803,7 +2829,7 @@ static uae_u32 fdd_wget(uaecptr a)
     a &= 0x00FFFFFF;
    // printf ("fdd_wget 0x%X\n", a);
     if (FDD_enabled && a == MFP_GPIP) { printf ("fdd gpip rd16\n");
-        uint8_t gpip = fdd_gpip (ps_read_8 (a));
+        uint8_t gpip = fdd_gpip (mfp_gpip_read (a));
         return gpip;
     }
     if (FDD_enabled && fdd_owns_address (a)) { printf ("fdd io rd16 0x%X\n", a);
@@ -2820,7 +2846,7 @@ static uae_u32 fdd_bget(uaecptr a)
     a &= 0x00FFFFFF;
    // printf ("fdd_bget 0x%X\n", a);
     if (FDD_enabled && a == MFP_GPIP) { printf ("fdd gpip rd8\n");
-        uint8_t gpip = fdd_gpip (ps_read_8 (a));
+        uint8_t gpip = fdd_gpip (mfp_gpip_read (a));
         pistorm_buserr (a, 0, true, sz_byte);
         return gpip;
     }
@@ -3424,7 +3450,7 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
 {
     if (a == MFP_GPIP)
     {
-        uae_u16 v = mfp_gpip_shim(ps_read_8(a));
+        uae_u16 v = mfp_gpip_shim(mfp_gpip_read(a));
         pistorm_buserr(a, 0, true, sz_word);
         return v;
     }
@@ -3449,7 +3475,7 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
 {
     if (a == MFP_GPIP)
     {
-        uae_u8 v = mfp_gpip_shim(ps_read_8(a));
+        uae_u8 v = mfp_gpip_shim(mfp_gpip_read(a));
         pistorm_buserr(a, 0, true, sz_byte);
         return v;
     }
