@@ -64,7 +64,8 @@ static int acsi_dbg_count;
  *   - the first DMA mode write ($8606) after the last CDB byte (a driver
  *     reprogramming the DMA chip ends any transfer still in progress)
  *   - how far the DMA address counter actually moved by the status read
- * Bounded (HT_MAX lines); silent and free when unset.
+ * PISTORM_HDC_TRACE=2 limits it to write commands; also logs real-FDC
+ * pulls. Unbounded; silent and free when unset.
  * ========================================================================= */
 static int hdc_trc = -1;
 
@@ -193,18 +194,11 @@ static void hdc_trace_status(uint32_t status)
     else
         snprintf(mode, sizeof mode, "none");
 
-    /* firmware 254 DIAG sticky flags (raw GPIO19 / GPIO18): has BGACK ever
-     * been asserted, and has a grant ever ended on BR alone. Meaningless on
-     * any other firmware. */
-    uint32_t sr = ps_read_status_reg();
-
     char tag[200];
     snprintf(tag, sizeof tag,
-             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B"
-             "  fw-diag bgack=%u bronly=%u",
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B",
              status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
-             (int)(addr - ht.base),
-             (sr >> 19) & 1u, (sr >> 18) & 1u);
+             (int)(addr - ht.base));
     ht_cdb(tag);
 }
 
@@ -1052,22 +1046,6 @@ static void hdc_sync_pull(void)
 
         if (HT_ON() && off == 0)
             hdc_trace_sector(buf);
-
-        /* Show what the guest will actually see, for the first few pulls:
-         * enough of the sector to judge an MBR/AHDI root by eye (partition
-         * bytes, and the $55AA MBR signature at the end). Self-limiting. */
-        static unsigned pulls;
-        if (pulls < 6 && off == 0) {
-            pulls++;
-            FDD_LOG("HDC pull #%u: %u sector(s) -> 0x%06X | "
-                    "%02X %02X %02X %02X %02X %02X %02X %02X ... "
-                    "%02X %02X %02X %02X @1B0 ... sig %02X%02X",
-                    pulls, fdc.hdc_count, fdc.hdc_base,
-                    buf[0], buf[1], buf[2], buf[3],
-                    buf[4], buf[5], buf[6], buf[7],
-                    buf[0x1B0], buf[0x1B1], buf[0x1B2], buf[0x1B3],
-                    buf[0x1FE], buf[0x1FF]);
-        }
     }
     FDD_DBG("HDC sync pull: %u sectors @ 0x%06X", fdc.hdc_count, fdc.hdc_base);
 
@@ -1383,9 +1361,16 @@ uint32_t fdd_io_read(uint32_t addr, int size)
                 else {
                     val = bus_read(addr, size);   /* ACSI status byte */
                     hdc_trace_status(val);
-                    if (fdc.hdc_pending)
-                        hdc_sync_pull();      /* end-of-command handshake:
-                                                 bring the mirror up to date */
+                    if (fdc.hdc_pending) {
+                        /* end-of-command handshake: bring the mirror up
+                         * to date - unless the device reports CHECK
+                         * CONDITION / BUSY (status bits 1-4): no valid
+                         * data then, and the driver will not use it */
+                        if (val & 0x1Eu)
+                            fdc.hdc_pending = false;
+                        else
+                            hdc_sync_pull();
+                    }
                 }
             } else if (FDD_enabled)
                 val = fdc_read_addr(addr, size);

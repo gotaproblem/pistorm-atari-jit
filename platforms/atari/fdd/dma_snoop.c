@@ -27,12 +27,11 @@ extern uint8_t  ps_read_8 (uint32_t addr);
 extern uint16_t ps_read_16(uint32_t addr);
 extern uint32_t ps_read_status_reg(void);
 
-/* CPLD status word, bit 11: sticky "M68K_BR_n has been asserted since
- * reset". Added to the firmware 2026-08-16 because it is the one thing the
- * Pi could not otherwise observe - whether the DMA controller is even
- * ASKING for the bus. Reads 0 on older firmware, which is indistinguishable
- * from "never requested", so check the firmware revision if it says no. */
-#define STATUS_BR_SEEN  0x0800u
+/* CPLD status word bit 11, as returned by ps_read_status_reg() (the raw
+ * GPLEV0 read: the 16-bit word sits on GPIO8-23, so word bit 11 is GPIO19).
+ * Firmware 253: 1 = bus arbitration active (~bus_mine) at the moment of
+ * the read. Older firmware used the bit differently or not at all. */
+#define STATUS_ARB_ACTIVE  (1u << 19)
 extern void     ps_write_8(uint32_t addr, uint16_t value);
 extern void     pistorm_dma_to_stram  (uint32_t addr, const uint8_t *src, uint32_t n);
 extern void     pistorm_dma_from_stram(uint32_t addr, uint8_t *dst, uint32_t n);
@@ -336,13 +335,13 @@ void dma_snoop_read(uint32_t addr, uint32_t val, int size)
             uint32_t after  = read_dma_base();
             uint32_t expect = win_base + win_count * 512u;
             uint32_t sr = ps_read_status_reg();
-            SNOOP_LOG("done: address 0x%06X -> 0x%06X (expected 0x%06X)  %s  [BR seen: %s]",
+            SNOOP_LOG("done: address 0x%06X -> 0x%06X (expected 0x%06X)  %s  [arbitration active: %s]",
                       win_base, after, expect,
                       (after == win_base)
                         ? "<< DID NOT MOVE - no DMA took place"
                         : (after == expect ? "<< advanced correctly"
                                            : "<< advanced, but not by the expected amount"),
-                      (sr & STATUS_BR_SEEN) ? "YES" : "no");
+                      (sr & STATUS_ARB_ACTIVE) ? "YES" : "no");
         }
 
         if (!win_is_write)
