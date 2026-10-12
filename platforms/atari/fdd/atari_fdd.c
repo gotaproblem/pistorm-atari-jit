@@ -1073,18 +1073,37 @@ static void hdc_sync_pull(void)
     }
 }
 
-static void hdc_sync_push(void)
+/* Copy [base, base+count*512) from the emulator's RAM image to real ST RAM.
+ * Byte writes, as before - same bus path the push always used. */
+static void hdc_push_window(uint32_t base, uint32_t count)
 {
-    uint32_t len = (uint32_t)fdc.hdc_count * 512u;
-    if (!hdc_window_ok(fdc.hdc_base, len))
+    uint32_t len = count * 512u;
+    if (!hdc_window_ok(base, len))
         return;
     uint8_t buf[512];
     for (uint32_t off = 0; off < len; off += 512u) {
-        pistorm_dma_from_stram(fdc.hdc_base + off, buf, 512u);
+        pistorm_dma_from_stram(base + off, buf, 512u);
         for (uint32_t i = 0; i < 512u; i++)
-            ps_write_8(fdc.hdc_base + off + i, buf[i]);
+            ps_write_8(base + off + i, buf[i]);
     }
-    FDD_DBG("HDC sync push: %u sectors @ 0x%06X", fdc.hdc_count, fdc.hdc_base);
+    FDD_DBG("HDC sync push: %u sectors @ 0x%06X", count, base);
+}
+
+/* The window pushed early, at the sector-count write (see
+ * hdc_note_sector_count) - the push at the first command byte skips it. */
+static uint32_t hdc_prepush_base, hdc_prepush_count;
+static int      hdc_prepushed;
+
+static void hdc_sync_push(void)
+{
+    if (hdc_prepushed && hdc_prepush_base == fdc.hdc_base &&
+        hdc_prepush_count >= fdc.hdc_count) {
+        hdc_prepushed = 0;
+        return;                 /* already on the real bus, before the DMA
+                                   chip could fetch any of it */
+    }
+    hdc_prepushed = 0;
+    hdc_push_window(fdc.hdc_base, fdc.hdc_count);
 }
 
 /* Sector-count write seen ($8604, SCREG set - mode bits cannot say whether
@@ -1100,6 +1119,24 @@ static void hdc_note_sector_count(uint32_t val)
     }
     fdc.hdc_count   = n;
     hdc_count_fresh = 1;
+
+    /* WRITE direction: push the buffer to real RAM NOW, before the count
+     * reaches the real DMA chip. In write direction the chip starts filling
+     * its 32-byte FIFO from real RAM the moment it has a count - before the
+     * first command byte, which is where the push used to happen. With
+     * stram_cache on (CPU writes stay in the emulator's image) the first 32
+     * bytes of a sector then went to disk stale: field trace showed GEMDOS
+     * FAT/dir buffers differing at +0, i.e. corrupted FAT and directory
+     * sectors. We cannot tell yet whether this count is for the HDC or the
+     * floppy; pushing for a floppy write is harmless (the emulated FDC
+     * reads the image anyway). */
+    hdc_prepushed = 0;
+    if ((fdc.dma_mode & DMA_MODE_RW) && n) {
+        hdc_push_window(fdc.dma_base_addr, n);
+        hdc_prepush_base  = fdc.dma_base_addr;
+        hdc_prepush_count = n;
+        hdc_prepushed     = 1;
+    }
 }
 
 /* First ACSI command byte after a count write: the count was for the HDC.
