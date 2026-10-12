@@ -4857,7 +4857,10 @@ static void pistorm_bad_opcode_dump(int nr)
 
 void REGPARAM2 Exception(int nr)
 {
-	if (nr == 4 || nr == 11)
+	/* illegal instruction only: Line F (vector 11) is routine - TOS 1.x
+	 * makes its internal calls through it, and Spectre/FPU emulators
+	 * trap through it constantly - so dumping it buried the console */
+	if (nr == 4)
 		pistorm_bad_opcode_dump(nr);
 #if CPU_EXCEPTION_TRACE
 	extern volatile uint8_t g_buserr;
