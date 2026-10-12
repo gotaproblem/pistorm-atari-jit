@@ -20,7 +20,15 @@ clean **`--uninstall`** that reverses every system change.
   compositor holds the display/DRM master (so `native_hdmi`/KMSDRM can't get the
   console) and steals the isolated CPU cores. Use **Lite**, or let the installer
   switch you to console boot.
-- **PiSTorm board fitted to a real Atari ST/STe.**
+- **PiSTorm board fitted to a real Atari ST/STe, with CPLD firmware 0.83a
+  (rev $253) or later.** Older firmware is obsolete: the Pi<->CPLD protocol
+  changed and the emulator refuses to start on it. Flash the bitstream from
+  `rtl/`, then power-cycle the ST:
+
+  ```
+  cd ~/pistorm-atari-jit
+  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf
+  ```
 - Run as your **normal user** (the script calls `sudo` itself; do **not** run it
   as root).
 - For the HDMI screen-mirror, a monitor on the **Pi's** HDMI, must be connected at boot.
