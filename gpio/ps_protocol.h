@@ -54,7 +54,7 @@ void ps_bus_unlock (void);
 #define PIN_WR (1 << 6)
 #define PI_TXN_IN_PROGRESS 1
 #else
-#define PIN_RD (1 << 4)
+//#define PIN_RD (1 << 4) // Sep 2026 new firmware does not use CMD_RD so frees up GPIO4 for other uses
 #define PIN_WR (1 << 1)
 #define PI_TXN_IN_PROGRESS 1
 #endif

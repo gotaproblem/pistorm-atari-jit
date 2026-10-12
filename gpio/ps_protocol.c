@@ -98,7 +98,8 @@ static inline void ps_unlock_bus(void)
 
 static inline void ps_wait_idle(void)
 {
-  while (*ioread & PI_TXN_IN_PROGRESS)
+  while ( __builtin_expect ((*ioread & PI_TXN_IN_PROGRESS), 1 ))
+  //while (*ioread & PI_TXN_IN_PROGRESS)
     asm volatile ("yield" ::: "memory");
 }
 
@@ -334,12 +335,6 @@ typedef struct {
 } ps_io_t;
 
 
-#define txn_go() { \
-  *ioset = PIN_WR; *ioset = PIN_WR; \
-  *ioclr = PIN_WR; *ioclr = PIN_WR; \
-  *ioclr = TXN_END; \
-}
-
 /* The hot paths cache the GPIO register pointers in const locals: the
  * spin loops' "memory"-clobbering yield (and any barrier) otherwise
  * forces the three GLOBAL pointers to be reloaded around every access.
@@ -367,6 +362,52 @@ void ps_write ( ps_io_t *ps_io );
  * dmb sy (after raising ps_bus_active), so the cores need no barrier of
  * their own - the second back-to-back dmb the old bodies carried was
  * pure overhead. */
+
+/* A bus cycle that never completes (TXN stuck high).
+ *
+ * Seen on the H5 board with firmware 253: a read of the keyboard ACIA
+ * ($FFFC00 - a VPA/E-clock cycle) occasionally never finishes, the arbiter
+ * idle (status bit 11 = 0). STATUS_BIT_INIT clears it (proved by a restart
+ * recovering), so do that here instead of hanging forever: after ~50 ms -
+ * far longer than any legitimate cycle, DMA tenures included - pulse INIT.
+ * TXN is still set and the address/opcode are still latched, so the CPLD
+ * simply re-runs the same cycle. Called with the bus lock held, in the
+ * middle of a transaction's poll, so it talks to the CPLD directly.
+ *
+ * The counter is one add+compare per GPLEV read (~74 ns each): free.
+ * 675000 x ~74 ns = ~50 ms. */
+#define PS_TXN_STUCK_SPINS 675000u
+
+static unsigned ps_txn_unsticks;
+
+static void __attribute__((noinline, cold))
+ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const rd  = ioread;
+
+  if (ps_txn_unsticks++ < 16)
+    fprintf (stderr, "[PS] %s cycle STUCK ~50 ms: addr $%06X fc %u type %u "
+             "data $%04X - GPLEV 0x%08X - INIT to restart it (%u so far)\n",
+             what, (unsigned)(io->addr & 0xFFFFFF), (unsigned)io->fc,
+             (unsigned)io->io_type, (unsigned)io->data, (unsigned)lev,
+             ps_txn_unsticks);
+
+  *clr = TXN_END;                       /* drop REG_DATA + WR of the poll */
+
+  *set = (STATUS_BIT_INIT << 8) | REG_STATUS;
+  txn_pulse (set, clr);
+  for (int i = 0; i < 1000; i++)        /* ~74 us of INIT: >> one c8m edge */
+    (void)*rd;
+  *set = (0 << 8) | REG_STATUS;
+  txn_pulse (set, clr);
+
+  if (is_read) {                        /* back into the read poll state */
+    *set = REG_DATA;
+    *set = PIN_WR;
+  }
+}
 
 __attribute__((always_inline))  static inline uint32_t ps_write_txn ( ps_io_t *ps_io )
 {
@@ -400,9 +441,16 @@ __attribute__((always_inline))  static inline uint32_t ps_write_txn ( ps_io_t *p
   /* the GPLEV sample that shows the transaction complete already
    * carries the final status bits - the old separate status read was
    * one uncached GPIO read per transfer, thrown away */
-  do {
-    status = *lev;
-  } while (status & PI_TXN_IN_PROGRESS);
+  {
+    uint32_t spins = 0;
+    do {
+      status = *lev;
+      if (__builtin_expect (++spins == PS_TXN_STUCK_SPINS, 0)) {
+        ps_txn_unstick ("write", ps_io, status, 0);
+        spins = 0;
+      }
+    } while (status & PI_TXN_IN_PROGRESS);
+  }
 
   ps_io->berr = CHECK_BERR (status);
   return status;
@@ -451,7 +499,7 @@ inline void ps_write_16 (uint32_t addr, uint16_t data)
 
 inline void ps_write_32 (uint32_t addr, uint32_t data) 
 {
-  ps_io_t txn;//hi, lo;
+  ps_io_t txn;
 
   txn.data = (uint16_t)(data >> 16);
   txn.addr = addr;
@@ -463,18 +511,12 @@ inline void ps_write_32 (uint32_t addr, uint32_t data)
 
   txn.data = (uint16_t)data;
   txn.addr = addr + 2;
-  //txn.fc = fc;
-  //txn.io_type = WRITE_WORD;
 
   /* one lock + one barrier pair for the whole longword */
   
   ps_write_txn (&txn);
   ps_unlock_bus ();
 
-  //if (hi.berr) {
-  //  g_buserr = 1;
-  //  g_buserr_addr = addr;
-  //}
   if (txn.berr) {
     g_buserr = 1;
     g_buserr_addr = addr + 2;
@@ -497,11 +539,18 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
   txn_pulse (set, clr);
 
   *set = REG_DATA;
-  *set = PIN_RD;
+  *set = PIN_WR;//PIN_RD;
 
-  do {
-    status = *lev;
-  } while (status & PI_TXN_IN_PROGRESS);
+  {
+    uint32_t spins = 0;
+    do {
+      status = *lev;
+      if (__builtin_expect (++spins == PS_TXN_STUCK_SPINS, 0)) {
+        ps_txn_unstick ("read", ps_io, status, 1);
+        spins = 0;
+      }
+    } while (status & PI_TXN_IN_PROGRESS);
+  }
 
   /* RE-SAMPLE AFTER THE HANDSHAKE - the zero-margin contract was a fault.
    *
@@ -936,7 +985,7 @@ int ps_acia_kbd_rescue (void)
 
 inline uint32_t ps_read_32 (uint32_t addr) 
 {
-  ps_io_t txn;//hi, lo;
+  ps_io_t txn;
   uint16_t hi_data;
 
   txn.data = 0;
@@ -948,21 +997,12 @@ inline uint32_t ps_read_32 (uint32_t addr)
   ps_read_txn (&txn);
 
   hi_data = txn.data;
-  //txn.data = 0;
   txn.addr = addr + 2;
-  //txn.fc = fc;
-  //txn.io_type = READ_WORD;
 
   /* one lock + one barrier pair for the whole longword */
-  //ps_lock_bus ();
- // ps_read_txn (&txn);
   ps_read_txn (&txn);
   ps_unlock_bus ();
 
-  //if (hi.berr) {
- //  g_buserr = 1;
-  //  g_buserr_addr = addr;
-  //}
   if (txn.berr) {
     g_buserr = 1;
     g_buserr_addr = addr + 2;
@@ -973,22 +1013,51 @@ inline uint32_t ps_read_32 (uint32_t addr)
 
 
 
+/* Bounded idle wait for the status-register paths ONLY.
+ *
+ * A status write is how the Pi resets the CPLD (STATUS_BIT_INIT / RESET),
+ * and the CPLD latches REG_STATUS on CMDWR whatever its cycle engine is
+ * doing - it does not need TXN low. Waiting for TXN without a limit meant a
+ * CPLD left with TXN stuck high (a cycle that never completed) could not be
+ * reset by anything short of a power cycle: the emulator hung at the first
+ * status read after the clock lines, and `ataritest --reset` hung too.
+ * ~150 ms of polling, then carry on. Reports the raw GPLEV once per stuck
+ * episode: bit 0 TXN, bits 8+ the data pins. */
+static int ps_wait_idle_bounded (const char *who)
+{
+  static int stuck_reported;
+  for (uint32_t n = 0; n < 2000000u; n++) {
+    if (!(*ioread & PI_TXN_IN_PROGRESS)) {
+      stuck_reported = 0;
+      return 0;
+    }
+    asm volatile ("yield" ::: "memory");
+  }
+  if (!stuck_reported) {
+    stuck_reported = 1;
+    fprintf (stderr, "[PS] %s: TXN stuck high (GPLEV 0x%08X) - CPLD cycle "
+             "never completed; going ahead anyway\n", who, (unsigned)*ioread);
+  }
+  return -1;
+}
+
 void ps_write_status_reg ( uint16_t value ) 
 {
-  static int timeout;
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  //static int timeout;
   
-  timeout = 1000000;
+  //timeout = 1000000;
   ps_lock_bus();
 
-  /* make sure no IO in progress */
-  while ( __builtin_expect ((*ioread & PI_TXN_IN_PROGRESS) && timeout--, 1 ))
-    asm volatile ("yield" ::: "memory");
+  /* make sure no IO in progress - but never forever, see above */
+  ps_wait_idle_bounded ("ps_write_status_reg");
   
-  *ioset = (value << 8) | REG_STATUS;
-  txn_go ();
+  *set = (value << 8) | REG_STATUS;
+  txn_pulse (set, clr);
 
-  if ( timeout <= 0 )
-    printf ( "ps_write_status_reg () timed-out\n" );
+  //if ( timeout <= 0 )
+  //  printf ( "ps_write_status_reg () timed-out\n" );
 
   /* when writing status, there isn't a PI_TXN_IN_PROGRESS */
   ps_unlock_bus();
@@ -1002,15 +1071,23 @@ uint32_t ps_read_status_reg ()
   ps_lock_bus();
   asm volatile ("dmb sy" : : : "memory");
 
-  /* make sure no IO in progress */
-  ps_wait_idle ();
+  /* make sure no IO in progress - bounded: the status readback is
+   * combinational in the CPLD and works with TXN stuck, which is exactly
+   * when it is most wanted (bit 11 = arbitration state on fw 253) */
+  int stuck = ps_wait_idle_bounded ("ps_read_status_reg");
   
   *ioset = REG_STATUS;
-  *ioset = PIN_RD;
-
-  ps_wait_idle ();
+  //*ioset = PIN_RD;
+  
+  if (!stuck)
+    ps_wait_idle_bounded ("ps_read_status_reg");
 
   status = *ioread;
+  if (stuck)
+    fprintf (stderr, "[PS] status read with TXN stuck: GPLEV 0x%08X - "
+             "word 0x%04X, bit11 (arbitration active) = %u\n",
+             (unsigned)status, (unsigned)((status >> 8) & 0xFFFF),
+             (unsigned)((status >> 19) & 1));
  	*ioclr = TXN_END;
 
   /* return all 32 bits */
