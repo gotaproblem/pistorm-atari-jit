@@ -72,9 +72,10 @@ static int hdc_trace_on(void)
 {
     if (hdc_trc < 0) {
         const char *e = getenv("PISTORM_HDC_TRACE");
-        hdc_trc = (e && *e && *e != '0') ? 1 : 0;
+        hdc_trc = (!e || !*e || *e == '0') ? 0 : (*e == '2') ? 2 : 1;
         if (hdc_trc)
-            FDD_LOG("HDC trace on (PISTORM_HDC_TRACE)");
+            FDD_LOG("HDC trace on (PISTORM_HDC_TRACE=%d: %s)", hdc_trc,
+                    hdc_trc == 2 ? "write commands only" : "everything");
     }
     return hdc_trc;
 }
@@ -86,7 +87,8 @@ static uint64_t ht_now_us(void)
     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
-#define HT_MAX 200
+#define HT_MAX 1000000u          /* effectively unbounded: a boot alone
+                                    used the old 200-line cap */
 static unsigned ht_lines;
 static struct {
     int      live;          /* first CDB byte seen, status not read yet */
@@ -98,7 +100,11 @@ static struct {
     char     src;
     unsigned polls;         /* GPIP reads since t_last                  */
     uint64_t t_mode;        /* first $8606 write since t_last (0 = none)*/
+    int      wr;            /* this command writes (direction or opcode) */
 } ht;
+
+/* PISTORM_HDC_TRACE=1: every command. =2: write commands only. */
+#define HT_ON() (hdc_trc == 1 || (hdc_trc == 2 && ht.wr))
 
 static void ht_cdb(const char *tag)
 {
@@ -115,16 +121,19 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
     if (!hdc_trace_on())
         return;
     if (first) {
-        if (ht.live && ht_lines < HT_MAX) {
+        if (ht.live && HT_ON() && ht_lines < HT_MAX) {
             ht_lines++;
             ht_cdb("ABANDONED - new command before any status read");
         }
         ht.live = 1;
         ht.n    = 0;
+        ht.wr   = (v & 0x1F) == 0x0A;               /* WRITE(6) */
         ht.base = base;
     }
     if (!ht.live)
         return;
+    if (ht.n == 1 && (ht.cdb[0] & 0x1F) == 0x1F && v == 0x2A)
+        ht.wr = 1;                                  /* ICD WRITE(10) */
     if (ht.n < sizeof ht.cdb)
         ht.cdb[ht.n] = v;
     ht.n++;
@@ -136,7 +145,7 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
 
 static void hdc_trace_gpip(int low, char src)
 {
-    if (hdc_trc != 1 || !ht.live)
+    if (!hdc_trc || !ht.live)
         return;
     ht.polls++;
     if (low && !ht.t_low) {
@@ -154,16 +163,16 @@ void hdc_trace_gpip_ide(void)
 
 static void hdc_trace_mode_write(void)
 {
-    if (hdc_trc == 1 && ht.live && !ht.t_mode)
+    if (hdc_trc && ht.live && !ht.t_mode)
         ht.t_mode = ht_now_us();
 }
 
 static void hdc_trace_status(uint32_t status)
 {
-    if (hdc_trc != 1 || !ht.live)
+    if (!hdc_trc || !ht.live)
         return;
     ht.live = 0;
-    if (ht_lines >= HT_MAX)
+    if (!HT_ON() || ht_lines >= HT_MAX)
         return;
     ht_lines++;
 
@@ -942,7 +951,7 @@ static void hdc_wait_dma_done(uint32_t base, uint32_t len)
             break;
         }
     }
-    if (hdc_trc == 1 && ht_lines < HT_MAX) {
+    if (HT_ON() && ht_lines < HT_MAX) {
         ht_lines++;
         FDD_LOG("HDC pull waited %lluus: counter +%d -> +%d of %u",
                 (unsigned long long)(ht_now_us() - t0),
@@ -1015,7 +1024,7 @@ static void hdc_sync_pull(void)
             buf[i] = ps_read_8(fdc.hdc_base + off + i);
         pistorm_dma_to_stram(fdc.hdc_base + off, buf, 512u);
 
-        if (hdc_trc == 1 && off == 0)
+        if (HT_ON() && off == 0)
             hdc_trace_sector(buf);
 
         /* Show what the guest will actually see, for the first few pulls:
@@ -1040,7 +1049,7 @@ static void hdc_sync_pull(void)
      * window a second time to catch reads that do not repeat. A boot that
      * works and one that crashes can then be compared transfer by transfer:
      * same sum = same data reached the guest. */
-    if (hdc_trc == 1 && ht_lines < HT_MAX) {
+    if (HT_ON() && ht_lines < HT_MAX) {
         uint32_t sum = 2166136261u, diff = 0, first = 0xFFFFFFFFu;
         uint8_t  v[512];
         for (uint32_t off = 0; off < len; off += 512u) {
@@ -1105,7 +1114,7 @@ static void hdc_note_sector_count(uint32_t val)
  * 32 bytes reaches the disk whatever the push does afterwards. */
 static void hdc_trace_write_window(void)
 {
-    if (hdc_trc != 1 || ht_lines >= HT_MAX)
+    if (!HT_ON() || ht_lines >= HT_MAX)
         return;
     uint32_t len = (uint32_t)fdc.hdc_count * 512u;
     if (!hdc_window_ok(fdc.hdc_base, len))
@@ -1139,7 +1148,9 @@ static void hdc_claim_count(void)
     hdc_count_fresh   = 0;
     fdc.hdc_base      = fdc.dma_base_addr;
     fdc.hdc_dir_write = (fdc.dma_mode & DMA_MODE_RW) != 0;
-    if (hdc_trc == 1 && ht_lines < HT_MAX) {
+    if (fdc.hdc_dir_write)
+        ht.wr = 1;
+    if (HT_ON() && ht_lines < HT_MAX) {
         ht_lines++;
         /* opcode $0A = WRITE(6); a write opcode taken as "read" means the
          * driver set write direction AFTER the command bytes - no push */
