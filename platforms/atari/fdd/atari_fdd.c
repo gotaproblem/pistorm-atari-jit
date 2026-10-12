@@ -1097,6 +1097,40 @@ static void hdc_note_sector_count(uint32_t val)
  * Snapshot the window HERE (the base could legally be programmed after the
  * count - only the final command byte starts the transfer) and prepare the
  * coherence sync for the direction in force. */
+/* PISTORM_HDC_TRACE, write commands: before the push, how many bytes of
+ * the window differ between the emulator's RAM image and real ST RAM. The
+ * DMA chip reads REAL RAM, and in write direction it starts filling its
+ * 32-byte FIFO as soon as the mode and count are programmed - before the
+ * first command byte, i.e. before the push. A difference here in the first
+ * 32 bytes reaches the disk whatever the push does afterwards. */
+static void hdc_trace_write_window(void)
+{
+    if (hdc_trc != 1 || ht_lines >= HT_MAX)
+        return;
+    uint32_t len = (uint32_t)fdc.hdc_count * 512u;
+    if (!hdc_window_ok(fdc.hdc_base, len))
+        return;
+    uint32_t diff = 0, first = 0xFFFFFFFFu;
+    uint8_t  m[512];
+    for (uint32_t off = 0; off < len; off += 512u) {
+        pistorm_dma_from_stram(fdc.hdc_base + off, m, 512u);
+        for (uint32_t i = 0; i < 512u; i++)
+            if (ps_read_8(fdc.hdc_base + off + i) != m[i]) {
+                if (first == 0xFFFFFFFFu)
+                    first = off + i;
+                diff++;
+            }
+    }
+    ht_lines++;
+    if (diff)
+        FDD_LOG("HDC WRITE %u sector(s) @0x%06X mode %03X: image and real RAM "
+                "DIFFER in %u bytes (first at +%u) before push",
+                fdc.hdc_count, fdc.hdc_base, fdc.dma_mode, diff, first);
+    else
+        FDD_LOG("HDC WRITE %u sector(s) @0x%06X mode %03X: image == real RAM",
+                fdc.hdc_count, fdc.hdc_base, fdc.dma_mode);
+}
+
 static void hdc_claim_count(void)
 {
     hdc_active = 1;
@@ -1105,7 +1139,20 @@ static void hdc_claim_count(void)
     hdc_count_fresh   = 0;
     fdc.hdc_base      = fdc.dma_base_addr;
     fdc.hdc_dir_write = (fdc.dma_mode & DMA_MODE_RW) != 0;
+    if (hdc_trc == 1 && ht_lines < HT_MAX) {
+        ht_lines++;
+        /* opcode $0A = WRITE(6); a write opcode taken as "read" means the
+         * driver set write direction AFTER the command bytes - no push */
+        uint8_t op = ht.cdb[0] & 0x1F;
+        FDD_LOG("HDC claim: %s, %u sector(s) @0x%06X, mode %03X at first "
+                "command byte (opcode $%02X%s)",
+                fdc.hdc_dir_write ? "WRITE (push)" : "read (pull)",
+                fdc.hdc_count, fdc.hdc_base, fdc.dma_mode, op,
+                (op == 0x0A && !fdc.hdc_dir_write) ? " - WRITE OPCODE BUT READ "
+                "DIRECTION: no push" : "");
+    }
     if (fdc.hdc_dir_write) {
+        hdc_trace_write_window();
         hdc_sync_push();                 /* buffer must be on the real bus
                                             before the device reads it */
         fdc.hdc_pending = false;
