@@ -261,6 +261,11 @@ bool fdd_owns_address(uint32_t addr);
  * fdd_io_* given the current FDD/ACSI enablement (see atari_fdd.c). */
 bool fdd_route_address(uint32_t addr);
 
+/* True when fdd_io_* handles the DMA-port window at all: emulated floppy,
+ * emulated ACSI, or real-device passthrough (fdd_init_passthrough). */
+bool fdd_dma_routed(void);
+void fdd_init_passthrough(void);
+
 #ifdef __cplusplus
 }
 #endif

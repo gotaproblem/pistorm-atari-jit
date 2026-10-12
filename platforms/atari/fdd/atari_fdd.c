@@ -215,6 +215,9 @@ static void hdc_trace_status(uint32_t status)
  * routed between emulated targets and the real ACSI bus per ID. */
 extern bool FDD_enabled;
 
+/* Real-device passthrough: see fdd_init_passthrough(). */
+static bool fdd_passthrough;
+
 /* =========================================================================
  * Global state
  * ========================================================================= */
@@ -233,6 +236,7 @@ static int hdc_count_fresh;
 /* =========================================================================
  * Forward declarations
  * ========================================================================= */
+static void     rfdc_gpip(uint8_t gpip);
 static void     fdc_decode_drive_side(void);
 static void     fdc_exec_command(uint8_t cmd);
 static void     fdc_do_type1(uint8_t cmd);
@@ -353,9 +357,29 @@ bool fdd_route_address(uint32_t addr)
 {
     if (FDD_enabled)
         return fdd_owns_address(addr);
-    if (acsi_enabled())
+    if (acsi_enabled() || fdd_passthrough)
         return addr >= 0xFF8600u && addr <= 0xFF860Fu;
     return false;
+}
+
+/* Is the DMA-port window handled by this file at all (any of: emulated
+ * floppy, emulated ACSI targets, or real-device passthrough)? The gate the
+ * dispatchers test before fdd_route_address / fdd_gpip. */
+bool fdd_dma_routed(void)
+{
+    return FDD_enabled || acsi_enabled() || fdd_passthrough;
+}
+
+/* No "fdd" lines and no emulated ACSI target: real floppy (drive, Gotek)
+ * and real ACSI devices only. The DMA-port window still routes through
+ * fdd_io_* so that real bus-master DMA keeps the emulator's RAM image
+ * coherent: the ACSI pull/push below, and the real-FDC pull (rfdc_*).
+ * Without this a real floppy read landed in real RAM only and the guest
+ * read the stale image - and real ACSI fell back to the old dma_snoop. */
+void fdd_init_passthrough(void)
+{
+    fdd_init();
+    fdd_passthrough = true;
 }
 
 /* MFP channel 7 = GPIP5 = the shared WD1772 INTRQ / ACSI /IRQ line.
@@ -759,6 +783,8 @@ uint8_t fdd_gpip(uint8_t other_gpip)
     }
 
     hdc_trace_gpip(!(other_gpip & (1u << 5)), 'R');
+    if (!FDD_enabled)
+        rfdc_gpip(other_gpip);            /* real FDC finished a read? */
     return other_gpip;                    /* real line as-is (ACSI visible) */
 }
 
@@ -1106,6 +1132,121 @@ static void hdc_sync_push(void)
     hdc_push_window(fdc.hdc_base, fdc.hdc_count);
 }
 
+/* =========================================================================
+ * Real FDC passthrough (no "fdd" lines): a real drive or Gotek on the real
+ * WD1772. Same coherence problem as real ACSI - the DMA chip writes REAL
+ * RAM, the guest reads the emulator's image - so a read-type command arms
+ * a window and the image is pulled when the command has completed.
+ *
+ * "Completed" = the first of:
+ *   - the guest reads the FDC status register and BUSY is clear (TOS does
+ *     this after every command, and an interrupt handler always does), or
+ *   - the guest polls GPIP and sees GPIP5 (INTRQ) low.
+ * Either is only believed RFDC_SETTLE_US after the command was written:
+ * the WD1772 needs a few microseconds to raise BUSY / drop INTRQ, and the
+ * Pi can read faster than that.
+ *
+ * Writes need no completion step: the buffer goes to real RAM at the
+ * sector-count write (hdc_note_sector_count, write direction), before the
+ * DMA chip can prefetch it; rfdc_command repeats it if the count came
+ * first and the base was moved afterwards.
+ * ========================================================================= */
+#define RFDC_SETTLE_US 200u
+
+static struct {
+    int      armed;         /* read-type command issued, not pulled yet */
+    uint32_t base;          /* DMA base at the command write            */
+    uint32_t count;         /* sector count in force (0 = not given)    */
+    uint8_t  cmd;
+    uint64_t t_cmd;
+} rfdc;
+
+static unsigned rfdc_logged;
+
+static void rfdc_pull(const char *why)
+{
+    rfdc.armed = 0;
+
+    uint32_t want = rfdc.count * 512u;
+    hdc_wait_dma_done(rfdc.base, want);
+    uint32_t moved = (hdc_dma_counter() - rfdc.base) & 0xFFFFFFu;
+
+    /* What actually reached RAM is what the counter passed; a FIFO tail
+     * under 16 bytes never leaves the chip (the ST cannot see it either). */
+    uint32_t len = moved;
+    if (want && len > want)
+        len = want;
+    if (len > HDC_MAX_SYNC_SECTORS * 512u)
+        len = HDC_MAX_SYNC_SECTORS * 512u;
+    if (!hdc_window_ok(rfdc.base, len))
+        return;
+
+    uint8_t buf[512];
+    for (uint32_t off = 0; off < len; off += 512u) {
+        uint32_t n = len - off < 512u ? len - off : 512u;
+        for (uint32_t i = 0; i < n; i++)
+            buf[i] = ps_read_8(rfdc.base + off + i);
+        pistorm_dma_to_stram(rfdc.base + off, buf, n);
+    }
+
+    if (hdc_trace_on() && rfdc_logged < 200u) {
+        rfdc_logged++;
+        FDD_LOG("FDC real cmd $%02X: pulled %u B @0x%06X (count %u, DMA moved "
+                "%u) at %s", rfdc.cmd, len, rfdc.base, rfdc.count, moved, why);
+    }
+}
+
+static int rfdc_settled(void)
+{
+    return ht_now_us() - rfdc.t_cmd >= RFDC_SETTLE_US;
+}
+
+/* A command for the real WD1772 ($8604, FDC selected, A1:A0 = 00). */
+static void rfdc_command(uint8_t cmd)
+{
+    uint8_t t = cmd & 0xF0u;
+
+    hdc_count_fresh = 0;            /* the count was the floppy's */
+    fdc.hdc_pending = false;
+
+    if (t == FDC_CMD_FORCE_INT)
+        return;                     /* aborts the command in progress: keep
+                                       its window, the next completion
+                                       pulls whatever did arrive */
+
+    rfdc.armed = 0;
+    if (t == 0x80u || t == 0x90u || t == FDC_CMD_READ_ADDR ||
+        t == FDC_CMD_READ_TRACK) {
+        rfdc.armed = 1;
+        rfdc.base  = fdc.dma_base_addr;
+        rfdc.count = fdc.hdc_count;
+        rfdc.cmd   = cmd;
+        rfdc.t_cmd = ht_now_us();
+    } else if (t == FDC_CMD_WRITE_SEC || t == 0xB0u ||
+               t == FDC_CMD_WRITE_TRACK) {
+        if (!(hdc_prepushed && hdc_prepush_base == fdc.dma_base_addr &&
+              hdc_prepush_count >= fdc.hdc_count))
+            hdc_push_window(fdc.dma_base_addr, fdc.hdc_count);
+    }
+    hdc_prepushed = 0;
+}
+
+/* Guest read of a real FDC register: status (A1:A0 = 00) with BUSY clear
+ * completes an armed read. */
+static void rfdc_status_read(uint32_t val)
+{
+    if (rfdc.armed && !(fdc.dma_mode & (DMA_MODE_A0 | DMA_MODE_A1)) &&
+        !(val & FDC_STATUS_BUSY) && rfdc_settled())
+        rfdc_pull("status read");
+}
+
+/* Guest GPIP poll: INTRQ (GPIP5) low completes an armed read. */
+static void rfdc_gpip(uint8_t gpip)
+{
+    if (rfdc.armed && !(gpip & (1u << 5)) && rfdc_settled())
+        rfdc_pull("GPIP5 low");
+}
+
 /* Sector-count write seen ($8604, SCREG set - mode bits cannot say whether
  * it is for the floppy or for ACSI). Stash it; if ACSI command bytes follow,
  * hdc_claim_count() turns it into a transfer window. */
@@ -1246,9 +1387,12 @@ uint32_t fdd_io_read(uint32_t addr, int size)
                         hdc_sync_pull();      /* end-of-command handshake:
                                                  bring the mirror up to date */
                 }
-            } else
-                val = FDD_enabled ? fdc_read_addr(addr, size)
-                                  : bus_read(addr, size);
+            } else if (FDD_enabled)
+                val = fdc_read_addr(addr, size);
+            else {
+                val = bus_read(addr, size);   /* real WD1772 register */
+                rfdc_status_read(val);
+            }
         } else if (addr == DMA_MODE_REG ||
                    addr == DMA_BASE_HIGH || addr == DMA_BASE_MID ||
                    addr == DMA_BASE_LOW) {
@@ -1323,6 +1467,8 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
                  * belong to a real drive on the real bus */
                 acsi_release();
                 hdc_active = 1;   /* real device owns the DMA regs now */
+                if (!(fdc.dma_mode & (DMA_MODE_A0 | DMA_MODE_A1)))
+                    rfdc_command((uint8_t)val);   /* command register */
                 bus_write(addr, val, size);
             } else {
                 /* emulated FDC command: the DMA is floppy's again */

@@ -2434,8 +2434,16 @@ int main (int argc, char *argv[])
      * the real bus), so its state must be initialised. Images were
      * attached at cfg parse time ("acsi" lines). fdd_init is declared
      * with C linkage in atari_fdd.h (included above). */
-    fdd_init ();
+    fdd_init_passthrough ();
     printf ("[INIT] Emulated ACSI target(s) active, floppy passthrough\n");
+  }
+  else
+  {
+    /* No "fdd" lines, no emulated ACSI: real floppy (drive / Gotek) and
+     * real ACSI only. Route the DMA-port window through fdd_io_* anyway
+     * so real bus-master DMA keeps the RAM image coherent. */
+    fdd_init_passthrough ();
+    printf ("[INIT] Real floppy / ACSI passthrough\n");
   }
 
   if (config->kbd_usb || config->usb_gamepad)
@@ -3188,7 +3196,7 @@ extern "C"
       return dmasnd_reg_read8(address);
 
     /* FDD / emulated ACSI */
-    if (FDD_enabled || acsi_enabled()) {
+    if (fdd_dma_routed()) {
       if (address == MFP_GPIP) {
         cpu_data_fc();
         return pistorm_mfp_gpip_shim (ps_read_8 (address));
@@ -3319,7 +3327,7 @@ extern "C"
       return dmasnd_reg_read16(address);
 
     /* FDD / emulated ACSI */
-    if (FDD_enabled || acsi_enabled())
+    if (fdd_dma_routed())
     {
       if (address == MFP_GPIP) {
         cpu_data_fc();
@@ -3438,7 +3446,7 @@ extern "C"
       return dmasnd_reg_read32(address);
 
      /* FDD / emulated ACSI */
-    if (FDD_enabled || acsi_enabled())
+    if (fdd_dma_routed())
     {
       if (fdd_route_address (address))
           return fdd_io_read (address, 4);
@@ -3544,7 +3552,7 @@ extern "C"
       return;
 
     /* FDD */
-    if (FDD_enabled || acsi_enabled())
+    if (fdd_dma_routed())
     {
       if (fdd_route_address (address)) {
           fdd_io_write (address, value, 1);
@@ -3687,7 +3695,7 @@ extern "C"
       return;
 
     /* FDD */
-    if (FDD_enabled || acsi_enabled())
+    if (fdd_dma_routed())
     {
       if (fdd_route_address (address)) {
           fdd_io_write (address, value, 2);
@@ -3814,7 +3822,7 @@ extern "C"
     if (blitter_disabled_addr(address))
       return;
 
-    if ( FDD_enabled || acsi_enabled() )
+    if (fdd_dma_routed())
     {
       if (fdd_route_address (address)) {
           fdd_io_write (address, value, 4);

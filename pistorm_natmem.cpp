@@ -221,6 +221,7 @@ extern "C"
     void     fdd_io_write     (uint32_t addr, uint32_t val, int size);
     bool     fdd_owns_address (uint32_t addr);
     bool     fdd_route_address(uint32_t addr);   /* FDD/ACSI dispatch gate */
+    bool     fdd_dma_routed   (void);              /* any of the above on   */
     bool     acsi_enabled     (void);           /* emulated ACSI targets? */
     /* real bus-master DMA mirror coherence - see dma_snoop.h */
     int      dma_snoop_active (void);
@@ -3272,7 +3273,7 @@ static inline uae_u8 mfp_gpip_shim(uae_u8 v)
      * silently discarded ACSI completion IRQs in ACSI-only configs -
      * EmuTOS's probe then timed out after the first CDB byte and no
      * emulated disk was ever seen ("needed to enable fdd" field case). */
-    if (FDD_enabled || acsi_enabled())
+    if (fdd_dma_routed())
         v = fdd_gpip(v);
     if (IDE_intrq_pending()) {
         if (v & 0x20)
