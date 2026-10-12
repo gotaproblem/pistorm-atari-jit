@@ -29,6 +29,17 @@ Development has been done on a Raspberry Pi4 with 2GB and various ATARI platform
 
 In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried. ***Update Pi3A+ and Pi02w only have 512MB RAM. As things are, this build will not work on either of these parts. I may get around to looking in to it, but cannot say when.***
 You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
+### CPLD firmware - 0.83a or later required
+> **This tree needs PiSTorm CPLD firmware 0.83a (rev $253) or later. Older firmware is obsolete and will not work.**
+
+The Pi<->CPLD protocol changed (single strobe - GPIO4 is no longer used) and the firmware now does real 68000 bus arbitration, which is what lets the ST's own DMA chip work: real ACSI hard disks and real floppy drives / Gotek. The emulator checks the firmware revision at start-up and refuses to run on anything older.
+
+Flash the bitstream shipped in `rtl/` (Verilog source alongside it):
+>cd ~/pistorm-atari-jit
+sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf
+
+then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware 0.83a`.
+
 ### Software
 Development used Raspberry Pi OS Lite - Trixie build 64bit AARCH64. This is mandatory for JIT.
 #### Building

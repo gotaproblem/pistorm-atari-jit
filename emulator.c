@@ -2041,6 +2041,42 @@ static int setup_page_dump(const uint32_t *xrgb, int w, int h, char *path, unsig
   return write_png_rgb(path, xrgb, (uint32_t)w, (uint32_t)h, (uint32_t)w);
 }
 
+/* The Pi-side protocol and the CPLD firmware are a matched pair. This tree
+ * needs firmware 0.83a (rev $253) or later:
+ *   - single-strobe protocol (fw $251+): GPIO4 is no longer a read strobe,
+ *     so older (two-strobe) firmware cannot even be talked to reliably;
+ *   - bus arbitration (fw $253): real ACSI and real floppy DMA.
+ * Revision word (status bits 10:0): $2xx = alpha 0.xxa, $4xx beta,
+ * $6xx release - anything beta/release is newer than every alpha.
+ * PISTORM_FW_ANY=1 skips the check (firmware development only). */
+#define CPLD_FW_MIN_ALPHA 0x253u
+
+static void check_cpld_firmware(void)
+{
+  unsigned fw   = (ps_read_status_reg() >> 8) & 0x07FFu;
+  unsigned kind = fw & 0x600u;
+  bool     ok   = fw != 0x7FFu &&             /* all ones: not answering */
+                  ((kind == 0x400u || kind == 0x600u) ||
+                   (kind == 0x200u && fw >= CPLD_FW_MIN_ALPHA));
+  const char *any = getenv("PISTORM_FW_ANY");
+
+  if (ok)
+    return;
+  fprintf(stderr,
+    "\n[INIT] *** PiSTorm CPLD firmware is too old (or not answering): rev $%03X ***\n"
+    "[INIT] This build needs firmware 0.%ua or later (rev $%03X). Older firmware\n"
+    "[INIT] uses a different Pi<->CPLD protocol and has no working bus arbitration.\n"
+    "[INIT] Flash the bitstream shipped in rtl/:\n"
+    "[INIT]     sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf\n"
+    "[INIT] then power-cycle the ST.\n",
+    fw, CPLD_FW_MIN_ALPHA & 0xFFu, CPLD_FW_MIN_ALPHA);
+  if (any && *any && *any != '0') {
+    fprintf(stderr, "[INIT] PISTORM_FW_ANY set - continuing anyway.\n\n");
+    return;
+  }
+  exit(1);
+}
+
 int main (int argc, char *argv[])
 {
   struct emulator_config *config;
@@ -2131,6 +2167,7 @@ int main (int argc, char *argv[])
 
   ps_setup_protocol();
   ps_get_firmware_revision();
+  check_cpld_firmware();
   ps_pulse_halt();
   ps_reset_state_machine();
   ps_pulse_reset();
