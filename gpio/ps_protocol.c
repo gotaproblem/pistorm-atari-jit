@@ -61,6 +61,24 @@ volatile uint32_t *ioset;
 volatile uint32_t *ioclr;
 volatile uint32_t *ioread;
 
+#ifdef PI5
+/* Pi 5: the 40-pin header GPIOs live in RP1, behind PCIe. RP1's RIO block
+ * gives the same three operations the BCM2711 has (atomic SET, atomic CLR,
+ * level read), so ioset/ioclr/ioread point at RIO's SET/CLR aliases of OUT
+ * and at SYNC_IN, and every bit means the same GPIO as on the Pi 4.
+ * What RP1 does NOT have is GPFSEL: a pin's direction is its OE bit. */
+static volatile uint32_t *rp1_io;      /* io_bank0: STATUS/CTRL per pin  */
+static volatile uint32_t *rp1_rio;     /* sys_rio0                       */
+static volatile uint32_t *rp1_pads;    /* pads_bank0                     */
+static volatile uint32_t *rio_oe_set;
+static volatile uint32_t *rio_oe_clr;
+
+/* Data bus direction for reads, RP1 form: the pin's OE bit (two posted
+ * writes each way). See the Pi 4 form below for why. */
+#define PS_DATA_PINS   0x00FFFF00u
+#define PS_BUS_IN()    (*rio_oe_clr = PS_DATA_PINS)
+#define PS_BUS_OUT()   (*rio_oe_set = PS_DATA_PINS)
+#else
 /* Data bus direction for reads.
  *
  * The CPLD drives D0-D15 (GPIO 8-23) for a data read (REG_DATA with WR
@@ -82,6 +100,7 @@ static uint32_t gpfsel2_keep;          /* GPIO 24-29 function bits, as found */
                           gpio [2] = gpfsel2_keep | GPFSEL2_INPUT; } while (0)
 #define PS_BUS_OUT() do { gpio [0] = GPFSEL0_OUTPUT; gpio [1] = GPFSEL1_OUTPUT; \
                           gpio [2] = gpfsel2_keep | GPFSEL2_OUTPUT; } while (0)
+#endif
 
 volatile uint32_t *gpclk;
 volatile uint32_t *clk_ctl;
@@ -200,6 +219,91 @@ void ps_bus_unlock (void)
 }
 
 
+#ifdef PI5
+/* RP1 as the CPU sees it: peripherals at 0x1f_0000_0000 (PCIe BAR);
+ * io_bank0 +0xD0000, sys_rio0 +0xE0000, pads_bank0 +0xF0000. /dev/gpiomem0
+ * maps exactly those three blocks (0x30000 from io_bank0) without root,
+ * so it is the fallback when /dev/mem is not available. */
+#define RP1_PERI_BASE   0x1f00000000ULL
+#define RP1_IO_BANK0    0x0d0000u
+#define RP1_GPIO_SPAN   0x030000u      /* io_bank0 + sys_rio0 + pads_bank0 */
+#define RP1_RIO_OFF     0x010000u      /* from io_bank0                    */
+#define RP1_PADS_OFF    0x020000u
+#define RIO_SET_ALIAS   0x2000u
+#define RIO_CLR_ALIAS   0x3000u
+#define RIO_OUT         0x00u
+#define RIO_OE          0x04u
+#define RIO_SYNC_IN     0x0Cu
+
+static void create_dev_mem_mapping ()
+{
+  void *map = MAP_FAILED;
+  const char *how = "/dev/mem";
+  int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
+
+  if ( fd >= 0 )
+  {
+    map = mmap ( NULL, RP1_GPIO_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED,
+                 fd, (off_t)(RP1_PERI_BASE + RP1_IO_BANK0) );
+    close ( fd );
+  }
+
+  if ( map == MAP_FAILED )
+  {
+    how = "/dev/gpiomem0";
+    fd = open ( "/dev/gpiomem0", O_RDWR | O_SYNC );
+    if ( fd >= 0 )
+    {
+      map = mmap ( NULL, RP1_GPIO_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+      close ( fd );
+    }
+  }
+
+  if ( map == MAP_FAILED )
+  {
+    printf ( "Unable to map RP1 GPIO (/dev/mem and /dev/gpiomem0), errno = %d\n", errno );
+    exit ( -1 );
+  }
+
+  rp1_io   = (volatile uint32_t *)map;
+  rp1_rio  = (volatile uint32_t *)((volatile uint8_t *)map + RP1_RIO_OFF);
+  rp1_pads = (volatile uint32_t *)((volatile uint8_t *)map + RP1_PADS_OFF);
+
+  ioset      = rp1_rio + (RIO_SET_ALIAS + RIO_OUT) / 4;
+  ioclr      = rp1_rio + (RIO_CLR_ALIAS + RIO_OUT) / 4;
+  ioread     = rp1_rio + RIO_SYNC_IN / 4;
+  rio_oe_set = rp1_rio + (RIO_SET_ALIAS + RIO_OE) / 4;
+  rio_oe_clr = rp1_rio + (RIO_CLR_ALIAS + RIO_OE) / 4;
+
+  gpio = NULL;                         /* no GPFSEL on RP1 */
+  printf ( "[INIT] Pi 5: RP1 GPIO mapped via %s\n", how );
+}
+
+/* GPIO 0-23 to RIO: io_bank0 CTRL funcsel 5 (SYS_RIO), no overrides.
+ * Pads: input enabled on every pin (RIO_IN needs it, and an output's
+ * level is read back too), not open-drain, 8 mA, Schmitt, fast slew.
+ * Direction: outputs where the Pi 4 path has GPFSEL = output -
+ * GPIO 1-4 (WR, CMD0, CMD1, spare) and 8-23 (D0-D15); inputs GPIO 0
+ * (TXN), 5/6 (IPL1/2), 7 (BERR). GPIO 24+ are left alone. */
+#define RP1_FUNCSEL_RIO   5u
+#define RP1_PAD_PIN       0x63u        /* IE | DRIVE=8mA | SCHMITT | SLEWFAST */
+#define PS_OUT_PINS       0x00FFFF1Eu
+#define PS_ALL_PINS       0x00FFFFFFu
+
+static void rp1_setup_pins ( void )
+{
+  *ioclr = PS_ALL_PINS;                /* outputs low before enabling them */
+  *rio_oe_clr = PS_ALL_PINS;
+
+  for ( int n = 0; n < 24; n++ )
+  {
+    rp1_pads [1 + n] = RP1_PAD_PIN;    /* word 0 is VOLTAGE_SELECT */
+    rp1_io [2 * n + 1] = RP1_FUNCSEL_RIO;
+  }
+
+  *rio_oe_set = PS_OUT_PINS;
+}
+#else
 static void create_dev_mem_mapping () 
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
@@ -236,6 +340,7 @@ static void create_dev_mem_mapping ()
   clk_ctl = gpclk + (0x70 / 4);
   clk_div = gpclk + (0x74 / 4);
 }
+#endif
 
 /* 
 GPIO 
@@ -337,6 +442,9 @@ void ps_setup_protocol ( void )
   create_dev_mem_mapping ();
   setup_gpclk ();
 
+#ifdef PI5
+  rp1_setup_pins ();
+#else
   /* GPFSEL2 covers GPIO 20-29, but PiStorm only owns 20-23 (bits 0-11).
    * Keep the rest as found: on a Pi 4, GPIO 28/29 are the Ethernet PHY's
    * MDIO/MDC (ALT5). Writing the whole register turned them into plain
@@ -344,6 +452,7 @@ void ps_setup_protocol ( void )
    * plugged in the kernel then hangs or reboots. */
   gpfsel2_keep = gpio [2] & ~0x00000FFFu;
   PS_BUS_OUT ();
+#endif
 
   *ioclr = TXN_END;
 }

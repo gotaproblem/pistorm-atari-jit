@@ -80,6 +80,10 @@ void ps_bus_unlock (void);
 #define READ_BYTE  0x0300
 #define READ_WORD  0x0200
 
+#if defined(PI5) && defined(USING_PI_CLK)
+  #error "USING_PI_CLK (GPCLK0 on GPIO4) is not implemented for the Pi 5 / RP1"
+#endif
+
 #ifndef PI3
   #define BCM2708_PERI_BASE	0xFE000000
 #else

@@ -2,6 +2,7 @@
 # atari-pistorm — Amiberry AArch64 JIT edition
 #
 #   make                    -> Pi 4 (cortex-a72), 64-bit
+#   make PIMODEL=PI5        -> Pi 5 (cortex-a76, GPIO via RP1), 64-bit
 #   make PIMODEL=PI3        -> Pi 3 (cortex-a53), 64-bit
 #   make PIMODEL=PI02W      -> Pi Zero 2 W (cortex-a53), 64-bit
 #
@@ -287,6 +288,9 @@ PIMODEL_CANON := $(shell printf '%s' '$(PIMODEL)' | tr '[:lower:]' '[:upper:]')
 ifeq ($(filter $(PIMODEL_CANON),PI4 RPI4 RASPI4),$(PIMODEL_CANON))
 	PIOPTS = -mcpu=cortex-a72 -march=armv8-a+crc+simd
 	PI     = -DPI4
+else ifeq ($(filter $(PIMODEL_CANON),PI5 RPI5 RASPI5),$(PIMODEL_CANON))
+	PIOPTS = -mcpu=cortex-a76
+	PI     = -DPI5
 else ifeq ($(filter $(PIMODEL_CANON),PI3 RPI3 RASPI3),$(PIMODEL_CANON))
 	PIOPTS = -mcpu=cortex-a53 -march=armv8-a+crc+simd
 	PI     = -DPI3
@@ -294,7 +298,7 @@ else ifeq ($(filter $(PIMODEL_CANON),PI02W PI0W2 ZERO2W ZERO2 PI_ZERO2W PIZERO2W
 	PIOPTS = -mcpu=cortex-a53 -march=armv8-a+crc+simd
 	PI     = -DPI3 -DPI02W
 else
-$(error Unknown PIMODEL '$(PIMODEL)'; use PI4, PI3, or PI02W)
+$(error Unknown PIMODEL '$(PIMODEL)'; use PI4, PI5, PI3, or PI02W)
 endif
 
 # Feature/target defines all live in sysconfig.h (UAE, JIT, USE_JIT, AMIBERRY,
