@@ -61,6 +61,28 @@ volatile uint32_t *ioset;
 volatile uint32_t *ioclr;
 volatile uint32_t *ioread;
 
+/* Data bus direction for reads.
+ *
+ * The CPLD drives D0-D15 (GPIO 8-23) for a data read (REG_DATA with WR
+ * held) and for a status read (REG_STATUS). Those pins used to stay Pi
+ * OUTPUTS throughout - driving the 0s txn_pulse() leaves on them - so
+ * every read was the Pi and the CPLD driving the same wires against each
+ * other, the CPLD merely winning. That is stress on both chips' output
+ * stages, and a level read during that fight is a race (cf. the
+ * "byte-swapped echoes of the Pi's own address phases" note below).
+ * The original PiStorm code flipped GPFSEL to input here; do it again.
+ *
+ * Three GPFSEL writes each way (GPIO 8-9 sit in GPFSEL0, 10-19 GPFSEL1,
+ * 20-23 GPFSEL2). GPFSEL2's GPIO 24-29 field is captured once at setup
+ * and written back unchanged: GPIO 28/29 are the Pi 4 Ethernet PHY's
+ * MDIO/MDC. */
+static uint32_t gpfsel2_keep;          /* GPIO 24-29 function bits, as found */
+
+#define PS_BUS_IN()  do { gpio [0] = GPFSEL0_INPUT;  gpio [1] = GPFSEL1_INPUT; \
+                          gpio [2] = gpfsel2_keep | GPFSEL2_INPUT; } while (0)
+#define PS_BUS_OUT() do { gpio [0] = GPFSEL0_OUTPUT; gpio [1] = GPFSEL1_OUTPUT; \
+                          gpio [2] = gpfsel2_keep | GPFSEL2_OUTPUT; } while (0)
+
 volatile uint32_t *gpclk;
 volatile uint32_t *clk_ctl;
 volatile uint32_t *clk_div;
@@ -315,14 +337,13 @@ void ps_setup_protocol ( void )
   create_dev_mem_mapping ();
   setup_gpclk ();
 
-  gpio [0] = GPFSEL0_OUTPUT;
-  gpio [1] = GPFSEL1_OUTPUT;
   /* GPFSEL2 covers GPIO 20-29, but PiStorm only owns 20-23 (bits 0-11).
-   * Read-modify-write: on a Pi 4, GPIO 28/29 are the Ethernet PHY's
+   * Keep the rest as found: on a Pi 4, GPIO 28/29 are the Ethernet PHY's
    * MDIO/MDC (ALT5). Writing the whole register turned them into plain
    * inputs, cutting the GENET driver off from its PHY - with a cable
    * plugged in the kernel then hangs or reboots. */
-  gpio [2] = ( gpio [2] & ~0x00000FFFu ) | ( GPFSEL2_OUTPUT & 0x00000FFFu );
+  gpfsel2_keep = gpio [2] & ~0x00000FFFu;
+  PS_BUS_OUT ();
 
   *ioclr = TXN_END;
 }
@@ -400,6 +421,7 @@ ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
              ps_txn_unsticks);
 
   *clr = TXN_END;                       /* drop REG_DATA + WR of the poll */
+  PS_BUS_OUT ();                        /* status writes drive D0-D15 */
 
   *set = (STATUS_BIT_INIT << 8) | REG_STATUS;
   txn_pulse (set, clr);
@@ -409,6 +431,7 @@ ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
   txn_pulse (set, clr);
 
   if (is_read) {                        /* back into the read poll state */
+    PS_BUS_IN ();
     *set = REG_DATA;
     *set = PIN_WR;
   }
@@ -543,6 +566,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
   *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
   txn_pulse (set, clr);
 
+  PS_BUS_IN ();                         /* the CPLD drives D0-D15 now */
   *set = REG_DATA;
   *set = PIN_WR;//PIN_RD;
 
@@ -590,6 +614,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
   }
 #endif
   *clr = TXN_END;
+  PS_BUS_OUT ();
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
 
@@ -1076,6 +1101,7 @@ uint32_t ps_read_status_reg ()
    * when it is most wanted (bit 11 = arbitration state on fw 253) */
   int stuck = ps_wait_idle_bounded ("ps_read_status_reg");
   
+  PS_BUS_IN ();                         /* the CPLD drives the status word */
   *ioset = REG_STATUS;
   //*ioset = PIN_RD;
   
@@ -1089,6 +1115,7 @@ uint32_t ps_read_status_reg ()
              (unsigned)status, (unsigned)((status >> 8) & 0xFFFF),
              (unsigned)((status >> 19) & 1));
  	*ioclr = TXN_END;
+  PS_BUS_OUT ();
 
   /* return all 32 bits */
   ps_unlock_bus();
