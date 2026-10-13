@@ -61,6 +61,30 @@ volatile uint32_t *ioset;
 volatile uint32_t *ioclr;
 volatile uint32_t *ioread;
 
+#ifdef PI5
+/* Pi 5: the 40-pin header GPIOs live in RP1, behind PCIe. RP1's RIO block
+ * gives the same three operations the BCM2711 has (atomic SET, atomic CLR,
+ * level read), so ioset/ioclr/ioread point at RIO's SET/CLR aliases of OUT
+ * and at SYNC_IN, and every bit means the same GPIO as on the Pi 4.
+ * What RP1 does NOT have is GPFSEL: a pin's direction is its OE bit. */
+static volatile uint32_t *rp1_io;      /* io_bank0: STATUS/CTRL per pin  */
+static volatile uint32_t *rp1_rio;     /* sys_rio0                       */
+static volatile uint32_t *rp1_pads;    /* pads_bank0                     */
+static volatile uint32_t *rio_oe_set;
+static volatile uint32_t *rio_oe_clr;
+
+/* The CPLD drives D0-D15 (GPIO 8-23) for a data or status read. On the
+ * Pi 4 path those pins stay outputs throughout (driving 0) and the CPLD
+ * simply overpowers them; RP1 gets them released instead: OE off before
+ * the read is started, back on once it is over. Two posted writes. */
+#define PS_DATA_PINS   0x00FFFF00u
+#define PS_BUS_IN()    (*rio_oe_clr = PS_DATA_PINS)
+#define PS_BUS_OUT()   (*rio_oe_set = PS_DATA_PINS)
+#else
+#define PS_BUS_IN()    ((void)0)
+#define PS_BUS_OUT()   ((void)0)
+#endif
+
 volatile uint32_t *gpclk;
 volatile uint32_t *clk_ctl;
 volatile uint32_t *clk_div;
@@ -178,6 +202,91 @@ void ps_bus_unlock (void)
 }
 
 
+#ifdef PI5
+/* RP1 as the CPU sees it: peripherals at 0x1f_0000_0000 (PCIe BAR);
+ * io_bank0 +0xD0000, sys_rio0 +0xE0000, pads_bank0 +0xF0000. /dev/gpiomem0
+ * maps exactly those three blocks (0x30000 from io_bank0) without root,
+ * so it is the fallback when /dev/mem is not available. */
+#define RP1_PERI_BASE   0x1f00000000ULL
+#define RP1_IO_BANK0    0x0d0000u
+#define RP1_GPIO_SPAN   0x030000u      /* io_bank0 + sys_rio0 + pads_bank0 */
+#define RP1_RIO_OFF     0x010000u      /* from io_bank0                    */
+#define RP1_PADS_OFF    0x020000u
+#define RIO_SET_ALIAS   0x2000u
+#define RIO_CLR_ALIAS   0x3000u
+#define RIO_OUT         0x00u
+#define RIO_OE          0x04u
+#define RIO_SYNC_IN     0x0Cu
+
+static void create_dev_mem_mapping ()
+{
+  void *map = MAP_FAILED;
+  const char *how = "/dev/mem";
+  int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
+
+  if ( fd >= 0 )
+  {
+    map = mmap ( NULL, RP1_GPIO_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED,
+                 fd, (off_t)(RP1_PERI_BASE + RP1_IO_BANK0) );
+    close ( fd );
+  }
+
+  if ( map == MAP_FAILED )
+  {
+    how = "/dev/gpiomem0";
+    fd = open ( "/dev/gpiomem0", O_RDWR | O_SYNC );
+    if ( fd >= 0 )
+    {
+      map = mmap ( NULL, RP1_GPIO_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+      close ( fd );
+    }
+  }
+
+  if ( map == MAP_FAILED )
+  {
+    printf ( "Unable to map RP1 GPIO (/dev/mem and /dev/gpiomem0), errno = %d\n", errno );
+    exit ( -1 );
+  }
+
+  rp1_io   = (volatile uint32_t *)map;
+  rp1_rio  = (volatile uint32_t *)((volatile uint8_t *)map + RP1_RIO_OFF);
+  rp1_pads = (volatile uint32_t *)((volatile uint8_t *)map + RP1_PADS_OFF);
+
+  ioset      = rp1_rio + (RIO_SET_ALIAS + RIO_OUT) / 4;
+  ioclr      = rp1_rio + (RIO_CLR_ALIAS + RIO_OUT) / 4;
+  ioread     = rp1_rio + RIO_SYNC_IN / 4;
+  rio_oe_set = rp1_rio + (RIO_SET_ALIAS + RIO_OE) / 4;
+  rio_oe_clr = rp1_rio + (RIO_CLR_ALIAS + RIO_OE) / 4;
+
+  gpio = NULL;                         /* no GPFSEL on RP1 */
+  printf ( "[INIT] Pi 5: RP1 GPIO mapped via %s\n", how );
+}
+
+/* GPIO 0-23 to RIO: io_bank0 CTRL funcsel 5 (SYS_RIO), no overrides.
+ * Pads: input enabled on every pin (RIO_IN needs it, and an output's
+ * level is read back too), not open-drain, 8 mA, Schmitt, fast slew.
+ * Direction: outputs where the Pi 4 path has GPFSEL = output -
+ * GPIO 1-4 (WR, CMD0, CMD1, spare) and 8-23 (D0-D15); inputs GPIO 0
+ * (TXN), 5/6 (IPL1/2), 7 (BERR). GPIO 24+ are left alone. */
+#define RP1_FUNCSEL_RIO   5u
+#define RP1_PAD_PIN       0x63u        /* IE | DRIVE=8mA | SCHMITT | SLEWFAST */
+#define PS_OUT_PINS       0x00FFFF1Eu
+#define PS_ALL_PINS       0x00FFFFFFu
+
+static void rp1_setup_pins ( void )
+{
+  *ioclr = PS_ALL_PINS;                /* outputs low before enabling them */
+  *rio_oe_clr = PS_ALL_PINS;
+
+  for ( int n = 0; n < 24; n++ )
+  {
+    rp1_pads [1 + n] = RP1_PAD_PIN;    /* word 0 is VOLTAGE_SELECT */
+    rp1_io [2 * n + 1] = RP1_FUNCSEL_RIO;
+  }
+
+  *rio_oe_set = PS_OUT_PINS;
+}
+#else
 static void create_dev_mem_mapping () 
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
@@ -214,6 +323,7 @@ static void create_dev_mem_mapping ()
   clk_ctl = gpclk + (0x70 / 4);
   clk_div = gpclk + (0x74 / 4);
 }
+#endif
 
 /* 
 GPIO 
@@ -315,6 +425,9 @@ void ps_setup_protocol ( void )
   create_dev_mem_mapping ();
   setup_gpclk ();
 
+#ifdef PI5
+  rp1_setup_pins ();
+#else
   gpio [0] = GPFSEL0_OUTPUT;
   gpio [1] = GPFSEL1_OUTPUT;
   /* GPFSEL2 covers GPIO 20-29, but PiStorm only owns 20-23 (bits 0-11).
@@ -323,6 +436,7 @@ void ps_setup_protocol ( void )
    * inputs, cutting the GENET driver off from its PHY - with a cable
    * plugged in the kernel then hangs or reboots. */
   gpio [2] = ( gpio [2] & ~0x00000FFFu ) | ( GPFSEL2_OUTPUT & 0x00000FFFu );
+#endif
 
   *ioclr = TXN_END;
 }
@@ -400,6 +514,7 @@ ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
              ps_txn_unsticks);
 
   *clr = TXN_END;                       /* drop REG_DATA + WR of the poll */
+  PS_BUS_OUT ();                        /* status writes drive D0-D15 */
 
   *set = (STATUS_BIT_INIT << 8) | REG_STATUS;
   txn_pulse (set, clr);
@@ -409,6 +524,7 @@ ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
   txn_pulse (set, clr);
 
   if (is_read) {                        /* back into the read poll state */
+    PS_BUS_IN ();
     *set = REG_DATA;
     *set = PIN_WR;
   }
@@ -543,6 +659,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
   *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
   txn_pulse (set, clr);
 
+  PS_BUS_IN ();                         /* Pi 5: let the CPLD drive D0-D15 */
   *set = REG_DATA;
   *set = PIN_WR;//PIN_RD;
 
@@ -590,6 +707,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
   }
 #endif
   *clr = TXN_END;
+  PS_BUS_OUT ();
   ps_io->berr = CHECK_BERR (status);
   ps_io->data = status >> 8;
 
@@ -1076,6 +1194,7 @@ uint32_t ps_read_status_reg ()
    * when it is most wanted (bit 11 = arbitration state on fw 253) */
   int stuck = ps_wait_idle_bounded ("ps_read_status_reg");
   
+  PS_BUS_IN ();                         /* Pi 5: CPLD drives the status word */
   *ioset = REG_STATUS;
   //*ioset = PIN_RD;
   
@@ -1089,6 +1208,7 @@ uint32_t ps_read_status_reg ()
              (unsigned)status, (unsigned)((status >> 8) & 0xFFFF),
              (unsigned)((status >> 19) & 1));
  	*ioclr = TXN_END;
+  PS_BUS_OUT ();
 
   /* return all 32 bits */
   ps_unlock_bus();
