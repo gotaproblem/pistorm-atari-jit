@@ -73,16 +73,33 @@ static volatile uint32_t *rp1_pads;    /* pads_bank0                     */
 static volatile uint32_t *rio_oe_set;
 static volatile uint32_t *rio_oe_clr;
 
-/* The CPLD drives D0-D15 (GPIO 8-23) for a data or status read. On the
- * Pi 4 path those pins stay outputs throughout (driving 0) and the CPLD
- * simply overpowers them; RP1 gets them released instead: OE off before
- * the read is started, back on once it is over. Two posted writes. */
+/* Data bus direction for reads, RP1 form: the pin's OE bit (two posted
+ * writes each way). See the Pi 4 form below for why. */
 #define PS_DATA_PINS   0x00FFFF00u
 #define PS_BUS_IN()    (*rio_oe_clr = PS_DATA_PINS)
 #define PS_BUS_OUT()   (*rio_oe_set = PS_DATA_PINS)
 #else
-#define PS_BUS_IN()    ((void)0)
-#define PS_BUS_OUT()   ((void)0)
+/* Data bus direction for reads.
+ *
+ * The CPLD drives D0-D15 (GPIO 8-23) for a data read (REG_DATA with WR
+ * held) and for a status read (REG_STATUS). Those pins used to stay Pi
+ * OUTPUTS throughout - driving the 0s txn_pulse() leaves on them - so
+ * every read was the Pi and the CPLD driving the same wires against each
+ * other, the CPLD merely winning. That is stress on both chips' output
+ * stages, and a level read during that fight is a race (cf. the
+ * "byte-swapped echoes of the Pi's own address phases" note below).
+ * The original PiStorm code flipped GPFSEL to input here; do it again.
+ *
+ * Three GPFSEL writes each way (GPIO 8-9 sit in GPFSEL0, 10-19 GPFSEL1,
+ * 20-23 GPFSEL2). GPFSEL2's GPIO 24-29 field is captured once at setup
+ * and written back unchanged: GPIO 28/29 are the Pi 4 Ethernet PHY's
+ * MDIO/MDC. */
+static uint32_t gpfsel2_keep;          /* GPIO 24-29 function bits, as found */
+
+#define PS_BUS_IN()  do { gpio [0] = GPFSEL0_INPUT;  gpio [1] = GPFSEL1_INPUT; \
+                          gpio [2] = gpfsel2_keep | GPFSEL2_INPUT; } while (0)
+#define PS_BUS_OUT() do { gpio [0] = GPFSEL0_OUTPUT; gpio [1] = GPFSEL1_OUTPUT; \
+                          gpio [2] = gpfsel2_keep | GPFSEL2_OUTPUT; } while (0)
 #endif
 
 volatile uint32_t *gpclk;
@@ -428,14 +445,13 @@ void ps_setup_protocol ( void )
 #ifdef PI5
   rp1_setup_pins ();
 #else
-  gpio [0] = GPFSEL0_OUTPUT;
-  gpio [1] = GPFSEL1_OUTPUT;
   /* GPFSEL2 covers GPIO 20-29, but PiStorm only owns 20-23 (bits 0-11).
-   * Read-modify-write: on a Pi 4, GPIO 28/29 are the Ethernet PHY's
+   * Keep the rest as found: on a Pi 4, GPIO 28/29 are the Ethernet PHY's
    * MDIO/MDC (ALT5). Writing the whole register turned them into plain
    * inputs, cutting the GENET driver off from its PHY - with a cable
    * plugged in the kernel then hangs or reboots. */
-  gpio [2] = ( gpio [2] & ~0x00000FFFu ) | ( GPFSEL2_OUTPUT & 0x00000FFFu );
+  gpfsel2_keep = gpio [2] & ~0x00000FFFu;
+  PS_BUS_OUT ();
 #endif
 
   *ioclr = TXN_END;
@@ -659,7 +675,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
   *set = (((ps_io->fc << 13) | ps_io->io_type | (ps_io->addr >> 16)) << 8) |  REG_ADDR_HI;
   txn_pulse (set, clr);
 
-  PS_BUS_IN ();                         /* Pi 5: let the CPLD drive D0-D15 */
+  PS_BUS_IN ();                         /* the CPLD drives D0-D15 now */
   *set = REG_DATA;
   *set = PIN_WR;//PIN_RD;
 
@@ -1194,7 +1210,7 @@ uint32_t ps_read_status_reg ()
    * when it is most wanted (bit 11 = arbitration state on fw 253) */
   int stuck = ps_wait_idle_bounded ("ps_read_status_reg");
   
-  PS_BUS_IN ();                         /* Pi 5: CPLD drives the status word */
+  PS_BUS_IN ();                         /* the CPLD drives the status word */
   *ioset = REG_STATUS;
   //*ioset = PIN_RD;
   
