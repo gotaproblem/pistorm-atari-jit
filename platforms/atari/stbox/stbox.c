@@ -188,6 +188,22 @@ static uint32_t g_vid_base;        /* latched video base                */
 static uint8_t  g_sync;            /* $FF820A                           */
 static uint8_t  g_res;             /* $FF8260                           */
 static uint8_t  g_bottom_open;     /* border opened during this frame   */
+static uint8_t  g_top_open;        /* top border opened this frame       */
+
+/* Top-border removal: the GLUE starts a 60 Hz display at line 34 and a
+ * 50 Hz one at line 63. Flip SYNC to 60 Hz around line 33 and back, and a
+ * 50 Hz frame's display - and with it the video address counter and the
+ * DE edges Timer B counts - starts at line 34. Fullscreen code locks to
+ * the beam by waiting for $FF8209 to move, so with the counter still
+ * parked until line 63 it ran 29 lines late, overran into the next VBL,
+ * and the main loop never got the CPU back (field case: the Replicants
+ * Turrican II intro, deaf to SPACE). */
+#define DE_FIRST_LINE_60  34
+#define DE_END_LINE       ( DE_FIRST_LINE + DE_LINES )   /* 263, both */
+static inline uint32_t de_first_line(void)
+{
+    return g_top_open ? DE_FIRST_LINE_60 : DE_FIRST_LINE;
+}
 static uint16_t g_pal[16];
 
 /* ------------------------------------------------------------------ */
@@ -1056,7 +1072,7 @@ static void mfp_timera_event(void)
 /* Timer B in event mode counts end-of-line (DE trailing edge) pulses */
 static void mfp_timerb_event(void)
 {
-    if (g_line < DE_FIRST_LINE || g_line >= DE_FIRST_LINE + DE_LINES)
+    if (g_line < de_first_line() || g_line >= DE_END_LINE)
         return;
     if ((mfp.tbcr & 0x0F) == 0x08) {
         if (--mfp.tbmain == 0) {
@@ -1255,15 +1271,16 @@ static uint32_t hw_read(uint32_t a, int size)
 #ifdef STBOX_OLD_VIDCOUNTER                    /* harness A/B: pre-fix model */
         off = (g_frame_cyc / 2) & ~1u; (void)line; (void)cyc; (void)stride;
 #else
-        if (line < DE_FIRST_LINE)                  off = 0;
-        else if (line >= DE_FIRST_LINE + DE_LINES) off = DE_LINES * stride;
+        uint32_t first = de_first_line();
+        if (line < first)                          off = 0;
+        else if (line >= DE_END_LINE)              off = (DE_END_LINE - first) * stride;
         else {
             uint32_t in = 0;
             if (cyc > DE_START_CYC) {
                 in = (cyc - DE_START_CYC) / 2;
                 if (in > DE_BYTES) in = DE_BYTES;
             }
-            off = (line - DE_FIRST_LINE) * stride + (in & ~1u);
+            off = (line - first) * stride + (in & ~1u);
         }
 #endif
         uint32_t vc = (g_vid_base + off) & 0xFFFFFF;
@@ -1420,6 +1437,8 @@ static void hw_write(uint32_t a, uint32_t v, int size)
          * else it is an ordinary rate set and means nothing here. */
         if (g_line >= 260 && g_line <= 266)
             g_bottom_open = 1;
+        if (g_line >= 32 && g_line <= 34)
+            g_top_open = 1;
         return;
     }
     if (a >= 0xFF8240 && a < 0xFF8260) {
@@ -2153,6 +2172,7 @@ void stbox_slice(uint64_t now)
                 g_cap_w = (g_cap_w + 1u) % STBOX_CAP_BUFS;
                 g_disp_base = g_vid_base;
                 g_bottom_open = 0;
+                g_top_open = 0;
                 stbox_shared.frame++;
                 update_irq();
             } else {
