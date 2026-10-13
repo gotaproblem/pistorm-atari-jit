@@ -317,7 +317,12 @@ void ps_setup_protocol ( void )
 
   gpio [0] = GPFSEL0_OUTPUT;
   gpio [1] = GPFSEL1_OUTPUT;
-  gpio [2] = GPFSEL2_OUTPUT;
+  /* GPFSEL2 covers GPIO 20-29, but PiStorm only owns 20-23 (bits 0-11).
+   * Read-modify-write: on a Pi 4, GPIO 28/29 are the Ethernet PHY's
+   * MDIO/MDC (ALT5). Writing the whole register turned them into plain
+   * inputs, cutting the GENET driver off from its PHY - with a cable
+   * plugged in the kernel then hangs or reboots. */
+  gpio [2] = ( gpio [2] & ~0x00000FFFu ) | ( GPFSEL2_OUTPUT & 0x00000FFFu );
 
   *ioclr = TXN_END;
 }
