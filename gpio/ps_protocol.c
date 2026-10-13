@@ -479,7 +479,7 @@ inline void ps_write_8 (uint32_t addr, uint16_t data)
 
   ps_write (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect(ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -496,7 +496,7 @@ inline void ps_write_16 (uint32_t addr, uint16_t data)
 
   ps_write (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect(ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -522,7 +522,7 @@ inline void ps_write_32 (uint32_t addr, uint32_t data)
   ps_write_txn (&txn);
   ps_unlock_bus ();
 
-  if (txn.berr) {
+  if (__builtin_expect(txn.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr + 2;
   }
@@ -673,7 +673,7 @@ inline uint16_t ps_read_16 (uint32_t addr)
 
   ps_read (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect(ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -695,7 +695,7 @@ inline uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_ou
   if (berr_out)
     *berr_out = ps_io.berr;
 
-  if (ps_io.berr) {
+  if (__builtin_expect(ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -714,7 +714,7 @@ inline uint8_t ps_read_8 (uint32_t addr)
 
   ps_read (&ps_io);
 
-  if (ps_io.berr) {
+  if (__builtin_expect(ps_io.berr, 0)) {
     g_buserr = 1; 
     g_buserr_addr = addr;
   } 
@@ -752,7 +752,7 @@ inline uint8_t ps_read_8_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
   if (berr_out)
     *berr_out = ps_io.berr;
 
-  if (ps_io.berr) {
+  if (__builtin_expect(ps_io.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr;
   }
@@ -1008,7 +1008,7 @@ inline uint32_t ps_read_32 (uint32_t addr)
   ps_read_txn (&txn);
   ps_unlock_bus ();
 
-  if (txn.berr) {
+  if (__builtin_expect(txn.berr, 0)) {
     g_buserr = 1;
     g_buserr_addr = addr + 2;
   }
@@ -1050,9 +1050,7 @@ void ps_write_status_reg ( uint16_t value )
 {
   volatile uint32_t *const set = ioset;
   volatile uint32_t *const clr = ioclr;
-  //static int timeout;
-  
-  //timeout = 1000000;
+
   ps_lock_bus();
 
   /* make sure no IO in progress - but never forever, see above */
@@ -1060,9 +1058,6 @@ void ps_write_status_reg ( uint16_t value )
   
   *set = (value << 8) | REG_STATUS;
   txn_pulse (set, clr);
-
-  //if ( timeout <= 0 )
-  //  printf ( "ps_write_status_reg () timed-out\n" );
 
   /* when writing status, there isn't a PI_TXN_IN_PROGRESS */
   ps_unlock_bus();
