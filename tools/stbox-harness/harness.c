@@ -201,6 +201,12 @@ int main(int argc, char **argv)
             trace_seen = stbox_trace_count;
         }
 
+        if (getenv("HARNESS_PC")) {
+            unsigned idx = stbox_pc_ring_idx;
+            printf("  %3us pc:", sec);
+            for (int k = 8; k > 0; k--) printf(" %06X", stbox_pc_ring[(idx - (unsigned)k) & (STBOX_PC_RING - 1)]);
+            printf("\n");
+        }
         uint32_t h = screen_hash();
         if (h != last_hash) { last_hash = h; last_change_sec = sec; }
 
