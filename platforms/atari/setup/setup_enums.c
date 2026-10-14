@@ -441,6 +441,8 @@ int se_machine_wants(const char *machine, int i, const char **key, const char **
     return 0;
 }
 
+/* The cpu a machine requires, exactly (NULL: any). Falcon TOS 4.0x runs
+ * PMOVE on the 68030's MMU from reset - a 68040/060 halts there. */
 const char *se_machine_min_cpu(const char *machine)
 {
     return !strcasecmp(machine_word(machine), "falcon") ? "68030" : NULL;

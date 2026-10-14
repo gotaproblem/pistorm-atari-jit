@@ -540,6 +540,19 @@ static void settle(struct state *st)
     if (st->sel == keep) move_sel(st, -1);
 }
 
+/* the cpu changed on a machine that allows only one (falcon: 68030):
+ * put it back and say why */
+static void pin_machine_cpu(struct state *st)
+{
+    const char *m = sc_get(&st->cfg, st->sec, "machine");
+    const char *need = se_machine_min_cpu(m);
+    const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
+    if (!need || (cpu && !strcasecmp(cpu, need)))
+        return;
+    if (sc_set(&st->cfg, st->sec, "cpu", need) == 0)
+        snprintf(st->msg, sizeof st->msg, "falcon needs a %s - cpu kept at %s", need, need);
+}
+
 /* the cpu changed: keys its rule now forbids leave the build */
 static void drop_by_rules(struct state *st)
 {
@@ -579,11 +592,11 @@ static void apply_machine(struct state *st)
         if (sc_set(&st->cfg, st->sec, key, val) == 0)
             DID("%s+%.10s", *did ? " " : "", key);
     }
-    const char *min = se_machine_min_cpu(m);
+    const char *need = se_machine_min_cpu(m);      /* falcon: exactly 68030 */
     const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
-    if (min && se_index("cpu", cpu ? cpu : "68000") < se_index("cpu", min) &&
-        sc_set(&st->cfg, st->sec, "cpu", min) == 0)
-        DID("%scpu %.6s", *did ? " " : "", min);
+    if (need && (!cpu || strcasecmp(cpu, need)) &&
+        sc_set(&st->cfg, st->sec, "cpu", need) == 0)
+        DID("%scpu %.6s", *did ? " " : "", need);
     int asw = acsi_switch_line(st);
     const char *a = asw >= 0 ? sc_get_n(&st->cfg, st->sec, "acsi", asw) : NULL;
     if (a && sp_row_on("acsi", a) && se_machine_rule("acsi", m) &&
@@ -1006,8 +1019,10 @@ static void tick(struct state *st, int open_editor_for_text)
         snprintf(st->msg, sizeof st->msg, "%.20s on", r->text);
     else
         snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text, tv);
-    if (!strcasecmp(r->text, "cpu"))
+    if (!strcasecmp(r->text, "cpu")) {
         drop_by_rules(st);
+        pin_machine_cpu(st);
+    }
     if (!strcasecmp(r->text, "machine"))
         apply_machine(st);
 }
@@ -1111,8 +1126,10 @@ static void choose_accept(struct state *st)
     } else if (sc_set_n(&st->cfg, st->sec, r->text, r->ord, c) == 0) {
         snprintf(st->msg, sizeof st->msg, "%.20s = %.30s", r->text,
                  se_label(r->text, st->choice));
-        if (!strcasecmp(r->text, "cpu"))
+        if (!strcasecmp(r->text, "cpu")) {
             drop_by_rules(st);
+            pin_machine_cpu(st);
+        }
         if (!strcasecmp(r->text, "machine"))
             apply_machine(st);
     }

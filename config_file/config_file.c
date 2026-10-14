@@ -1534,6 +1534,22 @@ struct emulator_config *load_config_file_section(char *filename,
     printf ("[CFG] ACSI: %d image line%s ignored - the section has no `acsi enabled`\n",
             acsi_n, acsi_n == 1 ? "" : "s");
 
+  /* `machine falcon` is a 68030 and nothing else. Falcon TOS 4.0x
+   * programs the 68030's own MMU (PMOVE) in its first instructions after
+   * reset; a 68040/060 has no PMOVE, takes a line-F trap before any
+   * vector is set and halts. Below a 68030 there is no 32-bit bus for
+   * TT-RAM/PSVIDEL. Whatever order the cpu and machine lines came in,
+   * the build boots as a 68030. */
+  if (cfg->machine_set && cfg->machine_kind == 3 &&
+      cfg->cpu_type != M68K_CPU_TYPE_68030 - 1)
+  {
+    printf ("[CFG] machine falcon: cpu %s not allowed - Falcon TOS needs a "
+            "68030, forcing 68030\n",
+            (cfg->cpu_type + 1 >= 0 && cfg->cpu_type + 1 < M68K_CPU_TYPES)
+              ? cpu_types[cfg->cpu_type + 1] : "?");
+    cfg->cpu_type = M68K_CPU_TYPE_68030 - 1;
+  }
+
   if (cfg->cpu_type < M68K_CPU_TYPE_68020 - 1)
   {
     if (cfg->fpu)
