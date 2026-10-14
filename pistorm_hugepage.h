@@ -15,8 +15,11 @@
  *                     /proc/sys/vm/nr_hugepages). Guaranteed 2 MB, never
  *                     split, no khugepaged. Opt-in: PISTORM_HUGETLB=1.
  *   2. THP/madvise  - anonymous mmap, 2 MB aligned, madvise(MADV_HUGEPAGE).
- *                     Works out of the box on Raspberry Pi OS 64-bit
- *                     (CONFIG_TRANSPARENT_HUGEPAGE_MADVISE). Default.
+ *                     Default. Needs CONFIG_TRANSPARENT_HUGEPAGE, which the
+ *                     stock Raspberry Pi OS Pi 4 kernel does NOT have (no
+ *                     /sys/kernel/mm/transparent_hugepage): madvise fails
+ *                     and the region silently stays on 4 KB pages - use
+ *                     backend 1 there.
  * Either way the caller gets a plain pointer; nothing else changes.
  *
  * PISTORM_HUGEPAGE=0 disables both (plain mmap) for A/B testing.
@@ -37,6 +40,11 @@ extern "C" {
  * implied. Returns MAP_FAILED on error, exactly like mmap(). Regions
  * smaller than 2 MB fall through to a plain mmap(). `tag` is for the log. */
 void *pistorm_mmap_huge(size_t size, int prot, int extra_flags, const char *tag);
+
+/* 1 if `base` is the start of a region pistorm_mmap_huge() put on
+ * hugetlbfs pages (such a mapping cannot be partly remapped below 2 MB
+ * granularity), else 0. */
+int pistorm_huge_is_hugetlb(const void *base);
 
 /* Print, once, how much of each tagged region actually landed on 2 MB pages
  * (AnonHugePages from /proc/self/smaps). Call after mlockall() has faulted

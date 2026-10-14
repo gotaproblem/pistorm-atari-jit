@@ -652,6 +652,15 @@ static void stram_alias_init(void)
     if (g_stram_st_mmu)
         fprintf(stderr, "[STRAM] plain-ST MMU flavour: A10/A20 bit-fold "
                 "modelled in the accessors while configured > actual\n");
+    /* hugetlbfs natmem (PISTORM_HUGETLB=1): MAP_FIXED of a 128K chunk can't
+     * split a 2 MB hugetlb page (EINVAL -> abort). The 4 MB ST window is
+     * exactly two whole huge pages at a 2 MB-aligned base, so drop them
+     * first; the alias layout then maps into the hole (4K pages, 4 MB). */
+    if (pistorm_huge_is_hugetlb(natmem_offset) &&
+        munmap(natmem_offset, ST_RAM_SIZE) != 0) {
+        perror("[STRAM] hugetlb ST window unmap");
+        abort();
+    }
     stram_alias_layout();
     /* mem_banks[] routing for an absent bank is applied by jit_mem_init
      * once the banks exist (stram_alias_apply_banks) */

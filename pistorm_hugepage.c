@@ -145,12 +145,31 @@ void *pistorm_mmap_huge(size_t size, int prot, int extra_flags, const char *tag)
             errno = e;
             return MAP_FAILED;
         }
-        if (!thp_ok)
+        if (!thp_ok) {
+            /* Not behind pst_verbose: a kernel without THP silently costs
+             * every big mapping its 2 MB pages, so say so once. */
+            static int warned;
+            if (!warned) {
+                warned = 1;
+                fprintf(stderr, "[HUGEPAGE] kernel has no transparent huge pages "
+                        "(no /sys/kernel/mm/transparent_hugepage) - 4K pages; "
+                        "use PISTORM_HUGETLB=1 with 'hugepagesz=2M hugepages=N' "
+                        "in cmdline.txt\n");
+            }
             note(tag, aligned, rsz, "THP unavailable (madvise failed) - 4K pages");
+        }
         else
             note(tag, aligned, rsz, "THP madvise(MADV_HUGEPAGE), 2M aligned");
         return aligned;
     }
+}
+
+int pistorm_huge_is_hugetlb(const void *base)
+{
+    for (int i = 0; i < g_nregions; i++)
+        if (g_regions[i].base == base)
+            return strstr(g_regions[i].how, "hugetlb") != NULL;
+    return 0;
 }
 
 /* Walk /proc/self/smaps once and sum AnonHugePages for each noted region. */
