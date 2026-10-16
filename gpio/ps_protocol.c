@@ -473,11 +473,11 @@ typedef struct {
 /* The hot paths cache the GPIO register pointers in const locals: the
  * spin loops' "memory"-clobbering yield (and any barrier) otherwise
  * forces the three GLOBAL pointers to be reloaded around every access.
- * Same wire sequence as txn_go(), just through the cached pointers. */
+ */
 __attribute__((always_inline)) static inline void txn_pulse (volatile uint32_t *const set,
                               volatile uint32_t *const clr)
 {
-  *set = PIN_WR; *set = PIN_WR;
+  *set = PIN_WR; *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
   *clr = PIN_WR; *clr = PIN_WR;
   *clr = TXN_END;
 }
@@ -677,7 +677,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
 
   PS_BUS_IN ();                         /* the CPLD drives D0-D15 now */
   *set = REG_DATA;
-  *set = PIN_WR;//PIN_RD;
+  *set = PIN_WR;
 
   {
     uint32_t spins = 0;
@@ -742,6 +742,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
    * Addressing: GPIP is the LOW byte. A byte read of $FFFA01 extracts
    * the low byte of data; a word read of $FFFA00 carries GPIP in its
    * low byte; the high byte of either is not GPIP. */
+#if (1)
   {
     uint32_t a = ps_io->addr & 0x00FFFFFFu;
     if (__builtin_expect ((ps_io->io_type == READ_BYTE && a == 0x00FFFA01u) ||
@@ -786,6 +787,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
       }
     }
   }
+#endif
   return status;
 }
 
@@ -1212,7 +1214,6 @@ uint32_t ps_read_status_reg ()
   
   PS_BUS_IN ();                         /* the CPLD drives the status word */
   *ioset = REG_STATUS;
-  //*ioset = PIN_RD;
   
   if (!stuck)
     ps_wait_idle_bounded ("ps_read_status_reg");
