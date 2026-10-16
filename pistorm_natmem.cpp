@@ -1991,7 +1991,17 @@ volatile uae_u32 pistorm_dm_berr_addr, pistorm_dm_berr_count;
  * by write/readback still terminates correctly on the constant 0. */
 static inline bool dm_bus_addr(uaecptr *a)
 {
-    if ((*a & 0xFF000000) == 0xFF000000)
+    /* 24-BIT MAP (no TT-RAM, no addr32): a 68000 has no A24-A31, so
+     * there is no high space and the silent-zero contract below cannot
+     * apply - $015FA89C IS $5FA89C. Without this mask, a wild jump into
+     * a 24-bit mirror of undecoded space (field case 15 Oct: Bad Apple
+     * landed at $015FA89C) fetched silent zeros and slid ~8 MB of
+     * ori.b #0,d0 into the ROM mirror and a cold reboot, where a real ST
+     * takes a bus error on the first fetch. Masked, the access goes to
+     * the real bus and the GLUE's own BERR answers it. */
+    if (pistorm_addr24)
+        *a &= 0x00FFFFFF;
+    else if ((*a & 0xFF000000) == 0xFF000000)
         *a &= 0x00FFFFFF;
     if ((*a & 0xFF000000) == 0)
         return true;
