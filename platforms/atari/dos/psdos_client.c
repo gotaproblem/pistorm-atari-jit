@@ -737,6 +737,9 @@ static const uint16_t st_to_retrok[128] = {
 };
 
 #define ST_UNDO 0x61
+#define ST_CTRL 0x1D                 /* Control   */
+#define ST_ALT  0x38                 /* Alternate */
+#define ST_G    0x22
 
 static unsigned linux_to_retrok(unsigned c)
 {
@@ -781,8 +784,19 @@ static unsigned linux_to_retrok(unsigned c)
 
 void psdos_key_st(uint8_t scan, int down)
 {
+  /* The ST keyboard gets the same Ctrl+Alt+G release DOSGEM's info line
+   * advertises - it used to be USB-only (psdos_key_linux), so on the
+   * native IKBD keyboard only Undo let go and Ctrl+Alt+G went to DOS.
+   * The Control/Alternate presses already reached DOS; the KEYS_UP the
+   * release sends lets go of them. */
+  static int st_ctrl, st_alt;
   scan &= 0x7F;
-  if (scan == ST_UNDO) {
+  if (scan == ST_CTRL)
+    st_ctrl = down;
+  else if (scan == ST_ALT)
+    st_alt = down;
+  if (scan == ST_UNDO ||
+      (scan == ST_G && st_ctrl && st_alt)) {
     if (down && g_capture)
       psdos_set_capture(0);
     return;
