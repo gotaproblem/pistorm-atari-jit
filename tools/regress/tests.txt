@@ -1,0 +1,15 @@
+# Regression register - one guest test per line, run by tools/regress/run.sh.
+#
+#   name | cfg section | hdd image (AUTO-starts the test) | seconds | what it guards
+#
+# The section is copied out of ../configs/psctrl.cfg as-is, so each test
+# runs on the same machine settings you use by hand; only the hdd line is
+# swapped for the test image. A test PASSES when the guest runs the whole
+# time with no EmuTOS "Panic:" and the emulator neither crashes nor exits.
+#
+# Test image: a copy of a bootable C: image with the program in C:\AUTO\
+# (EmuTOS runs C:\AUTO\*.PRG at boot - rename .TOS to .PRG). Anything the
+# program loads by relative name goes in C:\ (root) beside AUTO.
+#
+sndh44   | games | ../dkimages/regress-sndh44.img   | 90 | fullscreen YM intro: generated code + Timer A music (crash 16 Oct)
+#badapple | <ste section> | ../dkimages/regress-badapple.img | 240 | color.50k: HBL code in data + DMA sound ring (machine ste)
