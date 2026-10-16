@@ -423,7 +423,13 @@ const char *se_machine_rule(const char *key, const char *machine)
     return NULL;
 }
 
+/* STE and Mega ST shipped with the blitter too (config_file.c's
+ * blitter_machine_default agrees): choosing either switches an explicit
+ * `blitter disabled` back on. A `real` blitter line counts as on and is
+ * left alone. */
 static const struct { const char *machine, *key, *value; } mwants[] = {
+    { "ste",    "blitter",    "enabled" },
+    { "megast", "blitter",    "enabled" },
     { "falcon", "blitter",    "enabled" },
     { "falcon", "psvidel",    "enabled" },
     { "falcon", "falcon_dsp", "enabled" },
