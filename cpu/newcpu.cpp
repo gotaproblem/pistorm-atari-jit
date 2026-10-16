@@ -79,6 +79,33 @@ static unsigned pistorm_pc_ring_i;
 #include "debug.h"
 #include "debugmem.h"
 #include "gui.h"
+
+#if CPU_PC_RING
+/* One ring entry per instruction - except in UNDECODED space (the dummy
+ * bank): a wild jump that lands there and slides through fetched zeros
+ * is kept as ONE entry, its first PC, so the jump that started it is not
+ * flushed out of the ring by the slide (field case 15 Oct: 256 entries of
+ * $01DFFxxx, the jump long gone). One array load + compare per insn. */
+extern addrbank pistorm_dummy_bank;
+static unsigned pistorm_pc_ring_in_dummy;
+/* FROZEN at the first PC in undecoded space: interrupts keep firing
+ * during a slide and each one's handler PCs would flush the jump out
+ * again (field case 15 Oct, second run). The ring then holds the 255
+ * PCs that LED to the jump plus its landing; it thaws once dumped. */
+static unsigned pistorm_pc_ring_frozen;
+static inline void pistorm_pc_ring_push(uaecptr pc)
+{
+	if (pistorm_pc_ring_frozen)
+		return;
+	unsigned d = (mem_banks[bankindex(pc)] == &pistorm_dummy_bank);
+	if (d && pistorm_pc_ring_in_dummy)
+		return;
+	pistorm_pc_ring_in_dummy = d;
+	pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = pc;
+	if (d)
+		pistorm_pc_ring_frozen = 1;
+}
+#endif
 #include "savestate.h"
 #include "blitter.h"
 #include "ar.h"
@@ -4724,7 +4751,7 @@ extern "C" void pistorm_reset_state_dump(void)
 		for (unsigned k = 0; k < 256; k++)
 			fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[PCRING] ",
 				pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255]);
-		fprintf(stderr, "\n");
+		fprintf(stderr, "\n"); pistorm_pc_ring_frozen = 0;   /* dumped: thaw */
 	}
 #endif
 	fflush(stderr);
@@ -4851,7 +4878,7 @@ static void pistorm_bad_opcode_dump(int nr)
 	for (unsigned k = 0; k < 256; k++)
 		fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[CPU]   ",
 			pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255]);
-	fprintf(stderr, "\n");
+	fprintf(stderr, "\n"); pistorm_pc_ring_frozen = 0;   /* dumped: thaw */
 #endif
 }
 
@@ -4946,8 +4973,14 @@ void REGPARAM2 Exception(int nr)
 			e->has_regs = faultclass ? 1 : 0;
 			memset(e->code, 0, sizeof e->code);
 			if (faultclass) {
-				/* full 32-bit pc (TT-RAM code!); only strip the odd bit */
-				uae_u32 cpc = e->pc & 0xFFFFFFFEu;
+				/* full 32-bit pc (TT-RAM code!); only strip the odd bit.
+				 * 24-bit map: pistorm_pc_executable() judges the PC with
+				 * bits 24-31 masked, so READ it masked too - the mirror is
+				 * only 272 MB, and a tagged PC ($353AF992, Bad Apple 15 Oct)
+				 * read unmasked faulted the HOST: SIGSEGV in Exception(). */
+				extern int pistorm_addr24;
+				uae_u32 cpc = e->pc & (pistorm_addr24 ? 0x00FFFFFEu
+				                                      : 0xFFFFFFFEu);
 				if (pistorm_pc_executable(cpc)) {
 					uae_u8 *nm = natmem_offset;
 					for (int w = 0; w < 5; w++)
@@ -4958,7 +4991,8 @@ void REGPARAM2 Exception(int nr)
 					 * actually faulted - and whatever loaded the address
 					 * register it went through - is behind us, not at pc. */
 					for (int w = 0; w < 6; w++) {
-						uae_u32 a = cpc - 12 + 2 * (uae_u32)w;
+						uae_u32 a = (cpc - 12 + 2 * (uae_u32)w) &
+						            (pistorm_addr24 ? 0x00FFFFFFu : 0xFFFFFFFFu);
 						e->pre[w] = pistorm_pc_executable(a)
 						            ? (uae_u16)(((uae_u16)nm[a] << 8) | nm[a + 1])
 						            : 0;
@@ -9155,7 +9189,7 @@ static void m68k_run_mmu060()
 				f.x = regflags.x;
 				regs.instruction_pc = m68k_getpc();
 #if CPU_PC_RING
-				pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = regs.instruction_pc;
+				pistorm_pc_ring_push(regs.instruction_pc);
 #endif
 
 				do_cycles(cpu_cycles);
@@ -9858,7 +9892,7 @@ static void m68k_run_2p()
 			{
 				r->instruction_pc = m68k_getpc();
 #if CPU_PC_RING
-				pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = regs.instruction_pc;
+				pistorm_pc_ring_push(regs.instruction_pc);
 #endif
 				r->opcode = regs.irc;
 
@@ -10057,7 +10091,7 @@ static void m68k_run_2_000()
 #endif
 				r->instruction_pc = m68k_getpc();
 #if CPU_PC_RING
-				pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = r->instruction_pc;
+				pistorm_pc_ring_push(r->instruction_pc);
 #endif
 
 				r->opcode = x_get_iword(0);
@@ -10135,7 +10169,7 @@ static void m68k_run_2_020()
 					/* same ring as the 68000 loop: with jit off and
 					 * PISTORM_CPU_DIAG=1 the RESET dump prints the last
 					 * 256 PCs - the jump into the ROM among them */
-					pistorm_pc_ring[pistorm_pc_ring_i++ & 255] = r->instruction_pc;
+					pistorm_pc_ring_push(r->instruction_pc);
 #endif
 
 					r->opcode = x_get_iword(0);
