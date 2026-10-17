@@ -1034,17 +1034,32 @@ static void hdc_trace_sector(const uint8_t *b)
 static void hdc_sync_pull(void)
 {
     fdc.hdc_pending = false;
-    uint32_t len = (uint32_t)fdc.hdc_count * 512u;
-    if (!hdc_window_ok(fdc.hdc_base, len))
+    uint32_t want = (uint32_t)fdc.hdc_count * 512u;
+    if (!hdc_window_ok(fdc.hdc_base, want))
         return;
-    hdc_wait_dma_done(fdc.hdc_base, len);
+    hdc_wait_dma_done(fdc.hdc_base, want);
+
+    /* Pull only what the DMA chip actually wrote - the counter's travel -
+     * not the whole sector-count window. Drivers routinely program the
+     * count as a ceiling: TOS 3.06 sets 255 for a 1-sector READ(6), the
+     * device stops after 512 bytes, and the rest of the window in REAL RAM
+     * is whatever was there before. Low ST-RAM is mirror-only (CPU writes
+     * never reach the real chips below $10000), so copying 130560 stale
+     * bytes from $1654 back over the mirror wiped TOS's live variables -
+     * field case 17 Oct: the screen size at $2908-$2917 became text, the
+     * desktop's screen clear ran 31 MB, and TOS 3.06 crashed. rfdc_pull()
+     * (real floppy) has always limited itself the same way. */
+    uint32_t moved = (hdc_dma_counter() - fdc.hdc_base) & 0xFFFFFFu;
+    uint32_t len = moved < want ? moved : want;
+
     uint8_t buf[512];
     for (uint32_t off = 0; off < len; off += 512u) {
-        for (uint32_t i = 0; i < 512u; i++)
+        uint32_t n = len - off < 512u ? len - off : 512u;
+        for (uint32_t i = 0; i < n; i++)
             buf[i] = ps_read_8(fdc.hdc_base + off + i);
-        pistorm_dma_to_stram(fdc.hdc_base + off, buf, 512u);
+        pistorm_dma_to_stram(fdc.hdc_base + off, buf, n);
 
-        if (HT_ON() && off == 0)
+        if (HT_ON() && off == 0 && n == 512u)
             hdc_trace_sector(buf);
     }
     FDD_DBG("HDC sync pull: %u sectors @ 0x%06X", fdc.hdc_count, fdc.hdc_base);
@@ -1057,8 +1072,9 @@ static void hdc_sync_pull(void)
         uint32_t sum = 2166136261u, diff = 0, first = 0xFFFFFFFFu;
         uint8_t  v[512];
         for (uint32_t off = 0; off < len; off += 512u) {
-            pistorm_dma_from_stram(fdc.hdc_base + off, v, 512u);  /* mirror */
-            for (uint32_t i = 0; i < 512u; i++) {
+            uint32_t n = len - off < 512u ? len - off : 512u;
+            pistorm_dma_from_stram(fdc.hdc_base + off, v, n);  /* mirror */
+            for (uint32_t i = 0; i < n; i++) {
                 sum = (sum ^ v[i]) * 16777619u;
                 if (ps_read_8(fdc.hdc_base + off + i) != v[i]) {
                     if (first == 0xFFFFFFFFu)
@@ -1072,8 +1088,8 @@ static void hdc_sync_pull(void)
             FDD_LOG("HDC pull check: %u B @0x%06X sum %08X  REREAD DIFFERS in "
                     "%u bytes (first at +%u)", len, fdc.hdc_base, sum, diff, first);
         else
-            FDD_LOG("HDC pull check: %u B @0x%06X sum %08X  reread ok",
-                    len, fdc.hdc_base, sum);
+            FDD_LOG("HDC pull check: %u B @0x%06X sum %08X  reread ok "
+                    "(window %u B)", len, fdc.hdc_base, sum, want);
     }
 }
 
