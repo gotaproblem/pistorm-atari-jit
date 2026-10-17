@@ -39,17 +39,18 @@ while IFS='|' read -r name section image secs what; do
 		[ $want -eq 1 ] || continue
 	fi
 	log="$out/$name.log"
-	if [ ! -f "$image" ]; then
+	# "-" = no test disk: boot the section with its own drives
+	if [ "$image" != "-" ] && [ ! -f "$image" ]; then
 		echo "$name: SKIP - $image not found"
 		continue
 	fi
 	cfg="$out/$name.cfg"
 	# the section body, verbatim, minus its hdd lines; then the test disk
-	awk -v s="[$section]" '
+	awk -v s="[$section]" -v keep="$image" '
 		/^\[/ { on = ($0 == s); next }
-		on && $1 != "hdd" { print }' "$cfg_src" > "$cfg"
+		on && (keep == "-" || $1 != "hdd") { print }' "$cfg_src" > "$cfg"
 	[ -s "$cfg" ] || { echo "$name: SKIP - no [$section] in $cfg_src"; continue; }
-	echo "hdd $image" >> "$cfg"
+	[ "$image" = "-" ] || echo "hdd $image" >> "$cfg"
 
 	echo "$name: running ${secs}s on $commit ..."
 	sudo timeout -s INT "$secs" ./emulator --config "$cfg" --no-setup > "$log" 2>&1
@@ -57,8 +58,16 @@ while IFS='|' read -r name section image secs what; do
 	sleep 2                              # let the board settle between tests
 
 	reason=""
+	# EmuTOS says Panic:; Atari TOS just bombs, so also fail on what the
+	# emulator itself reports when a guest runs away or the host faults
 	if grep -q 'Panic:' "$log"; then
 		reason="guest panic: $(grep -m1 -A3 'Panic:' "$log" | tr -s ' \n' ' ' | cut -c1-120)"
+	elif grep -q '^\[SIGSEGV\]' "$log"; then
+		reason="host crash: $(grep -m1 '^\[SIGSEGV\]' "$log" | cut -c1-100)"
+	elif grep -q 'CPU halted' "$log"; then
+		reason="guest halted: $(grep -m1 'CPU halted' "$log" | cut -c1-100)"
+	elif grep -q 'instruction fetch from undecoded' "$log"; then
+		reason="guest ran away: $(grep -m1 'instruction fetch from undecoded' "$log" | cut -c1-100)"
 	elif [ $rc -ne 124 ]; then
 		reason="emulator exited early (rc=$rc)"
 	fi
