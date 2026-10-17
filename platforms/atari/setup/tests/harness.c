@@ -678,6 +678,14 @@ static void run_relevance(void)
     CHECK(se_off_value("lmc") && !strcmp(se_off_value("lmc"), "0"), "lmc off is 0");
     CHECK(se_off_value("blitter") && !strcmp(se_off_value("blitter"), "disabled"), "blitter off word");
     CHECK(se_off_value("fpu") == NULL, "fpu absent is off");
+    /* developer switches stay in the build when unticked, or their row
+     * (shown only while the line exists) would disappear for good */
+    CHECK(se_off_value("stram_cache") && !strcmp(se_off_value("stram_cache"), "disabled"),
+          "stram_cache untick keeps the line");
+    CHECK(se_off_value("stram_direct") && !strcmp(se_off_value("stram_direct"), "disabled"),
+          "stram_direct untick keeps the line");
+    CHECK(se_off_value("addr32") && !strcmp(se_off_value("addr32"), "disabled"),
+          "addr32 untick keeps the line");
     /* the ST-screen mirror on HDMI serves a GEM machine on an HDMI
      * monitor too, and fps paces that output whichever source it shows */
     CHECK(se_env("native_hdmi") == SE_BOTH, "native_hdmi is the ST-screen mirror: both");

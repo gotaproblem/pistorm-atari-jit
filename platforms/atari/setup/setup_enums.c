@@ -478,6 +478,13 @@ const char *se_off_value(const char *key)
     for (unsigned i = 0; i < sizeof absent_on / sizeof absent_on[0]; i++)
         if (!strcasecmp(key, absent_on[i].key))
             return absent_on[i].off;
+    /* A developer knob is only a row while its line is in the build, so
+     * unticking it must not drop the line: the row would vanish and the
+     * page could never turn it back on (field case: stram_cache and
+     * stram_direct gone from the Tuning tab after one untick). Write it
+     * off instead - every developer switch parses "disabled" as false. */
+    if (se_developer(key) && se_kind(key) == SE_K_SWITCH)
+        return "disabled";
     return NULL;
 }
 
