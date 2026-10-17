@@ -42,7 +42,25 @@
 /* Focused IDE access trace (make IDEDBG=1). Register names by offset so the
  * driver's probe sequence is readable. Status/alt-status reads are logged
  * only on VALUE CHANGE so a BSY spin-wait shows two lines, not thousands. */
+/* The register trace is always compiled now and switched at run time by
+ * PISTORM_IDE_TRACE=1 (make IDEDBG=1 still turns it on unconditionally):
+ * a TOS 2.06 boot that failed only with IDE images attached needed the
+ * probe sequence, and a compile-time switch costs a full rebuild. One
+ * cached getenv, one byte compare per access when off. */
+static int ide_trace_on(void)
+{
 #ifdef ATARI_IDE_DIAG
+    return 1;
+#else
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("PISTORM_IDE_TRACE");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on;
+#endif
+}
+
 static const char *ide_regname(int base)
 {
     switch (base) {
@@ -58,15 +76,16 @@ static const char *ide_regname(int base)
         default:   return "?";
     }
 }
-#define IDE_LOG_W(addr, port, base, val) \
+#define IDE_LOG_W(addr, port, base, val) do { if (ide_trace_on()) \
     fprintf(stderr, "[IDEw] @%06X p%d %-8s <= %02X %s\n", \
             (unsigned)(addr), (port), ide_regname(base), (unsigned)((val)&0xff), \
-            atariIDE[port] ? "" : "(NO DRIVE)")
-#define IDE_LOG_R(addr, port, base, val) \
+            atariIDE[port] ? "" : "(NO DRIVE)"); } while (0)
+#define IDE_LOG_R(addr, port, base, val) do { if (ide_trace_on()) \
     fprintf(stderr, "[IDEr] @%06X p%d %-8s => %02X %s\n", \
             (unsigned)(addr), (port), ide_regname(base), (unsigned)((val)&0xff), \
-            atariIDE[port] ? "" : "(NO DRIVE)")
+            atariIDE[port] ? "" : "(NO DRIVE)"); } while (0)
 #define IDE_LOG_STAT(addr, port, base, val) do {                 \
+        if (!ide_trace_on()) break;                              \
         static int last_stat = -1, last_ctrl = -1;               \
         int *lp = ((base) == 0x39) ? &last_ctrl : &last_stat;    \
         if (((val)&0xff) != *lp) {                               \
@@ -80,27 +99,21 @@ static const char *ide_regname(int base)
 /* data-port burst trace: first words of each transfer + total count */
 static unsigned ide_dbg_words, ide_dbg_burst;
 #define IDE_LOG_DATA_RESET() do {                                       \
+        if (!ide_trace_on()) break;                                     \
         if (ide_dbg_words)                                              \
             fprintf(stderr, "[IDEd] burst end: %u words\n", ide_dbg_words); \
         ide_dbg_words = 0; ide_dbg_burst++;                             \
     } while (0)
 #define IDE_LOG_DATA(val, width) do {                                   \
+        if (!ide_trace_on()) break;                                     \
         if (ide_dbg_words < 4)                                          \
             fprintf(stderr, "[IDEd] b%u w%u => %0*X\n", ide_dbg_burst, \
                     ide_dbg_words, (width), (unsigned)(val));           \
         ide_dbg_words++;                                                \
     } while (0)
-#define IDE_LOG_UNHANDLED(addr, kind, val)                              \
+#define IDE_LOG_UNHANDLED(addr, kind, val) do { if (ide_trace_on())    \
     fprintf(stderr, "[IDE?] %s @%06X => %04X (unhandled)\n",           \
-            (kind), (unsigned)(addr), (unsigned)(val))
-#else
-#define IDE_LOG_W(a,p,b,v)    ((void)0)
-#define IDE_LOG_R(a,p,b,v)    ((void)0)
-#define IDE_LOG_STAT(a,p,b,v) ((void)0)
-#define IDE_LOG_DATA_RESET()  ((void)0)
-#define IDE_LOG_DATA(v,w)     ((void)0)
-#define IDE_LOG_UNHANDLED(a,k,v) ((void)0)
-#endif
+            (kind), (unsigned)(addr), (unsigned)(val)); } while (0)
 
 
 static struct ide_controller *atariIDE [4] = {NULL, NULL, NULL, NULL};
@@ -153,9 +166,8 @@ void InitIDE (void)
   uint8_t num_IDE_drives = 0;
   int port = 0;
 
-#ifdef ATARI_IDE_DIAG
-  fprintf(stderr, "[IDE] diag build " __DATE__ " " __TIME__ "\n");
-#endif
+  if (ide_trace_on())
+    fprintf(stderr, "[IDE] register trace on (PISTORM_IDE_TRACE=1)\n");
 
   for ( int i = 0; i < IDE_MAX_HARDFILES && port < 4; i++ ) 
   {
