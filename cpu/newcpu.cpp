@@ -5233,6 +5233,19 @@ extern "C" int pistorm_hbl_handler_is_rte(void)
 	extern uae_u8 *natmem_offset;
 	if (!natmem_offset)
 		return 0;
+	/* A STOPped CPU must get the HBL whatever its handler does: taking the
+	 * interrupt is what wakes it, and do_interrupt() already refuses to
+	 * suppress level 2 while stopped for exactly that reason. This check
+	 * runs earlier, in the IPL sampler (emulator.c), so without it the
+	 * HBL never got that far. Field case 16 Oct, sndh44 INTRO: HBL vector
+	 * a bare RTE, Timer A routine syncs with `stop #$2100` (wait for the
+	 * next HBL). Skipped, it slept until the VBL, which nested inside the
+	 * IPL-3 Timer A routine every frame; the stack sank ~$230 a frame into
+	 * the program's variables (screen pointers, the Timer A vector) and
+	 * the intro crashed. regs.stopped is the CPU thread's; a stale read
+	 * costs at most one HBL line here. */
+	if (regs.stopped)
+		return 0;
 	const uae_u32 LOWLIM = 0x01000000u;   /* ST-RAM + ROM window */
 	uae_u32 vecaddr = regs.vbr + 0x68;    /* level-2 autovector (vector 26) */
 	if (vecaddr + 4 > LOWLIM)
