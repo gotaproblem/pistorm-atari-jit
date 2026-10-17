@@ -29,7 +29,7 @@ At some point I will include binaries for those technically challanged ;)
 ### Hardware
 Development has been done on a Raspberry Pi4 with 2GB and various ATARI platforms - STfm, STe, MST 
 
-**Raspberry Pi 5 has been tested and works.** CoreMark is about 2700 at the stock 2.4 GHz (a Pi 4 gives about 1090 at 1.5 GHz, about 1530 at 2.1 GHz). Build it with `make PIMODEL=PI5` (install-full.sh does this for you), and boot the 4K-page kernel - `kernel=kernel8.img` in config.txt, which the shipped `configs/config.txt` block sets under `[pi5]` - the Pi 5's default kernel uses 16K pages and the JIT protects its memory in 4K pages.
+**Raspberry Pi 5 has been tested and works.**[^pi5] CoreMark is about 2700 at the stock 2.4 GHz (a Pi 4 gives about 1090 at 1.5 GHz, about 1530 at 2.1 GHz). Build it with `make PIMODEL=PI5` (install-full.sh does this for you), and boot the 4K-page kernel - `kernel=kernel8.img` in config.txt, which the shipped `configs/config.txt` block sets under `[pi5]` - the Pi 5's default kernel uses 16K pages and the JIT protects its memory in 4K pages.
 
 In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried. ***Update Pi3A+ and Pi02w only have 512MB RAM. As things are, this build will not work on either of these parts. I may get around to looking in to it, but cannot say when.***
 You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
@@ -183,3 +183,5 @@ JIT speed WITH real translation.
 ~~Bus Arbitration is not working so Blitter, FDD, external ACSI bus devices will not work at the moment.~~
 Bus arbitration works with CPLD firmware 0.83a or later: external ACSI bus devices and the ST's floppy drive (real drive or Gotek) work.
 The high performance in a Mint environemnt may result in keyboard beeping - press the INSERT key to stop it
+
+[^pi5]: The current Atari PiSTorm JIT project will not pursue Pi5 development. The project remains Pi4 with support for Pi3B. Pi5 is included now as an experiment for anyone wishing to investigate.

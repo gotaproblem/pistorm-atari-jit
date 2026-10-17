@@ -14,7 +14,7 @@ clean **`--uninstall`** that reverses every system change.
 
 - **64-bit OS (aarch64).** The JIT backend is AArch64-only — a 32-bit OS can
   neither build nor run it. **The installer aborts if the OS isn't 64-bit.**
-- **Raspberry Pi 4 or Raspberry Pi 5.** The Pi 5 is tested and works (CoreMark
+- **Raspberry Pi 4 or Raspberry Pi 5.**[^pi5] The Pi 5 is tested and works (CoreMark
   about 2700 at its stock 2.4 GHz); the installer builds it with
   `PIMODEL=PI5` and the shipped `config.txt` block boots it on the 4K-page
   kernel the JIT needs. Pi 3 and Pi Zero 2 W are currently not supported.
@@ -540,3 +540,5 @@ If you package this for other people:
 - **Do not** bundle Atari TOS ROMs or any games/disk images — they're
   copyrighted. Ship the empty `roms/`/`dkimages/` folders and let users add
   their own.
+
+[^pi5]: The current Atari PiSTorm JIT project will not pursue Pi5 development. The project remains Pi4 with support for Pi3B. Pi5 is included now as an experiment for anyone wishing to investigate.
