@@ -14,7 +14,10 @@ clean **`--uninstall`** that reverses every system change.
 
 - **64-bit OS (aarch64).** The JIT backend is AArch64-only — a 32-bit OS can
   neither build nor run it. **The installer aborts if the OS isn't 64-bit.**
-- **Raspberry Pi 4** recommended (Pi 3 and Pi Zero 2 W are currently not supported).
+- **Raspberry Pi 4 or Raspberry Pi 5.** The Pi 5 is tested and works (CoreMark
+  about 2700 at its stock 2.4 GHz); the installer builds it with
+  `PIMODEL=PI5` and the shipped `config.txt` block boots it on the 4K-page
+  kernel the JIT needs. Pi 3 and Pi Zero 2 W are currently not supported.
 - **Raspberry Pi OS Lite (64-bit)** — a fresh install is fine and recommended.
 - **No desktop environment.** PiSTorm JIT can't run with a desktop: the
   compositor holds the display/DRM master (so `native_hdmi`/KMSDRM can't get the
@@ -40,7 +43,7 @@ Before touching anything, the installer verifies:
 | Check              | If it fails                                                       |
 |--------------------|------------------------------------------------------------------|
 | 64-bit (`aarch64`) | **Aborts** — re-install with 64-bit Raspberry Pi OS.              |
-| Pi model           | Warns on anything that is not a **Pi 4 / Pi 400 / CM4** — those are the only boards the JIT is validated on. It is a warning, not an abort. |
+| Pi model           | Warns on anything that is not a **Pi 4 / Pi 400 / CM4 or Pi 5 / Pi 500 / CM5**. The JIT is tested on the Pi 4 and the Pi 5; the Pi 400/CM4 and Pi 500/CM5 use the same chips but have not been tried. It is a warning, not an abort. |
 | RAM                | Warns if low, suggesting `make HEAVY_OPT=-O0` / swap for building. |
 | Desktop present    | Offers to disable it (console boot); **aborts** if you decline (`KILLGUI=1` to auto-disable). |
 
@@ -204,6 +207,11 @@ none exist).
 
 Nothing you had in those files is discarded.
 
+> **Pi 5: `kernel=kernel8.img`** (set under `[pi5]` in the shipped block). The
+> Pi 5 boots a 16K-page kernel by default; the JIT protects its memory in 4K
+> pages and needs the 4K-page kernel. If the PiStorm block was appended before
+> this line existed, add it to the `[pi5]` section of `config.txt` by hand.
+
 > **`gpu_mem=128` is a hard requirement on the Pi 4** (already set in the
 > shipped `configs/config.txt`). The VideoCore H.264 decoder (VIDPLAY film
 > playback) and encoder (screen recording) allocate their frame buffers from
@@ -220,15 +228,17 @@ Nothing you had in those files is discarded.
 ### Build the emulator
 
 If you choose to build, the script detects your Pi model and runs
-`make PIMODEL=…` — `PI4` for a Pi 4 / Pi 400 / CM4, `PI3` for a Pi 3, `PI02W`
-for a Zero 2 W, and `PI4` for anything it does not recognise. Note that the
+`make PIMODEL=…` — `PI4` for a Pi 4 / Pi 400 / CM4, `PI5` for a Pi 5 / Pi 500 /
+CM5, `PI3` for a Pi 3, `PI02W` for a Zero 2 W, and `PI4` for anything it does
+not recognise. Note that the
 `PI3`/`PI02W` cases exist in the script but those boards are **not currently
 supported**; the pre-flight check will already have warned you.
 
 You can always build later by hand:
 
 ```bash
-make -C pistorm-atari-jit          # PIMODEL is not actually needed for a Pi 4
+make -C pistorm-atari-jit                  # Pi 4 (the default)
+make -C pistorm-atari-jit PIMODEL=PI5      # Pi 5 - its GPIO is the RP1 chip, a different build
 ```
 
 The build stops early with a list of any missing `-dev` packages rather than
@@ -364,7 +374,7 @@ dd if=~/atari-share/media/somefilm.mkv of=/dev/null bs=1M count=500
 The second one is worth doing before concluding that video playback is broken.
 It reports a throughput figure; compare that against the file's bitrate, which
 `ffprobe` will tell you. 4K HEVC runs at roughly 50–80 Mbit/s — comfortable
-over the Pi 4's gigabit ethernet, marginal over Wi-Fi. Playback that stutters
+over the Pi's wired (RJ45) Ethernet, marginal over Wi-Fi. Playback that stutters
 at a *steady* rate is usually decode; playback that is fine and then hitches in
 bursts is usually the network.
 
@@ -475,6 +485,10 @@ form the setup page writes); a bare `fdd image` takes the next free
 drive, A then B. Drive B has its own row on the Drives tab. A drive with
 no image is left alone on the bus, so a real floppy drive on the ST still
 answers in B: while an image is served in A:.
+
+Real hardware on the ST's own ports works too: the CPLD firmware (0.83a or
+later) does 68000 bus arbitration, so the ST's DMA chip runs real ACSI hard
+disks and the real floppy drive or a Gotek.
 
 ---
 

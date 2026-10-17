@@ -38,6 +38,13 @@ arm_freq=1500
 gpu_mem=128
 
 
+[pi5]
+# Tested: CoreMark about 2700 at the stock 2.4 GHz - no overclock needed.
+# The JIT protects its memory in 4K pages; the Pi 5's default kernel
+# (kernel_2712.img) uses 16K pages. Boot the 4K-page kernel instead.
+kernel=kernel8.img
+
+
 [all]
 arm64bit=1
 boot_delay=0

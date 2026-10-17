@@ -190,7 +190,8 @@ require_jit() {
   local model; model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
   case "$model" in
     *"Pi 4"*|*"Pi 400"*|*"Compute Module 4"*) ;;
-    *) warn "Unrecognised/older board '$model' — JIT is validated on Pi 4 only" ;;
+    *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*) ;;
+    *) warn "Unrecognised/older board '$model' — JIT is tested on Pi 4 and Pi 5 only" ;;
   esac
   # RAM — compiling the CPU/JIT units is memory-hungry.
   local memmb; memmb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
@@ -454,6 +455,7 @@ if ask BUILD "Build the emulator now (make)?" y; then
   MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
   case "$MODEL" in
     *"Pi 4"*|*"Pi 400"*|*"Compute Module 4"*) PIMODEL=PI4 ;;
+    *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*) PIMODEL=PI5 ;;
     *"Pi 3"*)                                 PIMODEL=PI3 ;;
     *"Zero 2"*)                               PIMODEL=PI02W ;;
     *) PIMODEL=PI4; warn "Unrecognised model '$MODEL' — defaulting to PI4" ;;
