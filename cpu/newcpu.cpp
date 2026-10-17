@@ -95,8 +95,80 @@ static unsigned pistorm_pc_ring_in_dummy;
  * again (field case 15 Oct, second run). The ring then holds the 255
  * PCs that LED to the jump plus its landing; it thaws once dumped. */
 static unsigned pistorm_pc_ring_frozen;
+/* PISTORM_WATCH=addr[,addr...] (up to 4, ST-RAM/TT-RAM longs): before
+ * every interpreted instruction, compare each watched long in the host
+ * mirror with its last value and log any change with the PC of the
+ * instruction that ran just before - plus the one before that, the
+ * opcode words and the registers. The mirror is what the CPU reads, so
+ * this sees every writer: a guest store, an exception frame, and host
+ * code (DMA, blitter, natfeats) writing guest RAM directly. If the
+ * previous instruction cannot write that address, a host writer did.
+ * Off (one load of a zero count) when the variable is unset. */
+#define PS_WATCH_N   4
+static int      ps_watch_n = -1;           /* -1: env not read yet */
+static uae_u32  ps_watch_a[PS_WATCH_N], ps_watch_v[PS_WATCH_N];
+static FILE    *ps_watch_f;                /* every change, unthrottled */
+static uaecptr  ps_watch_prev, ps_watch_prev2;
+static void ps_watch_init(void)
+{
+	ps_watch_n = 0;
+	const char *s = getenv("PISTORM_WATCH");
+	if (!s || !*s)
+		return;
+	/* A pointer the guest rewrites every frame changes 50 times a
+	 * second - far too much for the console, so it goes to a file
+	 * (PISTORM_WATCH_LOG, default /tmp/pistorm-watch.log). */
+	const char *fn = getenv("PISTORM_WATCH_LOG");
+	ps_watch_f = fopen(fn && *fn ? fn : "/tmp/pistorm-watch.log", "w");
+	if (!ps_watch_f)
+		ps_watch_f = stderr;
+	setvbuf(ps_watch_f, NULL, _IOLBF, 0);
+	while (s && *s && ps_watch_n < PS_WATCH_N) {
+		char *e = NULL;
+		unsigned long a = strtoul(s, &e, 0);
+		if (e == s)
+			break;
+		ps_watch_a[ps_watch_n] = (uae_u32)a & ~1u;
+		ps_watch_v[ps_watch_n] = do_get_mem_long((uae_u32 *)(natmem_offset + ps_watch_a[ps_watch_n]));
+		fprintf(ps_watch_f, "[WATCH] watching long at %08X (now %08X)\n",
+				ps_watch_a[ps_watch_n], ps_watch_v[ps_watch_n]);
+		ps_watch_n++;
+		s = (*e == ',') ? e + 1 : e;
+	}
+}
+static void ps_watch_check(uaecptr pc)
+{
+	for (int i = 0; i < ps_watch_n; i++) {
+		uae_u32 v = do_get_mem_long((uae_u32 *)(natmem_offset + ps_watch_a[i]));
+		if (v == ps_watch_v[i])
+			continue;
+		{
+			uae_u8 *p = natmem_offset + (ps_watch_prev & 0x00FFFFFEu);
+			fprintf(ps_watch_f, "[WATCH] %08X: %08X -> %08X  after pc=%08X (before it %08X)  next pc=%08X sr=%04X\n"
+					"[WATCH]   code@after: %02X%02X %02X%02X %02X%02X %02X%02X\n"
+					"[WATCH]   D: %08X %08X %08X %08X %08X %08X %08X %08X\n"
+					"[WATCH]   A: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+					ps_watch_a[i], ps_watch_v[i], v, ps_watch_prev, ps_watch_prev2, pc, regs.sr,
+					p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+					m68k_dreg(regs, 0), m68k_dreg(regs, 1), m68k_dreg(regs, 2), m68k_dreg(regs, 3),
+					m68k_dreg(regs, 4), m68k_dreg(regs, 5), m68k_dreg(regs, 6), m68k_dreg(regs, 7),
+					m68k_areg(regs, 0), m68k_areg(regs, 1), m68k_areg(regs, 2), m68k_areg(regs, 3),
+					m68k_areg(regs, 4), m68k_areg(regs, 5), m68k_areg(regs, 6), m68k_areg(regs, 7));
+		}
+		ps_watch_v[i] = v;
+	}
+	ps_watch_prev2 = ps_watch_prev;
+	ps_watch_prev = pc;
+}
+
 static inline void pistorm_pc_ring_push(uaecptr pc)
 {
+	if (__builtin_expect(ps_watch_n != 0, 0)) {
+		if (ps_watch_n < 0)
+			ps_watch_init();
+		if (ps_watch_n > 0)
+			ps_watch_check(pc);
+	}
 	if (pistorm_pc_ring_frozen)
 		return;
 	unsigned d = (mem_banks[bankindex(pc)] == &pistorm_dummy_bank);
