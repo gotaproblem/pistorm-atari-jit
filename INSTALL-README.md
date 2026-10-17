@@ -17,7 +17,9 @@ clean **`--uninstall`** that reverses every system change.
 - **Raspberry Pi 4 or Raspberry Pi 5.**[^pi5] The Pi 5 is tested and works (CoreMark
   about 2700 at its stock 2.4 GHz); the installer builds it with
   `PIMODEL=PI5` and the shipped `config.txt` block boots it on the 4K-page
-  kernel the JIT needs. Pi 3 and Pi Zero 2 W are currently not supported.
+  kernel the JIT needs.
+- **Raspberry Pi 3B** is supported too (1 GB RAM). The Pi 3A+ and Pi Zero 2 W
+  are not: they have 512 MB.
 - **Raspberry Pi OS Lite (64-bit)** — a fresh install is fine and recommended.
 - **No desktop environment.** PiSTorm JIT can't run with a desktop: the
   compositor holds the display/DRM master (so `native_hdmi`/KMSDRM can't get the
@@ -43,7 +45,7 @@ Before touching anything, the installer verifies:
 | Check              | If it fails                                                       |
 |--------------------|------------------------------------------------------------------|
 | 64-bit (`aarch64`) | **Aborts** — re-install with 64-bit Raspberry Pi OS.              |
-| Pi model           | Warns on anything that is not a **Pi 4 / Pi 400 / CM4 or Pi 5 / Pi 500 / CM5**. The JIT is tested on the Pi 4 and the Pi 5; the Pi 400/CM4 and Pi 500/CM5 use the same chips but have not been tried. It is a warning, not an abort. |
+| Pi model           | Warns on anything that is not a **Pi 4 / Pi 400 / CM4, Pi 5 / Pi 500 / CM5 or Pi 3B**. The JIT is tested on the Pi 4 and the Pi 5; the Pi 400/CM4 and Pi 500/CM5 use the same chips but have not been tried. It is a warning, not an abort. |
 | RAM                | Warns if low, suggesting `make HEAVY_OPT=-O0` / swap for building. |
 | Desktop present    | Offers to disable it (console boot); **aborts** if you decline (`KILLGUI=1` to auto-disable). |
 
@@ -230,9 +232,9 @@ Nothing you had in those files is discarded.
 If you choose to build, the script detects your Pi model and runs
 `make PIMODEL=…` — `PI4` for a Pi 4 / Pi 400 / CM4, `PI5` for a Pi 5 / Pi 500 /
 CM5, `PI3` for a Pi 3, `PI02W` for a Zero 2 W, and `PI4` for anything it does
-not recognise. Note that the
-`PI3`/`PI02W` cases exist in the script but those boards are **not currently
-supported**; the pre-flight check will already have warned you.
+not recognise. A Pi 3B is supported; the Pi 3A+ and Zero 2 W (512 MB) are
+**not** - the script still builds them, but the pre-flight check will already
+have warned you.
 
 You can always build later by hand:
 

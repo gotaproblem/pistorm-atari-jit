@@ -191,7 +191,8 @@ require_jit() {
   case "$model" in
     *"Pi 4"*|*"Pi 400"*|*"Compute Module 4"*) ;;
     *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*) ;;
-    *) warn "Unrecognised/older board '$model' — JIT is tested on Pi 4 and Pi 5 only" ;;
+    *"Pi 3 Model B"*) ;;                       # 3B / 3B+: 1 GB RAM
+    *) warn "Unrecognised board '$model' — supported: Pi 4, Pi 3B (Pi 5 experimental). Pi 3A+ / Zero 2 W have only 512 MB" ;;
   esac
   # RAM — compiling the CPU/JIT units is memory-hungry.
   local memmb; memmb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
