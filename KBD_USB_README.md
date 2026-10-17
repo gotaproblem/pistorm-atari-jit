@@ -145,12 +145,13 @@ onto the single ST Control/Alternate. Edit the `st_scan[]` table in
 
 ## Emulator hotkeys
 
-Work from the ST's own keyboard and from a USB one (Help = PageUp):
+Work from the ST's own keyboard and from a USB one (Undo = End or PageDown).
+Undo rather than Help because TOS acts on Alt+Help itself (hardcopy):
 
 | Keys | Action |
 |---|---|
-| Ctrl + Alt + Help | restart the emulator - exits 42, `run-pistorm.sh` relaunches, the setup page comes up and the `.cfg` is re-read |
-| Ctrl + Alt + Shift + Help | abort the emulator - clean exit 0, back to the console |
+| Ctrl + Alt + Undo | restart the emulator - exits 42, `run-pistorm.sh` relaunches, the setup page comes up and the `.cfg` is re-read |
+| Ctrl + Alt + Shift + Undo | abort the emulator - clean exit 0, back to the console |
 
 TOS's own Ctrl+Alt+Del (warm) and Ctrl+Alt+Right Shift+Del (cold) still
 reset the Atari side only. The USB combination is seen where the key

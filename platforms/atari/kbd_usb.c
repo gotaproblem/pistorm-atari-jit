@@ -1302,14 +1302,15 @@ static int stbox_divert_real_byte(uint8_t v)
 
 /* --- Emulator hotkeys, from the ST's own keyboard or a USB one -------
  *
- *   Ctrl + Alt + Help          restart the emulator (exit 42: the launcher
+ *   Ctrl + Alt + Undo          restart the emulator (exit 42: the launcher
  *                              relaunches, the setup page comes up and the
  *                              .cfg is re-read)
- *   Ctrl + Alt + Shift + Help  abort the emulator (exit 0: back to the
+ *   Ctrl + Alt + Shift + Undo  abort the emulator (exit 0: back to the
  *                              console)
  *
- * Help is PgUp on a USB keyboard. TOS uses Ctrl+Alt+Del (warm) and
- * Ctrl+Alt+RShift+Del (cold) and nothing on Ctrl+Alt+Help. The native
+ * Undo is End or PgDn on a USB keyboard. Undo, not Help: TOS acts on
+ * Alt+Help itself (hardcopy) inside its keyboard handler, Undo it leaves
+ * alone. TOS uses Ctrl+Alt+Del (warm) and Ctrl+Alt+RShift+Del (cold). The native
  * keyboard is watched at the ACIA: every FRESH byte the guest reads off
  * the real IKBD (kbd_hotkey_ikbd_byte, called from natmem's data read and
  * the USB data shim) - so the native combination needs the guest to be
@@ -1329,9 +1330,9 @@ static void hk_key(struct hk_state *h, uint8_t sc, int down, const char *src)
         case 0x36: h->rsh  = (uint8_t)down; return;   /* Right Shift */
         default:   break;
     }
-    if (sc == 0x62 && down && h->ctrl && h->alt) {  /* Help        */
+    if (sc == 0x61 && down && h->ctrl && h->alt) {  /* Undo        */
         int abort_it = h->lsh || h->rsh;
-        printf("[KBD] Ctrl+Alt+%sHelp on the %s keyboard - %s\n",
+        printf("[KBD] Ctrl+Alt+%sUndo on the %s keyboard - %s\n",
                abort_it ? "Shift+" : "", src,
                abort_it ? "aborting the emulator" : "restarting the emulator");
         fflush(stdout);
@@ -1349,7 +1350,7 @@ int kbd_hotkeys_on(void)
         on = !(e && (*e == '0' || !strcasecmp(e, "off") || !strcasecmp(e, "false")));
         hk_trace = e && *e == '2';
         if (on)
-            printf("[KBD] hotkeys: Ctrl+Alt+Help restarts, Ctrl+Alt+Shift+Help "
+            printf("[KBD] hotkeys: Ctrl+Alt+Undo restarts, Ctrl+Alt+Shift+Undo "
                    "aborts the emulator (PISTORM_HOTKEYS=0 turns them off%s)\n",
                    hk_trace ? "; =2 tracing" : "");
     }
