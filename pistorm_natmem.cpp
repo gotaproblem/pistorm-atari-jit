@@ -3411,8 +3411,8 @@ static inline uae_u8 kbd_acia_data_read(void)
      * the status is sampled first - a status read clears nothing. */
     int fresh = kbd_hotkeys_on() && (ps_acia_kbd_read8(KBD_ACIA_CTRL) & 0x01);
     uae_u8 v = ps_acia_kbd_read8(KBD_ACIA_DATA);
-    if (fresh)
-        kbd_hotkey_ikbd_byte(v);
+    if (kbd_hotkeys_on())
+        kbd_hotkey_ikbd_byte(v, fresh);
     return kbd_native_rx_filter(v);
 }
 

@@ -3327,8 +3327,8 @@ extern "C"
        * status read clears nothing; same as natmem's kbd_acia_data_read */
       int fresh = kbd_hotkeys_on () && (ps_read_8 (0x00FFFC00) & 0x01);
       uint8_t v = ps_read_8 (address);
-      if (fresh)
-        kbd_hotkey_ikbd_byte (v);
+      if (kbd_hotkeys_on ())
+        kbd_hotkey_ikbd_byte (v, fresh);
       return kbd_native_rx_filter (v);
     }
 
@@ -3450,8 +3450,8 @@ extern "C"
       cpu_data_fc();
       int fresh = kbd_hotkeys_on () && (ps_read_8 (0x00FFFC00) & 0x01);
       uint8_t v = ps_read_8 (address);
-      if (fresh)
-        kbd_hotkey_ikbd_byte (v);
+      if (kbd_hotkeys_on ())
+        kbd_hotkey_ikbd_byte (v, fresh);
       return (uint16_t)((kbd_native_rx_filter (v) << 8) | 0xFF);
     }
 

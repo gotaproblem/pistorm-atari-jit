@@ -134,7 +134,7 @@ int     kbd_ikbd_divert_active(void);     /* STBOX running: shadow $FFFC02
 void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
 uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */
 int     kbd_hotkeys_on(void);             /* emulator hotkeys enabled  */
-void    kbd_hotkey_ikbd_byte(uint8_t v);  /* a FRESH byte off the IKBD */
+void    kbd_hotkey_ikbd_byte(uint8_t v, int fresh); /* a byte the guest read off the IKBD; acted on only when fresh (RDRF was set) */
 
 #ifdef __cplusplus
 }

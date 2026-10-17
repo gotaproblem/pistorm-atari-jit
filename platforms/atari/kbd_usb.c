@@ -1339,15 +1339,19 @@ static void hk_key(struct hk_state *h, uint8_t sc, int down, const char *src)
     }
 }
 
+static int hk_trace;                     /* PISTORM_HOTKEYS=2: log every byte */
+
 int kbd_hotkeys_on(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("PISTORM_HOTKEYS");
         on = !(e && (*e == '0' || !strcasecmp(e, "off") || !strcasecmp(e, "false")));
+        hk_trace = e && *e == '2';
         if (on)
             printf("[KBD] hotkeys: Ctrl+Alt+Help restarts, Ctrl+Alt+Shift+Help "
-                   "aborts the emulator (PISTORM_HOTKEYS=0 turns them off)\n");
+                   "aborts the emulator (PISTORM_HOTKEYS=0 turns them off%s)\n",
+                   hk_trace ? "; =2 tracing" : "");
     }
     return on;
 }
@@ -1355,12 +1359,19 @@ int kbd_hotkeys_on(void)
 /* Packet framing as stbox_raw_pkt_len(): only a header's make/break byte
  * is a key; mouse, joystick and clock data bytes are skipped. A gap longer
  * than any packet's byte spacing re-syncs (a byte lost to a crash). */
-void kbd_hotkey_ikbd_byte(uint8_t v)
+void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
 {
     static struct hk_state st;
     static int left;
     static uint64_t last;
     if (!kbd_hotkeys_on())
+        return;
+    if (hk_trace) {
+        printf("[KBD] hk: data read $%02X %s left=%d ctrl=%u alt=%u\n", v,
+               fresh ? "FRESH" : "stale", left, st.ctrl, st.alt);
+        fflush(stdout);
+    }
+    if (!fresh)
         return;
     uint64_t now = now_us();
     if (left && now - last > 4000)
@@ -1510,12 +1521,13 @@ uint8_t kbd_usb_acia_data_shim(void)
     if (fresh)
     {
         acia_last = v;
-        kbd_hotkey_ikbd_byte(v);
+        kbd_hotkey_ikbd_byte(v, 1);
     }
     else
     {
         v = acia_last;
         acc_src = "held";
+        kbd_hotkey_ikbd_byte(v, 0);
     }
     acc_note('D', v);
     return v;
@@ -2217,6 +2229,11 @@ static void handle_event(const struct input_event *ev, int is_mouse)
     {
         static struct hk_state usb_hk;
         uint8_t sc = st_scan[ev->code];
+        if (hk_trace) {
+            printf("[KBD] hk: USB code %u -> st $%02X %s\n", (unsigned)ev->code,
+                   sc, pressed ? "down" : "up");
+            fflush(stdout);
+        }
         if (sc != ST_NONE)
             hk_key(&usb_hk, sc, pressed, "USB");
     }
