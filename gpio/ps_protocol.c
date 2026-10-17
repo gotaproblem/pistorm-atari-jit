@@ -536,7 +536,14 @@ static unsigned ps_txn_unsticks;
 
 uint16_t ps_fw_rev;                      /* set by ps_get_firmware_revision */
 static unsigned ps_power_dead;           /* consecutive mismatched samples */
-extern void pistorm_power_lost (void);   /* emulator.c */
+/* emulator.c's strong definition tears the machine down and exits 42;
+ * ataritest links this file without emulator.c, so a weak fallback */
+__attribute__((weak)) void pistorm_power_lost (void)
+{
+  fprintf (stderr, "\n[POWER] Atari power lost (CPLD no longer answers firmware "
+           "rev $%03X) - stopping\n", (unsigned)ps_fw_rev);
+  exit (1);
+}
 
 static inline uint16_t status_fwrev (uint32_t status)
 {
