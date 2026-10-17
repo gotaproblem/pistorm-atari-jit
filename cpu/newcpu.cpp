@@ -80,6 +80,8 @@ static unsigned pistorm_pc_ring_i;
 #include "debugmem.h"
 #include "gui.h"
 
+static inline void pistorm_fetch_guard(uaecptr pc);   /* below exception2_fetch() */
+
 #if CPU_PC_RING
 /* One ring entry per instruction - except in UNDECODED space (the dummy
  * bank): a wild jump that lands there and slides through fetched zeros
@@ -9907,6 +9909,7 @@ static void m68k_run_2p()
 #if CPU_PC_RING
 				pistorm_pc_ring_push(regs.instruction_pc);
 #endif
+				pistorm_fetch_guard(r->instruction_pc);
 				r->opcode = regs.irc;
 
 #if DEBUG_CD32CDTVIO
@@ -10106,6 +10109,7 @@ static void m68k_run_2_000()
 #if CPU_PC_RING
 				pistorm_pc_ring_push(r->instruction_pc);
 #endif
+				pistorm_fetch_guard(r->instruction_pc);
 
 				r->opcode = x_get_iword(0);
 				count_instr(r->opcode);
@@ -10184,6 +10188,7 @@ static void m68k_run_2_020()
 					 * 256 PCs - the jump into the ROM among them */
 					pistorm_pc_ring_push(r->instruction_pc);
 #endif
+					pistorm_fetch_guard(r->instruction_pc);
 
 					r->opcode = x_get_iword(0);
 					count_instr(r->opcode);
@@ -11914,6 +11919,36 @@ void exception2_fetch(uae_u32 opcode, int offset, int pcoffset)
 	exception2_fetch_common(opcode, offset);
 	last_addr_for_exception_3 += pcoffset;
 	Exception(2);
+}
+
+/* Instruction fetch from UNDECODED space (the dummy bank) = bus error.
+ *
+ * The interpreter fetches through regs.pc_p, a direct pointer into
+ * natmem, and only re-derives it on a jump - so code that runs off the end
+ * of TT-RAM, or a jump into the dummy bank (dm_xlate hands back natmem
+ * too), executes the zeros there as ori.b #0,d0 forever. Field cases: Bad
+ * Apple 15 Oct slid ~8 MB into the ROM mirror; TOS 3.06 17 Oct ran from
+ * the end of TT-RAM to $11000000, the end of the natmem reservation, and
+ * the HOST took SIGSEGV. A real 68000/030 with nothing decoding the
+ * address takes a bus error on the fetch. pistorm_pc_executable() keeps
+ * everything code can legitimately run from (ST-RAM, TT-RAM, TOS ROM,
+ * cartridge) out of this. One bank-table load per instruction. */
+extern addrbank pistorm_dummy_bank;
+extern "C" int pistorm_pc_executable(unsigned int pc);
+static inline void pistorm_fetch_guard(uaecptr pc)
+{
+	if (__builtin_expect(mem_banks[bankindex(pc)] != &pistorm_dummy_bank, 1))
+		return;
+	if (pistorm_pc_executable(pc))
+		return;
+	static unsigned shown;
+	if (shown < 8) {
+		shown++;
+		fprintf(stderr, "[CPU] instruction fetch from undecoded $%08X - "
+				"bus error (sr %04X)\n", (unsigned)pc, regs.sr);
+	}
+	exception2_fetch_common(regs.ir, 0);
+	THROW(2);
 }
 
 bool cpureset(void)
