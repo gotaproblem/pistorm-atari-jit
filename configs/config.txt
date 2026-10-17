@@ -17,7 +17,6 @@ gpu_mem=16
 #overvoltage=6
 arm_freq=1500
 core_freq=500
-gpu_mem=32
 
 
 [pi4]
@@ -29,13 +28,6 @@ gpu_mem=32
 #over_voltage=6
 #arm_freq=2100
 arm_freq=1500
-# 128 MB minimum - do NOT reduce. The VPU H.264 decoder (VIDPLAY film
-# playback) and encoder (avrecord screen recording) allocate their frame
-# buffers from gpu_mem. At 32 MB the decoder OPENS but never emits a frame
-# (ffmpeg: "poll unexpected timeout"), the player hangs silently, and
-# killing it wedges the VPU ('failed to create component ril.video_decode'
-# in dmesg) until the next reboot.
-gpu_mem=128
 
 
 [pi5]
@@ -47,6 +39,13 @@ kernel=kernel8.img
 
 [all]
 arm64bit=1
+# 128 MB minimum - do NOT reduce. The VPU H.264 decoder (VIDPLAY film
+# playback) and encoder (avrecord screen recording) allocate their frame
+# buffers from gpu_mem. At 32 MB the decoder OPENS but never emits a frame
+# (ffmpeg: "poll unexpected timeout"), the player hangs silently, and
+# killing it wedges the VPU ('failed to create component ril.video_decode'
+# in dmesg) until the next reboot.
+gpu_mem=128
 boot_delay=0
 force_turbo=1
 arm_boost=1
