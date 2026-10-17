@@ -3275,7 +3275,13 @@ extern "C"
     else if (address == 0x00FFFC02 &&
              (kbd_native_mouse_enabled () || kbd_ikbd_divert_active ())) {
       cpu_data_fc();
-      return kbd_native_rx_filter (ps_read_8 (address));
+      /* hotkeys see only FRESH bytes - status (RDRF) sampled first, a
+       * status read clears nothing; same as natmem's kbd_acia_data_read */
+      int fresh = kbd_hotkeys_on () && (ps_read_8 (0x00FFFC00) & 0x01);
+      uint8_t v = ps_read_8 (address);
+      if (fresh)
+        kbd_hotkey_ikbd_byte (v);
+      return kbd_native_rx_filter (v);
     }
 
     /* STE enhanced joypad ports ("usb gamepad"): merge the pads into what
@@ -3394,7 +3400,11 @@ extern "C"
     else if (address == 0x00FFFC02 &&
              (kbd_native_mouse_enabled () || kbd_ikbd_divert_active ())) {
       cpu_data_fc();
-      return (uint16_t)((kbd_native_rx_filter (ps_read_8 (address)) << 8) | 0xFF);
+      int fresh = kbd_hotkeys_on () && (ps_read_8 (0x00FFFC00) & 0x01);
+      uint8_t v = ps_read_8 (address);
+      if (fresh)
+        kbd_hotkey_ikbd_byte (v);
+      return (uint16_t)((kbd_native_rx_filter (v) << 8) | 0xFF);
     }
 
     /* STE enhanced joypad ports ("usb gamepad"): merge the pads into what
