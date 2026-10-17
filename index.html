@@ -392,8 +392,8 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
       <div class="features">
         <div class="feat"><h4>Xbox and USB gamepads</h4><p>Wired or Bluetooth pads as ST joysticks and STe joypads, in GEM, games and the ST Box. One line: <code>usb gamepad</code>.</p></div>
         <div class="feat"><h4>USB keyboard and mouse</h4><p>Merged into the IKBD stream. The real ST keyboard and mouse are optional: use them, USB, or both.</p></div>
-        <div class="feat"><h4>Floppy, IDE, ACSI, HOSTFS</h4><p>WD1772 floppy emulation, IDE and ACSI disk images, and folders on the Pi as GEMDOS drives.</p></div>
-        <div class="feat"><h4>Networking</h4><p>FreeMiNT networking over the Pi's WiFi, through the NatFeat Ethernet driver. The Pi's RJ45 Ethernet port isn't supported yet.</p></div>
+        <div class="feat"><h4>Floppy, IDE, ACSI, HOSTFS</h4><p>WD1772 floppy emulation, IDE and ACSI disk images, and folders on the Pi as GEMDOS drives. Real ACSI hard disks and the real floppy drive or a Gotek work on the ST's own ports too.</p></div>
+        <div class="feat"><h4>Networking</h4><p>FreeMiNT networking over the Pi's WiFi or its RJ45 Ethernet port, through the NatFeat Ethernet driver.</p></div>
         <div class="feat"><h4>Emulated blitter</h4><p>The ST BLiTTER in software over the RAM copy, with or without a real chip fitted.</p></div>
         <div class="feat"><h4>ST Box</h4><p>A sandboxed 68000 ST or STe in a resizable GEM window under APJ-OS, for games that want a plain machine. <a href="#stbox">More</a></p></div>
       </div>
@@ -412,14 +412,14 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
       <div class="panel">
         <h3>Host</h3>
         <dl class="spec">
-          <dt>Board</dt><dd>Raspberry Pi 4, 1&nbsp;GB or more. More RAM lets you give the Atari more TT-RAM. The Pi 3B is tested with the APJ-OS install script.</dd>
+          <dt>Board</dt><dd>Raspberry Pi 4, 1&nbsp;GB or more. More RAM lets you give the Atari more TT-RAM. The Pi 3B and 3B+ (1&nbsp;GB) are supported too.</dd>
           <dt>OS</dt><dd>Raspberry Pi OS Lite, Trixie, 64-bit. Lite is required: a desktop holds the display and takes the isolated cores.</dd>
           <dt>Cores</dt><dd>2 for emulation, 2 for Linux. Build with <code>make -j2</code>.</dd>
           <dt>Display</dt><dd>A monitor on the Pi's HDMI, connected at boot, for HDMI output.</dd>
           <dt>Input</dt><dd>The ST's own keyboard and mouse, or USB and Bluetooth ones on the Pi. Either works.</dd>
-          <dt>Network</dt><dd>The Pi's WiFi. RJ45 Ethernet isn't supported yet.</dd>
+          <dt>Network</dt><dd>The Pi's WiFi or its RJ45 Ethernet port.</dd>
         </dl>
-        <p class="note">The Pi 3A+ and Pi Zero 2 W have 512&nbsp;MB of RAM and can't fit the memory layout. The Pi 5's GPIO sits behind the RP1 chip, which is too slow for bus work.</p>
+        <p class="note">The Pi 3A+ and Pi Zero 2 W have 512&nbsp;MB of RAM and can't fit the memory layout. The Pi 5 has been tried as an experiment and works: CoreMark about 2700 at its stock 2.4&nbsp;GHz, built with <code>make PIMODEL=PI5</code> and booted on the 4K-page kernel (<code>kernel=kernel8.img</code>). The project stays on the Pi 4 and will not pursue Pi 5 development; it is there for anyone who wants to investigate.</p>
       </div>
       <div class="panel">
         <h3>Atari</h3>
@@ -427,8 +427,9 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 16px 32px; justify-content: 
           <dt>Tested</dt><dd>STfm, STe, Mega ST</dd>
           <dt>DIL 68000</dt><dd>STfm, Mega ST: a PiStorm board made for the Amiga A500</dd>
           <dt>STe</dt><dd>A custom STe board, available online or from users on the Discord</dd>
+          <dt>CPLD</dt><dd>PiStorm firmware 0.83a or later; the emulator won't start on older firmware</dd>
         </dl>
-        <p class="note">Bus arbitration in the CPLD doesn't work yet, so the real blitter chip and real DMA devices can't be driven. The emulated blitter, floppy and ACSI cover them.</p>
+        <p class="note">The CPLD firmware does 68000 bus arbitration, so the ST's DMA chip works: real ACSI hard disks, and the real floppy drive or a Gotek.</p>
       </div>
     </div>
   </div>
@@ -694,7 +695,7 @@ hostfs S /home/pistorm/atari-share</pre>
         <tr><td class="k">acsi</td><td class="v">N:image</td><td>Emulated ACSI targets beside real devices. <code>.hfs</code> volumes for Spectre.</td></tr>
         <tr><td class="k">fdd</td><td class="v">A:image B:image</td><td>Floppy drives: <code>.st</code> read-write, <code>.msa</code> read-only. F11 swaps disks.</td></tr>
         <tr><td class="k">hostfs</td><td class="v">drive path [ro]</td><td>A Pi folder as a GEMDOS drive. The installed share is S:.</td></tr>
-        <tr><td class="k">network</td><td class="v">on / off</td><td>FreeMiNT networking over a TAP device, set up by <code>netstart.sh</code>. WiFi only for now; the RJ45 port isn't supported yet.</td></tr>
+        <tr><td class="k">network</td><td class="v">on / off</td><td>FreeMiNT networking over a TAP device, set up by <code>netstart.sh</code>. Over WiFi or the RJ45 Ethernet port.</td></tr>
       </tbody>
     </table></div>
   </div>
