@@ -143,6 +143,22 @@ ST scancode `0x60`, NumLock/ScrollLock → keypad `(` `)`. Right Ctrl/Alt fold
 onto the single ST Control/Alternate. Edit the `st_scan[]` table in
 `platforms/atari/kbd_usb.c` to taste.
 
+## Emulator hotkeys
+
+Work from the ST's own keyboard and from a USB one (Help = PageUp):
+
+| Keys | Action |
+|---|---|
+| Ctrl + Alt + Help | restart the emulator - exits 42, `run-pistorm.sh` relaunches, the setup page comes up and the `.cfg` is re-read |
+| Ctrl + Alt + Shift + Help | abort the emulator - clean exit 0, back to the console |
+
+TOS's own Ctrl+Alt+Del (warm) and Ctrl+Alt+Right Shift+Del (cold) still
+reset the Atari side only. The USB combination is seen where the key
+arrives, so it works whatever the guest is doing - captured by the DOS
+window, the ST Box, or hung. The ST keyboard's combination is seen as the
+guest reads the keyboard, so it needs the guest to still be reading it.
+`PISTORM_HOTKEYS=0` turns both off.
+
 ## Build (on the Pi 4)
 
 ```

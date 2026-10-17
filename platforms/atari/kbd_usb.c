@@ -29,6 +29,7 @@
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdatomic.h>
 #include "mfp_hub.h"
 #include <pthread.h>
@@ -1299,11 +1300,90 @@ static int stbox_divert_real_byte(uint8_t v)
     return 1;
 }
 
+/* --- Emulator hotkeys, from the ST's own keyboard or a USB one -------
+ *
+ *   Ctrl + Alt + Help          restart the emulator (exit 42: the launcher
+ *                              relaunches, the setup page comes up and the
+ *                              .cfg is re-read)
+ *   Ctrl + Alt + Shift + Help  abort the emulator (exit 0: back to the
+ *                              console)
+ *
+ * Help is PgUp on a USB keyboard. TOS uses Ctrl+Alt+Del (warm) and
+ * Ctrl+Alt+RShift+Del (cold) and nothing on Ctrl+Alt+Help. The native
+ * keyboard is watched at the ACIA: every FRESH byte the guest reads off
+ * the real IKBD (kbd_hotkey_ikbd_byte, called from natmem's data read and
+ * the USB data shim) - so the native combination needs the guest to be
+ * reading the keyboard. USB keys are watched where they arrive, so the
+ * USB combination works whatever the guest is doing. PISTORM_HOTKEYS=0
+ * turns both off. */
+extern void pistorm_request_exit(int restart);   /* emulator.c */
+
+struct hk_state { uint8_t ctrl, alt, lsh, rsh; };
+
+static void hk_key(struct hk_state *h, uint8_t sc, int down, const char *src)
+{
+    switch (sc) {
+        case 0x1D: h->ctrl = (uint8_t)down; return;   /* Control     */
+        case 0x38: h->alt  = (uint8_t)down; return;   /* Alternate   */
+        case 0x2A: h->lsh  = (uint8_t)down; return;   /* Left Shift  */
+        case 0x36: h->rsh  = (uint8_t)down; return;   /* Right Shift */
+        default:   break;
+    }
+    if (sc == 0x62 && down && h->ctrl && h->alt) {  /* Help        */
+        int abort_it = h->lsh || h->rsh;
+        printf("[KBD] Ctrl+Alt+%sHelp on the %s keyboard - %s\n",
+               abort_it ? "Shift+" : "", src,
+               abort_it ? "aborting the emulator" : "restarting the emulator");
+        fflush(stdout);
+        pistorm_request_exit(!abort_it);
+    }
+}
+
+int kbd_hotkeys_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("PISTORM_HOTKEYS");
+        on = !(e && (*e == '0' || !strcasecmp(e, "off") || !strcasecmp(e, "false")));
+        if (on)
+            printf("[KBD] hotkeys: Ctrl+Alt+Help restarts, Ctrl+Alt+Shift+Help "
+                   "aborts the emulator (PISTORM_HOTKEYS=0 turns them off)\n");
+    }
+    return on;
+}
+
+/* Packet framing as stbox_raw_pkt_len(): only a header's make/break byte
+ * is a key; mouse, joystick and clock data bytes are skipped. A gap longer
+ * than any packet's byte spacing re-syncs (a byte lost to a crash). */
+void kbd_hotkey_ikbd_byte(uint8_t v)
+{
+    static struct hk_state st;
+    static int left;
+    static uint64_t last;
+    if (!kbd_hotkeys_on())
+        return;
+    uint64_t now = now_us();
+    if (left && now - last > 4000)
+        left = 0;
+    last = now;
+    if (left) {
+        left--;
+        return;
+    }
+    left = stbox_raw_pkt_len(v);
+    if (left == 0)
+        hk_key(&st, v & 0x7F, !(v & 0x80), "ST");
+}
+
 /* natmem / emulator.c: shadow the ACIA data register for the divert even
- * when neither USB injection nor the native mouse threshold is on. */
+ * when neither USB injection nor the native mouse threshold is on - and
+ * always while the hotkeys are on, so every real byte passes them. The
+ * shadow is transparent when nothing diverts: kbd_native_rx_filter hands
+ * the byte back unchanged. */
 int kbd_ikbd_divert_active(void)
 {
-    return stbox_running() || psdos_view_open() || raw_main_pending >= 0;
+    return stbox_running() || psdos_view_open() || raw_main_pending >= 0 ||
+           kbd_hotkeys_on();
 }
 
 static void real_drain(uint8_t rs)
@@ -1428,7 +1508,10 @@ uint8_t kbd_usb_acia_data_shim(void)
     acc_src = "real";
     uint8_t v = data_shim_inner(&fresh);
     if (fresh)
+    {
         acia_last = v;
+        kbd_hotkey_ikbd_byte(v);
+    }
     else
     {
         v = acia_last;
@@ -2127,6 +2210,16 @@ static void handle_event(const struct input_event *ev, int is_mouse)
         return;                                  /* TOS/games do their own */
 
     int pressed = ev->value == 1;
+
+    /* emulator hotkeys, before any routing - DOS capture, ST Box or a
+     * hung guest cannot swallow them */
+    if (ev->code <= KEY_MAX && kbd_hotkeys_on())
+    {
+        static struct hk_state usb_hk;
+        uint8_t sc = st_scan[ev->code];
+        if (sc != ST_NONE)
+            hk_key(&usb_hk, sc, pressed, "USB");
+    }
 
     if (ev->code == BTN_LEFT)
     {

@@ -3405,8 +3405,15 @@ static inline uae_u8 kbd_acia_data_read(void)
         return kbd_usb_acia_data_shim();
     /* Native mouse threshold / STBOX divert with USB injection off: read
      * the byte once - reading $FFFC02 clears RDRF - and hand it to the
-     * filter, which routes it into the sandbox while that is focused. */
-    return kbd_native_rx_filter(ps_acia_kbd_read8(KBD_ACIA_DATA));
+     * filter, which routes it into the sandbox while that is focused.
+     * The hotkeys watch only FRESH bytes (RDRF set before the read: a
+     * guest may read the data register twice and get the same byte), so
+     * the status is sampled first - a status read clears nothing. */
+    int fresh = kbd_hotkeys_on() && (ps_acia_kbd_read8(KBD_ACIA_CTRL) & 0x01);
+    uae_u8 v = ps_acia_kbd_read8(KBD_ACIA_DATA);
+    if (fresh)
+        kbd_hotkey_ikbd_byte(v);
+    return kbd_native_rx_filter(v);
 }
 
 /* The JIT/natmem banks are the path that actually runs; the equivalent

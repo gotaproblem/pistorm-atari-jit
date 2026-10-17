@@ -133,6 +133,8 @@ int     kbd_ikbd_divert_active(void);     /* STBOX running: shadow $FFFC02
                                              routed into the sandbox     */
 void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
 uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */
+int     kbd_hotkeys_on(void);             /* emulator hotkeys enabled  */
+void    kbd_hotkey_ikbd_byte(uint8_t v);  /* a FRESH byte off the IKBD */
 
 #ifdef __cplusplus
 }
