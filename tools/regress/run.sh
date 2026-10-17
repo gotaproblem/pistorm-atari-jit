@@ -46,10 +46,17 @@ while IFS='|' read -r name section image secs what; do
 	fi
 	cfg="$out/$name.cfg"
 	# the section body, verbatim, minus its hdd lines; then the test disk
+	# bare file names in a section are resolved with [psctrl]'s
+	# rom_path / disk_path / fdd_path - carry them over (with ~ expanded:
+	# the emulator runs under sudo), or the ROM and disks are not found
+	awk -v home="$HOME" '
+		/^\[/ { on = ($0 == "[psctrl]"); next }
+		on && ($1 == "rom_path" || $1 == "disk_path" || $1 == "fdd_path") {
+			sub(/^~/, home, $2); print $1, $2 }' "$cfg_src" > "$cfg"
 	awk -v s="[$section]" -v keep="$image" '
 		/^\[/ { on = ($0 == s); next }
-		on && (keep == "-" || $1 != "hdd") { print }' "$cfg_src" > "$cfg"
-	[ -s "$cfg" ] || { echo "$name: SKIP - no [$section] in $cfg_src"; continue; }
+		on && (keep == "-" || $1 != "hdd") { print }' "$cfg_src" >> "$cfg"
+	grep -q "^\[$section\]" "$cfg_src" || { echo "$name: SKIP - no [$section] in $cfg_src"; continue; }
 	[ "$image" = "-" ] || echo "hdd $image" >> "$cfg"
 
 	echo "$name: running ${secs}s on $commit ..."
