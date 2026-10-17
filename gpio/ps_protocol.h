@@ -173,6 +173,16 @@ void ps_write_latchtype ( uint16_t );
 void ps_read_ipl ( uint8_t* );
 void ps_get_firmware_revision ( void );
 
+/* Atari power sensing (status readback bits 10:0 = CPLD firmware revision,
+ * bit 13 = M68K RESET_n). ps_fw_rev is the revision the CPLD answered at
+ * start-up; a CPLD that stops answering it has lost its power - the ST's.
+ * ps_power_poll: one sample for the main thread (0 alive, 1 power lost
+ * confirmed, -1 no sample: the bus was busy). ps_power_wait: block until
+ * the CPLD answers a valid revision with RESET_n high, stably. */
+extern uint16_t ps_fw_rev;
+int  ps_power_poll ( void );
+void ps_power_wait ( void );
+
 
 #define read8 ps_read_8
 #define read16 ps_read_16

@@ -515,6 +515,56 @@ void ps_write ( ps_io_t *ps_io );
 
 static unsigned ps_txn_unsticks;
 
+/* --- Atari power sensing --------------------------------------------
+ *
+ * The CPLD is powered by the ST. Its status readback (rev 253 Verilog:
+ * {IPL2, IPL1, RESET_n, HALT_n, ~bus_mine, fwrev[10:0]}) is combinational
+ * and works with TXN stuck, and a powered CPLD always answers the same
+ * revision word - the one captured at start-up (ps_fw_rev). So "the CPLD
+ * no longer answers that word" is the ST's power going, whatever the
+ * floating pins happen to read (no assumption about all-ones/all-zeros,
+ * no assumption about whether a dead bus leaves TXN high or low). Both
+ * ways a dead bus can look are covered:
+ *   - cycles never complete: the CPU thread sits in ps_txn_unstick with
+ *     the bus lock held, so the sample is taken THERE, after the INIT;
+ *   - cycles complete with garbage: the main thread samples through the
+ *     lock (ps_power_poll) every 250 ms.
+ * Either path, after PS_POWER_DEAD_SAMPLES consecutive mismatches, calls
+ * pistorm_power_lost() (emulator.c), which never returns. */
+#define PS_POWER_DEAD_SAMPLES 8          /* 8 x 50 ms stuck, or 8 x 250 ms polled */
+#define PS_POWER_ALIVE_SAMPLES 5         /* stable answers before "power back" */
+
+uint16_t ps_fw_rev;                      /* set by ps_get_firmware_revision */
+static unsigned ps_power_dead;           /* consecutive mismatched samples */
+extern void pistorm_power_lost (void);   /* emulator.c */
+
+static inline uint16_t status_fwrev (uint32_t status)
+{
+  return (uint16_t)((status >> 8) & 0x07FF);
+}
+
+/* A revision word the CPLD could actually be answering (0x7FF / 0x000 are
+ * not: bits 10:9 = 11 is no release type, and 0x000 is "release 0.0" on an
+ * EPM240 - never shipped). Used only at start-up to tell "no power" from
+ * "old firmware"; at run time the exact start-up word is the test. */
+static int fwrev_plausible (uint16_t fw)
+{
+  return fw != 0x7FF && fw != 0x000 && (fw & 0x600) != 0x600;
+}
+
+/* One dead/alive sample. Returns 1 when PS_POWER_DEAD_SAMPLES consecutive
+ * samples disagree with the start-up revision. */
+static int power_sample (uint32_t status)
+{
+  if (ps_fw_rev == 0)                    /* no reference yet (init) */
+    return 0;
+  if (status_fwrev (status) == ps_fw_rev) {
+    ps_power_dead = 0;
+    return 0;
+  }
+  return ++ps_power_dead >= PS_POWER_DEAD_SAMPLES;
+}
+
 static void __attribute__((noinline, cold))
 ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
 {
@@ -538,6 +588,22 @@ ps_txn_unstick (const char *what, const ps_io_t *io, uint32_t lev, int is_read)
     (void)*rd;
   *set = (0 << 8) | REG_STATUS;
   txn_pulse (set, clr);
+
+  /* Is the CPLD still there? Same readback as ps_read_status_reg: CMD =
+   * REG_STATUS with WR low (txn_pulse's TXN_END cleared CMD, so the
+   * CPLD's st_wr_release has dropped), a moment to settle, sample. */
+  {
+    uint32_t st;
+    PS_BUS_IN ();
+    *set = REG_STATUS;
+    for (int i = 0; i < 16; i++)        /* ~1 us: the readback is combinational */
+      (void)*rd;
+    st = *rd;
+    *clr = TXN_END;
+    PS_BUS_OUT ();
+    if (power_sample (st))
+      pistorm_power_lost ();            /* does not return */
+  }
 
   if (is_read) {                        /* back into the read poll state */
     PS_BUS_IN ();
@@ -1359,6 +1425,8 @@ void ps_get_firmware_revision ( void )
 {
   uint16_t fw = (ps_read_status_reg () >> 8) & 0x07FF;
 
+  ps_fw_rev = fwrev_plausible (fw) ? fw : 0;   /* reference for power sensing */
+
   /* 
    * if alpha release, then all 8 bits will be version number 
    * eg. 0.1a - 0.255a 
@@ -1386,6 +1454,63 @@ void ps_get_firmware_revision ( void )
   usleep (1000);
 }
 
+
+/* Main-thread power sample. The CPU thread holds the bus lock for whole
+ * cycles; a cycle that is merely slow (a DMA tenure) is a few ms, so give
+ * the lock up to ~5 ms and otherwise report "no sample" rather than stall
+ * the caller. Never spins on a lock the CPU thread holds for ever (the
+ * stuck case): that case is sensed inside ps_txn_unstick instead. */
+int ps_power_poll ( void )
+{
+  if (ps_fw_rev == 0)
+    return -1;
+  for (unsigned n = 0; ; n++) {
+    if (!atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
+      break;
+    if (n >= 5000)                      /* ~5 ms */
+      return -1;
+    usleep (1);
+  }
+  ps_bus_active = 1;
+  asm volatile ("dmb sy" ::: "memory");
+
+  /* body of ps_read_status_reg, lock already held */
+  PS_BUS_IN ();
+  *ioset = REG_STATUS;
+  ps_wait_idle_bounded ("ps_power_poll");
+  uint32_t status = *ioread;
+  *ioclr = TXN_END;
+  PS_BUS_OUT ();
+
+  ps_unlock_bus ();
+  return power_sample (status) ? 1 : 0;
+}
+
+/* Block until the ST is powered: the CPLD answers a plausible revision
+ * (the start-up one, when known) with M68K RESET_n high - the ST's own
+ * power-on reset over - for PS_POWER_ALIVE_SAMPLES consecutive samples
+ * 200 ms apart. Prints once on entry and once on return. Called before
+ * the emulation threads exist (start-up), so plain status reads. */
+void ps_power_wait ( void )
+{
+  unsigned alive = 0;
+  printf ("[POWER] Atari is off (CPLD not answering) - waiting for power...\n");
+  fflush (stdout);
+  for (;;) {
+    uint32_t st = ps_read_status_reg ();
+    uint16_t fw = status_fwrev (st);
+    int ok = (ps_fw_rev ? fw == ps_fw_rev : fwrev_plausible (fw)) &&
+             ((st >> 8) & 0x2000);      /* bit 13: RESET_n high */
+    alive = ok ? alive + 1 : 0;
+    if (alive >= PS_POWER_ALIVE_SAMPLES)
+      break;
+    usleep (200000);
+  }
+  ps_power_dead = 0;
+  printf ("[POWER] power is back (firmware rev $%03X, RESET_n high) - starting\n",
+          (unsigned)status_fwrev (ps_read_status_reg ()));
+  fflush (stdout);
+}
 
 void ps_diag (void)
 {

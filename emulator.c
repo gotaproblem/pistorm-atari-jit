@@ -1985,6 +1985,26 @@ extern "C" void pistorm_request_exit(int restart)
   _exit(restart ? 42 : 0);
 }
 
+/*
+ * The ST's power has gone (gpio/ps_protocol.c: the CPLD stopped answering
+ * its firmware revision - sensed on the CPU thread inside a stuck cycle,
+ * or by main's poll). Nothing on the bus is real any more, so stop the
+ * machine the proven way and exit 42: the launcher relaunches, and the
+ * new process waits in check_cpld_firmware -> ps_power_wait() until the
+ * ST is powered and out of its own reset, then boots as from cold. Runs
+ * on whichever thread sensed it; the other threads die with the process.
+ */
+extern "C" void pistorm_power_lost(void)
+{
+  static volatile int once;
+  if (__atomic_exchange_n(&once, 1, __ATOMIC_SEQ_CST))
+    for (;;) pause();                   /* a second sensor: let the first finish */
+  fprintf(stderr, "\n[POWER] Atari power lost (CPLD no longer answers firmware rev $%03X)"
+                  " - stopping, will reboot when power returns\n", (unsigned)ps_fw_rev);
+  orderly_teardown();
+  _exit(42);
+}
+
 
 void *cpu_task(void *)
 {
@@ -2059,6 +2079,22 @@ static void check_cpld_firmware(void)
                   ((kind == 0x400u || kind == 0x600u) ||
                    (kind == 0x200u && fw >= CPLD_FW_MIN_ALPHA));
   const char *any = getenv("PISTORM_FW_ANY");
+
+  /* Not answering at all (all ones / all zeros / no release type): the
+   * ST is off - the CPLD is powered from it. Wait for power rather than
+   * fail: this is also where the relaunch after a power loss at run time
+   * (pistorm_power_lost -> exit 42) sits until the ST comes back. Then
+   * take the firmware word afresh and check it as usual. */
+  if (!ok && (fw == 0x7FFu || fw == 0x000u || kind == 0x600u) &&
+      !(any && *any && *any != '0')) {
+    ps_power_wait();
+    ps_get_firmware_revision();
+    fw   = (ps_read_status_reg() >> 8) & 0x07FFu;
+    kind = fw & 0x600u;
+    ok   = fw != 0x7FFu &&
+           ((kind == 0x400u || kind == 0x600u) ||
+            (kind == 0x200u && fw >= CPLD_FW_MIN_ALPHA));
+  }
 
   if (ok)
     return;
@@ -2752,7 +2788,19 @@ int main (int argc, char *argv[])
   /* Start Emulation */
   cpu_emulation_running = 1; /* start the threads running - up until now, they are just waiting/looping  */
 
-  pthread_join(cpu_tid, NULL);
+  /* Main thread: wait for the CPU thread, sensing the ST's power on the
+   * way (gpio/ps_protocol.c: a status sample through the bus lock every
+   * 250 ms, "no sample" while the CPU thread holds it). PISTORM_POWER=0
+   * turns the run-time sensing off; start-up's wait-for-power stays. */
+  {
+    const char *pe = getenv("PISTORM_POWER");
+    int sense = !(pe && *pe == '0');
+    while (pthread_tryjoin_np(cpu_tid, NULL) == EBUSY) {
+      usleep(250000);
+      if (sense && cpu_emulation_running && ps_power_poll() > 0)
+        pistorm_power_lost();           /* exits 42 */
+    }
+  }
 
   printf("[MAIN] Emulation Ended\n");
   platform_network_shutdown();
