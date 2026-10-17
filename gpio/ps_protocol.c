@@ -1285,11 +1285,18 @@ uint32_t ps_read_status_reg ()
     ps_wait_idle_bounded ("ps_read_status_reg");
 
   status = *ioread;
-  if (stuck)
-    fprintf (stderr, "[PS] status read with TXN stuck: GPLEV 0x%08X - "
-             "word 0x%04X, bit11 (arbitration active) = %u\n",
-             (unsigned)status, (unsigned)((status >> 8) & 0xFFFF),
-             (unsigned)((status >> 19) & 1));
+  if (stuck) {
+    /* once per distinct reading, not per call: ps_power_wait samples
+     * this every few hundred ms for as long as the ST is off */
+    static uint32_t last_stuck_status = ~0u;
+    if (status != last_stuck_status) {
+      last_stuck_status = status;
+      fprintf (stderr, "[PS] status read with TXN stuck: GPLEV 0x%08X - "
+               "word 0x%04X, bit11 (arbitration active) = %u\n",
+               (unsigned)status, (unsigned)((status >> 8) & 0xFFFF),
+               (unsigned)((status >> 19) & 1));
+    }
+  }
  	*ioclr = TXN_END;
   PS_BUS_OUT ();
 
@@ -1426,6 +1433,10 @@ void ps_get_firmware_revision ( void )
   uint16_t fw = (ps_read_status_reg () >> 8) & 0x07FF;
 
   ps_fw_rev = fwrev_plausible (fw) ? fw : 0;   /* reference for power sensing */
+  if (!ps_fw_rev) {
+    printf ( "[INIT] PiSTorm firmware: CPLD not answering (word $%03X)\n", fw );
+    return;
+  }
 
   /* 
    * if alpha release, then all 8 bits will be version number 
