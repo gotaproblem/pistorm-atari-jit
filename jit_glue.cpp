@@ -603,6 +603,43 @@ void intlev_ack (uint8_t nr)
     }
 
 #if (1)
+    /* LIVE-LEVEL CHECK before a real bus IACK.
+     *
+     * Pi 3A+ (H5 board), 2026-10-18: with the CPU halted, 10000 level-6
+     * IACK cycles answered correctly every time (ataritest --mfp iack=yes);
+     * live, the same cycle came back $03/$83/$FF/$00 or NOACK. The
+     * difference is where the level comes from: halted, the IACK was only
+     * issued after reading IPL=6 off the CPLD; live, this fires blind on
+     * the level the sampler decided on some microseconds earlier. If the
+     * MFP is no longer (or never was) requesting when the cycle lands, the
+     * GLUE routes it to a 68901 with nothing to say - timeout or whatever
+     * the lines float at. A real 68000 cannot IACK a level that is not
+     * asserted either: it samples IPL at the start of the cycle. So:
+     * re-read IPL now; if it is below `nr`, report no-ack WITHOUT touching
+     * the bus and let the retry path above re-evaluate. Counted and logged
+     * (first 16, then every 1024th). PISTORM_IACK_CHECK=0 disables. */
+    {
+        static int chk = -1;
+        if (chk < 0) { const char *e = getenv("PISTORM_IACK_CHECK"); chk = !(e && *e == '0'); }
+        if (chk && nr >= 6)
+        {
+            uint8_t live = 0;
+            ps_read_ipl(&live);
+            if (live < nr)
+            {
+                static uint32_t phantom;
+                if (phantom < 16 || (phantom & 0x3ff) == 0)
+                    fprintf(stderr, "[IACK-PHANTOM] level %u requested, live IPL=%u - IACK not issued (count %u)\n",
+                            nr, live, phantom + 1);
+                phantom++;
+                pistorm_iack_vector = 0xFFFE;
+                g_buserr = 0;
+                if (nr == 6) g_l6_noack++;
+                return;
+            }
+        }
+    }
+
     uint8_t iack_berr = 0;
     uint8_t vector = ps_read_8_fc (0x00FFFFF1u | (nr << 1), 7, &iack_berr);
     if (iack_berr)
