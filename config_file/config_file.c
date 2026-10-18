@@ -789,7 +789,7 @@ struct emulator_config *load_config_file_section(char *filename,
   memset(cfg, 0x00, sizeof(struct emulator_config));
   cfg->cpu_type = M68K_CPU_TYPE_68000 - 1;
   /* ACSI: the switch and the image lines, attached once the section is read */
-  int  acsi_enabled = 0, acsi_n = 0, acsi_id[8];
+  int  acsi_enabled = 0, acsi_switch_seen = 0, acsi_n = 0, acsi_id[8];
   static char acsi_img[8][512];
   cfg->jit = true;
   cfg->blitter = true;
@@ -1108,7 +1108,16 @@ struct emulator_config *load_config_file_section(char *filename,
            * may sit anywhere in the section. .hfs images are bare Mac
            * HFS volumes (ACSI-DESIGN.md). */
           if (is_bool_true(parse_line + str_pos) || is_bool_false(parse_line + str_pos)) {
-            acsi_enabled = get_bool_default_true(parse_line + str_pos) ? 1 : 0;
+            int on = get_bool_default_true(parse_line + str_pos) ? 1 : 0;
+            /* Two switch lines in one section is a broken file, and the
+             * last one deciding silently cost an afternoon (field case
+             * 17 Oct: `acsi enabled` then `acsi disabled`, the images
+             * ignored, TOS probing an empty bus). Say so. */
+            if (acsi_switch_seen && on != acsi_enabled)
+              printf ("[CFG] *** a second `acsi` switch line (line %d) overrides the "
+                      "earlier one - remove one of them ***\n", cur_line);
+            acsi_switch_seen = 1;
+            acsi_enabled = on;
             printf ("[CFG] ACSI %s\n", acsi_enabled ? "enabled" : "disabled");
           } else if (acsi_n < 8) {
             int id;

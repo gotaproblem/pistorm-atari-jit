@@ -995,6 +995,21 @@ static void tick(struct state *st, int open_editor_for_text)
         return;
     }
     int ord = r->ord < 0 ? sc_count(&st->cfg, st->sec, r->text) : r->ord;
+    /* `acsi`: the switch is whichever line says enabled/disabled, and a
+     * file can hold more than one (field case 17 Oct: `acsi enabled` AND
+     * `acsi disabled` - the parser takes the last, the page showed the
+     * first, the images were silently ignored). Drop every switch line
+     * but the one being written, so the file holds exactly one. */
+    if (!strcasecmp(r->text, "acsi") && r->ord >= 0) {
+        int n = sc_count(&st->cfg, st->sec, "acsi");
+        for (int i = n - 1; i >= 0; i--)
+            if (i != r->ord && is_switch_line("acsi", sc_get_n(&st->cfg, st->sec, "acsi", i)))
+                sc_set_n(&st->cfg, st->sec, "acsi", i, NULL);
+        /* removing a lower line renumbers the rest: find the switch again */
+        ord = acsi_switch_line(st);
+        if (ord < 0)
+            ord = sc_count(&st->cfg, st->sec, "acsi");
+    }
     if (r->ticked) {
         /* off = out of the build; the two the emulator has on by default
          * must say so */
