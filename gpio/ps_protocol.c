@@ -897,19 +897,28 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
          * changes after four consecutive reads agree, 80 ms at TOS's
          * poll rate, so a real monitor swap still works. */
         static int run = 0;
+        static uint16_t bad_val = 0; static uint32_t bad_st = 0;
         int bit = (ps_io->data & 0x0080u) ? 1 : 0;
         if (ps_gpip7_stable < 0)
           ps_gpip7_stable = bit;
         else if (bit != ps_gpip7_stable) {
+          bad_val = (uint16_t)ps_io->data; bad_st = status;   /* what was actually read */
           if (++run >= 4) {
             ps_gpip7_stable = bit; run = 0;
             fprintf (stderr, "[GPIP] monitor detect now %s\n", bit ? "COLOUR" : "MONO");
           }
         } else if (run) {
           if (ps_gpip7_glitches < 8)
-            fprintf (stderr, "[GPIP] monitor-detect glitch: read %s %d time%s, kept %s\n",
+            /* The byte read on the last disagreeing sample is the fact that
+             * matters: $6F (bit 7 alone) = the wire went low; $00/$80/$FF or
+             * other bits off = a corrupted transfer. Also the raw GPLEV word
+             * (status bits 0-7 = CPLD status incl. IPL/BERR) and the size. */
+            fprintf (stderr, "[GPIP] monitor-detect glitch: read %s %d time%s, kept %s "
+                             "(value $%0*X %s, gplev=%08X)\n",
                      ps_gpip7_stable ? "mono" : "colour", run, run == 1 ? "" : "s",
-                     ps_gpip7_stable ? "colour" : "mono");
+                     ps_gpip7_stable ? "colour" : "mono",
+                     ps_io->io_type == READ_BYTE ? 2 : 4, bad_val,
+                     ps_io->io_type == READ_BYTE ? "byte $FFFA01" : "word $FFFA00", bad_st);
           ps_gpip7_glitches++;
           run = 0;
         }
