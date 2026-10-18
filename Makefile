@@ -458,6 +458,11 @@ SETUP_SRC = platforms/atari/setup/shifter_setup.c \
 setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -ldrm
 
+# GCC 14 ICEs in the second scheduling pass (sched-deps.cc add_dependence_1)
+# on ps_acia_kbd_rescue() with the cortex-a53 pipeline model, i.e. only on
+# PI3 / PI02W builds. The pass is a minor win in bit-bang GPIO code anyway.
+gpio/ps_protocol.o: CFLAGS += -fno-schedule-insns2
+
 %.o: %.c
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
