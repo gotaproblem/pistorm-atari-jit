@@ -632,9 +632,13 @@ static uint16_t ide_data_in(struct ide_drive *d, int len)
          * reads the IDE status; the ACSI boot loader on that sector saw
          * GPIP5 low, took every command byte as acknowledged, and
          * jumped into a buffer nothing had filled (4 bombs at
-         * $DDAC10). Falcon TOS only, as everything else is unchanged. */
-        if (emulator_falcon_tos())
-          d->intrq = 0;
+         * $DDAC10). Was Falcon-TOS-only; TOS 2.06 does exactly the
+         * same (18 Oct, PISTORM_IDE_TRACE: IDENTIFY, READ SECTORS of
+         * sector 1, one status read, 256 data words, never again) and
+         * its ACSI probe then read every status at GPIP5-low-already,
+         * got $FF, and the real board's in-flight read crashed the
+         * boot. The line is what the drive does, so every guest. */
+        d->intrq = 0;
       }
     }
   } else
