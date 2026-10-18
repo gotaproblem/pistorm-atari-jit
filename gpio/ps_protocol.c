@@ -304,11 +304,58 @@ static void rp1_setup_pins ( void )
   *rio_oe_set = PS_OUT_PINS;
 }
 #else
-static void create_dev_mem_mapping () 
+/* Peripheral base from the device tree, so one build serves every board.
+ * /proc/device-tree/soc/ranges is big-endian cells:
+ *   BCM2837 (Pi 3B/3A+/Zero 2 W): <7e000000 3f000000 01000000>
+ *                                 child(1) parent(1) size(1)
+ *   BCM2711 (Pi 4/400/CM4):       <7e000000 00000000 fe000000 01800000> [...]
+ *                                 child(1) parent(2) size(1)
+ * The parent address is the cell(s) after the 0x7e000000 child address;
+ * the high parent cell is 0 on BCM2711, so the first non-zero cell wins. */
+uint32_t ps_peri_base ( void )
+{
+  static uint32_t base = 0;
+  if ( base )
+    return base;
+
+  uint8_t buf [64];
+  int fd = open ( "/proc/device-tree/soc/ranges", O_RDONLY );
+  if ( fd >= 0 )
+  {
+    ssize_t n = read ( fd, buf, sizeof buf );
+    close ( fd );
+    for ( int i = 1; n >= 12 && i < n / 4; i++ )
+    {
+      uint32_t c = (uint32_t)buf [4*i] << 24 | (uint32_t)buf [4*i+1] << 16 |
+                   (uint32_t)buf [4*i+2] << 8 | buf [4*i+3];
+      if ( c == 0 )
+        continue;                            /* high half of a 2-cell parent */
+      if ( c == 0x3F000000u || c == 0xFE000000u || c == 0x20000000u )
+      {
+        base = c;
+        break;
+      }
+      break;                                 /* unexpected layout: fall back */
+    }
+  }
+
+  if ( !base )
+  {
+    base = BCM2708_PERI_BASE;
+    printf ( "[GPIO] device tree unreadable - assuming peripheral base 0x%08X\n", base );
+  }
+  else
+    printf ( "[GPIO] peripheral base 0x%08X (%s)\n", base,
+             base == 0xFE000000u ? "BCM2711 / Pi 4" : "BCM2837 / Pi 3, Zero 2 W" );
+
+  return base;
+}
+
+static void create_dev_mem_mapping ()
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
-  
-  if ( fd < 0 ) 
+
+  if ( fd < 0 )
   {
     printf ( "Unable to open /dev/mem.\n" );
     exit ( -1 );
@@ -320,7 +367,7 @@ static void create_dev_mem_mapping ()
       PROT_READ | PROT_WRITE,  // Enable reading & writting to mapped memory
       MAP_SHARED,              // Shared with other processes
       fd,                      // File to map
-      BCM2708_PERI_BASE        // Offset to GPIO peripheral
+      ps_peri_base ()          // Offset to GPIO peripheral (run-time detected)
   );
 
   close(fd);

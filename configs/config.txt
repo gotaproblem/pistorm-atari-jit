@@ -10,7 +10,6 @@
 #overvoltage=6
 #arm_freq=1300
 core_freq=500
-gpu_mem=16
 
 
 [pi3]
@@ -82,3 +81,15 @@ dtoverlay=gpio-no-irq
 # Disable Bluetooth
 dtoverlay=disable-bt
 
+
+# --- 512 MB boards (Pi 3A+, Zero 2 W) ------------------------------------
+# Must come AFTER [all]: later sections win, and [all] sets gpu_mem=128.
+# 64 MB still runs the HDMI desktop at 1080p; VIDPLAY film playback and
+# avrecord need the full 128 (see the note above) - not for these boards.
+# [pi3] matches every BCM2837 board incl. the 3B (1 GB), so the 3B gets 64
+# too; raise it back to 128 there if you use VIDPLAY/avrecord on a 3B.
+[pi02]
+gpu_mem=64
+
+[pi3]
+gpu_mem=64
