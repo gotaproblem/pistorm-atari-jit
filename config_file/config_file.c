@@ -900,6 +900,7 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_CPU_COMPATIBLE:
         cfg->cpu_compatible = get_bool_default_true(parse_line + str_pos);
+        cfg->cpu_compatible_set = true;
         printf ("[CFG] CPU compatible mode %s (prefetch-accurate 68000 core, "
                 "needs jit disabled)\n",
                 cfg->cpu_compatible ? "enabled" : "disabled");

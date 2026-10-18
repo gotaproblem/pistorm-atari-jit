@@ -142,7 +142,7 @@ static int perf_jit_cache_set;
  * tests without editing the cfg. Both are honoured only for a 68000 with
  * the JIT disabled - the prefetch core exists for exact 68000 group-0
  * frames and has never been validated for anything else. */
-static bool cfg_cpu_compatible;
+static int cfg_cpu_compatible = -1;   /* -1 = not in cfg: default by model/JIT */
 
 /* 1 = the guest address space is 24-bit (no TT-RAM/addr32): address bits
  * 24-31 do not exist on the bus and must be ignored everywhere. */
@@ -150,7 +150,7 @@ extern "C" { int pistorm_addr24 = 0; }
 
 extern "C" void jit_cpu_set_compatible(int on)
 {
-    cfg_cpu_compatible = on != 0;
+    cfg_cpu_compatible = on;              /* 1, 0, or -1 (unset) */
 }
 
 /* cfg 'mmu enabled' switch, set from emulator.c before jit_cpu_init().
@@ -281,13 +281,23 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
      * Slower, and the interrupt path differs (re-poll loop) - treat as
      * experimental alongside real-pin IPL until proven. */
     {
+        /* Default (no cfg line): ON for a 68000 with the JIT off. That
+         * configuration exists to run 68000 software faithfully, and the
+         * approximate group-0 frame of the plain core is the one thing in
+         * it a real 68000 program can see - the diagnostic cartridge's
+         * "I7 bus error not detected" (18 Oct 2026) was exactly that.
+         * 'cpu_compatible false' in the cfg still turns it off. */
         const char *e = getenv("PISTORM_CPU_COMPAT");
-        bool wanted = cfg_cpu_compatible || (e && *e == '1');
+        bool dflt = disable_jit && m == 68000;
+        bool wanted = (cfg_cpu_compatible < 0 ? dflt : cfg_cpu_compatible != 0) ||
+                      (e && *e == '1');
+        if (e && *e == '0') wanted = false;
         bool compat = wanted && disable_jit && m == 68000;
         currprefs.cpu_compatible = changed_prefs.cpu_compatible = compat;
         if (compat)
             write_log("[JITGLUE] cpu_compatible=1: prefetch-accurate 68000 "
-                      "core, exact group-0 frames\n");
+                      "core, exact group-0 frames%s\n",
+                      cfg_cpu_compatible < 0 ? " (default for 68000 + jit off)" : "");
         else if (wanted)
             write_log("[JITGLUE] cpu_compatible requested but IGNORED: "
                       "needs 'cpu 68000' and 'jit disabled' (have %d, jit %s)\n",
