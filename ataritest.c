@@ -58,7 +58,7 @@ int  memTest ( int direction, int type, uint32_t startAdd, uint32_t length, uint
 void clearmem ( uint32_t length, uint32_t *duration, uint16_t pattern, int8_t loop );
 void setMemory ( uint32_t size );
 void peek ( uint32_t start );
-void mfptest ( uint32_t count );
+void mfptest ( uint32_t count, int irq );
 void poke ( uint32_t address, uint8_t data );
 void dump ( uint32_t ROMsize, uint32_t ROMaddress );
 void memspeed ( uint32_t length );
@@ -86,6 +86,7 @@ uint32_t padd;
 uint8_t pdata;
 int cmdPeek = 0;
 int cmdMfp = 0;
+int mfpIrq = 0;
 uint32_t mfpCount = 100000;
 int cmdPoke = 0;
 int cmdMem = 0;
@@ -328,7 +329,7 @@ int main ( int argc, char *argv[] )
         }
 
         if ( cmdMfp )
-            mfptest ( mfpCount );
+            mfptest ( mfpCount, mfpIrq );
 
         if ( cmdDump )
         {
@@ -489,9 +490,10 @@ test_loop:
                  "     At least one test must be supplied.\n"
                  "     <loop> repeats tests until CNTRL-C is entered.\n"
                  "     <stop> aborts tests on an error.\n"
-                 "--mfp <count=N>\n"
+                 "--mfp <count=N> <irq=yes>\n"
                  "     Read-stability test of MFP/ACIA registers (bit errors on\n"
                  "     peripheral reads). Default 100000 reads per register.\n"
+                 "     <irq=yes> holds an MFP interrupt asserted during the reads.\n"
                  "--peek address=xxxxxx <loop=yes>\n"
                  "     examine address.\n"
                  "     displays 256 bytes from address.\n"
@@ -584,8 +586,15 @@ void memspeed ( uint32_t length )
  *                the bus and the one the H5 hang was seen on
  *   $000600 RAM byte as the control
  * Prints, per register: distinct values seen with their counts, the number
- * of reads that differed from the majority value, and bus errors. */
-void mfptest ( uint32_t count )
+ * of reads that differed from the majority value, and bus errors.
+ *
+ * irq=yes: before the loop, Timer D is set to interrupt (TDDR=1, /4
+ * prescale, IERB/IMRB bit 4) and is never acknowledged, so the 68901 holds
+ * IRQ asserted - IPL=6 on the CPLD - for every read. That is the one
+ * condition the halted test lacks and the live emulator always has while
+ * the keyboard ISR reads GPIP (it runs straight after the IACK, with the
+ * ACIA line active). Registers are restored afterwards. */
+void mfptest ( uint32_t count, int irq )
 {
     static const struct { uint32_t addr; const char *name; } regs [] = {
         { 0xFFFA01, "GPIP  " }, { 0xFFFA03, "AER   " }, { 0xFFFA05, "DDR   " },
@@ -595,7 +604,32 @@ void mfptest ( uint32_t count )
     const int nregs = (int)(sizeof regs / sizeof regs [0]);
     uint32_t total_bad = 0;
 
-    printf ( "\nMFP / ACIA read stability - %u reads per register, CPU halted\n\n", count );
+    uint8_t sv_ierb = 0, sv_imrb = 0, sv_tcdcr = 0, sv_tddr = 0, sv_vr = 0;
+    if ( irq )
+    {
+        uint8_t b;
+        sv_ierb  = ps_read_8_fc ( 0xFFFA09, fc, &b );
+        sv_imrb  = ps_read_8_fc ( 0xFFFA15, fc, &b );
+        sv_tcdcr = ps_read_8_fc ( 0xFFFA1D, fc, &b );
+        sv_tddr  = ps_read_8_fc ( 0xFFFA25, fc, &b );
+        sv_vr    = ps_read_8_fc ( 0xFFFA17, fc, &b );
+        ps_write_8 ( 0xFFFA1D, sv_tcdcr & 0xF0 );     /* Timer D stopped */
+        ps_write_8 ( 0xFFFA17, 0x48 );                /* vector base $40, S=1 (software EOI) */
+        ps_write_8 ( 0xFFFA25, 0x01 );                /* TDDR = 1 */
+        ps_write_8 ( 0xFFFA09, sv_ierb | 0x10 );      /* IERB bit 4 = Timer D */
+        ps_write_8 ( 0xFFFA15, sv_imrb | 0x10 );      /* IMRB bit 4 */
+        ps_write_8 ( 0xFFFA1D, (sv_tcdcr & 0xF0) | 0x01 ); /* /4: fires in ~2 us, every 2 us */
+        usleep ( 100 );
+        {
+            uint8_t ipl = 0, ipr = ps_read_8_fc ( 0xFFFA0D, fc, &b ), isr = ps_read_8_fc ( 0xFFFA11, fc, &b );
+            ps_read_ipl ( &ipl );
+            printf ( "\nIRQ held: MFP IPRB=$%02X ISRB=$%02X, CPLD IPL=%u%s\n", ipr, isr, ipl,
+                     ipl == 6 ? "" : "  (expected 6 - the MFP is NOT asserting; results below are without IRQ)" );
+        }
+    }
+
+    printf ( "\nMFP / ACIA read stability - %u reads per register, CPU halted%s\n\n", count,
+             irq ? ", MFP IRQ asserted throughout" : "" );
     printf ( " reg      addr     majority  errors  berr   values seen (value:count)\n" );
 
     for ( int r = 0; r < nregs; r++ )
@@ -654,7 +688,20 @@ void mfptest ( uint32_t count )
         }
     }
 
-    printf ( "\n%s: %u bad reads in total\n\n", total_bad ? "FAIL" : "PASS", total_bad );
+    if ( irq )
+    {
+        ps_write_8 ( 0xFFFA1D, sv_tcdcr & 0xF0 );
+        ps_write_8 ( 0xFFFA09, sv_ierb );
+        ps_write_8 ( 0xFFFA15, sv_imrb );
+        ps_write_8 ( 0xFFFA0D, 0xEF );                /* clear Timer D pending */
+        ps_write_8 ( 0xFFFA11, 0xEF );                /* and in-service */
+        ps_write_8 ( 0xFFFA25, sv_tddr );
+        ps_write_8 ( 0xFFFA1D, sv_tcdcr );
+        ps_write_8 ( 0xFFFA17, sv_vr );
+    }
+
+    printf ( "\n%s: %u bad reads in total%s\n\n", total_bad ? "FAIL" : "PASS", total_bad,
+             irq ? " (IRQ asserted)" : "" );
 }
 
 void peek ( uint32_t start )
@@ -2000,6 +2047,12 @@ int parser ( int argc, char **argv )
                     tptr = strtok ( NULL, "" );
                     mfpCount = (uint32_t)atoi ( tptr );
                     if ( mfpCount < 1000 ) mfpCount = 1000;
+                }
+
+                else if ( strcmp ( aptr, "irq" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    mfpIrq = ( strcmp ( tptr, "yes" ) == 0 );
                 }
 
                 else
