@@ -111,6 +111,11 @@ volatile uint32_t g_buserr_addr = 0;
 
 static atomic_flag ps_txn_lock = ATOMIC_FLAG_INIT;
 
+/* Extra GPLEV samples after TXN falls on a read, before the data is taken.
+ * Set in ps_setup_protocol: 0 on BCM2711, 4 on BCM2837, PISTORM_RD_SETTLE
+ * overrides (0..8). See the comment in ps_read_txn. */
+static int ps_rd_settle = 0;
+
 /* Raised for the whole time a thread owns the bus - i.e. the window in
  * which the Pi may be DRIVING the GPIO bank (address/data phases flip
  * GPFSEL to output). GPLEV0 then reads back the driven values, so an
@@ -489,6 +494,17 @@ void ps_setup_protocol ( void )
   create_dev_mem_mapping ();
   setup_gpclk ();
 
+#ifndef PI5
+  {
+    const char *e = getenv ("PISTORM_RD_SETTLE");
+    ps_rd_settle = e ? atoi (e) : (ps_peri_base () == 0x3F000000u ? 4 : 0);
+    if (ps_rd_settle < 0) ps_rd_settle = 0;
+    if (ps_rd_settle > 8) ps_rd_settle = 8;
+    printf ("[GPIO] read settle %d GPLEV sample%s after TXN%s\n", ps_rd_settle,
+            ps_rd_settle == 1 ? "" : "s", e ? " (PISTORM_RD_SETTLE)" : "");
+  }
+#endif
+
 #ifdef PI5
   rp1_setup_pins ();
 #else
@@ -826,22 +842,18 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
    * on a clock edge with datasheet setup; this loop sampled on a race.
    *
    * Each extra GPLEV read adds ~50-100ns of settle after the TXN edge.
-   * Sweep result: 1 was not enough, 4 is clean. PISTORM_RD_SETTLE tunes. */
-#if (0)
-  {
-    static int rd_settle = -1;
+   * Sweep result: 1 was not enough, 4 is clean.
+   *
+   * 2026-10-18: BCM2837 (Pi 3A+/3B/Zero 2 W) reads the GPIO block faster
+   * than BCM2711, so with zero settle the sample lands on the edge and
+   * ataritest shows ~0.02% of reads returning 0000/FFFF or echoes of the
+   * opcode byte ($0300/$0100/$0081), at stock clocks. BCM2711's ~74 ns
+   * GPLEV read is settle enough on its own, so the Pi 4 default stays 0.
+   * ps_rd_settle is set once in ps_setup_protocol (per SoC, or from
+   * PISTORM_RD_SETTLE); the loop below is one predictable branch when 0. */
+  for (int i = 0; i < ps_rd_settle; i++)
+    status = *lev;
 
-    if (__builtin_expect(rd_settle < 0, 0)) {
-      const char *e = getenv("PISTORM_RD_SETTLE");
-      rd_settle = e ? atoi(e) : 4;
-      if (rd_settle < 0) rd_settle = 0;
-      if (rd_settle > 8) rd_settle = 8;
-    }
-
-    for (int i = 0; i < rd_settle; i++)
-      status = *lev;
-  }
-#endif
   *clr = TXN_END;
   PS_BUS_OUT ();
   ps_io->berr = CHECK_BERR (status);
