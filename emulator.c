@@ -2768,7 +2768,7 @@ int main (int argc, char *argv[])
   /* Initialise JIT CPU core */
   PS_INFO("[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
-  jit_cpu_set_compatible(config->cpu_compatible_set ? (config->cpu_compatible ? 1 : 0) : -1);
+  jit_cpu_set_compatible(config->cpu_compatible ? 1 : 0);
   jit_cpu_set_mmu(config->mmu ? 1 : 0);
 
   /* Monitor-detect force lives at the ps_protocol layer (see the note
