@@ -614,6 +614,13 @@ void mfptest ( uint32_t count, int irq )
         sv_tddr  = ps_read_8_fc ( 0xFFFA25, fc, &b );
         sv_vr    = ps_read_8_fc ( 0xFFFA17, fc, &b );
         ps_write_8 ( 0xFFFA1D, sv_tcdcr & 0xF0 );     /* Timer D stopped */
+        /* A channel left in-service by a crashed guest (software EOI
+         * mode) masks every lower channel: seen ISRB=$40 (keyboard ACIA)
+         * blocking Timer D. Clear in-service and pending on both halves. */
+        ps_write_8 ( 0xFFFA0F, 0x00 );                /* ISRA */
+        ps_write_8 ( 0xFFFA11, 0x00 );                /* ISRB */
+        ps_write_8 ( 0xFFFA0B, 0x00 );                /* IPRA */
+        ps_write_8 ( 0xFFFA0D, 0x00 );                /* IPRB */
         ps_write_8 ( 0xFFFA17, 0x48 );                /* vector base $40, S=1 (software EOI) */
         ps_write_8 ( 0xFFFA25, 0x01 );                /* TDDR = 1 */
         ps_write_8 ( 0xFFFA09, sv_ierb | 0x10 );      /* IERB bit 4 = Timer D */
