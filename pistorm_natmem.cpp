@@ -5713,6 +5713,44 @@ extern "C" void jit_mem_init(void)
     }
 
     map_region(pistorm_rom_start, pistorm_rom_size, &pistorm_rom_bank);
+
+    /* Cartridge port $FA0000-$FBFFFF.
+     *
+     * Field case (18 Oct 2026, TOS 1.04, diagnostic cartridge): TOS found the
+     * $FA52235F magic - data reads of $FA0000 fall through to the dummy bank
+     * and go to the real bus - and did its `jmp $FA0004`, but the PC ring
+     * showed $FC0036 as the very next instruction, forever. Code is FETCHED
+     * through the JIT's natmem mirror, and the mirror held nothing at
+     * $FA0004. A cartridge is ROM, so do what is done for TOS: if the port
+     * answers with either magic, snapshot the 128 KB off the bus once and
+     * give it the ROM bank (mirror reads, writes ignored). The cart's own
+     * accesses to hardware ($FF8001 etc.) are data cycles and still reach
+     * the bus. No cartridge: the range stays on the dummy bank, exactly as
+     * before. ~50 ms of bus reads, paid only when a cartridge is present.
+     * PISTORM_CART=0 disables the probe (a misbehaving port, A/B). */
+    {
+        const char *e = getenv("PISTORM_CART");
+        if (!(e && *e == '0'))
+        {
+            const uae_u32 magic = ((uae_u32)ps_read_16(0x00FA0000u) << 16) |
+                                  ps_read_16(0x00FA0002u);
+            if (magic == 0xFA52235Fu || magic == 0xABCDEF42u)
+            {
+                uae_u8 *dst = natmem_offset + 0x00FA0000u;
+                for (uae_u32 a = 0; a < 0x20000u; a += 2)
+                {
+                    uae_u16 v = ps_read_16(0x00FA0000u + a);
+                    dst[a] = (uae_u8)(v >> 8);
+                    dst[a + 1] = (uae_u8)v;
+                }
+                map_region(0x00FA0000u, 0x20000u, &pistorm_rom_bank);
+                printf("[INIT] cartridge at $FA0000 (%s) - 128KB snapshot mapped read-only\n",
+                       magic == 0xFA52235Fu ? "DIAGNOSTIC: TOS will run it instead of booting"
+                                            : "application");
+            }
+        }
+    }
+
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases
     map_region(0xFFFF0000u, 0x10000, &pistorm_hw_bank); // 32-bit alias
     map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
