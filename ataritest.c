@@ -58,7 +58,7 @@ int  memTest ( int direction, int type, uint32_t startAdd, uint32_t length, uint
 void clearmem ( uint32_t length, uint32_t *duration, uint16_t pattern, int8_t loop );
 void setMemory ( uint32_t size );
 void peek ( uint32_t start );
-void mfptest ( uint32_t count, int irq );
+void mfptest ( uint32_t count, int irq, int iack );
 void poke ( uint32_t address, uint8_t data );
 void dump ( uint32_t ROMsize, uint32_t ROMaddress );
 void memspeed ( uint32_t length );
@@ -87,6 +87,7 @@ uint8_t pdata;
 int cmdPeek = 0;
 int cmdMfp = 0;
 int mfpIrq = 0;
+int mfpIack = 0;
 uint32_t mfpCount = 100000;
 int cmdPoke = 0;
 int cmdMem = 0;
@@ -329,7 +330,7 @@ int main ( int argc, char *argv[] )
         }
 
         if ( cmdMfp )
-            mfptest ( mfpCount, mfpIrq );
+            mfptest ( mfpCount, mfpIrq, mfpIack );
 
         if ( cmdDump )
         {
@@ -490,10 +491,11 @@ test_loop:
                  "     At least one test must be supplied.\n"
                  "     <loop> repeats tests until CNTRL-C is entered.\n"
                  "     <stop> aborts tests on an error.\n"
-                 "--mfp <count=N> <irq=yes>\n"
+                 "--mfp <count=N> <irq=yes> <iack=yes>\n"
                  "     Read-stability test of MFP/ACIA registers (bit errors on\n"
                  "     peripheral reads). Default 100000 reads per register.\n"
                  "     <irq=yes> holds an MFP interrupt asserted during the reads.\n"
+                 "     <iack=yes> adds real level-6 IACK cycles with a GPIP read after each.\n"
                  "--peek address=xxxxxx <loop=yes>\n"
                  "     examine address.\n"
                  "     displays 256 bytes from address.\n"
@@ -594,7 +596,7 @@ void memspeed ( uint32_t length )
  * condition the halted test lacks and the live emulator always has while
  * the keyboard ISR reads GPIP (it runs straight after the IACK, with the
  * ACIA line active). Registers are restored afterwards. */
-void mfptest ( uint32_t count, int irq )
+void mfptest ( uint32_t count, int irq, int iack )
 {
     static const struct { uint32_t addr; const char *name; } regs [] = {
         { 0xFFFA01, "GPIP  " }, { 0xFFFA03, "AER   " }, { 0xFFFA05, "DDR   " },
@@ -693,6 +695,51 @@ void mfptest ( uint32_t count, int irq )
                     printf ( " D%d:%u", b, bitflip [b] );
             printf ( "\n" );
         }
+    }
+
+    /* iack=yes (needs irq=yes): the real thing the live system does and
+     * nothing above does - a level-6 IACK cycle (FC=7, $FFFFFD), vector
+     * expected $44 (base $40 + Timer D ch4), then a GPIP read immediately
+     * after, as the keyboard ISR does. Software-EOI mode leaves ch4 in
+     * service, which drops IRQ; clear ISRB to re-arm, wait for IPRB bit 4
+     * (Timer D fires every ~2 us), repeat. */
+    if ( irq && iack )
+    {
+        uint32_t vhist [256], ghist [256], berrs = 0, noirq = 0, gpip_bad = 0, vbad = 0;
+        uint32_t n = count / 10 < 1000 ? 1000 : count / 10;   /* each pass is several cycles */
+        memset ( vhist, 0, sizeof vhist );
+        memset ( ghist, 0, sizeof ghist );
+
+        for ( uint32_t i = 0; i < n; i++ )
+        {
+            uint8_t b = 0, ipl = 0;
+            int w;
+            ps_write_8 ( 0xFFFA11, 0x00 );                 /* ISRB: end of service */
+            for ( w = 0; w < 1000; w++ )                    /* wait for Timer D to re-pend */
+            {
+                ps_read_ipl ( &ipl );
+                if ( ipl == 6 ) break;
+            }
+            if ( ipl != 6 ) { noirq++; continue; }
+
+            uint8_t v = ps_read_8_fc ( 0x00FFFFFDu, 7, &b );
+            if ( b ) { berrs++; continue; }
+            vhist [v]++;
+            if ( v != 0x44 ) vbad++;
+
+            uint8_t g = ps_read_8_fc ( 0xFFFA01, fc, &b );
+            ghist [g]++;
+            if ( g != 0xEF ) gpip_bad++;
+        }
+
+        printf ( "\nIACK cycles: %u  vector!=$44: %u  berr: %u  no-IRQ (timer did not re-pend): %u\n",
+                 n, vbad, berrs, noirq );
+        printf ( "  vectors seen:" );
+        for ( int v = 0; v < 256; v++ ) if ( vhist [v] ) printf ( " $%02X:%u", v, vhist [v] );
+        printf ( "\n  GPIP read right after IACK: %u != $EF; values:", gpip_bad );
+        for ( int v = 0; v < 256; v++ ) if ( ghist [v] ) printf ( " $%02X:%u", v, ghist [v] );
+        printf ( "\n" );
+        total_bad += vbad + berrs + gpip_bad;
     }
 
     if ( irq )
@@ -2060,6 +2107,13 @@ int parser ( int argc, char **argv )
                 {
                     tptr = strtok ( NULL, "" );
                     mfpIrq = ( strcmp ( tptr, "yes" ) == 0 );
+                }
+
+                else if ( strcmp ( aptr, "iack" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    mfpIack = ( strcmp ( tptr, "yes" ) == 0 );
+                    if ( mfpIack ) mfpIrq = 1;
                 }
 
                 else
