@@ -13,6 +13,7 @@ Pi 4, 3B, 3A+ and Zero 2 W. Branch `small-boards`.
 | `ps_rd_settle` = 2 on BCM2837, 0 on BCM2711 (`gpio/ps_protocol.c`) | BCM2837 reads GPLEV fast enough to sample the data bus on the TXN edge: ~0.02 % of reads wrong (`ataritest --memory`). Sweep: 0 fails, 1-3 clean, same throughput. `PISTORM_RD_SETTLE=n` overrides. |
 | Live-IPL check before a real level-6 IACK; MFP in-service vector delivered at once on a no-ack (`jit_glue.cpp`, `cpu/newcpu.cpp`) | The IACK cycle fails back to the Pi ~5e-5 halted / ~1e-3 live while the 68901 HAS serviced it (set ISR, dropped IRQ). The retry path then fired two more IACKs into an idle MFP: erratic mouse, keyboard beeps, Timer C orphaned in service. Mitigation, not root cause - the cycle itself is CPLD-vs-MFP IACK termination timing (firmware); the Pi 4 shows the same fault at a lower rate ("garbled-IACK wedge"). Reproducer: `ataritest --mfp iack=yes count=1000000`. |
 | `ataritest --mfp [count=N] [irq=yes] [iack=yes]` | Read-stability test of MFP/ACIA registers with IPL held / with real IACK cycles. |
+| STBOX slice host cap 3000 ns on BCM2837, 1500 elsewhere (`platforms/atari/stbox/stbox.c`) | A slice is ~1.3 us on the A53 vs ~0.4 on the A72; at 1500 every burst ended on the cap (slices/s 86k, 5.5-7.5 M cps, games slow). 3000 = full speed, main machine unaffected. `PISTORM_STBOX_SLICE_NS` overrides. |
 | `gpio/ps_protocol.o: -fno-schedule-insns2` (Makefile) | GCC 14 ICE with the cortex-a53 pipeline model only. |
 
 ## config.txt (per board, see `configs/config.txt`)
