@@ -9,7 +9,7 @@
  *   cpu 68000
  *   machine st | ste | megast        from the chips that answer
  *   stram_size <bank0 + bank1>       from the DRAM fold probe
- *   shifter st | ste                 $FF8265 (STE horizontal scroll)
+ *   shifter st | ste                 $FF8901 (STE DMA sound) answers
  *   blitter real | blitter disabled  $FF8A00 - the real chip, nothing emulated
  *   rom native-tos.rom               the real TOS, copied into rom_path
  *

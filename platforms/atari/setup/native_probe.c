@@ -102,9 +102,13 @@ int np_probe(struct np_result *r)
            r->mega_rtc ? "yes" : "no", r->tt_shifter ? "yes" : "no");
 
     /* `machine` takes st / ste / megast (falcon is an experiment, never a
-     * probe result). A Mega STE is an STE to the emulator; a TT would be
-     * too, and is logged above so it is not mistaken for one silently. */
-    if (r->ste_shifter || r->dma_sound)
+     * probe result). STE = the DMA sound chip answers ($FF8901), the test
+     * TOS makes: a plain ST with TOS 2.06 answered $FF8265 (the GLUE
+     * decodes the whole shifter page), so the scroll register says
+     * nothing and is only logged. A Mega STE is an STE to the emulator; a
+     * TT would be too, and is logged so it is not mistaken for one. */
+    r->ste_shifter = r->dma_sound;
+    if (r->dma_sound)
         strcpy(r->machine, "ste");
     else if (r->blitter && r->mega_rtc)
         strcpy(r->machine, "megast");

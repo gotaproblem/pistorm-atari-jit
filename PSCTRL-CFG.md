@@ -66,7 +66,7 @@ loaded yet) and adds one:
 cpu 68000
 machine ste            st / ste / megast, from the chips that answer
 stram_size 4M          bank 0 + bank 1, from the DRAM probe
-shifter ste            $FF8265 answered (STE horizontal scroll)
+shifter ste            $FF8901 (STE DMA sound) answered
 blitter real           $FF8A00 answered; `blitter disabled` otherwise
 rom native-tos.rom     the machine's own TOS, copied from the real ROM
 ```
