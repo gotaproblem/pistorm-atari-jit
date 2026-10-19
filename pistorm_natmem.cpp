@@ -1561,11 +1561,33 @@ static inline int stram_range_overlaps(uaecptr a, int sz, uae_u32 start, uae_u32
     return a < win_end && end > start;
 }
 
+/* PISTORM_ACSI_HOLD_WRITES=1 (A/B experiment, 19 Oct 2026): while a real
+ * ACSI read is in flight, do NOT put CPU writes to ST-RAM on the bus; the
+ * mirror still takes them. HDDriver's INQUIRY buffer on its stack received
+ * HDDriver's OWN CODE BYTES instead of the device's data (HDC trace, real
+ * RAM dump) - and the only code bytes that cross the bus are CPU writes of
+ * code (HDDriver copying its resident part) issued WHILE the DMA chip is
+ * flushing its FIFO to RAM. Two masters writing at once = arbitration not
+ * holding the Pi's write cycle off the bus. If holding the writes makes
+ * HDDriver run, that is the finding; the fix belongs in the CPLD. The
+ * deferred words are NOT replayed to real RAM afterwards (an experiment):
+ * anything a bus master reads from those addresses during the window sees
+ * stale real RAM, which is why this is not a default. */
+extern "C" int pistorm_acsi_read_in_flight(void);
+static inline int acsi_hold_writes(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("PISTORM_ACSI_HOLD_WRITES"); on = (e && *e == '1'); }
+    return on;
+}
+
 static inline int stram_needs_bus_write(uaecptr a, int sz)
 {
     a &= 0x00FFFFFFu;
     if (a >= ST_RAM_SIZE)
         return 0;                 /* Falcon 14MB: no board RAM up there */
+    if (acsi_hold_writes() && pistorm_acsi_read_in_flight())
+        return 0;
     if (!emulator_config_stram_cache_enabled())
         return 1;
 
