@@ -432,6 +432,33 @@ void fdd_init(void)
 
     mfp_hub_register_level(7, fdd_mfp_level_poll);   /* GPIP5 - see above */
 
+    /* Quieten the REAL WD1772 once. With the floppy emulated, nothing ever
+     * talks to the chip on the board, and a 1772 holds INTRQ asserted from
+     * power-on until its status register is read (or a command is written).
+     * INTRQ is wired to GPIP5 together with ACSI /IRQ, so every ACSI
+     * driver that polls GPIP5 - TOS, EmuTOS, HDDriver - saw "device ready"
+     * on its FIRST poll of every command, read a status byte off a bus the
+     * device had not yet driven, and never waited for the data phase.
+     *
+     * Reproduced 19 Oct 2026 (cold power-up, fdd 0: mounted, EmuTOS): IDs
+     * with no device answered st=FF on 1 poll, ID 0's INQUIRY moved 0 bytes
+     * on 1 poll; with the floppy not emulated the same INQUIRY took 23 polls
+     * and moved 32 bytes. Removing the fdd line, or any guest floppy access
+     * that reached the real chip, cleared it - which is why it only showed
+     * after a full power-off. One real status read, FDC selected (mode bit 3
+     * = 0, A1:A0 = 00), done before the guest runs. The value is discarded.
+     * Real-floppy configurations are unaffected (the guest talks to the chip
+     * itself there). PISTORM_FDC_NO_INTRQ_CLEAR=1 skips it, for A/B. */
+    {
+        const char *e = getenv("PISTORM_FDC_NO_INTRQ_CLEAR");
+        if (!(e && *e == '1')) {
+            ps_write_16(DMA_MODE_REG, 0x0080);        /* FDC selected, status reg, read */
+            uint16_t st = ps_read_16(FDC_DATA_REG);   /* WD1772 status read clears INTRQ */
+            ps_write_16(DMA_MODE_REG, 0x0080);
+            FDD_INFO("real WD1772 status read once at init (INTRQ cleared): $%02X", st & 0xFF);
+        }
+    }
+
     FDD_INFO("Initialised");
 }
 
