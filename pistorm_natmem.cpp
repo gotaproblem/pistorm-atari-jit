@@ -3035,6 +3035,17 @@ static inline uae_u32 hw_joypad_idle(uaecptr a, int size)
     return v;
 }
 
+/* `machine ste` on a plain ST board (19 Oct 2026, TOS 1.62): the STE TOS
+ * reads $FF9200 unguarded at $E00392 during init - an STE always has the
+ * port - took the real board's bus error into whatever vector 2 held, and
+ * never booted. The cfg claims an STE, so the port must answer: same
+ * idle-ports rule as the Falcon personality below. */
+static inline int joypad_port_claimed(void)
+{
+    const int k = emulator_config_machine_kind();
+    return falcon_armed() || k == 1 || k == 3;
+}
+
 static inline uae_u32 hw_joypad_get(uaecptr a, int size)
 {
     uae_u32 v;
@@ -3047,7 +3058,7 @@ static inline uae_u32 hw_joypad_get(uaecptr a, int size)
         if (size == 4)      v = ps_bus_lget(a);
         else if (size == 2) v = ps_read_16(a);
         else                v = ps_read_8(a);
-        if (g_buserr && falcon_armed()) {
+        if (g_buserr && joypad_port_claimed()) {
             g_buserr = 0;
             v = hw_joypad_idle(a, size);
         }
@@ -4015,7 +4026,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
         case HW_PAGE_JOYPAD:
             if (JOY_USB_enabled && joy_usb_ste_addr(a))
                 joy_usb_ste_write(a, 4, v);   /* column select shadow */
-            if (falcon_armed()) {
+            if (joypad_port_claimed()) {
                 /* see hw_joypad_idle: absent ports take the write */
                 g_buserr = 0;
                 ps_bus_lput(a, v);
@@ -4119,7 +4130,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
         case HW_PAGE_JOYPAD:
             if (JOY_USB_enabled && joy_usb_ste_addr(a))
                 joy_usb_ste_write(a, 2, v);   /* column select shadow */
-            if (falcon_armed()) {
+            if (joypad_port_claimed()) {
                 /* see hw_joypad_idle: absent ports take the write */
                 g_buserr = 0;
                 ps_write_16(a, (uae_u16)v);
@@ -4225,7 +4236,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
         case HW_PAGE_JOYPAD:
             if (JOY_USB_enabled && joy_usb_ste_addr(a))
                 joy_usb_ste_write(a, 1, v);   /* column select shadow */
-            if (falcon_armed()) {
+            if (joypad_port_claimed()) {
                 /* see hw_joypad_idle: absent ports take the write */
                 g_buserr = 0;
                 ps_write_8(a, (uae_u8)v);
