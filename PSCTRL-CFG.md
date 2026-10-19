@@ -55,6 +55,30 @@ cpu 68040
   `shifter`, `cpu_compatible`). The emulator accepts any key in any build.
 * Up to 8 builds are listed.
 
+### `[native]` - the real machine, written for you
+
+The first time the emulator starts with a psctrl.cfg that has builds but
+no `[native]` section, it asks the board what it is (68k halted, nothing
+loaded yet) and adds one:
+
+```
+[native]
+cpu 68000
+machine ste            st / ste / megast, from the chips that answer
+stram_size 4M          bank 0 + bank 1, from the DRAM probe
+shifter ste            $FF8265 answered (STE horizontal scroll)
+blitter                $FF8A00 answered; `blitter disabled` otherwise
+rom native-tos.rom     the machine's own TOS, copied from the real ROM
+```
+
+The ROM copy is byte-exact and lands under `rom_path` as
+`native-tos.rom` (TOS 1.x 192K from `$FC0000`, TOS 2.x 256K / 3.x 512K
+from `$E00000`). Everything probed is printed on the console as
+`[NATIVE] ...`. An existing `[native]` is never touched, so edits to it
+on the page stick; delete the section and it is written again at the
+next start. A Mega STE comes out as `ste`. `PISTORM_NATIVE_PROBE=0`
+skips the whole thing.
+
 ## `[psctrl]` - the page
 
 | key | values | |

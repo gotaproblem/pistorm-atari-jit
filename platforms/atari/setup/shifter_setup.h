@@ -48,6 +48,12 @@ struct ss_screen {
  * bus. The HDMI mirror (setup_hdmi.c) is then the only output. */
 int  ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50);
 
+/* The DRAM probe ss_bringup uses: bytes in the bank at `base` (0, 128K,
+ * 512K, 2M), found by writing a pattern and looking for its folds. The
+ * caller programs $FF8001 (2M|2M, 0x0A) and sets fc to supervisor
+ * first. Also used by native_probe.c. */
+uint32_t ss_probe_bank(uint32_t base);
+
 /* 4 colours, ST 0x0RGB (3 bits a gun). Mono uses bit 0 of colour 0. */
 void ss_palette(const uint16_t pal[4]);
 

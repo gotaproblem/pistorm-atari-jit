@@ -24,6 +24,7 @@
 #include "config_file/config_file.h"
 #include "platforms/atari/setup/setup_cfg.h"
 #include "platforms/atari/setup/setup_page.h"
+#include "platforms/atari/setup/native_probe.h"
 #include "platforms/atari/setup/setup_input.h"
 #include "platforms/atari/setup/setup_hdmi.h"
 #include "platforms/atari/psctrl/psctrl_tunables.h"
@@ -2290,6 +2291,15 @@ int main (int argc, char *argv[])
   char boot_section[32];
   int  have_sections = 0;
   memset(boot_section, 0, sizeof boot_section);
+  /* First start on this board: no [native] build yet. Ask the board what
+   * it is and write one (native_probe.c) - now, with the 68k halted and
+   * nothing loaded, so the page lists it. The real TOS is copied to
+   * rom_path/native-tos.rom on the way. PISTORM_NATIVE_PROBE=0 skips it. */
+  {
+    const char *np = getenv("PISTORM_NATIVE_PROBE");
+    if (!(np && *np == '0'))
+      np_ensure_native_section(config_file);
+  }
   {
     static struct sc_cfg probe;
     char secs[8][SC_SEC_LEN];

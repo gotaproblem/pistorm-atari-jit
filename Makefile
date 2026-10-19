@@ -64,7 +64,8 @@ CFILES = config_file/config_file.c \
          platforms/atari/setup/setup_cfg.c \
          platforms/atari/setup/setup_enums.c \
          platforms/atari/setup/setup_hdmi.c \
-         platforms/atari/setup/setup_page.c
+         platforms/atari/setup/setup_page.c \
+         platforms/atari/setup/native_probe.c
 
 # -----------------------------------------------------------------
 # Musashi 68000 core for the STBOX game sandbox (third_party/musashi).

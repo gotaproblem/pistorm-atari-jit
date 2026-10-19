@@ -8,6 +8,8 @@
 #   [psctrl]   the setup page's own keys - never a machine
 #   [gem]      the plain GEM machine (TOS/EmuTOS desktop, ST video)
 #   [apj-os]   the APJ-OS machine (FreeMiNT + XaAES + fVDI, ET4000 on HDMI)
+#   [native]   the real machine - written by the emulator at its first
+#              start from what the board answers (PSCTRL-CFG.md)
 #
 # The emulator loads ONE build, whichever the setup page picked (or the
 # `boot` key below). Each build is complete on its own: nothing is

@@ -32,7 +32,7 @@ static int pattern_present(uint32_t addr)
     return 1;
 }
 
-static uint32_t probe_bank(uint32_t base)
+uint32_t ss_probe_bank(uint32_t base)
 {
     uint16_t v = 0;
     for (uint32_t a = base + 0x008; a < base + 0x200; a += 2) {
@@ -68,8 +68,8 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     fc = 0x5;                              /* supervisor data: GLUE ignores FC 0 */
 
     ps_write_8(REG_MEMCFG, 0x0A);          /* 2M|2M while probing */
-    ss->bank0 = probe_bank(0x000000u);
-    ss->bank1 = probe_bank(0x200000u);
+    ss->bank0 = ss_probe_bank(0x000000u);
+    ss->bank1 = ss_probe_bank(0x200000u);
     ss->shifter = ss->bank0 != 0;
     if (ss->shifter) {
         ss->memcfg = (uint8_t)((bank_bits(ss->bank0) << 2) |
