@@ -1332,14 +1332,6 @@ static void hdc_trace_write_window(void)
                 fdc.hdc_count, fdc.hdc_base, fdc.dma_mode);
 }
 
-/* 1 while a real-ACSI READ is in flight (first CDB byte .. status read).
- * pistorm_natmem.cpp asks before putting a CPU write on the bus - see
- * PISTORM_ACSI_HOLD_WRITES there. */
-int pistorm_acsi_read_in_flight(void)
-{
-    return fdc.hdc_pending ? 1 : 0;
-}
-
 static void hdc_claim_count(void)
 {
     hdc_active = 1;
