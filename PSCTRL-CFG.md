@@ -67,7 +67,7 @@ cpu 68000
 machine ste            st / ste / megast, from the chips that answer
 stram_size 4M          bank 0 + bank 1, from the DRAM probe
 shifter ste            $FF8265 answered (STE horizontal scroll)
-blitter                $FF8A00 answered; `blitter disabled` otherwise
+blitter real           $FF8A00 answered; `blitter disabled` otherwise
 rom native-tos.rom     the machine's own TOS, copied from the real ROM
 ```
 
@@ -76,7 +76,8 @@ The ROM copy is byte-exact and lands under `rom_path` as
 from `$E00000`). Everything probed is printed on the console as
 `[NATIVE] ...`. An existing `[native]` is never touched, so edits to it
 on the page stick; delete the section and it is written again at the
-next start. A Mega STE comes out as `ste`. `PISTORM_NATIVE_PROBE=0`
+next start. A Mega STE comes out as `ste`. Nothing in the block is
+emulated: the blitter is the real chip through the CPLD's bus arbitration. `PISTORM_NATIVE_PROBE=0`
 skips the whole thing.
 
 ## `[psctrl]` - the page

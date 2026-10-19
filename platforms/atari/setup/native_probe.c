@@ -253,7 +253,7 @@ int np_ensure_native_section(const char *cfg_path)
         sc_set(&c, "native", "machine", r.machine) != 0 ||
         sc_set(&c, "native", "stram_size", stram) != 0 ||
         sc_set(&c, "native", "shifter", r.ste_shifter ? "ste" : "st") != 0 ||
-        sc_set(&c, "native", "blitter", r.blitter ? "" : "disabled") != 0 ||
+        sc_set(&c, "native", "blitter", r.blitter ? "real" : "disabled") != 0 ||
         (rom_file[0] && sc_set(&c, "native", "rom", "native-tos.rom") != 0)) {
         fprintf(stderr, "[NATIVE] psctrl.cfg is full - [native] not added\n");
         return -1;
@@ -265,7 +265,7 @@ int np_ensure_native_section(const char *cfg_path)
     printf("[NATIVE] added [native]: cpu 68000, machine %s, stram_size %s, "
            "shifter %s, blitter %s, rom %s\n",
            r.machine, stram, r.ste_shifter ? "ste" : "st",
-           r.blitter ? "on" : "disabled",
+           r.blitter ? "real" : "disabled",
            rom_file[0] ? "native-tos.rom" : "(none - no ROM found)");
     return 1;
 }
