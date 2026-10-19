@@ -54,7 +54,8 @@ int np_copy_rom(const struct np_result *r, const char *path);
 /* The whole thing: if cfg_path has no [native] section, probe, copy the
  * ROM to <rom_path>/native-tos.rom (rom_path from [psctrl], ~ expanded
  * to the invoking user's home, relative to the emulator's directory) and
- * add the section. Returns 1 when the file was changed, 0 when there was
+ * add the section, and set [psctrl] boot to native so it boots first.
+ * Returns 1 when the file was changed, 0 when there was
  * nothing to do, -1 on failure (logged). */
 int np_ensure_native_section(const char *cfg_path);
 

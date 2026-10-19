@@ -258,10 +258,18 @@ int np_ensure_native_section(const char *cfg_path)
         fprintf(stderr, "[NATIVE] psctrl.cfg is full - [native] not added\n");
         return -1;
     }
+    /* the first boot is the real machine: [psctrl] boot native, so the
+     * page's countdown (and --no-setup) boots it until something else is
+     * picked */
+    if (sc_set(&c, "psctrl", "boot", "native") != 0) {
+        fprintf(stderr, "[NATIVE] psctrl.cfg is full - boot not set\n");
+        return -1;
+    }
     if (sc_save(&c, cfg_path) != 0) {
         fprintf(stderr, "[NATIVE] cannot save %s: %s\n", cfg_path, sc_save_error(&c));
         return -1;
     }
+    printf("[NATIVE] boot native (first start)\n");
     printf("[NATIVE] added [native]: cpu 68000, machine %s, stram_size %s, "
            "shifter %s, blitter %s, rom %s\n",
            r.machine, stram, r.ste_shifter ? "ste" : "st",

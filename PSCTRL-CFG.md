@@ -74,7 +74,9 @@ rom native-tos.rom     the machine's own TOS, copied from the real ROM
 The ROM copy is byte-exact and lands under `rom_path` as
 `native-tos.rom` (TOS 1.x 192K from `$FC0000`, TOS 2.x 256K / 3.x 512K
 from `$E00000`). Everything probed is printed on the console as
-`[NATIVE] ...`. An existing `[native]` is never touched, so edits to it
+`[NATIVE] ...`. The same start sets `[psctrl] boot native`, so the
+real machine is the default and boots first; the page's choice then
+takes over as usual. An existing `[native]` is never touched, so edits to it
 on the page stick; delete the section and it is written again at the
 next start. A Mega STE comes out as `ste`. Nothing in the block is
 emulated: the blitter is the real chip through the CPLD's bus arbitration. `PISTORM_NATIVE_PROBE=0`
