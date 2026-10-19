@@ -4887,9 +4887,18 @@ static void pistorm_bad_opcode_dump(int nr)
 	const uae_u32 top = 0x01000000u + tt_ram_size - 0x40u;   /* mirrored */
 	uaecptr pc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
 	uaecptr sp = m68k_areg(regs, 7);
-	fprintf(stderr, "[CPU] %s at %08X (sr %04X sp %08X):\n",
-		nr == 4 ? "illegal instruction" : "Line F",
-		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp);
+	/* One line always, WITH the opcode word (regs.ir): TOS, MiNT and every
+	 * HD driver probe the CPU type by executing movec / move sr and taking
+	 * this exception on purpose, so the line is routine. The 30-line body
+	 * (code, stack, registers, 256-entry PC ring) is for a genuine fault
+	 * and only with PISTORM_CPU_DIAG=1 - 19 Oct 2026, it was drowning
+	 * every boot log. */
+	fprintf(stderr, "[CPU] %s %04X at %08X (sr %04X sp %08X)%s\n",
+		nr == 4 ? "illegal instruction" : "Line F", (unsigned)regs.ir,
+		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp,
+		pistorm_cpu_diag() ? ":" : "  (PISTORM_CPU_DIAG=1 for code/stack/registers/PC ring)");
+	if (!pistorm_cpu_diag())
+		return;
 	{
 		/* PISTORM_DSP_TRACE: hold the Falcon host-port trace as it was
 		 * when the 68k went astray, and write it (no-op otherwise) */
