@@ -4894,7 +4894,7 @@ static void pistorm_bad_opcode_dump(int nr)
 	 * and only with PISTORM_CPU_DIAG=1 - 19 Oct 2026, it was drowning
 	 * every boot log. */
 	fprintf(stderr, "[CPU] %s %04X at %08X (sr %04X sp %08X)%s\n",
-		nr == 4 ? "illegal instruction" : "Line F", (unsigned)regs.ir,
+		nr == 4 ? "illegal instruction" : "Line F", (unsigned)regs.opcode,
 		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp,
 		pistorm_cpu_diag() ? ":" : "  (PISTORM_CPU_DIAG=1 for code/stack/registers/PC ring)");
 	if (!pistorm_cpu_diag())
