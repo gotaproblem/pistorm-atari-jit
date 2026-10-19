@@ -1090,6 +1090,26 @@ static void hdc_sync_pull(void)
         else
             FDD_LOG("HDC pull check: %u B @0x%06X sum %08X  reread ok "
                     "(window %u B)", len, fdc.hdc_base, sum, want);
+
+        /* Short transfers (INQUIRY, MODE SENSE, REQUEST SENSE): dump the first
+         * 64 bytes of REAL RAM at the base, so "DMA moved 48 B" against a
+         * 16-byte allocation length can be read for what it is - 48 bytes of
+         * device data (the device ignored the allocation length), or 16 bytes
+         * of data and 32 untouched (the DMA counter ran on, FIFO granularity,
+         * RAM beyond +16 is what was there before). 19 Oct 2026: HDDriver's
+         * INQUIRY buffers sit on its stack and the return address 24 bytes
+         * past the buffer was overwritten with code bytes. */
+        if (len && len <= 64u) {
+            uint8_t w[64];
+            char hex[64 * 3 + 1];
+            uint32_t k = 0;
+            for (uint32_t i = 0; i < 64u; i++) {
+                w[i] = ps_read_8(fdc.hdc_base + i);
+                k += (uint32_t)snprintf(hex + k, sizeof hex - k, "%02X%s", w[i],
+                                        (i & 15) == 15 ? " " : "");
+            }
+            FDD_LOG("HDC real RAM @0x%06X +0..63: %s", fdc.hdc_base, hex);
+        }
     }
 }
 
