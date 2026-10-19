@@ -45,7 +45,7 @@ static int acsi_dbg_on(void)
     return pst_dbg_acsi;
 }
 static int acsi_dbg_count;
-#define ACSI_DBG_LIMIT 120
+#define ACSI_DBG_LIMIT 2000
 
 
 #include "acsi.h"
