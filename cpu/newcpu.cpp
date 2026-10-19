@@ -2983,6 +2983,7 @@ extern "C" volatile uint32_t pistorm_cpu_hostop;
  * ps_read_ipl with si_addr=0 under heavy IDE+TimerA load). */
 extern "C" void ps_read_ipl(uint8_t *ipl);
 extern "C" uint8_t ps_read_8(uint32_t address);
+extern "C" uint16_t ps_read_16(uint32_t address);
 extern "C" uint8_t ps_read_8_fc(uint32_t addr, uint8_t fc_value, uint8_t *berr_out);
 extern "C" volatile uint32_t pistorm_mfp_iack_counts[16];
 extern "C" volatile uint8_t pistorm_mfp_last_iack_vector;
@@ -6511,6 +6512,28 @@ uae_u32 REGPARAM2 op_illg(uae_u32 opcode)
 #endif
 		warned++;
 		// activate_debugger_new();
+	}
+
+	/* PISTORM_CPU_DIAG=1: what will Exception(4) dispatch to? HDDriver's
+	 * CPU probe (19 Oct 2026, 68000, JIT off) wrote its handler to $10 with
+	 * move.l a3,$10.w, executed movec, and the exception went to TOS's
+	 * default vector instead - so show vector 4 as the bank sees it, as the
+	 * mirror holds it, and (JIT off, so the bus is quiet) as the real ST
+	 * RAM holds it. One line per illegal instruction, capped. */
+	if (ATARI_MFP_IACK_DIAG)
+	{
+		static int illg_diag;
+		if (illg_diag < 16)
+		{
+			extern uae_u8 *natmem_offset;
+			uae_u32 vbank = get_long(regs.vbr + 0x10);
+			uae_u32 vmirr = do_get_mem_long((uae_u32 *)(natmem_offset + regs.vbr + 0x10));
+			uae_u32 vbus = ((uae_u32)ps_read_16(regs.vbr + 0x10) << 16) | ps_read_16(regs.vbr + 0x12);
+			write_log("[ILLG] %04X at %08X vbr=%08X vec4: bank=%08X mirror=%08X bus=%08X%s\n",
+					  opcode, pc, regs.vbr, vbank, vmirr, vbus,
+					  (vbank != vmirr || vbank != vbus) ? "  <-- DISAGREE" : "");
+			illg_diag++;
+		}
 	}
 
 	Exception(4);
