@@ -5268,8 +5268,16 @@ static void bus_error()
 {
 #if CPU_BUSERR_TRACE
 	if (pistorm_cpu_diag() && pistorm_be_budget())
-		fprintf(stderr, "[BE] getpc=%08x instr_pc=%08x fault=%08x\n",
-				m68k_getpc(), regs.instruction_pc, last_fault_for_exception_3);
+	{
+		extern uae_u8 *natmem_offset;
+		uae_u32 vbank = get_long(regs.vbr + 0x08);
+		uae_u32 vmirr = do_get_mem_long((uae_u32 *)(natmem_offset + regs.vbr + 0x08));
+		uae_u32 vbus = ((uae_u32)ps_read_16(regs.vbr + 0x08) << 16) | ps_read_16(regs.vbr + 0x0A);
+		fprintf(stderr, "[BE] getpc=%08x instr_pc=%08x fault=%08x sp=%08x sr=%04x vec2: bank=%08x mirror=%08x bus=%08x%s\n",
+				m68k_getpc(), regs.instruction_pc, last_fault_for_exception_3,
+				m68k_areg(regs, 7), regs.sr, vbank, vmirr, vbus,
+				(vbank != vmirr || vbank != vbus) ? "  <-- DISAGREE" : "");
+	}
 #endif
 
 	TRY(prb2)
