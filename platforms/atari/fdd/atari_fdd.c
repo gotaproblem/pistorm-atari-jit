@@ -1509,22 +1509,25 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
                     hdc_trace_cmd_byte((uint8_t)val, first, fdc.dma_base_addr);
                     hdc_claim_count();            /* real ACSI device  */
                     bus_write(addr, val, size);
-                    /* PISTORM_ACSI_CDB_GAP_US=n: pause after each command
-                     * byte on the real bus. 19 Oct 2026: with the floppy
-                     * emulated, ACSI worked ONLY with PISTORM_HDC_TRACE=1
-                     * on - whose only effect inside the CDB phase is the
+                    /* Pause after each command byte on the real bus.
+                     *
+                     * 19 Oct 2026: with the floppy emulated, a cold-booted
+                     * machine saw no ACSI drives - unless PISTORM_HDC_TRACE=1
+                     * was on, whose only effect inside the CDB phase is the
                      * fprintf of the claim line between byte 1 and byte 2,
                      * tens of microseconds. A 68000 driver spaces CDB bytes
-                     * by several us; the Pi delivers them as fast as the
-                     * CPLD cycles. The RP2040 HDC polls for the CS edge
-                     * ("12 us to assert IRQ") and can miss a byte that
-                     * follows the previous one too closely. Default 0 for
-                     * the A/B; the value that works becomes the default. */
+                     * by ~4-6 us of instruction time; the Pi delivers them
+                     * as fast as the CPLD cycles. The RP2040 HDC polls for
+                     * the CS edge ("12 us to assert IRQ") and misses a byte
+                     * that follows the previous one too closely. Sweep on
+                     * that controller: 0 fails, 2 works, 5 works. Default 5
+                     * = real-68000 spacing with margin; ~30 us per command.
+                     * PISTORM_ACSI_CDB_GAP_US=n overrides (0 = old timing). */
                     {
                         static int gap = -1;
                         if (gap < 0) {
                             const char *e = getenv("PISTORM_ACSI_CDB_GAP_US");
-                            gap = e ? atoi(e) : 0;
+                            gap = e ? atoi(e) : 5;
                             if (gap < 0) gap = 0;
                             if (gap > 1000) gap = 1000;
                         }
