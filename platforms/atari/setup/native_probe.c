@@ -110,7 +110,10 @@ int np_probe(struct np_result *r)
     r->ste_shifter = r->dma_sound;
     if (r->dma_sound)
         strcpy(r->machine, "ste");
-    else if (r->blitter && r->mega_rtc)
+    else if (r->blitter)           /* Mega ST: a blitter in an ST. $FFFC21
+                                    * answered on a plain ST too (GLUE
+                                    * decodes the page) so the RTC is not
+                                    * a test, only logged */
         strcpy(r->machine, "megast");
     else
         strcpy(r->machine, "st");
