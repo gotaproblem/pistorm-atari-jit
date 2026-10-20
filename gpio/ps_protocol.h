@@ -185,12 +185,12 @@ extern uint16_t ps_fw_rev;
 int  ps_power_poll ( void );
 void ps_power_wait ( void );
 
-/* ST RESET on GPIO4 (CPLD firmware rev $256+): the CPLD drives it low while
+/* ST RESET on GPIO4 (CPLD firmware 1.0b, rev $420): the CPLD drives it low while
  * the ST holds RESET low - reset button, power-on reset - and never for the
  * Pi's own ps_pulse_reset. ps_st_reset_pin: -1 the firmware has no such pin
  * (or a PI_CLK build, where GPIO4 is the clock), 0 RESET high, 1 RESET low.
  * A plain GPLEV0 read: no bus lock, no transaction, any thread. */
-#define CPLD_FW_RESET_PIN 0x256u
+#define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
 int  ps_st_reset_pin ( void );
 
 
