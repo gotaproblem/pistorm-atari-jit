@@ -5860,4 +5860,16 @@ extern "C" void pistorm_mirror_check_tick(void)
     if (diff)
         fprintf(stderr, ", rows %u-%u, first%s", row_lo, row_hi, first);
     fputc('\n', stderr);
+
+    /* the palette: shadow vs the real chip's registers (12 bits each) */
+    fc = 0x5;
+    fprintf(stderr, "[MIRROR] palette shadow/real:");
+    for (int i = 0; i < 16; i++) {
+        uint16_t sh = st_palette[i] & 0x0FFFu;
+        uint16_t re = ps_read_16(0x00FF8240u + 2u * (uint32_t)i) & 0x0FFFu;
+        fprintf(stderr, " %03X/%03X%s", sh, re, sh != re ? "!" : "");
+    }
+    fputc('\n', stderr);
+    fc = old_fc;
+    g_buserr = 0;
 }
