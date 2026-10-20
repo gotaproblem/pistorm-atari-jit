@@ -2778,10 +2778,7 @@ int main (int argc, char *argv[])
   /* Likewise the mirror's palette: start from what the chip holds, not
    * from 000s - a guest that only sets some entries (the field-service
    * cartridge) relies on the rest being whatever was there. */
-  {
-    extern void st_palette_seed_from_chip (void);
-    st_palette_seed_from_chip ();
-  }
+  st_palette_seed_from_chip ();
 
   /* Probe the board's real DRAM banks and take $FF8001 off the guest.
    * After jit_mem_init (so stram_alias_init has had its go at the
@@ -2971,6 +2968,7 @@ uint8_t RTG_enabled = 1;
 /* ST Shifter palette cache: $FF8240..$FF825E, 16 big-endian words. */
 volatile uint16_t st_palette[16];
 extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
+extern "C" void st_palette_seed_from_chip(void);          /* pistorm_natmem.cpp */
 
 static inline void rtg_write_snoop(uint8_t type, uint32_t addr, uint32_t val)
 {
