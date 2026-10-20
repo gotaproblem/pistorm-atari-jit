@@ -55,6 +55,7 @@ void ps_bus_unlock (void);
 #define PI_TXN_IN_PROGRESS 1
 #else
 //#define PIN_RD (1 << 4) // Sep 2026 new firmware does not use CMD_RD so frees up GPIO4 for other uses
+#define PIN_ST_RESET (1 << 4) // GPIO4 INPUT: ST RESET, active low - CPLD firmware $256+
 #define PIN_WR (1 << 1)
 #define PI_TXN_IN_PROGRESS 1
 #endif
@@ -120,7 +121,8 @@ void ps_bus_unlock (void);
 #define FSEL1 GPIO_OUTPUT  // PI_CMD_WR
 #define FSEL2 GPIO_OUTPUT  // PI_CMD 0
 #define FSEL3 GPIO_OUTPUT  // PI_CMD 1
-#define FSEL4 GPIO_OUTPUT  // PI_CMD_RD
+#define FSEL4 GPIO_INPUT   // PI_RESET from the CPLD (fw $256+); was PI_CMD_RD - must
+                           // not be an output now the CPLD drives it
 #define FSEL5 GPIO_INPUT   // PI_IPL1
 #define FSEL6 GPIO_INPUT   // PI_IPL2
 #define FSEL7 GPIO_INPUT   // PI_BERR
@@ -182,6 +184,14 @@ void ps_get_firmware_revision ( void );
 extern uint16_t ps_fw_rev;
 int  ps_power_poll ( void );
 void ps_power_wait ( void );
+
+/* ST RESET on GPIO4 (CPLD firmware rev $256+): the CPLD drives it low while
+ * the ST holds RESET low - reset button, power-on reset - and never for the
+ * Pi's own ps_pulse_reset. ps_st_reset_pin: -1 the firmware has no such pin
+ * (or a PI_CLK build, where GPIO4 is the clock), 0 RESET high, 1 RESET low.
+ * A plain GPLEV0 read: no bus lock, no transaction, any thread. */
+#define CPLD_FW_RESET_PIN 0x256u
+int  ps_st_reset_pin ( void );
 
 
 #define read8 ps_read_8

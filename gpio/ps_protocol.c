@@ -283,11 +283,11 @@ static void create_dev_mem_mapping ()
  * Pads: input enabled on every pin (RIO_IN needs it, and an output's
  * level is read back too), not open-drain, 8 mA, Schmitt, fast slew.
  * Direction: outputs where the Pi 4 path has GPFSEL = output -
- * GPIO 1-4 (WR, CMD0, CMD1, spare) and 8-23 (D0-D15); inputs GPIO 0
- * (TXN), 5/6 (IPL1/2), 7 (BERR). GPIO 24+ are left alone. */
+ * GPIO 1-3 (WR, CMD0, CMD1) and 8-23 (D0-D15); inputs GPIO 0 (TXN),
+ * 4 (ST RESET, fw $256+), 5/6 (IPL1/2), 7 (BERR). GPIO 24+ are left alone. */
 #define RP1_FUNCSEL_RIO   5u
 #define RP1_PAD_PIN       0x63u        /* IE | DRIVE=8mA | SCHMITT | SLEWFAST */
-#define PS_OUT_PINS       0x00FFFF1Eu
+#define PS_OUT_PINS       0x00FFFF0Eu
 #define PS_ALL_PINS       0x00FFFFFFu
 
 static void rp1_setup_pins ( void )
@@ -1470,6 +1470,26 @@ void ps_get_firmware_revision ( void )
       (fw & 0x600) == 0x400 ? 'b' : 'r' );
 
   usleep (1000);
+}
+
+
+/* ST RESET on GPIO4 - see ps_protocol.h. Only EPM240 firmware from alpha
+ * $256 (and any beta) drives the pin; with older firmware GPIO4 is an
+ * unused CPLD pin with a weak pull-up, so it would read "high" anyway,
+ * but say "no pin" rather than pretend. */
+int ps_st_reset_pin ( void )
+{
+#ifdef USING_PI_CLK
+  return -1;                             /* GPIO4 is GPCLK0 in this build */
+#else
+  uint16_t fw = ps_fw_rev;
+
+  if ( !( ((fw & 0x700) == 0x200 && fw >= CPLD_FW_RESET_PIN) ||
+          (fw & 0x700) == 0x400 ) )
+    return -1;
+
+  return ( *ioread & PIN_ST_RESET ) ? 0 : 1;
+#endif
 }
 
 

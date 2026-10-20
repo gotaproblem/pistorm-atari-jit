@@ -2114,6 +2114,28 @@ static void check_cpld_firmware(void)
   exit(1);
 }
 
+/*
+ * The ST's RESET line went low - its reset button (or its own power-on
+ * reset) - seen on GPIO4 (CPLD firmware $256+, ps_st_reset_pin). The real
+ * peripherals have just been reset under the emulated CPU, so carry on
+ * running and the guest is talking to chips that forgot everything. Stop
+ * the machine the proven way, as Ctrl+Alt+Undo does: orderly teardown and
+ * exit 42, the launcher relaunches and the emulator boots afresh. Wait for
+ * the button to be let go first (bounded: a power loss mid-wait also ends
+ * up here, and the relaunch's ps_power_wait handles that). Main thread.
+ */
+static void pistorm_st_reset(void)
+{
+  fprintf(stderr, "\n[RESET] Atari RESET asserted (reset button) - stopping, "
+                  "will restart when it is released\n");
+  orderly_teardown();
+  for (int i = 0; i < 1000 && ps_st_reset_pin() == 1; i++)  /* <= 10 s */
+    usleep(10000);
+  fprintf(stderr, "[RESET] %s - restarting\n",
+          ps_st_reset_pin() == 1 ? "RESET still low after 10 s" : "RESET released");
+  _exit(42);
+}
+
 int main (int argc, char *argv[])
 {
   struct emulator_config *config;
@@ -2801,13 +2823,33 @@ int main (int argc, char *argv[])
   /* Main thread: wait for the CPU thread, sensing the ST's power on the
    * way (gpio/ps_protocol.c: a status sample through the bus lock every
    * 250 ms, "no sample" while the CPU thread holds it). PISTORM_POWER=0
-   * turns the run-time sensing off; start-up's wait-for-power stays. */
+   * turns the run-time sensing off; start-up's wait-for-power stays.
+   *
+   * And the ST's RESET line (GPIO4, CPLD firmware $256+): a GPLEV0 read
+   * every 10 ms, no bus lock. Two consecutive low samples (>= 10 ms low;
+   * the CPLD already drops anything under 2 us and our own reset pulses)
+   * -> pistorm_st_reset, exits 42. PISTORM_RESET_PIN=0 turns it off. */
   {
     const char *pe = getenv("PISTORM_POWER");
     int sense = !(pe && *pe == '0');
+    const char *re = getenv("PISTORM_RESET_PIN");
+    int rsense = !(re && *re == '0') && ps_st_reset_pin() >= 0;
+    unsigned tick = 0, rlow = 0;
+
+    printf("[MAIN] ST reset button sensing: %s\n",
+           rsense ? "on (GPIO4)" :
+           ps_st_reset_pin() < 0 ? "off (CPLD firmware has no RESET pin - needs rev $256)"
+                                 : "off (PISTORM_RESET_PIN=0)");
+
     while (pthread_tryjoin_np(cpu_tid, NULL) == EBUSY) {
-      usleep(250000);
-      if (sense && cpu_emulation_running && ps_power_poll() > 0)
+      usleep(10000);
+      if (rsense && cpu_emulation_running) {
+        rlow = ps_st_reset_pin() == 1 ? rlow + 1 : 0;
+        if (rlow >= 2)
+          pistorm_st_reset();           /* exits 42 */
+      }
+      if (++tick % 25 == 0 &&
+          sense && cpu_emulation_running && ps_power_poll() > 0)
         pistorm_power_lost();           /* exits 42 */
     }
   }
