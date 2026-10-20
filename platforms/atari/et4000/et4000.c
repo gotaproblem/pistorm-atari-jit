@@ -2912,9 +2912,34 @@ void et4000_native_vbl_snapshot(void)
     g_snap_w = (g_snap_w + 1u) % ST_SNAP_BUFS;
 }
 
-/* Render-thread side: draw the newest VBL snapshot. 0 if none yet. */
+/* Render-thread side: draw the newest VBL snapshot. 0 if none yet, or if
+ * the snapshots have STOPPED - then the caller reads the mirror live.
+ *
+ * Snapshots are taken on the level-4 line's rising edge. The GLUE latches
+ * VBL until the CPU acknowledges it, so code that runs with SR=$2700
+ * holds IPL at 4 forever: one edge, one snapshot, and HDMI showed that
+ * first frame for good. Field case: a diagnostic cartridge (TOS 1.04
+ * jumps to $FA0004 straight out of reset, interrupts masked) drew its
+ * text to the screen and the RGB monitor showed it; HDMI never did. Any
+ * code that sits masked or halted does the same. No new VBL for 100 ms
+ * (5 frames at 50 Hz) = fall back to the live read, which is what HDMI
+ * did before the snapshot existed. Render thread only - nothing on
+ * core 3. */
 static int blit_st_native_snapshot(ET4000State *s)
 {
+    static uint32_t seq_seen;
+    static struct timespec seq_at;
+    struct timespec now;
+    uint32_t seq = __atomic_load_n(&g_vbl_seq, __ATOMIC_ACQUIRE);
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (seq != seq_seen || (seq_at.tv_sec == 0 && seq_at.tv_nsec == 0)) {
+        seq_seen = seq;
+        seq_at = now;
+    } else if ((now.tv_sec - seq_at.tv_sec) * 1000000000LL +
+               (now.tv_nsec - seq_at.tv_nsec) > 100000000LL)
+        return 0;
+
     uint32_t i = g_snap_pub;
     if (i >= ST_SNAP_BUFS)
         return 0;

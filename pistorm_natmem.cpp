@@ -1484,6 +1484,13 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     }
     else if (a == 0x00FF8260u) {
         rtg.shift_mode = (uint8_t)(value >> 8);
+        /* The HDMI renderer reads ONLY hw_rez (et4000.c render loop and
+         * the VBL snapshot). The byte and long paths set it; this word
+         * path did not, so a `move.w`/`clr.w` to $FF8260 changed the real
+         * Shifter but left HDMI decoding the screen at the previous
+         * resolution - TOS writes rez with move.b and never hit it, code
+         * that runs before TOS (a diagnostic cartridge) can. */
+        rtg.hw_rez = (uint8_t)(value >> 8);
         st_rez_sync_trace(a, (uint8_t)(value >> 8));
         vid_dbg_w(a, value >> 8);
     }
