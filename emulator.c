@@ -3122,6 +3122,14 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     pistorm_rez_sync_trace(a, (uint8_t)value);  /* legacy path was invisible */
     vid_dbg_w(a, value);
   }
+  else if (a >= 0x00FF8240 && a < 0x00FF8260) {
+    /* a byte of a palette entry (see pistorm_natmem.cpp) */
+    unsigned i = (a - 0x00FF8240) >> 1;
+    uint16_t w = st_palette[i];
+    w = (a & 1) ? (uint16_t)((w & 0xFF00u) | value)
+                : (uint16_t)((w & 0x00FFu) | ((uint16_t)value << 8));
+    st_palette[i] = w;
+  }
 }
 
 static inline void st_video_snoop16(uint32_t address, uint16_t value)

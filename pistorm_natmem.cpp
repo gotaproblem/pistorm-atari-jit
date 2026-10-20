@@ -1392,6 +1392,19 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     else if (a == 0x00FF820Au) {
         st_rez_sync_trace(a, value);
     }
+    else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
+        /* a byte of a palette entry: even address = the high byte (red),
+         * odd = the low byte (green, blue). Used to be dropped, so a
+         * move.b into the palette reached the real chip and not the HDMI
+         * mirror (Atari field-service cart: menu text in colour 1 drawn
+         * as 000 - black on blue - while the ST monitor showed it). */
+        unsigned i = (a - 0x00FF8240u) >> 1;
+        uint16_t w = st_palette[i];
+        w = (a & 1) ? (uint16_t)((w & 0xFF00u) | value)
+                    : (uint16_t)((w & 0x00FFu) | ((uint16_t)value << 8));
+        st_palette[i] = w;
+        st_palette_log(i, w);
+    }
 }
 
 /* GLUE mode changes are rare (a handful per boot) and are exactly what
