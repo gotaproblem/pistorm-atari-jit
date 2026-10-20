@@ -1357,6 +1357,15 @@ static inline void st_video_ste_extras_clear(void)
 
 static void st_rez_sync_trace(uint32_t a, uint8_t v);
 
+/* PISTORM_PAL_TRACE=1: what the snoop recorded, beside [PALBUS] */
+static inline void pal_snoop_trace(uint32_t a, int sz, uint32_t v)
+{
+    static int en = -1;
+    if (__builtin_expect(en < 0, 0)) { const char *e = getenv("PISTORM_PAL_TRACE"); en = (e && *e == '1'); }
+    if (en)
+        fprintf(stderr, "[PALSNOOP] w%d %06X=%0*X\n", sz, a, sz * 2, v);
+}
+
 static inline void st_video_snoop8(uint32_t address, uint8_t value)
 {
     uint32_t a = address & 0x00FFFFFFu;
@@ -1404,6 +1413,7 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
                     : (uint16_t)((w & 0x00FFu) | ((uint16_t)value << 8));
         st_palette[i] = w;
         st_palette_log(i, w);
+        pal_snoop_trace(a, 1, value);
     }
 }
 
@@ -1506,6 +1516,7 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
         st_palette[(a - 0x00FF8240u) >> 1] = value;
         st_palette_log((a - 0x00FF8240u) >> 1, value);
+        pal_snoop_trace(a, 2, value);
     }
 }
 
@@ -1526,6 +1537,7 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
         vid_dbg_w(a + 2, value);
     } else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
         unsigned i = (a - 0x00FF8240u) >> 1;
+        pal_snoop_trace(a, 4, value);
         st_palette[i] = (uint16_t)(value >> 16);
         st_palette_log(i, (uint16_t)(value >> 16));
         if (i + 1 < 16) {

@@ -673,9 +673,27 @@ __attribute__((always_inline)) inline void ps_write ( ps_io_t *ps_io )
   ps_unlock_bus();
 }
 
+/* PISTORM_PAL_TRACE=1: every bus write into the ST palette ($FF8240-
+ * $FF825F), whatever path sent it, with the caller's return address
+ * (addr2line -e emulator <ra> names it). Diagnostic for "the real chip
+ * has a colour the HDMI mirror's shadow does not". */
+static int ps_pal_trace = -1;
+static inline void ps_pal_trace_w (uint32_t addr, int sz, uint32_t data, void *ra)
+{
+  if (__builtin_expect(ps_pal_trace < 0, 0)) {
+    const char *e = getenv("PISTORM_PAL_TRACE");
+    ps_pal_trace = (e && *e == '1');
+  }
+  if (ps_pal_trace && (addr & 0x00FFFFE0u) == 0x00FF8240u)
+    fprintf(stderr, "[PALBUS] w%d %06X=%0*X fc%u from %p\n", sz, addr & 0x00FFFFFFu,
+            sz * 2, data, fc, ra);
+}
+
 inline void ps_write_8 (uint32_t addr, uint16_t data) 
 {
   ps_io_t ps_io;
+
+  ps_pal_trace_w (addr, 1, data & 0xFF, __builtin_return_address(0));
 
   ps_io.data = addr & 0x01 ? data & 0xFF : data << 8;
   ps_io.addr = addr;
@@ -693,6 +711,7 @@ inline void ps_write_8 (uint32_t addr, uint16_t data)
 inline void ps_write_16 (uint32_t addr, uint16_t data) 
 {
   ps_io_t ps_io;
+  ps_pal_trace_w (addr, 2, data, __builtin_return_address(0));
 
   ps_io.data = data;
   ps_io.addr = addr;
@@ -710,6 +729,7 @@ inline void ps_write_16 (uint32_t addr, uint16_t data)
 inline void ps_write_32 (uint32_t addr, uint32_t data) 
 {
   ps_io_t txn;
+  ps_pal_trace_w (addr, 4, data, __builtin_return_address(0));
 
   txn.data = (uint16_t)(data >> 16);
   txn.addr = addr;
