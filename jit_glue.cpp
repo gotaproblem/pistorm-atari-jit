@@ -507,6 +507,7 @@ volatile uint8_t pistorm_mfp_last_iack_vector;
 static volatile unsigned g_l6_virt, g_l6_real, g_l6_noack;
 extern "C" int falcon_hreq(void);         /* platforms/atari/falcon/falcon_hw.c */
 extern "C" uint8_t falcon_ivr(void);
+extern "C" void pistorm_mirror_check_tick(void);  /* pistorm_natmem.cpp */
 static void l6_tick(void)
 {
     static uint64_t last_ns;
@@ -530,6 +531,7 @@ void intlev_ack (uint8_t nr)
 {
     pistorm_iack_dsp = 0;
     if (nr == 6) l6_tick();
+    if (nr == 4) pistorm_mirror_check_tick();   /* PISTORM_MIRROR_CHECK=1 */
     /* Virtual keyboard (USB/Bluetooth -> IKBD injection): if the pending
      * level-6 was raised for an injected byte, the real MFP has nothing to
      * acknowledge - a bus IACK would BERR. Supply GPIP4's vector directly.

@@ -5789,3 +5789,62 @@ extern "C" void pistorm_seed_reset_vector(void)
     if (natmem_offset)
         memcpy(natmem_offset + 0, natmem_offset + pistorm_rom_start, 8);
 }
+
+/* PISTORM_MIRROR_CHECK=1: every 2 s, on the CPU thread (level-4 ack, so
+ * the bus is ours), compare the HDMI mirror's idea of the screen - the
+ * natmem copy at the snooped base - against the real board: the real
+ * shifter's base registers and the real DRAM under it. Prints the bases,
+ * how many words differ, which screen rows they fall in, and the first
+ * few with both values. For "the ST monitor shows it, HDMI does not". */
+extern "C" void pistorm_mirror_check_tick(void)
+{
+    static int en = -1;
+    if (en < 0) { const char *e = getenv("PISTORM_MIRROR_CHECK"); en = (e && *e == '1'); }
+    if (!en) return;
+    static uint64_t last_ns;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    if (now - last_ns < 2000000000ull) return;
+    last_ns = now;
+
+    uint8_t old_fc = fc;
+    fc = 0x5;
+    uint32_t real_base = ((uint32_t)ps_read_8(0x00FF8201u) << 16) |
+                         ((uint32_t)ps_read_8(0x00FF8203u) << 8);
+    uint32_t real_cnt  = ((uint32_t)ps_read_8(0x00FF8205u) << 16) |
+                         ((uint32_t)ps_read_8(0x00FF8207u) << 8) |
+                          (uint32_t)ps_read_8(0x00FF8209u);
+    uint8_t  real_rez  = ps_read_8(0x00FF8260u) & 3;
+    uint32_t snoop_base = ((uint32_t)rtg.high << 16) | ((uint32_t)rtg.mid << 8);
+    uint32_t base = snoop_base ? snoop_base : real_base;
+    uint32_t stride = (real_rez == 2) ? 80u : 160u;
+    uint32_t rows = (real_rez == 2) ? 400u : 200u;
+    uint32_t bytes = stride * rows;
+    unsigned diff = 0, row_lo = 0xFFFF, row_hi = 0;
+    char first[200] = "";
+    size_t fl = 0;
+    if (base + bytes <= ST_RAM_SIZE) {
+        for (uint32_t off = 0; off < bytes; off += 2) {
+            uint16_t m = do_get_mem_word((uae_u16 *)(natmem_offset + base + off));
+            uint16_t r = ps_read_16(base + off);
+            if (m != r) {
+                unsigned row = off / stride;
+                if (row < row_lo) row_lo = row;
+                if (row > row_hi) row_hi = row;
+                if (diff < 4)
+                    fl += (size_t)snprintf(first + fl, sizeof first - fl,
+                                           " %06X:m%04X/r%04X", base + off, m, r);
+                diff++;
+            }
+        }
+    }
+    fc = old_fc;
+    g_buserr = 0;
+    fprintf(stderr, "[MIRROR] snoop base %06X real base %06X counter %06X rez %u "
+            "(mirror rez %u): %u/%u words differ", snoop_base, real_base,
+            real_cnt, real_rez, rtg.hw_rez & 3, diff, bytes / 2);
+    if (diff)
+        fprintf(stderr, ", rows %u-%u, first%s", row_lo, row_hi, first);
+    fputc('\n', stderr);
+}
