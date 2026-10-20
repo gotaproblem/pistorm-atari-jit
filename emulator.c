@@ -305,6 +305,7 @@ extern "C"
 #endif
 
   extern void *render_frame(void *);
+  extern void st_palette_seed_from_chip(void);   /* pistorm_natmem.cpp */
   extern void pistorm_cpu_irqwatch_dump(uint32_t raw6, uint32_t latched6, uint32_t raw4, uint32_t latched4);
   extern void jit_request_cpu_exit(void);
 
@@ -2968,7 +2969,6 @@ uint8_t RTG_enabled = 1;
 /* ST Shifter palette cache: $FF8240..$FF825E, 16 big-endian words. */
 volatile uint16_t st_palette[16];
 extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
-extern "C" void st_palette_seed_from_chip(void);          /* pistorm_natmem.cpp */
 
 static inline void rtg_write_snoop(uint8_t type, uint32_t addr, uint32_t val)
 {
