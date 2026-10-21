@@ -107,6 +107,10 @@ static struct {
     unsigned tc_falls;      /* ... bit 7 going 1 -> 0 between two reads  */
     unsigned tc_berr;       /* ... reads that came back with a bus error */
     int      tc_prev;       /* last bit 7 seen (-1 = none yet)          */
+    uint32_t gap_us[17];    /* byte i: us since byte i-1                */
+    uint32_t irq_us[17];    /* byte i: us since GPIP5 first read low
+                               after byte i-1 (~0u = never seen low)    */
+    int      stall_shown;   /* live-command report printed once         */
 } ht;
 
 /* " poll-end +Xus  TimerC n rd / k b7-falls / e berr" for the line */
@@ -133,6 +137,54 @@ static void ht_cdb(const char *tag)
         k += snprintf(buf + k, sizeof buf - k, "%02X ", ht.cdb[i]);
     buf[k ? k - 1 : 0] = 0;
     FDD_LOG("HDC %s [%s]", tag, buf);
+}
+
+/* The command in flight, once: how far its CDB got and how each byte
+ * followed the device's IRQ. Printed when a command has gone 0.5 s with
+ * no status read (from the guest's GPIP / Timer C polling - never between
+ * CDB bytes, where a print changes the timing), or at shutdown. */
+static uint32_t hdc_dma_counter(void);
+
+static void hdc_trace_live(const char *why)
+{
+    if (!ht.live || ht.stall_shown || !HT_ON())
+        return;
+    ht.stall_shown = 1;
+
+    char per[17 * 28 + 1];
+    int  k = 0;
+    per[0] = 0;
+    for (unsigned i = 1; i < ht.n && i < 17u && k < (int)sizeof per - 28; i++) {
+        if (ht.irq_us[i] == ~0u)
+            k += snprintf(per + k, sizeof per - k, " b%u:+%uus/IRQ-never",
+                          i + 1, ht.gap_us[i]);
+        else
+            k += snprintf(per + k, sizeof per - k, " b%u:+%uus/IRQ+%uus",
+                          i + 1, ht.gap_us[i], ht.irq_us[i]);
+    }
+    char low[48], tag[700];
+    if (ht.t_low)
+        snprintf(low, sizeof low, "%c +%lluus/%upolls", ht.src,
+                 (unsigned long long)(ht.t_low - ht.t_last), ht.polls);
+    else
+        snprintf(low, sizeof low, "never (%u polls)", ht.polls);
+    uint32_t moved = (hdc_dma_counter() - ht.base) & 0xFFFFFFu;
+    snprintf(tag, sizeof tag,
+             "LIVE (%s) - %u CDB byte(s) @0x%06X, last +%lluus ago, no status "
+             "read; GPIP5-low since last byte %s; DMA counter +%u B; per byte "
+             "(since previous / since its IRQ):%s",
+             why, ht.n, ht.base,
+             (unsigned long long)(ht_now_us() - ht.t_last), low, moved,
+             per[0] ? per : " (first byte only)");
+    ht_lines++;
+    ht_cdb(tag);
+}
+
+/* emulator.c's orderly_teardown: a Ctrl-C during a hung command */
+void hdc_trace_shutdown(void)
+{
+    if (hdc_trc)
+        hdc_trace_live("shutdown");
 }
 
 static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
@@ -166,6 +218,7 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
         ht.n    = 0;
         ht.wr   = (v & 0x1F) == 0x0A;               /* WRITE(6) */
         ht.base = base;
+        ht.stall_shown = 0;
     }
     if (!ht.live)
         return;
@@ -173,6 +226,11 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
         ht.wr = 1;                                  /* ICD WRITE(10) */
     if (ht.n < sizeof ht.cdb)
         ht.cdb[ht.n] = v;
+    if (ht.n && ht.n < 17u) {
+        uint64_t now = ht_now_us();
+        ht.gap_us[ht.n] = (uint32_t)(now - ht.t_last);
+        ht.irq_us[ht.n] = ht.t_low ? (uint32_t)(now - ht.t_low) : ~0u;
+    }
     ht.n++;
     ht.t_last = ht_now_us();
     ht.t_low  = 0;
@@ -195,6 +253,8 @@ static void hdc_trace_gpip(int low, char src)
         ht.t_low = ht_now_us();
         ht.src   = src;
     }
+    if (!ht.stall_shown && ht.t_poll - ht.t_last > 500000u)
+        hdc_trace_live("0.5 s without status");
 }
 
 /* called from pistorm_natmem.cpp's io_bget for every $FFFA23 (Timer C
@@ -206,6 +266,8 @@ void hdc_trace_tcdr(uint8_t v, int berr)
     if (!hdc_trc || !ht.live)
         return;
     ht.tc_reads++;
+    if (!ht.stall_shown && ht_now_us() - ht.t_last > 500000u)
+        hdc_trace_live("0.5 s without status");
     if (berr) {
         ht.tc_berr++;
         return;

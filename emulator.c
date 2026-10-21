@@ -1936,9 +1936,12 @@ void *foldchk_thread(void *arg)
  * handler and the PSCTRL restart/shutdown actions, so all three quit the
  * same proven way: stop the CPU, dump JIT stats, restore the tty.
  */
+extern "C" void hdc_trace_shutdown(void);   /* platforms/atari/fdd/atari_fdd.c */
+
 static void orderly_teardown(void)
 {
   cpu_emulation_running = 0;
+  hdc_trace_shutdown();   /* PISTORM_HDC_TRACE: report a command still in flight */
 
   printf("\n[MAIN] Exiting\n");
 
