@@ -145,6 +145,47 @@ static void ht_cdb(const char *tag)
  * CDB bytes, where a print changes the timing), or at shutdown. */
 static uint32_t hdc_dma_counter(void);
 
+/* I/O the guest reads between CDB bytes / before the status read:
+ * address histogram (8 slots + overflow), reset at every CDB byte.
+ * hdc_io_watch gates the hook in natmem's PROF_IO_R. */
+volatile int hdc_io_watch;
+static struct { uint32_t a, n; } io_hist[8];
+static unsigned io_other;
+
+void hdc_trace_io(uint32_t a)
+{
+    a &= 0x00FFFFFFu;
+    for (unsigned i = 0; i < 8u; i++) {
+        if (io_hist[i].n && io_hist[i].a == a) { io_hist[i].n++; return; }
+        if (!io_hist[i].n) { io_hist[i].a = a; io_hist[i].n = 1; return; }
+    }
+    io_other++;
+}
+
+static void io_hist_reset(void)
+{
+    memset(io_hist, 0, sizeof io_hist);
+    io_other = 0;
+}
+
+/* "  io: FFFA01x1 FF8604x2 ...  MFP ch7 (GPIP5) IER1 IMR1 IPR0 ISR0 VR48" */
+static void ht_io(char *out, size_t sz)
+{
+    int k = snprintf(out, sz, "  io:");
+    for (unsigned i = 0; i < 8u && io_hist[i].n && k < (int)sz; i++)
+        k += snprintf(out + k, sz - k, " %06Xx%u", io_hist[i].a, io_hist[i].n);
+    if (!io_hist[0].n && k < (int)sz)
+        k += snprintf(out + k, sz - k, " none");
+    if (io_other && k < (int)sz)
+        k += snprintf(out + k, sz - k, " +%u other", io_other);
+    if (k < (int)sz)
+        snprintf(out + k, sz - k,
+                 "  MFP ch7 (GPIP5) IER%u IMR%u IPR%u ISR%u VR%02X",
+                 (ps_read_8(0xFFFA09u) >> 7) & 1u, (ps_read_8(0xFFFA15u) >> 7) & 1u,
+                 (ps_read_8(0xFFFA0Du) >> 7) & 1u, (ps_read_8(0xFFFA11u) >> 7) & 1u,
+                 ps_read_8(0xFFFA17u));
+}
+
 static void hdc_trace_live(const char *why)
 {
     if (!ht.live || ht.stall_shown || !HT_ON())
@@ -162,7 +203,8 @@ static void hdc_trace_live(const char *why)
             k += snprintf(per + k, sizeof per - k, " b%u:+%uus/IRQ+%uus",
                           i + 1, ht.gap_us[i], ht.irq_us[i]);
     }
-    char low[48], tag[700];
+    char low[48], tag[1100], io[300];
+    ht_io(io, sizeof io);
     if (ht.t_low)
         snprintf(low, sizeof low, "%c +%lluus/%upolls", ht.src,
                  (unsigned long long)(ht.t_low - ht.t_last), ht.polls);
@@ -172,10 +214,10 @@ static void hdc_trace_live(const char *why)
     snprintf(tag, sizeof tag,
              "LIVE (%s) - %u CDB byte(s) @0x%06X, last +%lluus ago, no status "
              "read; GPIP5-low since last byte %s; DMA counter +%u B; per byte "
-             "(since previous / since its IRQ):%s",
+             "(since previous / since its IRQ):%s%s",
              why, ht.n, ht.base,
              (unsigned long long)(ht_now_us() - ht.t_last), low, moved,
-             per[0] ? per : " (first byte only)");
+             per[0] ? per : " (first byte only)", io);
     ht_lines++;
     ht_cdb(tag);
 }
@@ -233,6 +275,8 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
     }
     ht.n++;
     ht.t_last = ht_now_us();
+    io_hist_reset();
+    hdc_io_watch = 1;
     ht.t_low  = 0;
     ht.t_mode = 0;
     ht.polls  = 0;
@@ -298,6 +342,7 @@ static void hdc_trace_status(uint32_t status)
     if (!hdc_trc || !ht.live)
         return;
     ht.live = 0;
+    hdc_io_watch = 0;
     if (!HT_ON() || ht_lines >= HT_MAX)
         return;
     ht_lines++;
@@ -319,12 +364,13 @@ static void hdc_trace_status(uint32_t status)
     else
         snprintf(mode, sizeof mode, "none");
 
-    char tag[300], loop[96];
+    char tag[700], loop[96], io[300];
     ht_loop(loop, sizeof loop);
+    ht_io(io, sizeof io);
     snprintf(tag, sizeof tag,
-             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s",
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s%s",
              status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
-             (int)(addr - ht.base), loop);
+             (int)(addr - ht.base), loop, io);
     ht_cdb(tag);
 
     /* write commands: decode the first sector as it sits in REAL RAM -

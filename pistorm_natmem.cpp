@@ -1777,6 +1777,14 @@ extern "C" void pistorm_dma_to_stram(uaecptr addr, const uint8_t *src, uint32_t 
  * to print: total reads/writes per bank, and the top-N hottest 64KB pages
  * across ALL handler banks — i.e. exactly where your bus cycles are going.
  * ====================================================================== */
+/* PISTORM_HDC_TRACE: which I/O the guest reads while an ACSI command is
+ * waiting (atari_fdd.c). One predicted-false branch per I/O read when
+ * the trace is off. */
+extern "C" volatile int hdc_io_watch;
+extern "C" void hdc_trace_io(uint32_t a);
+#define HDC_IO_NOTE(a) \
+    do { if (__builtin_expect(hdc_io_watch, 0)) hdc_trace_io((uint32_t)(a)); } while (0)
+
 #ifdef PISTORM_BANK_PROFILE
 #include <signal.h>
 #include <stdio.h>
@@ -1807,6 +1815,7 @@ static uint32_t prof_page_w[0x10000]; /* per-64KB-page write hits */
     {                                        \
         prof_io_r++;                         \
         prof_page_r[((a) >> 16) & 0xffff]++; \
+        HDC_IO_NOTE(a);                      \
     } while (0)
 #define PROF_IO_W(a)                         \
     do                                       \
@@ -1901,7 +1910,7 @@ extern "C" void pistorm_bank_profile_init(void)
 #else
 #define PROF_DUMMY_R(a) ((void)0)
 #define PROF_DUMMY_W(a) ((void)0)
-#define PROF_IO_R(a) ((void)0)
+#define PROF_IO_R(a) HDC_IO_NOTE(a)
 #define PROF_IO_W(a) ((void)0)
 #define PROF_IDE_R(a) ((void)0)
 #define PROF_IDE_W(a) ((void)0)
