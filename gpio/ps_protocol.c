@@ -1507,6 +1507,20 @@ int ps_berr_cause ( void )
 }
 
 
+int ps_berr_diag2b ( void )
+{
+  if ( ps_fw_rev != CPLD_FW_DIAG_BERR2 )
+    return -1;
+
+  uint16_t w = (uint16_t)(ps_read_status_reg () >> 8);
+
+  return ((w & 0x8000) ? PS_B2_GLUE  : 0) |
+         ((w & 0x4000) ? PS_B2_DTACK : 0) |
+         ((w & 0x1000) ? PS_B2_ARB   : 0) |
+         ((w & 0x0800) ? PS_B2_LONG  : 0);
+}
+
+
 int ps_berr_detail ( void )
 {
   volatile uint32_t *const set = ioset;

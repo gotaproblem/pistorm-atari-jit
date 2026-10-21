@@ -208,6 +208,16 @@ int  ps_berr_cause ( void );
  *   sees page 2. */
 int  ps_berr_detail ( void );
 
+/* Small diag build 1.0b-diag2b (readback fwrev $43E): bits latched at the
+ * last Pi bus error. ps_berr_diag2b: -1 if not that firmware, else the
+ * PS_B2_* bits. One status read, so call only after the failing cycle. */
+#define CPLD_FW_DIAG_BERR2 0x43Eu
+#define PS_B2_GLUE  1   /* bit 15: the ST's BERR line                       */
+#define PS_B2_DTACK 2   /* bit 14: DTACK seen while our AS was low          */
+#define PS_B2_ARB   4   /* bit 12: BR or BG seen while our AS was low       */
+#define PS_B2_LONG  8   /* bit 11: our AS had been low for 16+ clocks (2 us) */
+int  ps_berr_diag2b ( void );
+
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
 int  ps_st_reset_pin ( void );
 
