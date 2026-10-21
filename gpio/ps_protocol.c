@@ -1510,7 +1510,7 @@ int ps_berr_cause ( void )
 int ps_berr_diag2b ( void )
 {
   if ( ps_fw_rev != CPLD_FW_DIAG_BERR2 && ps_fw_rev != CPLD_FW_DIAG_BERR2C &&
-       ps_fw_rev != CPLD_FW_ARB_FIX1 )
+       ps_fw_rev != CPLD_FW_ARB_FIX1 && ps_fw_rev != CPLD_FW_ARB_FIX2 )
     return -1;
 
   uint16_t w = (uint16_t)(ps_read_status_reg () >> 8);

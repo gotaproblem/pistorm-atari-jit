@@ -220,6 +220,7 @@ int  ps_berr_detail ( void );
                            was already low at the first clock of our cycle */
 #define CPLD_FW_DIAG_BERR2C 0x43Du
 #define CPLD_FW_ARB_FIX1    0x43Cu  /* arbitration fix candidate + diag2c bits */
+#define CPLD_FW_ARB_FIX2    0x43Bu  /* 68000-style synchronous cycle start + diag2c bits */
 int  ps_berr_diag2b ( void );
 
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
