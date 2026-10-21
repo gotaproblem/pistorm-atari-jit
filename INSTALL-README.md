@@ -27,13 +27,19 @@ clean **`--uninstall`** that reverses every system change.
   switch you to console boot.
 - **PiSTorm board fitted to a real Atari ST/STe, with CPLD firmware 0.83a
   (rev $253) or later.** Older firmware is obsolete: the Pi<->CPLD protocol
-  changed and the emulator refuses to start on it. Flash the bitstream from
-  `rtl/`, then power-cycle the ST:
+  changed and the emulator refuses to start on it. **1.0b** (first beta,
+  rev 256) is recommended: it adds the ST's RESET line on GPIO4, so the ST's
+  reset button restarts the emulator. Flash a bitstream from `rtl/`, then
+  power-cycle the ST:
 
   ```
   cd ~/pistorm-atari-jit
-  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf
+  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_0b.svf   # 1.0b (recommended)
+  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf    # 0.83a (minimum)
   ```
+
+  The emulator prints `[INIT] PiSTorm firmware EPM240 1.0b` (or `0.83a`) at
+  start-up, and with 1.0b `[MAIN] ST reset button sensing: on (GPIO4)`.
 - Run as your **normal user** (the script calls `sudo` itself; do **not** run it
   as root).
 - For the HDMI screen-mirror, a monitor on the **Pi's** HDMI, must be connected at boot.
@@ -490,7 +496,8 @@ answers in B: while an image is served in A:.
 
 Real hardware on the ST's own ports works too: the CPLD firmware (0.83a or
 later) does 68000 bus arbitration, so the ST's DMA chip runs real ACSI hard
-disks and the real floppy drive or a Gotek.
+disks and the real floppy drive or a Gotek. HDDRIVER (loaded from floppy)
+partitions a real ACSI drive, installs itself on C: and boots from it.
 
 ---
 

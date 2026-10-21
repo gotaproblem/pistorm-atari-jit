@@ -14,6 +14,7 @@ Then add-ons can be developed, such as
 - [x] WiFi networking [implemented]
 - [x] Ethernet - the Pi's RJ45 port works alongside the PiStorm bus [implemented]
 - [x] Real ACSI bus devices and real floppy drives / Gotek - CPLD bus arbitration, firmware 0.83a+ [implemented]
+- [x] The ST's own reset button restarts the emulator - CPLD firmware 1.0b [implemented]
 - [x] DMA Sound [implemented]
 - [x] FDD Emulation [implemented]
 - [x] Host MP3 playback via NatFeats (mixed with ST sound, SDL3) [implemented]
@@ -35,16 +36,31 @@ Development has been done on a Raspberry Pi4 with 2GB and various ATARI platform
 
 In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried. ***Update Pi3A+ and Pi02w only have 512MB RAM. As things are, this build will not work on either of these parts. I may get around to looking in to it, but cannot say when.***
 You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
-### CPLD firmware - 0.83a or later required
+### CPLD firmware - 0.83a or later required, 1.0b recommended
 > **This tree needs PiSTorm CPLD firmware 0.83a (rev $253) or later. Older firmware is obsolete and will not work.**
 
-The Pi<->CPLD protocol changed (single strobe - GPIO4 is no longer used) and the firmware now does real 68000 bus arbitration, which is what lets the ST's own DMA chip work: real ACSI hard disks and real floppy drives / Gotek. The emulator checks the firmware revision at start-up and refuses to run on anything older.
+The Pi<->CPLD protocol changed (single strobe) and the firmware now does real 68000 bus arbitration, which is what lets the ST's own DMA chip work: real ACSI hard disks and real floppy drives / Gotek. The emulator checks the firmware revision at start-up and refuses to run on anything older.
 
-Flash the bitstream shipped in `rtl/` (Verilog source alongside it):
+Two bitstreams ship in `rtl/`, each with its Verilog source alongside:
+
+| Bitstream | Firmware | What it adds |
+|---|---|---|
+| `EPM240_bitstream_dev_1_0b.svf` | **1.0b** (first beta, rev 256, fwrev `$420`) - recommended | everything in 0.83a, plus the ST's RESET line to the Pi on GPIO4: pressing the ST's reset button restarts the emulator (see below) |
+| `EPM240_bitstream_dev_253.svf` | 0.83a (rev $253) - minimum | single-strobe protocol, bus arbitration |
+
+Flash one of them:
 >cd ~/pistorm-atari-jit
-sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf
+sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_0b.svf
 
-then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware 0.83a`.
+then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware EPM240 1.0b` (or `[INIT] PiSTorm firmware 0.83a` for the 253 bitstream).
+
+#### ST reset button (firmware 1.0b)
+With 1.0b the CPLD drives GPIO4 low while the ST holds its RESET line low (reset button or the ST's own power-on reset - never for a reset the emulator itself issues). The ST's chips have just been reset under the running emulator, so the emulator stops cleanly, waits for the button to be released (up to 10 s), exits with code 42 and is relaunched - the same restart as Ctrl+Alt+Undo - and the ST boots afresh.
+
+At start-up the emulator says whether it is watching the pin:
+- `[MAIN] ST reset button sensing: on (GPIO4)`
+- `[MAIN] ST reset button sensing: off (CPLD firmware has no RESET pin - needs 1.0b)` - 0.83a firmware; GPIO4 is not read
+- `[MAIN] ST reset button sensing: off (PISTORM_RESET_PIN=0)` - turned off by the environment variable
 
 ### Software
 Development used Raspberry Pi OS Lite - Trixie build 64bit AARCH64. This is mandatory for JIT.
@@ -183,7 +199,7 @@ JIT speed WITH real translation.
 ~~68000, 68010 are not supported~~
 ~~GEM based games can not be played, they will likely run, but you will not see a meaningful native Atari screen output~~
 ~~Bus Arbitration is not working so Blitter, FDD, external ACSI bus devices will not work at the moment.~~
-Bus arbitration works with CPLD firmware 0.83a or later: external ACSI bus devices and the ST's floppy drive (real drive or Gotek) work.
+Bus arbitration works with CPLD firmware 0.83a or later: external ACSI bus devices and the ST's floppy drive (real drive or Gotek) work. HDDRIVER partitions, installs and boots from a real ACSI drive. (An MFP register read by the Pi that collides with the DMA chip taking the bus is reported by the firmware as a bus error; the emulator repeats the read instead of passing a bus error to the ST, which a real MFP never gives.)
 The high performance in a Mint environemnt may result in keyboard beeping - press the INSERT key to stop it
 
 [^pi5]: The current Atari PiSTorm JIT project will not pursue Pi5 development. The project remains Pi4 with support for Pi3B. Pi5 is included now as an experiment for anyone wishing to investigate.

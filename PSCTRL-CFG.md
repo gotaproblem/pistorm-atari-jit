@@ -242,6 +242,9 @@ set them in `run-pistorm.sh` or with `sudo env VAR=... sh run-pistorm.sh`.
 | `PISTORM_DMASND_GPIP7=0/1` | STE DMA sound: withhold / force the GPIP7 frame pulses (default: only to a handler in RAM) |
 | `PISTORM_STBOX_TOS`, `PISTORM_STBOX_PLANE` | see `stbox_*` |
 | `PISTORM_POWER=0` | Turn off the run-time Atari power sensing (the CPLD, powered by the ST, stops answering its firmware revision -> exit 42, relaunch waits for power, then cold boot). Start-up still waits for power |
+| `PISTORM_RESET_PIN=0` | Turn off ST reset-button sensing (CPLD firmware 1.0b: the ST's RESET line on GPIO4 -> orderly stop, wait for release, exit 42, relaunch). Without 1.0b firmware it is off anyway |
+| `PISTORM_HDC_TRACE=1/2` | Real-ACSI trace: one line per command (`=2`: write commands only) with status, GPIP5 timing, bytes moved and the driver's Timer C wait count; sectors 0, 1 and 2097151 dumped in full on read and write. For HDDRIVER/HDDRUTIL problems |
+| `PISTORM_ACSI_CDB_GAP_US=n` | Real ACSI: pause n us after each command byte (default 5; 0 = old timing) |
 | `PISTORM_HOTKEYS=0` | Turn off the emulator hotkeys: Ctrl+Alt+Undo restarts the emulator, Ctrl+Alt+Shift+Undo aborts it (ST or USB keyboard; Undo = End/PgDn on USB) |
 | `PISTORM_STBOX_DBG=1` | ST Box developer output: health lines every 5 s, plane and input details, full crash reports. Off, the box logs only start/stop, disks, errors and short crash lines |
 | `PISTORM_DUMP_ADDR=addr[,addr]` | dump guest memory at these addresses when the guest dies |
