@@ -200,6 +200,14 @@ void ps_power_wait ( void );
 #define PS_BERR_TENURE 4   /* bit 12: ...and the arbiter saw it as a DMA tenure */
 int  ps_berr_cause ( void );
 
+/* Page 2 of the diag readback (diag2 build): for the last bus error,
+ *   bits 7:0 c8m clocks our AS had been low (255 = 255+), bit 8 DTACK
+ *   seen, 9 BG out, 10 BR seen, 11 BGACK seen (all while our AS was low),
+ *   12 VPA low; 15:13 = 101 marker. Returns -1 if not answering. One bus
+ *   lock for select / read / deselect, so no other status reader ever
+ *   sees page 2. */
+int  ps_berr_detail ( void );
+
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
 int  ps_st_reset_pin ( void );
 

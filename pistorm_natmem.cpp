@@ -56,6 +56,7 @@ extern "C"
 
     uint8_t ps_read_8(uint32_t address);
     int ps_berr_cause(void);              /* gpio/ps_protocol.c, diag fw only */
+    int ps_berr_detail(void);             /* ... page 2 (diag2 build)          */
     uint16_t ps_read_16(uint32_t address);
     uint32_t ps_read_32(uint32_t address);
 
@@ -1982,10 +1983,24 @@ static void mfp_berr_note(uaecptr a)
         if (c & BERR_GLUE && c & BERR_BGACK)
             why = " - cause: ST BERR line AND BGACK inside our cycle";
     }
+    /* page 2: how long our AS was low, and what else happened meanwhile */
+    char det[160] = "";
+    if (c >= 0) {
+        int d = ps_berr_detail();
+        if (d >= 0)
+            snprintf(det, sizeof det, "\n      AS low %s%u clk (%.2f us), DTACK %s, "
+                     "BR %s, BG %s, BGACK %s, VPA %s",
+                     (d & 0xFF) == 0xFF ? ">=" : "", (unsigned)(d & 0xFF),
+                     (d & 0xFF) / 8.0, (d & 0x100) ? "seen" : "never",
+                     (d & 0x400) ? "seen" : "no", (d & 0x200) ? "out" : "no",
+                     (d & 0x800) ? "seen" : "no", (d & 0x1000) ? "low" : "no");
+        else
+            snprintf(det, sizeof det, " (no page 2: diag build without it)");
+    }
     mfp_gpip_berr_retries++;
     if (mfp_gpip_berr_retries <= 32)
-        fprintf(stderr, "[MFP] read $%06X bus error - retrying, %u so far%s\n",
-                (unsigned)a, mfp_gpip_berr_retries, why);
+        fprintf(stderr, "[MFP] read $%06X bus error - retrying, %u so far%s%s\n",
+                (unsigned)a, mfp_gpip_berr_retries, why, det);
     if (c >= 0 && (mfp_gpip_berr_retries % 256) == 0)
         fprintf(stderr, "[MFP] %u bus errors: GLUE BERR %u, DMA tenure %u, "
                 "BGACK pulse %u, none %u\n", mfp_gpip_berr_retries,

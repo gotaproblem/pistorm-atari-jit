@@ -1507,6 +1507,39 @@ int ps_berr_cause ( void )
 }
 
 
+int ps_berr_detail ( void )
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  uint32_t st;
+
+  if ( ps_fw_rev != CPLD_FW_DIAG_BERR )
+    return -1;
+
+  ps_lock_bus ();
+  ps_wait_idle_bounded ("ps_berr_detail");
+
+  *set = (0x8000u << 8) | REG_STATUS;   /* status $8000: page 2 */
+  txn_pulse (set, clr);
+
+  PS_BUS_IN ();
+  *set = REG_STATUS;                    /* status read, WR low */
+  for (int i = 0; i < 16; i++)          /* ~1 us: the readback is combinational */
+    (void)*ioread;
+  st = *ioread;
+  *clr = TXN_END;
+  PS_BUS_OUT ();
+
+  *set = (0x0000u << 8) | REG_STATUS;   /* status 0: back to page 1 */
+  txn_pulse (set, clr);
+
+  ps_unlock_bus ();
+
+  uint16_t w = (uint16_t)(st >> 8);
+  return ((w >> 13) == 5u) ? (int)w : -1;
+}
+
+
 /* Main-thread power sample. The CPU thread holds the bus lock for whole
  * cycles; a cycle that is merely slow (a DMA tenure) is a few ms, so give
  * the lock up to ~5 ms and otherwise report "no sample" rather than stall
