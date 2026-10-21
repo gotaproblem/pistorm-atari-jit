@@ -1019,6 +1019,27 @@ static int hdc_window_ok(uint32_t base, uint32_t len)
     return 1;
 }
 
+/* A driver's sector count is a CEILING (HDDriver and TOS program 255 for
+ * a 1-sector READ(6)), so count*512 can run past the end of ST-RAM when
+ * the buffer sits near the top. hdc_window_ok() then refused the WHOLE
+ * window and nothing was synced: field case 21 Oct, HDDriver under TOS
+ * 2.06 reads its FAT sectors into $3F0000; $3F0000 + 255*512 = $40FE00,
+ * so the FAT never reached the guest, the cluster chain returned the
+ * same cluster for ever (LBA 524628 x N into consecutive buffers, drive
+ * LED flashing). Clamp to the end of real RAM instead; 0 = base itself
+ * is past it. */
+static uint32_t hdc_clamp(uint32_t base, uint32_t len)
+{
+    uint32_t end = 0x400000u;
+    uint32_t top = pistorm_stram_phys_top();
+
+    if (top && top < end)
+        end = top;
+    if (base >= end)
+        return 0;
+    return len > end - base ? end - base : len;
+}
+
 /* The DMA chip's address counter ($FF8609/0B/0D, real bus). */
 static uint32_t hdc_dma_counter(void)
 {
@@ -1149,7 +1170,11 @@ static void hdc_trace_sector(const uint8_t *b)
 static void hdc_sync_pull(void)
 {
     fdc.hdc_pending = false;
-    uint32_t want = (uint32_t)fdc.hdc_count * 512u;
+    uint32_t want = hdc_clamp(fdc.hdc_base, (uint32_t)fdc.hdc_count * 512u);
+    if (!want) {
+        hdc_window_ok(fdc.hdc_base, (uint32_t)fdc.hdc_count * 512u);   /* logs */
+        return;
+    }
     if (!hdc_window_ok(fdc.hdc_base, want))
         return;
     hdc_wait_dma_done(fdc.hdc_base, want);
@@ -1232,13 +1257,18 @@ static void hdc_sync_pull(void)
  * Byte writes, as before - same bus path the push always used. */
 static void hdc_push_window(uint32_t base, uint32_t count)
 {
-    uint32_t len = count * 512u;
+    uint32_t len = hdc_clamp(base, count * 512u);
+    if (!len) {
+        hdc_window_ok(base, count * 512u);   /* logs "past real RAM" */
+        return;
+    }
     if (!hdc_window_ok(base, len))
         return;
     uint8_t buf[512];
     for (uint32_t off = 0; off < len; off += 512u) {
-        pistorm_dma_from_stram(base + off, buf, 512u);
-        for (uint32_t i = 0; i < 512u; i++)
+        uint32_t n = len - off < 512u ? len - off : 512u;
+        pistorm_dma_from_stram(base + off, buf, n);
+        for (uint32_t i = 0; i < n; i++)
             ps_write_8(base + off + i, buf[i]);
     }
     FDD_DBG("HDC sync push: %u sectors @ 0x%06X", count, base);
@@ -1423,14 +1453,15 @@ static void hdc_trace_write_window(void)
 {
     if (!HT_ON() || ht_lines >= HT_MAX)
         return;
-    uint32_t len = (uint32_t)fdc.hdc_count * 512u;
-    if (!hdc_window_ok(fdc.hdc_base, len))
+    uint32_t len = hdc_clamp(fdc.hdc_base, (uint32_t)fdc.hdc_count * 512u);
+    if (!len || !hdc_window_ok(fdc.hdc_base, len))
         return;
     uint32_t diff = 0, first = 0xFFFFFFFFu;
     uint8_t  m[512];
     for (uint32_t off = 0; off < len; off += 512u) {
-        pistorm_dma_from_stram(fdc.hdc_base + off, m, 512u);
-        for (uint32_t i = 0; i < 512u; i++)
+        uint32_t n = len - off < 512u ? len - off : 512u;
+        pistorm_dma_from_stram(fdc.hdc_base + off, m, n);
+        for (uint32_t i = 0; i < n; i++)
             if (ps_read_8(fdc.hdc_base + off + i) != m[i]) {
                 if (first == 0xFFFFFFFFu)
                     first = off + i;
