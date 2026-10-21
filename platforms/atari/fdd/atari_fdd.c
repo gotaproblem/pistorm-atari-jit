@@ -111,6 +111,7 @@ static struct {
     uint32_t irq_us[17];    /* byte i: us since GPIP5 first read low
                                after byte i-1 (~0u = never seen low)    */
     int      stall_shown;   /* live-command report printed once         */
+    uint32_t pc[17];        /* guest PC at each CDB byte write          */
 } ht;
 
 /* " poll-end +Xus  TimerC n rd / k b7-falls / e berr" for the line */
@@ -144,6 +145,35 @@ static void ht_cdb(const char *tag)
  * no status read (from the guest's GPIP / Timer C polling - never between
  * CDB bytes, where a print changes the timing), or at shutdown. */
 static uint32_t hdc_dma_counter(void);
+extern uint32_t pistorm_guest_pc(void);        /* cpu/newcpu.cpp */
+void pistorm_dma_from_stram(uint32_t, uint8_t*, uint32_t);   /* pistorm_natmem.cpp */
+
+/* Guest code around a PC that touches the ACSI port, once per distinct
+ * PC (first 8): the driver's wait loop can then be disassembled instead
+ * of guessed at. 48 bytes either side, from the RAM image. */
+static void ht_code_dump(const char *what, uint32_t pc)
+{
+    static uint32_t seen[8];
+    static unsigned nseen;
+    pc &= 0x00FFFFFFu;
+    for (unsigned i = 0; i < nseen; i++)
+        if (seen[i] == pc)
+            return;
+    if (nseen >= 8u)
+        return;
+    seen[nseen++] = pc;
+    uint32_t from = pc >= 48u ? (pc - 48u) & ~1u : 0u;
+    uint8_t  b[96];
+    memset(b, 0, sizeof b);
+    pistorm_dma_from_stram(from, b, sizeof b);
+    for (unsigned r = 0; r < 96u; r += 16u) {
+        char hex[16 * 3 + 1];
+        int  k = 0;
+        for (unsigned i = 0; i < 16u; i++)
+            k += snprintf(hex + k, sizeof hex - k, "%02X ", b[r + i]);
+        FDD_LOG("HDC code %s pc=%06X  %06X: %s", what, pc, from + r, hex);
+    }
+}
 
 /* I/O the guest reads between CDB bytes / before the status read:
  * address histogram (8 slots + overflow), reset at every CDB byte.
@@ -268,6 +298,10 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
         ht.wr = 1;                                  /* ICD WRITE(10) */
     if (ht.n < sizeof ht.cdb)
         ht.cdb[ht.n] = v;
+    if (ht.n < 17u)
+        ht.pc[ht.n] = pistorm_guest_pc() & 0x00FFFFFFu;
+    if (HT_ON())
+        ht_code_dump(ht.n ? "cdb-byte" : "cdb-first", ht.pc[ht.n < 17u ? ht.n : 16]);
     if (ht.n && ht.n < 17u) {
         uint64_t now = ht_now_us();
         ht.gap_us[ht.n] = (uint32_t)(now - ht.t_last);
@@ -364,13 +398,22 @@ static void hdc_trace_status(uint32_t status)
     else
         snprintf(mode, sizeof mode, "none");
 
-    char tag[700], loop[96], io[300];
+    char tag[900], loop[96], io[300], pcs[17 * 8 + 16];
     ht_loop(loop, sizeof loop);
     ht_io(io, sizeof io);
+    uint32_t stpc = pistorm_guest_pc() & 0x00FFFFFFu;
+    ht_code_dump("status", stpc);
+    {
+        int k = snprintf(pcs, sizeof pcs, "  pc:");
+        for (unsigned i = 0; i < ht.n && i < 17u && k < (int)sizeof pcs; i++)
+            k += snprintf(pcs + k, sizeof pcs - k, " %06X", ht.pc[i]);
+        if (k < (int)sizeof pcs)
+            snprintf(pcs + k, sizeof pcs - k, " st %06X", stpc);
+    }
     snprintf(tag, sizeof tag,
-             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s%s",
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s%s%s",
              status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
-             (int)(addr - ht.base), loop, io);
+             (int)(addr - ht.base), loop, io, pcs);
     ht_cdb(tag);
 
     /* write commands: decode the first sector as it sits in REAL RAM -
