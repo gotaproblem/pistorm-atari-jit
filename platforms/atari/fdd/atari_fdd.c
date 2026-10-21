@@ -1610,12 +1610,18 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
                      * that follows the previous one too closely. Sweep on
                      * that controller: 0 fails, 2 works, 5 works. Default 5
                      * = real-68000 spacing with margin; ~30 us per command.
-                     * PISTORM_ACSI_CDB_GAP_US=n overrides (0 = old timing). */
+                     * PISTORM_ACSI_CDB_GAP_US=n overrides (0 = old timing).
+                     *
+                     * 21 Oct 2026: 5 us is not enough for TOS 2.06, whose
+                     * code from "IRQ seen" to the next byte is shorter than
+                     * 1.04's: the HDC (ACSI ID 1) never acked byte 1 and ID 0
+                     * got a phantom ack. At 20 us TOS 2.06 read ID 1's LBA 0
+                     * (status 00, 512 B). Default 20; ~120 us per 6-byte CDB. */
                     {
                         static int gap = -1;
                         if (gap < 0) {
                             const char *e = getenv("PISTORM_ACSI_CDB_GAP_US");
-                            gap = e ? atoi(e) : 5;
+                            gap = e ? atoi(e) : 20;
                             if (gap < 0) gap = 0;
                             if (gap > 1000) gap = 1000;
                         }
