@@ -27,19 +27,22 @@ clean **`--uninstall`** that reverses every system change.
   switch you to console boot.
 - **PiSTorm board fitted to a real Atari ST/STe, with CPLD firmware 0.83a
   (rev $253) or later.** Older firmware is obsolete: the Pi<->CPLD protocol
-  changed and the emulator refuses to start on it. **1.0b** (first beta,
-  rev 256) is recommended: it adds the ST's RESET line on GPIO4, so the ST's
-  reset button restarts the emulator. Flash a bitstream from `rtl/`, then
-  power-cycle the ST:
+  changed and the emulator refuses to start on it. **1.1b** is recommended:
+  1.0b's ST RESET line on GPIO4 (the ST's reset button restarts the
+  emulator) plus 68000-style bus-cycle start and stricter arbitration, so
+  the Pi's MFP reads never collide with ACSI / floppy DMA. Flash a
+  bitstream from `rtl/`, then power-cycle the ST:
 
   ```
   cd ~/pistorm-atari-jit
-  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_0b.svf   # 1.0b (recommended)
+  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf   # 1.1b (recommended)
+  sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_0b.svf   # 1.0b
   sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf    # 0.83a (minimum)
   ```
 
-  The emulator prints `[INIT] PiSTorm firmware EPM240 1.0b` (or `0.83a`) at
-  start-up, and with 1.0b `[MAIN] ST reset button sensing: on (GPIO4)`.
+  The emulator prints `[INIT] PiSTorm firmware EPM240 1.1b` (or `1.0b`,
+  `0.83a`) at start-up, and with 1.0b or later `[MAIN] ST reset button
+  sensing: on (GPIO4)`.
 - Run as your **normal user** (the script calls `sudo` itself; do **not** run it
   as root).
 - For the HDMI screen-mirror, a monitor on the **Pi's** HDMI, must be connected at boot.

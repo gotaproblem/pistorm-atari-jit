@@ -36,25 +36,26 @@ Development has been done on a Raspberry Pi4 with 2GB and various ATARI platform
 
 In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried. ***Update Pi3A+ and Pi02w only have 512MB RAM. As things are, this build will not work on either of these parts. I may get around to looking in to it, but cannot say when.***
 You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
-### CPLD firmware - 0.83a or later required, 1.0b recommended
+### CPLD firmware - 0.83a or later required, 1.1b recommended
 > **This tree needs PiSTorm CPLD firmware 0.83a (rev $253) or later. Older firmware is obsolete and will not work.**
 
 The Pi<->CPLD protocol changed (single strobe) and the firmware now does real 68000 bus arbitration, which is what lets the ST's own DMA chip work: real ACSI hard disks and real floppy drives / Gotek. The emulator checks the firmware revision at start-up and refuses to run on anything older.
 
-Two bitstreams ship in `rtl/`, each with its Verilog source alongside:
+The bitstreams ship in `rtl/`, each with its Verilog source alongside:
 
 | Bitstream | Firmware | What it adds |
 |---|---|---|
-| `EPM240_bitstream_dev_1_0b.svf` | **1.0b** (first beta, rev 256, fwrev `$420`) - recommended | everything in 0.83a, plus the ST's RESET line to the Pi on GPIO4: pressing the ST's reset button restarts the emulator (see below) |
+| `EPM240_bitstream_dev_1_1b.svf` | **1.1b** (fwrev `$421`) - recommended | everything in 1.0b, plus 68000-style bus-cycle start (decided on a falling edge, AS on the rising edge) and stricter arbitration (no cycle start once BR is seen, BG held until our AS is up): no MFP bus errors during ACSI / floppy DMA |
+| `EPM240_bitstream_dev_1_0b.svf` | 1.0b (first beta, rev 256, fwrev `$420`) | everything in 0.83a, plus the ST's RESET line to the Pi on GPIO4: pressing the ST's reset button restarts the emulator (see below) |
 | `EPM240_bitstream_dev_253.svf` | 0.83a (rev $253) - minimum | single-strobe protocol, bus arbitration |
 
 Flash one of them:
 >cd ~/pistorm-atari-jit
-sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_0b.svf
+sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf
 
-then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware EPM240 1.0b` (or `[INIT] PiSTorm firmware 0.83a` for the 253 bitstream).
+then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware EPM240 1.1b` (`EPM240 1.0b`, or `0.83a` for the 253 bitstream).
 
-#### ST reset button (firmware 1.0b)
+#### ST reset button (firmware 1.0b and later)
 With 1.0b the CPLD drives GPIO4 low while the ST holds its RESET line low (reset button or the ST's own power-on reset - never for a reset the emulator itself issues). The ST's chips have just been reset under the running emulator, so the emulator stops cleanly, waits for the button to be released (up to 10 s), exits with code 42 and is relaunched - the same restart as Ctrl+Alt+Undo - and the ST boots afresh.
 
 At start-up the emulator says whether it is watching the pin:
@@ -199,7 +200,7 @@ JIT speed WITH real translation.
 ~~68000, 68010 are not supported~~
 ~~GEM based games can not be played, they will likely run, but you will not see a meaningful native Atari screen output~~
 ~~Bus Arbitration is not working so Blitter, FDD, external ACSI bus devices will not work at the moment.~~
-Bus arbitration works with CPLD firmware 0.83a or later: external ACSI bus devices and the ST's floppy drive (real drive or Gotek) work. HDDRIVER partitions, installs and boots from a real ACSI drive. (An MFP register read by the Pi that collides with the DMA chip taking the bus is reported by the firmware as a bus error; the emulator repeats the read instead of passing a bus error to the ST, which a real MFP never gives.)
+Bus arbitration works with CPLD firmware 0.83a or later: external ACSI bus devices and the ST's floppy drive (real drive or Gotek) work. HDDRIVER partitions, installs and boots from a real ACSI drive. With firmware 1.0b and older, an MFP register read by the Pi that collides with the DMA chip taking the bus came back as a bus error (the GLUE timing out a cycle begun after BR, or the GLUE taking the bus mid-cycle); the emulator repeats such a read. Firmware 1.1b starts bus cycles like a 68000 and does not provoke either, so with 1.1b these retries do not happen. Under TOS 2.06 the drive LED stays on for a few seconds while the boot driver loads: that is TOS 2.06's own DMA read routine, which waits two 200 Hz ticks (10-15 ms) after every command byte, exactly as on a real ST.
 The high performance in a Mint environemnt may result in keyboard beeping - press the INSERT key to stop it
 
 [^pi5]: The current Atari PiSTorm JIT project will not pursue Pi5 development. The project remains Pi4 with support for Pi3B. Pi5 is included now as an experiment for anyone wishing to investigate.

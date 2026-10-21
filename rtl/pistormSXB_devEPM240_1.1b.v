@@ -3,6 +3,31 @@
  */
 
 /*
+ * Oct 2026 1.1b (fwrev $421): 1.0b + 68000-style cycle start and stricter
+ * bus arbitration. Fixes the MFP bus errors seen during ACSI/floppy DMA
+ * (HDDriver's GPIP / Timer C polls), measured with diagnostic builds:
+ *
+ *  A. GLUE BERR, AS low 2us+, no DTACK: a Pi cycle that began after the
+ *     DMA had raised BR was never answered and the GLUE timed it out.
+ *  B. BGACK inside our cycle: BG given while our AS was low and the GLUE
+ *     took the bus without waiting for AS to rise.
+ *
+ * 10. br_clear = BR through ONE flop (the arbiter's br is two).
+ * 11. BG is held off while our AS is out (as_busy); once given it stays.
+ * 12. go    - start decision on the FALLING edge (68000 S1): parked in S2,
+ *             TXN pending, bus_mine, BGACKi, br_clear and the BR pin high,
+ *             AS not already out. FC, R/W and PI_BERR are set from it.
+ * 13. as_on - AS (and UDS/LDS on a read) on the next RISING edge (68000
+ *             S2), cleared at S7. AS_INT = ~as_on: no asynchronous latch
+ *             drives AS any more.
+ * 14. as_busy to the arbiter = go | as_on: once the decision is made, BG
+ *     waits until our AS is out and back.
+ * S3 follows S2 when as_on; S4-S7, data latching, VMA unchanged.
+ * Tested on hardware (fix2 build): no MFP bus errors under TOS 1.04 /
+ * 1.62 / 2.06, HDDriver on a real ACSI HDC, floppy DMA.
+ */
+
+/*
  * Oct 2026 1.0b (fwrev $420) = rev 256, first beta. Tested OK on hardware.
  *
  * Oct 2026 rev 256: 253/255 + a real RESET signal for the Pi on GPIO4
@@ -75,24 +100,6 @@
 //`define LS373
 `define LS374
 
-/*
- * DIAG_BERR2 - small diagnostic build of 1.0b (readback fwrev $43E,
- * prints as "EPM240 1.30b"). Kept to a handful of LEs on purpose: a
- * bigger diag (157 LEs) re-placed the Pi strobe decodes and broke writes.
- *
- * At every Pi bus error (end of S5 with BERR_n or BGACKi low) the
- * readback bits the Pi does not use latch, for that cycle:
- *
- *   bit 15  M68K_BERR_n low       - the ST's BERR line (GLUE)
- *   bit 14  DTACK_n was low at some clock while our AS was low
- *   bit 12  BR or BG seen at some clock while our AS was low
- *   bit 11  our AS had been low for 16+ c8m clocks (2 us) - a normal
- *           MFP read is a few clocks; a GLUE timeout is far longer
- *
- * (bit 11 is ~bus_mine in the release.) Held until the next bus error.
- * Comment the define out for the 1.0b release.
- */
-`define DIAG_BERR2
 
 /*
  * Bus Arbitration
@@ -106,6 +113,8 @@ module BusArbSync (
 
 	input  wire br_n,       // Bus Request,             raw pin, active low
 	input  wire bgack_n,    // Bus Grant Acknowledge,   raw pin, active low
+	input  wire as_busy,    // 1 = one of our cycles has AS asserted (fix 11)
+	output wire br_clear,   // BR through one flop: 1 = not requested (fix 10)
 
 	output reg  bg_n,       // Bus Grant, active low, registered (no glitches)
 	output reg  bus_mine    // 1 = the engine may START a cycle
@@ -142,6 +151,8 @@ module BusArbSync (
 	wire br    = ~br_s[1];
 	wire bgack = ~bgk_s[1];
 
+	assign br_clear = br_s[0];
+
 	always @(negedge clk or negedge reset_n) begin
 
 		if (!reset_n) begin
@@ -165,7 +176,7 @@ module BusArbSync (
 						bus_mine <= 1'b0;
 					end else if (br) begin
 						st       <= GRANT;
-						bg_n     <= 1'b0;
+						bg_n     <= as_busy; /* fix 11: not while our AS is low */
 						bus_mine <= 1'b0;   /* no new cycle from here on */
 					end else begin
 						bg_n     <= 1'b1;
@@ -183,7 +194,9 @@ module BusArbSync (
 						st   <= SETTLE;     /* requester gave up - or BGACK is a
 											   sample behind; SETTLE tells */
 						bg_n <= 1'b1;
-					end
+					end else if (bg_n)
+						bg_n <= as_busy;    /* fix 11: give BG once our AS is up;
+											   once given it stays */
 				end
 
 				FOREIGN: begin
@@ -202,7 +215,7 @@ module BusArbSync (
 						quiet <= 1'b0;
 					end else if (br) begin
 						st    <= GRANT;
-						bg_n  <= 1'b0;
+						bg_n  <= as_busy;
 						quiet <= 1'b0;
 					end else if (quiet) begin
 						st       <= OWNED;
@@ -419,15 +432,11 @@ module pistormsxb_devEPM240(
 
 	wire trigger;
 	wire bus_mine;							/* BusArbSync: 1 = we may start a cycle */
+	wire br_clear;							/* BusArbSync: BR not requested, 1 flop (fix 10) */
 	assign trigger							= (cmd_status && !CMDWR && !st_wr_release);
 
 	/* bit 11 (raw GPIO19): arbitration active - BG out or foreign master */
-`ifdef DIAG_BERR2
-	reg  d_berr = 1'b0, d_dtk = 1'b0, d_arb = 1'b0, d_long = 1'b0;
-	assign PI_D 							= trigger ? {d_berr, d_dtk, M68K_RESET_n, d_arb, d_long, 11'h43E} : 16'bz;
-`else
 	assign PI_D 							= trigger ? {PI_IPL2, PI_IPL1, M68K_RESET_n, M68K_HALT_n, ~bus_mine, fwrev} : 16'bz;
-`endif
 	
 	reg [15:0] status;
 	
@@ -448,7 +457,9 @@ module pistormsxb_devEPM240(
 	reg op_lds_n 							= HI;
 
 	reg [2:0] FC_INT;
-	reg AS_INT;
+	reg  go								= 1'b0;	/* fix2: start decision, falling edge */
+	reg  as_on								= 1'b0;	/* fix2: AS asserted, rising edge     */
+	wire AS_INT								= ~as_on;
 	reg UDS_INT;
 	reg LDS_INT;
 	reg RW_INT;
@@ -591,6 +602,8 @@ module pistormsxb_devEPM240(
 		.reset_n  ( M68K_RESET_n ),
 		.br_n     ( M68K_BR_n ),
 		.bgack_n  ( M68K_BGACK_n ),
+		.as_busy  ( go | as_on ),
+		.br_clear ( br_clear ),
 		.bg_n     ( M68K_BG_n ),
 		.bus_mine ( bus_mine )
 	);
@@ -609,7 +622,7 @@ module pistormsxb_devEPM240(
 	 * both latch output enables.
 	 */
 	reg  own_q								= HI;
-	wire bus_drv							= BGACKi & (bus_mine | ~AS_INT | own_q);
+	wire bus_drv							= BGACKi & (bus_mine | go | ~AS_INT | own_q);
 
 	always @(posedge c8m) begin
 		own_q								<= bus_mine | ~AS_INT;
@@ -618,6 +631,34 @@ module pistormsxb_devEPM240(
 	assign LTCH_A_OE_n						= LTCH_A_OE_r    | ~bus_drv;
 	assign LTCH_D_WR_OE_n					= LTCH_D_WR_OE_r | ~bus_drv;
 
+
+	/*
+	 * fix2: cycle start, 68000 style.
+	 *   falling edge: decide (go) - bus ours, BR pin high, no BGACK, TXN pending
+	 *   rising edge:  AS out (as_on) - S2
+	 *   falling edge: S3 (s3 needs s2 && as_on)
+	 * as_on is cleared by S7 (falling edge) or a reset/INIT (oor).
+	 */
+	wire as_clr								= s7 || oor;
+
+	always @(negedge c8m, posedge oor) begin
+		if (oor)
+			go								<= 1'b0;
+		else
+			go								<= s2 && !as_on && PI_TXN_IN_PROGRESS &&
+											   bus_mine && BGACKi && br_clear &&
+											   M68K_BR_n;	/* BR pin at this edge: a cycle never
+															   starts once BR is out (go is a flop -
+															   metastability has half a clock to
+															   settle before as_on samples it) */
+	end
+
+	always @(posedge c8m, posedge as_clr) begin
+		if (as_clr)
+			as_on							<= 1'b0;
+		else if (s2 && go && BGACKi)
+			as_on							<= 1'b1;
+	end
 
 	/* BUS TRANSFER STATE MACHINE */
 	wire s0rst 								= s1;
@@ -683,7 +724,9 @@ module pistormsxb_devEPM240(
 		//else if (s2 && PI_TXN_IN_PROGRESS)
 		/* rev 252: start only while the bus is ours; a cycle whose AS is
 		 * already out (AS_INT low) always runs to completion */
-		else if (s2 && PI_TXN_IN_PROGRESS && ((bus_mine && BGACKi) || !AS_INT))
+		/* fix2: the start was decided on the previous falling edge (go) and
+		 * AS went out on the rising edge (as_on) - S3 just follows */
+		else if (s2 && as_on)
 		  s3 <= 1'd1;
 	end
 	
@@ -704,34 +747,6 @@ module pistormsxb_devEPM240(
 	 * possible to miss DTACK assertion so latch DTACK when seen
 	 * copied from Will James - Sinclair QL
 	 */
-`ifdef DIAG_BERR2
-	/* while our AS is low: clocks (saturating at 16), DTACK seen, BR or
-	 * BG seen. Captured at the posedge that closes the PI_BERR latch. */
-	reg [4:0] c_len							= 5'd0;
-	reg       c_dtk = 1'b0, c_arb = 1'b0;
-
-	always @(posedge c8m) begin
-		if (AS_INT) begin
-			c_len							<= 5'd0;
-			c_dtk							<= 1'b0;
-			c_arb							<= 1'b0;
-		end else begin
-			if (!c_len[4])
-				c_len						<= c_len + 5'd1;
-			if (!M68K_DTACK_n)
-				c_dtk						<= 1'b1;
-			if (!M68K_BR_n || !bus_mine)
-				c_arb						<= 1'b1;
-		end
-
-		if (s5 && (!M68K_BERR_n || !BGACKi)) begin
-			d_berr							<= !M68K_BERR_n;
-			d_dtk							<= c_dtk | !M68K_DTACK_n;
-			d_arb							<= c_arb | !M68K_BR_n | !bus_mine;
-			d_long							<= c_len[4];
-		end
-	end
-`endif
 
 	always @(*) begin
 
@@ -897,26 +912,20 @@ module pistormsxb_devEPM240(
 		//	s2delay <= LO;
 			LTCH_A_OE_r <= LO;
 			
-			/* rev 252: no new cycle once BG is out */
-			if (PI_TXN_IN_PROGRESS && bus_mine && BGACKi) begin
+			/* fix2: FC / R/W / PI_BERR from the registered start decision
+			 * (falling edge); AS itself is as_on (rising edge) */
+			if (go) begin
 		
 				FC_INT <= op_fc;					
 				PI_BERR <= HI;
 				RW_INT <= op_rw;			
-			
-				//LTCH_A_OE_n <= LO;
+			end
+
+			/* read: UDS/LDS with AS (68000 S2) */
+			if (as_on && op_rw) begin
 				
-			//	s2delay <= HI;
-			//	if (s2delay) begin
-				
-					AS_INT <= LO;
-			//	end
-				
-				if ( op_rw ) begin
-				
-					UDS_INT <= op_uds_n;
-					LDS_INT <= op_lds_n;
-				end
+				UDS_INT <= op_uds_n;
+				LDS_INT <= op_lds_n;
 			end
 		end
 		
@@ -968,7 +977,7 @@ module pistormsxb_devEPM240(
 	
 		if (s7) begin
 			
-			AS_INT <= HI; /* deassert Address Strobe */
+			/* AS deasserts via as_on (cleared by s7) */
 			UDS_INT <= HI;
 			LDS_INT <= HI;
 			

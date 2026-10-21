@@ -2107,7 +2107,7 @@ static void check_cpld_firmware(void)
     "[INIT] This build needs firmware 0.%ua or later (rev $%03X). Older firmware\n"
     "[INIT] uses a different Pi<->CPLD protocol and has no working bus arbitration.\n"
     "[INIT] Flash the bitstream shipped in rtl/:\n"
-    "[INIT]     sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf\n"
+    "[INIT]     sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf\n"
     "[INIT] then power-cycle the ST.\n",
     fw, CPLD_FW_MIN_ALPHA & 0xFFu, CPLD_FW_MIN_ALPHA);
   if (any && *any && *any != '0') {
