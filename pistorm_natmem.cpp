@@ -1953,16 +1953,57 @@ extern volatile uint8_t g_buserr;
  * side effects), so repeat it; only a BERR that survives three retries is
  * passed on to the guest as a real one. */
 static unsigned mfp_gpip_berr_retries;
+extern "C" void hdc_trace_tcdr(uint8_t v, int berr);   /* fdd/atari_fdd.c */
+
+static inline void mfp_berr_note(uaecptr a)
+{
+    if (mfp_gpip_berr_retries++ < 32)
+        fprintf(stderr, "[MFP] read $%06X bus error (arbitration overlap?) "
+                "- retrying, %u so far\n", (unsigned)a, mfp_gpip_berr_retries);
+}
 
 static inline uae_u8 mfp_gpip_read(uaecptr a)
 {
     uae_u8 v = ps_read_8(a);
     for (int i = 0; g_buserr && i < 3; i++) {
-        if (mfp_gpip_berr_retries++ < 8)
-            fprintf(stderr, "[MFP] GPIP read bus error (arbitration overlap?) "
-                    "- retrying, %u so far\n", mfp_gpip_berr_retries);
+        mfp_berr_note(a);
         g_buserr = 0;
         v = ps_read_8(a);
+    }
+    return v;
+}
+
+/* Every other MFP register, same reason. HDDRIVER's ACSI wait loop
+ * (HDDRIVER.SYS $177A/$1BB2/$2928) reads GPIP and then Timer C data
+ * ($FFFA23) to count its timeout, back to back, for the whole of a DMA
+ * transfer - the overlap lands on the TCDR read as often as on GPIP, and
+ * that one went to the guest as a bus error: two bombs mid-transfer
+ * (Pexec of a file from C: halted the CPU, a 64 KB HDDRUTIL write was
+ * abandoned without its status). Not the USART data register
+ * ($FFFA2F): reading it pops the receive buffer, so it is not repeated. */
+static inline bool mfp_read_repeatable(uaecptr a)
+{
+    return (a | 1u) != 0x00FFFA2Fu;
+}
+
+static inline uae_u8 mfp_read8_retry(uaecptr a)
+{
+    uae_u8 v = ps_read_8(a);
+    for (int i = 0; g_buserr && i < 3 && mfp_read_repeatable(a); i++) {
+        mfp_berr_note(a);
+        g_buserr = 0;
+        v = ps_read_8(a);
+    }
+    return v;
+}
+
+static inline uae_u16 mfp_read16_retry(uaecptr a)
+{
+    uae_u16 v = ps_read_16(a);
+    for (int i = 0; g_buserr && i < 3 && mfp_read_repeatable(a); i++) {
+        mfp_berr_note(a);
+        g_buserr = 0;
+        v = ps_read_16(a);
     }
     return v;
 }
@@ -3500,7 +3541,8 @@ static inline uae_u32 hw_mfp_wget(uaecptr a)
         return v;
     }
     {
-        uae_u16 v = (uae_u16)hw_bus_wget(a);
+        uae_u16 v = mfp_read16_retry(a);
+        pistorm_buserr(a, 0, true, sz_word);
         /* MFP reg is the LOW byte of a word read. A word read at $FFFA00
          * sees GPIP in its low byte but skips the a==MFP_GPIP byte match
          * above - route it through the ONE gpip shim (monitor force, kbd,
@@ -3525,7 +3567,10 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
         return v;
     }
     {
-        uae_u8 v = (uae_u8)hw_bus_bget(a);
+        uae_u8 v = mfp_read8_retry(a);
+        if (a == 0x00FFFA23u)
+            hdc_trace_tcdr(v, g_buserr);   /* PISTORM_HDC_TRACE: Timer C */
+        pistorm_buserr(a, 0, true, sz_byte);
         v = mfp_hub_read_shim(a, v);
         mfp_trace("R", a, v, 0);
         return v;

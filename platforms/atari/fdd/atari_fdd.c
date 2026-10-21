@@ -102,7 +102,25 @@ static struct {
     unsigned polls;         /* GPIP reads since t_last                  */
     uint64_t t_mode;        /* first $8606 write since t_last (0 = none)*/
     int      wr;            /* this command writes (direction or opcode) */
+    uint64_t t_poll;        /* most recent GPIP read since t_last       */
+    unsigned tc_reads;      /* Timer C data ($FFFA23) reads since t_last */
+    unsigned tc_falls;      /* ... bit 7 going 1 -> 0 between two reads  */
+    unsigned tc_berr;       /* ... reads that came back with a bus error */
+    int      tc_prev;       /* last bit 7 seen (-1 = none yet)          */
 } ht;
+
+/* " poll-end +Xus  TimerC n rd / k b7-falls / e berr" for the line */
+static void ht_loop(char *out, size_t sz)
+{
+    char pe[24];
+    if (ht.t_poll)
+        snprintf(pe, sizeof pe, "+%lluus",
+                 (unsigned long long)(ht.t_poll - ht.t_last));
+    else
+        snprintf(pe, sizeof pe, "none");
+    snprintf(out, sz, "  last-poll %s  TimerC %u rd/%u b7-falls/%u berr",
+             pe, ht.tc_reads, ht.tc_falls, ht.tc_berr);
+}
 
 /* PISTORM_HDC_TRACE=1: every command. =2: write commands only. */
 #define HT_ON() (hdc_trc == 1 || (hdc_trc == 2 && ht.wr))
@@ -123,8 +141,26 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
         return;
     if (first) {
         if (ht.live && HT_ON() && ht_lines < HT_MAX) {
+            /* what the abandoned command got before the guest gave up:
+             * time since its last CDB byte (= the driver's timeout or
+             * retry point), and whether the device ever pulled GPIP5.
+             * No "DMA moved": the guest has already loaded the next
+             * command's DMA base by now. */
+            char tag[300], low[48], loop[96];
+            uint64_t now = ht_now_us();
+            ht_loop(loop, sizeof loop);
+            if (ht.t_low)
+                snprintf(low, sizeof low, "%c +%lluus/%upolls", ht.src,
+                         (unsigned long long)(ht.t_low - ht.t_last), ht.polls);
+            else
+                snprintf(low, sizeof low, "never (%u polls)", ht.polls);
+            snprintf(tag, sizeof tag,
+                     "ABANDONED - new command $%02X @0x%06X +%lluus after last "
+                     "CDB byte, no status read; GPIP5-low %s  mode-wr %s%s",
+                     v, base, (unsigned long long)(now - ht.t_last), low,
+                     ht.t_mode ? "yes" : "none", loop);
             ht_lines++;
-            ht_cdb("ABANDONED - new command before any status read");
+            ht_cdb(tag);
         }
         ht.live = 1;
         ht.n    = 0;
@@ -142,6 +178,11 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
     ht.t_low  = 0;
     ht.t_mode = 0;
     ht.polls  = 0;
+    ht.t_poll   = 0;
+    ht.tc_reads = 0;
+    ht.tc_falls = 0;
+    ht.tc_berr  = 0;
+    ht.tc_prev  = -1;
 }
 
 static void hdc_trace_gpip(int low, char src)
@@ -149,10 +190,30 @@ static void hdc_trace_gpip(int low, char src)
     if (!hdc_trc || !ht.live)
         return;
     ht.polls++;
+    ht.t_poll = ht_now_us();
     if (low && !ht.t_low) {
         ht.t_low = ht_now_us();
         ht.src   = src;
     }
+}
+
+/* called from pistorm_natmem.cpp's io_bget for every $FFFA23 (Timer C
+ * data) read. HDDriver times its ACSI waits by counting bit-7 falls of
+ * this register (one per Timer C period, 5 ms at TOS's 200 Hz), so the
+ * count per command says how long the GUEST thought it waited. */
+void hdc_trace_tcdr(uint8_t v, int berr)
+{
+    if (!hdc_trc || !ht.live)
+        return;
+    ht.tc_reads++;
+    if (berr) {
+        ht.tc_berr++;
+        return;
+    }
+    int b7 = (v >> 7) & 1;
+    if (ht.tc_prev == 1 && b7 == 0)
+        ht.tc_falls++;
+    ht.tc_prev = b7;
 }
 
 /* called from pistorm_natmem.cpp's GPIP shim when the emulated IDE INTRQ
@@ -167,6 +228,8 @@ static void hdc_trace_mode_write(void)
     if (hdc_trc && ht.live && !ht.t_mode)
         ht.t_mode = ht_now_us();
 }
+
+static void hdc_trace_sector(const uint8_t *b);
 
 static void hdc_trace_status(uint32_t status)
 {
@@ -194,12 +257,23 @@ static void hdc_trace_status(uint32_t status)
     else
         snprintf(mode, sizeof mode, "none");
 
-    char tag[200];
+    char tag[300], loop[96];
+    ht_loop(loop, sizeof loop);
     snprintf(tag, sizeof tag,
-             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B",
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s",
              status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
-             (int)(addr - ht.base));
+             (int)(addr - ht.base), loop);
     ht_cdb(tag);
+
+    /* write commands: decode the first sector as it sits in REAL RAM -
+     * what the DMA chip sent - so a write to LBA 0 shows the partition
+     * table that went to the disk */
+    if (ht.wr && (int)(addr - ht.base) >= 512) {
+        uint8_t b[512];
+        for (unsigned i = 0; i < 512u; i++)
+            b[i] = ps_read_8(ht.base + i);
+        hdc_trace_sector(b);
+    }
 }
 
 /* When the floppy itself is NOT emulated (no "fdd" cfg lines) but
@@ -1015,10 +1089,13 @@ static uint32_t le32(const uint8_t *p) { return le16(p) | (le16(p + 2) << 16); }
 
 static void hdc_trace_sector(const uint8_t *b)
 {
-    /* sectors only: READ(6) $08 or ICD-wrapped READ(10) $1F $28. INQUIRY,
-     * REQUEST SENSE etc. are pulled too but are not disk sectors. */
+    /* sectors only: READ(6) $08 / WRITE(6) $0A or ICD-wrapped READ(10)
+     * $1F $28 / WRITE(10) $1F $2A. INQUIRY, REQUEST SENSE etc. are pulled
+     * too but are not disk sectors. */
     int icd = (ht.cdb[0] & 0x1F) == 0x1F;
-    if (!((!icd && (ht.cdb[0] & 0x1F) == 0x08) || (icd && ht.cdb[1] == 0x28)))
+    uint8_t op6 = ht.cdb[0] & 0x1F;
+    if (!((!icd && (op6 == 0x08 || op6 == 0x0A)) ||
+          (icd && (ht.cdb[1] == 0x28 || ht.cdb[1] == 0x2A))))
         return;
     if (ht_lines >= HT_MAX)
         return;
@@ -1038,6 +1115,17 @@ static void hdc_trace_sector(const uint8_t *b)
             tgt, lba, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
             b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
             b[510], b[511]);
+
+    /* the partitioning sectors in full: LBA 0 (MBR / Atari root sector),
+     * LBA 1, and the top of the 21-bit READ(6) range that HDDRUTIL reads
+     * and writes - so every byte a partitioner looks at is in the log */
+    if (lba <= 1 || lba >= 0x1FFFFFu)
+        for (int r = 0; r < 512; r += 16)
+            FDD_LOG("HDC   %03X: %02X %02X %02X %02X %02X %02X %02X %02X  "
+                    "%02X %02X %02X %02X %02X %02X %02X %02X", r,
+                    b[r], b[r + 1], b[r + 2], b[r + 3], b[r + 4], b[r + 5],
+                    b[r + 6], b[r + 7], b[r + 8], b[r + 9], b[r + 10],
+                    b[r + 11], b[r + 12], b[r + 13], b[r + 14], b[r + 15]);
 
     if (lba == 0 && b[510] == 0x55 && b[511] == 0xAA)
         for (int i = 0; i < 4; i++) {
