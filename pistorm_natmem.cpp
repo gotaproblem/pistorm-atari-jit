@@ -55,6 +55,7 @@ extern "C"
     void m68k_write_memory_32(unsigned int address, unsigned int value);
 
     uint8_t ps_read_8(uint32_t address);
+    int ps_berr_cause(void);              /* gpio/ps_protocol.c, diag fw only */
     uint16_t ps_read_16(uint32_t address);
     uint32_t ps_read_32(uint32_t address);
 
@@ -1955,11 +1956,41 @@ extern volatile uint8_t g_buserr;
 static unsigned mfp_gpip_berr_retries;
 extern "C" void hdc_trace_tcdr(uint8_t v, int berr);   /* fdd/atari_fdd.c */
 
-static inline void mfp_berr_note(uaecptr a)
+/* With the diagnostic CPLD firmware (1.0b-diag, $43F) each one also says
+ * WHY the CPLD reported it (ps_berr_cause): the ST's own BERR line, or
+ * BGACK inside our cycle - as a real DMA tenure, or as a pulse too short
+ * to be one. Tallied; the first 32 are listed, then a tally every 256. */
+static unsigned mfp_berr_cause_n[4];      /* glue, tenure, bgack pulse, none */
+enum { BERR_GLUE = 1, BERR_BGACK = 2, BERR_TENURE = 4 };  /* = PS_BERR_* in
+                                       gpio/ps_protocol.h (not included here) */
+
+static void mfp_berr_note(uaecptr a)
 {
-    if (mfp_gpip_berr_retries++ < 32)
-        fprintf(stderr, "[MFP] read $%06X bus error (arbitration overlap?) "
-                "- retrying, %u so far\n", (unsigned)a, mfp_gpip_berr_retries);
+    int c = ps_berr_cause();
+    const char *why = "";
+    if (c >= 0) {
+        int k = (c & BERR_GLUE)   ? 0 :
+                (c & BERR_TENURE) ? 1 :
+                (c & BERR_BGACK)  ? 2 : 3;
+        static const char *const name[4] = {
+            " - cause: ST BERR line (GLUE)",
+            " - cause: BGACK inside our cycle, DMA tenure",
+            " - cause: BGACK_n pulse inside our cycle, too short for a tenure",
+            " - cause: none latched" };
+        mfp_berr_cause_n[k]++;
+        why = name[k];
+        if (c & BERR_GLUE && c & BERR_BGACK)
+            why = " - cause: ST BERR line AND BGACK inside our cycle";
+    }
+    mfp_gpip_berr_retries++;
+    if (mfp_gpip_berr_retries <= 32)
+        fprintf(stderr, "[MFP] read $%06X bus error - retrying, %u so far%s\n",
+                (unsigned)a, mfp_gpip_berr_retries, why);
+    if (c >= 0 && (mfp_gpip_berr_retries % 256) == 0)
+        fprintf(stderr, "[MFP] %u bus errors: GLUE BERR %u, DMA tenure %u, "
+                "BGACK pulse %u, none %u\n", mfp_gpip_berr_retries,
+                mfp_berr_cause_n[0], mfp_berr_cause_n[1],
+                mfp_berr_cause_n[2], mfp_berr_cause_n[3]);
 }
 
 static inline uae_u8 mfp_gpip_read(uaecptr a)

@@ -190,6 +190,16 @@ void ps_power_wait ( void );
  * Pi's own ps_pulse_reset. ps_st_reset_pin: -1 the firmware has no such pin
  * (or a PI_CLK build, where GPIO4 is the clock), 0 RESET high, 1 RESET low.
  * A plain GPLEV0 read: no bus lock, no transaction, any thread. */
+/* Diagnostic CPLD firmware 1.0b-diag (readback fwrev $43F) latches the
+ * cause of the last Pi bus error into status readback bits 15/14/12.
+ * ps_berr_cause: -1 not that firmware, else PS_BERR_* bits. Takes the bus
+ * lock (a status read): call only after the bus-erroring transaction. */
+#define CPLD_FW_DIAG_BERR 0x43Fu
+#define PS_BERR_GLUE   1   /* bit 15: M68K_BERR_n low - a real BERR from the ST */
+#define PS_BERR_BGACK  2   /* bit 14: BGACK low inside our own cycle            */
+#define PS_BERR_TENURE 4   /* bit 12: ...and the arbiter saw it as a DMA tenure */
+int  ps_berr_cause ( void );
+
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
 int  ps_st_reset_pin ( void );
 

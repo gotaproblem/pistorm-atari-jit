@@ -1493,6 +1493,20 @@ int ps_st_reset_pin ( void )
 }
 
 
+/* Cause of the last Pi bus error - diagnostic firmware only, see ps_protocol.h */
+int ps_berr_cause ( void )
+{
+  if ( ps_fw_rev != CPLD_FW_DIAG_BERR )
+    return -1;
+
+  uint16_t w = (uint16_t)(ps_read_status_reg () >> 8);
+
+  return ((w & 0x8000) ? PS_BERR_GLUE   : 0) |
+         ((w & 0x4000) ? PS_BERR_BGACK  : 0) |
+         ((w & 0x1000) ? PS_BERR_TENURE : 0);
+}
+
+
 /* Main-thread power sample. The CPU thread holds the bus lock for whole
  * cycles; a cycle that is merely slow (a DMA tenure) is a few ms, so give
  * the lock up to ~5 ms and otherwise report "no sample" rather than stall
