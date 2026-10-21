@@ -2006,15 +2006,19 @@ static void mfp_berr_note(uaecptr a)
         if (b2 & 8) b2_long++;
         if (!(b2 & 2)) b2_nodtk++;
         if (b2 & 4) b2_arb++;
-        snprintf(det, sizeof det, " - %s, AS low %s, DTACK %s, BR/BG during cycle %s",
+        snprintf(det, sizeof det, " - %s, AS low %s, DTACK %s, %s %s",
                  (b2 & 1) ? "ST BERR line (GLUE)" : "not the BERR line (BGACK)",
                  (b2 & 8) ? "2us+" : "under 2us",
-                 (b2 & 2) ? "seen" : "never", (b2 & 4) ? "yes" : "no");
+                 (b2 & 2) ? "seen" : "never",
+                 (b2 & 16) ? "BR already low when our cycle began:"
+                           : "BR/BG during cycle",
+                 (b2 & 4) ? "yes" : "no");
     }
     mfp_gpip_berr_retries++;
     if (b2 >= 0 && (mfp_gpip_berr_retries % 256) == 0)
         fprintf(stderr, "[MFP] %u bus errors: AS low 2us+ %u, no DTACK %u, "
-                "BR/BG during cycle %u\n", b2_n, b2_long, b2_nodtk, b2_arb);
+                "%s %u\n", b2_n, b2_long, b2_nodtk,
+                (b2 & 16) ? "BR before our cycle" : "BR/BG during cycle", b2_arb);
     if (mfp_gpip_berr_retries <= 32)
         fprintf(stderr, "[MFP] read $%06X bus error - retrying, %u so far%s%s\n",
                 (unsigned)a, mfp_gpip_berr_retries, why, det);

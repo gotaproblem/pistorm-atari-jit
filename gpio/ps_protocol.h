@@ -216,6 +216,9 @@ int  ps_berr_detail ( void );
 #define PS_B2_DTACK 2   /* bit 14: DTACK seen while our AS was low          */
 #define PS_B2_ARB   4   /* bit 12: BR or BG seen while our AS was low       */
 #define PS_B2_LONG  8   /* bit 11: our AS had been low for 16+ clocks (2 us) */
+#define PS_B2_C     16  /* diag2c ($43D): bit 12 (PS_B2_ARB) instead means BR_n
+                           was already low at the first clock of our cycle */
+#define CPLD_FW_DIAG_BERR2C 0x43Du
 int  ps_berr_diag2b ( void );
 
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
