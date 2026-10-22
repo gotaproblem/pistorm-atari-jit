@@ -46,16 +46,18 @@ The bitstreams ship in `rtl/`, each with its Verilog source alongside:
 | Bitstream | Firmware | What it adds |
 |---|---|---|
 | `EPM240_bitstream_dev_1_1b.svf` | **1.1b** (fwrev `$421`) - recommended | everything in 1.0b, plus 68000-style bus-cycle start (decided on a falling edge, AS on the rising edge) and stricter arbitration (no cycle start once BR is seen, BG held until our AS is up): no MFP bus errors during ACSI / floppy DMA |
+| `EPM570_bitstream_dev_1_1b.svf` | **1.1b** for boards with an EPM570 CPLD (fwrev `$521`) | the same logic and pinout as the EPM240 1.1b; use this one if your board carries an EPM570 |
 | `EPM240_bitstream_dev_1_0b.svf` | 1.0b (first beta, rev 256, fwrev `$420`) | everything in 0.83a, plus the ST's RESET line to the Pi on GPIO4: pressing the ST's reset button restarts the emulator (see below) |
 | `EPM240_bitstream_dev_253.svf` | 0.83a (rev $253) - minimum | single-strobe protocol, bus arbitration |
 
 Flash one of them:
 >cd ~/pistorm-atari-jit
-sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf
+sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf     # EPM240 boards
+sudo rtl/pistormflash -s rtl/EPM570_bitstream_dev_1_1b.svf     # EPM570 boards
 
-then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware EPM240 1.1b` (`EPM240 1.0b`, or `0.83a` for the 253 bitstream).
+then power-cycle the ST. On start-up the emulator reports `[INIT] PiSTorm firmware EPM240 1.1b` (`EPM570 1.1b` on an EPM570, `EPM240 1.0b`, or `0.83a` for the 253 bitstream).
 
-#### ST reset button (firmware 1.0b and later)
+#### ST reset button (firmware 1.0b and later, EPM240 or EPM570)
 With 1.0b the CPLD drives GPIO4 low while the ST holds its RESET line low (reset button or the ST's own power-on reset - never for a reset the emulator itself issues). The ST's chips have just been reset under the running emulator, so the emulator stops cleanly, waits for the button to be released (up to 10 s), exits with code 42 and is relaunched - the same restart as Ctrl+Alt+Undo - and the ST boots afresh.
 
 At start-up the emulator says whether it is watching the pin:

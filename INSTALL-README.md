@@ -36,11 +36,13 @@ clean **`--uninstall`** that reverses every system change.
   ```
   cd ~/pistorm-atari-jit
   sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf   # 1.1b (recommended)
+  sudo rtl/pistormflash -s rtl/EPM570_bitstream_dev_1_1b.svf   # 1.1b, boards with an EPM570 CPLD
   sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_0b.svf   # 1.0b
   sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_253.svf    # 0.83a (minimum)
   ```
 
-  The emulator prints `[INIT] PiSTorm firmware EPM240 1.1b` (or `1.0b`,
+  The emulator prints `[INIT] PiSTorm firmware EPM240 1.1b` (`EPM570 1.1b` on
+  an EPM570; or `1.0b`,
   `0.83a`) at start-up, and with 1.0b or later `[MAIN] ST reset button
   sensing: on (GPIO4)`.
 - Run as your **normal user** (the script calls `sudo` itself; do **not** run it

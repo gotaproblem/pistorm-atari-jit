@@ -2105,6 +2105,7 @@ static void check_cpld_firmware(void)
     "[INIT] uses a different Pi<->CPLD protocol and has no working bus arbitration.\n"
     "[INIT] Flash the bitstream shipped in rtl/:\n"
     "[INIT]     sudo rtl/pistormflash -s rtl/EPM240_bitstream_dev_1_1b.svf\n"
+    "[INIT] (EPM570 boards: rtl/EPM570_bitstream_dev_1_1b.svf)\n"
     "[INIT] then power-cycle the ST.\n",
     fw, CPLD_FW_MIN_ALPHA & 0xFFu, CPLD_FW_MIN_ALPHA);
   if (any && *any && *any != '0') {
