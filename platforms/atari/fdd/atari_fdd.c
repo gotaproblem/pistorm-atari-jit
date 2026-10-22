@@ -1629,11 +1629,35 @@ static void hdc_trace_write_window(void)
                 fdc.hdc_count, fdc.hdc_base, fdc.dma_mode);
 }
 
-static void hdc_claim_count(void)
+static void hdc_claim_count(bool first)
 {
     hdc_active = 1;
-    if (!hdc_count_fresh)
+    if (!hdc_count_fresh) {
+        /* No sector-count write since the last command - the driver is
+         * issuing another command under the count it already set, which
+         * the DMA chip allows. Field case 22 Oct, HDDRUTIL scanning real
+         * ACSI: INQUIRY (count written), then four 4-byte REQUEST SENSEs
+         * with no count write. The chip's FIFO only goes to RAM in 16-byte
+         * chunks, so the four together fill one chunk ("DMA moved 16 B"
+         * on the third) - but nothing was pulled, the guest read a stale
+         * sense buffer, and HDDRUTIL listed no devices on either ACSI
+         * target (no READ CAPACITY ever sent).
+         *
+         * So on the FIRST byte of such a command, read direction, arm a
+         * pull from where the chip's address counter is now. The pull
+         * takes only what the counter moved (hdc_sync_pull), bounded by
+         * the count in force, so a command that moves nothing pulls
+         * nothing. Write direction is unchanged: its data went out at
+         * the count write. */
+        if (first && !(fdc.dma_mode & DMA_MODE_RW)) {
+            fdc.hdc_base      = hdc_dma_counter();
+            fdc.hdc_dir_write = false;
+            if (!fdc.hdc_count)
+                fdc.hdc_count = 1;
+            fdc.hdc_pending   = true;
+        }
         return;
+    }
     hdc_count_fresh   = 0;
     fdc.hdc_base      = fdc.dma_base_addr;
     fdc.hdc_dir_write = (fdc.dma_mode & DMA_MODE_RW) != 0;
@@ -1777,7 +1801,7 @@ void fdd_io_write(uint32_t addr, uint32_t val, int size)
                     fdc.hdc_pending = false;
                 } else {
                     hdc_trace_cmd_byte((uint8_t)val, first, fdc.dma_base_addr);
-                    hdc_claim_count();            /* real ACSI device  */
+                    hdc_claim_count(first);       /* real ACSI device  */
                     bus_write(addr, val, size);
                     /* Pause after each command byte on the real bus.
                      *
