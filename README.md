@@ -41,7 +41,7 @@ You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST)
 
 The Pi<->CPLD protocol changed (single strobe) and the firmware now does real 68000 bus arbitration, which is what lets the ST's own DMA chip work: real ACSI hard disks and real floppy drives / Gotek. The emulator checks the firmware revision at start-up and refuses to run on anything older.
 
-The bitstreams ship in `rtl/`, each with its Verilog source alongside:
+The bitstreams ship in `rtl/`. The Verilog source is included for the 1.1b builds (`pistormSXB_devEPM240_1.1b.v`, `pistormSXB_devEPM570_1.1b.v`):
 
 | Bitstream | Firmware | What it adds |
 |---|---|---|
