@@ -190,39 +190,6 @@ void ps_power_wait ( void );
  * Pi's own ps_pulse_reset. ps_st_reset_pin: -1 the firmware has no such pin
  * (or a PI_CLK build, where GPIO4 is the clock), 0 RESET high, 1 RESET low.
  * A plain GPLEV0 read: no bus lock, no transaction, any thread. */
-/* Diagnostic CPLD firmware 1.0b-diag (readback fwrev $43F) latches the
- * cause of the last Pi bus error into status readback bits 15/14/12.
- * ps_berr_cause: -1 not that firmware, else PS_BERR_* bits. Takes the bus
- * lock (a status read): call only after the bus-erroring transaction. */
-#define CPLD_FW_DIAG_BERR 0x43Fu
-#define PS_BERR_GLUE   1   /* bit 15: M68K_BERR_n low - a real BERR from the ST */
-#define PS_BERR_BGACK  2   /* bit 14: BGACK low inside our own cycle            */
-#define PS_BERR_TENURE 4   /* bit 12: ...and the arbiter saw it as a DMA tenure */
-int  ps_berr_cause ( void );
-
-/* Page 2 of the diag readback (diag2 build): for the last bus error,
- *   bits 7:0 c8m clocks our AS had been low (255 = 255+), bit 8 DTACK
- *   seen, 9 BG out, 10 BR seen, 11 BGACK seen (all while our AS was low),
- *   12 VPA low; 15:13 = 101 marker. Returns -1 if not answering. One bus
- *   lock for select / read / deselect, so no other status reader ever
- *   sees page 2. */
-int  ps_berr_detail ( void );
-
-/* Small diag build 1.0b-diag2b (readback fwrev $43E): bits latched at the
- * last Pi bus error. ps_berr_diag2b: -1 if not that firmware, else the
- * PS_B2_* bits. One status read, so call only after the failing cycle. */
-#define CPLD_FW_DIAG_BERR2 0x43Eu
-#define PS_B2_GLUE  1   /* bit 15: the ST's BERR line                       */
-#define PS_B2_DTACK 2   /* bit 14: DTACK seen while our AS was low          */
-#define PS_B2_ARB   4   /* bit 12: BR or BG seen while our AS was low       */
-#define PS_B2_LONG  8   /* bit 11: our AS had been low for 16+ clocks (2 us) */
-#define PS_B2_C     16  /* diag2c ($43D): bit 12 (PS_B2_ARB) instead means BR_n
-                           was already low at the first clock of our cycle */
-#define CPLD_FW_DIAG_BERR2C 0x43Du
-#define CPLD_FW_ARB_FIX1    0x43Cu  /* arbitration fix candidate + diag2c bits */
-#define CPLD_FW_ARB_FIX2    0x43Bu  /* 68000-style synchronous cycle start + diag2c bits */
-int  ps_berr_diag2b ( void );
-
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
 int  ps_st_reset_pin ( void );
 

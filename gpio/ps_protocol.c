@@ -1493,69 +1493,6 @@ int ps_st_reset_pin ( void )
 }
 
 
-/* Cause of the last Pi bus error - diagnostic firmware only, see ps_protocol.h */
-int ps_berr_cause ( void )
-{
-  if ( ps_fw_rev != CPLD_FW_DIAG_BERR )
-    return -1;
-
-  uint16_t w = (uint16_t)(ps_read_status_reg () >> 8);
-
-  return ((w & 0x8000) ? PS_BERR_GLUE   : 0) |
-         ((w & 0x4000) ? PS_BERR_BGACK  : 0) |
-         ((w & 0x1000) ? PS_BERR_TENURE : 0);
-}
-
-
-int ps_berr_diag2b ( void )
-{
-  if ( ps_fw_rev != CPLD_FW_DIAG_BERR2 && ps_fw_rev != CPLD_FW_DIAG_BERR2C &&
-       ps_fw_rev != CPLD_FW_ARB_FIX1 && ps_fw_rev != CPLD_FW_ARB_FIX2 )
-    return -1;
-
-  uint16_t w = (uint16_t)(ps_read_status_reg () >> 8);
-
-  return (ps_fw_rev != CPLD_FW_DIAG_BERR2 ? PS_B2_C : 0) |
-         ((w & 0x8000) ? PS_B2_GLUE  : 0) |
-         ((w & 0x4000) ? PS_B2_DTACK : 0) |
-         ((w & 0x1000) ? PS_B2_ARB   : 0) |
-         ((w & 0x0800) ? PS_B2_LONG  : 0);
-}
-
-
-int ps_berr_detail ( void )
-{
-  volatile uint32_t *const set = ioset;
-  volatile uint32_t *const clr = ioclr;
-  uint32_t st;
-
-  if ( ps_fw_rev != CPLD_FW_DIAG_BERR )
-    return -1;
-
-  ps_lock_bus ();
-  ps_wait_idle_bounded ("ps_berr_detail");
-
-  *set = (0x8000u << 8) | REG_STATUS;   /* status $8000: page 2 */
-  txn_pulse (set, clr);
-
-  PS_BUS_IN ();
-  *set = REG_STATUS;                    /* status read, WR low */
-  for (int i = 0; i < 16; i++)          /* ~1 us: the readback is combinational */
-    (void)*ioread;
-  st = *ioread;
-  *clr = TXN_END;
-  PS_BUS_OUT ();
-
-  *set = (0x0000u << 8) | REG_STATUS;   /* status 0: back to page 1 */
-  txn_pulse (set, clr);
-
-  ps_unlock_bus ();
-
-  uint16_t w = (uint16_t)(st >> 8);
-  return ((w >> 13) == 5u) ? (int)w : -1;
-}
-
-
 /* Main-thread power sample. The CPU thread holds the bus lock for whole
  * cycles; a cycle that is merely slow (a DMA tenure) is a few ms, so give
  * the lock up to ~5 ms and otherwise report "no sample" rather than stall

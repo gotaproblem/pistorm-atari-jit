@@ -1059,8 +1059,8 @@ struct emulator_config *load_config_file_section(char *filename,
          * 2.06 read every word of the IDE images byte-swapped - partition
          * found, boot sector `3C EB 50 90 ...`, drive unreadable).
          * Default when absent. `swapped` - the twisted-cable order
-         * PP-prepared images need; EmuTOS detects and adapts to either. Falcon TOS is always
-         * native. */
+         * PP-prepared images need; EmuTOS detects and adapts to either.
+         * Falcon TOS is always native. */
         {
           const char *arg = parse_line + str_pos;
           if (!strncasecmp(arg, "native", 6))
@@ -1069,7 +1069,6 @@ struct emulator_config *load_config_file_section(char *filename,
             cfg->ide_byteorder = 0;
           else
             printf ("[CFG] ide_byteorder '%s' not understood - use native or swapped\n", arg);
-          printf ("[CFG] IDE byte order %s\n", cfg->ide_byteorder ? "native" : "swapped");
         }
         break;
 

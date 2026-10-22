@@ -45,19 +45,7 @@ static int acsi_dbg_on(void)
     return pst_dbg_acsi;
 }
 static int acsi_dbg_count;
-/* 2000 lines is used up by the TOS boot's floppy traffic before a driver
- * started from the desktop sends anything (field case 22 Oct). Default
- * kept; PISTORM_ACSI_DEBUG_LIMIT=n raises it. */
-static int acsi_dbg_limit(void)
-{
-    static int lim = -1;
-    if (lim < 0) {
-        const char *e = getenv("PISTORM_ACSI_DEBUG_LIMIT");
-        lim = (e && atoi(e) > 0) ? atoi(e) : 2000;
-    }
-    return lim;
-}
-#define ACSI_DBG_LIMIT acsi_dbg_limit()
+#define ACSI_DBG_LIMIT 2000
 
 
 #include "acsi.h"
@@ -119,11 +107,6 @@ static struct {
     unsigned tc_falls;      /* ... bit 7 going 1 -> 0 between two reads  */
     unsigned tc_berr;       /* ... reads that came back with a bus error */
     int      tc_prev;       /* last bit 7 seen (-1 = none yet)          */
-    uint32_t gap_us[17];    /* byte i: us since byte i-1                */
-    uint32_t irq_us[17];    /* byte i: us since GPIP5 first read low
-                               after byte i-1 (~0u = never seen low)    */
-    int      stall_shown;   /* live-command report printed once         */
-    uint32_t pc[17];        /* guest PC at each CDB byte write          */
 } ht;
 
 /* " poll-end +Xus  TimerC n rd / k b7-falls / e berr" for the line */
@@ -150,125 +133,6 @@ static void ht_cdb(const char *tag)
         k += snprintf(buf + k, sizeof buf - k, "%02X ", ht.cdb[i]);
     buf[k ? k - 1 : 0] = 0;
     FDD_LOG("HDC %s [%s]", tag, buf);
-}
-
-/* The command in flight, once: how far its CDB got and how each byte
- * followed the device's IRQ. Printed when a command has gone 0.5 s with
- * no status read (from the guest's GPIP / Timer C polling - never between
- * CDB bytes, where a print changes the timing), or at shutdown. */
-static uint32_t hdc_dma_counter(void);
-extern uint32_t pistorm_guest_pc(void);        /* cpu/newcpu.cpp */
-void pistorm_dma_from_stram(uint32_t, uint8_t*, uint32_t);   /* pistorm_natmem.cpp */
-
-/* Guest code around a PC that touches the ACSI port, once per distinct
- * PC (first 8): the driver's wait loop can then be disassembled instead
- * of guessed at. 48 bytes either side, from the RAM image. */
-static void ht_code_dump(const char *what, uint32_t pc)
-{
-    static uint32_t seen[8];
-    static unsigned nseen;
-    pc &= 0x00FFFFFFu;
-    for (unsigned i = 0; i < nseen; i++)
-        if (seen[i] == pc)
-            return;
-    if (nseen >= 8u)
-        return;
-    seen[nseen++] = pc;
-    uint32_t from = pc >= 48u ? (pc - 48u) & ~1u : 0u;
-    uint8_t  b[96];
-    memset(b, 0, sizeof b);
-    pistorm_dma_from_stram(from, b, sizeof b);
-    for (unsigned r = 0; r < 96u; r += 16u) {
-        char hex[16 * 3 + 1];
-        int  k = 0;
-        for (unsigned i = 0; i < 16u; i++)
-            k += snprintf(hex + k, sizeof hex - k, "%02X ", b[r + i]);
-        FDD_LOG("HDC code %s pc=%06X  %06X: %s", what, pc, from + r, hex);
-    }
-}
-
-/* I/O the guest reads between CDB bytes / before the status read:
- * address histogram (8 slots + overflow), reset at every CDB byte.
- * hdc_io_watch gates the hook in natmem's PROF_IO_R. */
-volatile int hdc_io_watch;
-static struct { uint32_t a, n; } io_hist[8];
-static unsigned io_other;
-
-void hdc_trace_io(uint32_t a)
-{
-    a &= 0x00FFFFFFu;
-    for (unsigned i = 0; i < 8u; i++) {
-        if (io_hist[i].n && io_hist[i].a == a) { io_hist[i].n++; return; }
-        if (!io_hist[i].n) { io_hist[i].a = a; io_hist[i].n = 1; return; }
-    }
-    io_other++;
-}
-
-static void io_hist_reset(void)
-{
-    memset(io_hist, 0, sizeof io_hist);
-    io_other = 0;
-}
-
-/* "  io: FFFA01x1 FF8604x2 ...  MFP ch7 (GPIP5) IER1 IMR1 IPR0 ISR0 VR48" */
-static void ht_io(char *out, size_t sz)
-{
-    int k = snprintf(out, sz, "  io:");
-    for (unsigned i = 0; i < 8u && io_hist[i].n && k < (int)sz; i++)
-        k += snprintf(out + k, sz - k, " %06Xx%u", io_hist[i].a, io_hist[i].n);
-    if (!io_hist[0].n && k < (int)sz)
-        k += snprintf(out + k, sz - k, " none");
-    if (io_other && k < (int)sz)
-        k += snprintf(out + k, sz - k, " +%u other", io_other);
-    if (k < (int)sz)
-        snprintf(out + k, sz - k,
-                 "  MFP ch7 (GPIP5) IER%u IMR%u IPR%u ISR%u VR%02X",
-                 (ps_read_8(0xFFFA09u) >> 7) & 1u, (ps_read_8(0xFFFA15u) >> 7) & 1u,
-                 (ps_read_8(0xFFFA0Du) >> 7) & 1u, (ps_read_8(0xFFFA11u) >> 7) & 1u,
-                 ps_read_8(0xFFFA17u));
-}
-
-static void hdc_trace_live(const char *why)
-{
-    if (!ht.live || ht.stall_shown || !HT_ON())
-        return;
-    ht.stall_shown = 1;
-
-    char per[17 * 28 + 1];
-    int  k = 0;
-    per[0] = 0;
-    for (unsigned i = 1; i < ht.n && i < 17u && k < (int)sizeof per - 28; i++) {
-        if (ht.irq_us[i] == ~0u)
-            k += snprintf(per + k, sizeof per - k, " b%u:+%uus/IRQ-never",
-                          i + 1, ht.gap_us[i]);
-        else
-            k += snprintf(per + k, sizeof per - k, " b%u:+%uus/IRQ+%uus",
-                          i + 1, ht.gap_us[i], ht.irq_us[i]);
-    }
-    char low[48], tag[1100], io[300];
-    ht_io(io, sizeof io);
-    if (ht.t_low)
-        snprintf(low, sizeof low, "%c +%lluus/%upolls", ht.src,
-                 (unsigned long long)(ht.t_low - ht.t_last), ht.polls);
-    else
-        snprintf(low, sizeof low, "never (%u polls)", ht.polls);
-    uint32_t moved = (hdc_dma_counter() - ht.base) & 0xFFFFFFu;
-    snprintf(tag, sizeof tag,
-             "LIVE (%s) - %u CDB byte(s) @0x%06X, last +%lluus ago, no status "
-             "read; GPIP5-low since last byte %s; DMA counter +%u B; per byte "
-             "(since previous / since its IRQ):%s%s",
-             why, ht.n, ht.base,
-             (unsigned long long)(ht_now_us() - ht.t_last), low, moved,
-             per[0] ? per : " (first byte only)", io);
-    ht_lines++;
-    ht_cdb(tag);
-}
-
-/* emulator.c's orderly_teardown: a Ctrl-C during a hung command */
-void hdc_trace_shutdown(void)
-{
-    if (hdc_trc)
-        hdc_trace_live("shutdown");
 }
 
 static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
@@ -302,7 +166,6 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
         ht.n    = 0;
         ht.wr   = (v & 0x1F) == 0x0A;               /* WRITE(6) */
         ht.base = base;
-        ht.stall_shown = 0;
     }
     if (!ht.live)
         return;
@@ -310,19 +173,8 @@ static void hdc_trace_cmd_byte(uint8_t v, bool first, uint32_t base)
         ht.wr = 1;                                  /* ICD WRITE(10) */
     if (ht.n < sizeof ht.cdb)
         ht.cdb[ht.n] = v;
-    if (ht.n < 17u)
-        ht.pc[ht.n] = pistorm_guest_pc() & 0x00FFFFFFu;
-    if (HT_ON())
-        ht_code_dump(ht.n ? "cdb-byte" : "cdb-first", ht.pc[ht.n < 17u ? ht.n : 16]);
-    if (ht.n && ht.n < 17u) {
-        uint64_t now = ht_now_us();
-        ht.gap_us[ht.n] = (uint32_t)(now - ht.t_last);
-        ht.irq_us[ht.n] = ht.t_low ? (uint32_t)(now - ht.t_low) : ~0u;
-    }
     ht.n++;
     ht.t_last = ht_now_us();
-    io_hist_reset();
-    hdc_io_watch = 1;
     ht.t_low  = 0;
     ht.t_mode = 0;
     ht.polls  = 0;
@@ -343,8 +195,6 @@ static void hdc_trace_gpip(int low, char src)
         ht.t_low = ht_now_us();
         ht.src   = src;
     }
-    if (!ht.stall_shown && ht.t_poll - ht.t_last > 500000u)
-        hdc_trace_live("0.5 s without status");
 }
 
 /* called from pistorm_natmem.cpp's io_bget for every $FFFA23 (Timer C
@@ -356,8 +206,6 @@ void hdc_trace_tcdr(uint8_t v, int berr)
     if (!hdc_trc || !ht.live)
         return;
     ht.tc_reads++;
-    if (!ht.stall_shown && ht_now_us() - ht.t_last > 500000u)
-        hdc_trace_live("0.5 s without status");
     if (berr) {
         ht.tc_berr++;
         return;
@@ -388,7 +236,6 @@ static void hdc_trace_status(uint32_t status)
     if (!hdc_trc || !ht.live)
         return;
     ht.live = 0;
-    hdc_io_watch = 0;
     if (!HT_ON() || ht_lines >= HT_MAX)
         return;
     ht_lines++;
@@ -410,22 +257,12 @@ static void hdc_trace_status(uint32_t status)
     else
         snprintf(mode, sizeof mode, "none");
 
-    char tag[900], loop[96], io[300], pcs[17 * 8 + 16];
+    char tag[300], loop[96];
     ht_loop(loop, sizeof loop);
-    ht_io(io, sizeof io);
-    uint32_t stpc = pistorm_guest_pc() & 0x00FFFFFFu;
-    ht_code_dump("status", stpc);
-    {
-        int k = snprintf(pcs, sizeof pcs, "  pc:");
-        for (unsigned i = 0; i < ht.n && i < 17u && k < (int)sizeof pcs; i++)
-            k += snprintf(pcs + k, sizeof pcs - k, " %06X", ht.pc[i]);
-        if (k < (int)sizeof pcs)
-            snprintf(pcs + k, sizeof pcs - k, " st %06X", stpc);
-    }
     snprintf(tag, sizeof tag,
-             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s%s%s",
+             "st=%02X read +%lluus  GPIP5-low %s  mode-wr %s  DMA moved %d B%s",
              status & 0xFFu, (unsigned long long)(now - ht.t_last), low, mode,
-             (int)(addr - ht.base), loop, io, pcs);
+             (int)(addr - ht.base), loop);
     ht_cdb(tag);
 
     /* write commands: decode the first sector as it sits in REAL RAM -

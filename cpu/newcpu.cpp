@@ -4649,70 +4649,8 @@ static void ExceptionX(int nr, uaecptr address, uaecptr oldpc)
 	}
 }
 
-/* PISTORM_CONOUT_TRACE=1: copy what programs write to the screen console
- * to stderr as "[CON] ..." lines - GEMDOS Cconws (trap #1 fn 9) and
- * Cconout (fn 2), BIOS Bconout (trap #13 fn 3) to CON (2) or the raw
- * screen (5). For messages that flash past before GEM redraws (a hard
- * disk driver started from the desktop, field case 22 Oct). VT52 escapes
- * are dropped. Read from the RAM image only - no bus access, no faults.
- * Off: one cached flag test per trap #1 / #13. */
-extern "C" void pistorm_dma_from_stram(uint32_t addr, uint8_t *dst, uint32_t n);
-
-static char con_line[256];
-static int  con_len, con_esc;           /* con_esc: chars of an escape to drop */
-
-static void con_put(uint8_t c)
-{
-	if (con_esc) { if (con_esc == 1 && c == 'Y') con_esc = 3; con_esc--; return; }
-	if (c == 0x1B) { con_esc = 1; return; }
-	if (c == '\n' || con_len >= (int)sizeof con_line - 1) {
-		con_line[con_len] = 0;
-		if (con_len)
-			fprintf(stderr, "[CON] %s\n", con_line);
-		con_len = 0;
-		if (c == '\n')
-			return;
-	}
-	if (c == '\r')
-		return;
-	con_line[con_len++] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
-}
-
-static void pistorm_conout_trap(int nr)
-{
-	static int on = -1;
-	if (on < 0) {
-		const char *e = getenv("PISTORM_CONOUT_TRACE");
-		on = (e && *e && *e != '0') ? 1 : 0;
-	}
-	if (!on || (nr != 33 && nr != 45))
-		return;
-	uae_u32 sp = m68k_areg(regs, 7);
-	uint8_t a[8];
-	memset(a, 0, sizeof a);
-	pistorm_dma_from_stram(sp, a, sizeof a);
-	unsigned fn = ((unsigned)a[0] << 8) | a[1];
-	if (nr == 33 && fn == 9) {                          /* Cconws */
-		uae_u32 str = ((uae_u32)a[2] << 24) | ((uae_u32)a[3] << 16) |
-		              ((uae_u32)a[4] << 8) | a[5];
-		uint8_t buf[512];
-		memset(buf, 0, sizeof buf);
-		pistorm_dma_from_stram(str, buf, sizeof buf);
-		for (unsigned i = 0; i < sizeof buf && buf[i]; i++)
-			con_put(buf[i]);
-	} else if (nr == 33 && fn == 2) {                   /* Cconout */
-		con_put(a[3]);
-	} else if (nr == 45 && fn == 3) {                   /* Bconout */
-		unsigned dev = ((unsigned)a[2] << 8) | a[3];
-		if (dev == 2 || dev == 5)
-			con_put(a[5]);
-	}
-}
-
 void REGPARAM2 Exception_cpu_oldpc(int nr, uaecptr oldpc)
 {
-	if (nr == 33 || nr == 45)
-		pistorm_conout_trap(nr);
 	bool t0 = currprefs.cpu_model >= 68020 && regs.t0 && !regs.t1;
 	ExceptionX(nr, 0xffffffff, oldpc);
 	// Check T0 trace

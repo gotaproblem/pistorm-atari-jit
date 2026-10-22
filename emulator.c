@@ -1936,12 +1936,9 @@ void *foldchk_thread(void *arg)
  * handler and the PSCTRL restart/shutdown actions, so all three quit the
  * same proven way: stop the CPU, dump JIT stats, restore the tty.
  */
-extern "C" void hdc_trace_shutdown(void);   /* platforms/atari/fdd/atari_fdd.c */
-
 static void orderly_teardown(void)
 {
   cpu_emulation_running = 0;
-  hdc_trace_shutdown();   /* PISTORM_HDC_TRACE: report a command still in flight */
 
   printf("\n[MAIN] Exiting\n");
 
@@ -2510,9 +2507,8 @@ int main (int argc, char *argv[])
 
   if (config->ide) {
     ide_set_byteorder(config->ide_byteorder);
-    printf("[MAIN] IDE data port byte order: %s\n",
-           config->ide_byteorder ? "native (default)"
-                                 : "swapped (cfg ide_byteorder swapped)");
+    if (!config->ide_byteorder)
+      printf("[MAIN] IDE data port byte order: swapped\n");
     InitIDE();
   }
 

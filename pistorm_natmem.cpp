@@ -55,9 +55,6 @@ extern "C"
     void m68k_write_memory_32(unsigned int address, unsigned int value);
 
     uint8_t ps_read_8(uint32_t address);
-    int ps_berr_cause(void);              /* gpio/ps_protocol.c, diag fw only */
-    int ps_berr_detail(void);             /* ... page 2 (diag2 build)          */
-    int ps_berr_diag2b(void);             /* ... small diag2b build ($43E)     */
     uint16_t ps_read_16(uint32_t address);
     uint32_t ps_read_32(uint32_t address);
 
@@ -1777,14 +1774,6 @@ extern "C" void pistorm_dma_to_stram(uaecptr addr, const uint8_t *src, uint32_t 
  * to print: total reads/writes per bank, and the top-N hottest 64KB pages
  * across ALL handler banks — i.e. exactly where your bus cycles are going.
  * ====================================================================== */
-/* PISTORM_HDC_TRACE: which I/O the guest reads while an ACSI command is
- * waiting (atari_fdd.c). One predicted-false branch per I/O read when
- * the trace is off. */
-extern "C" volatile int hdc_io_watch;
-extern "C" void hdc_trace_io(uint32_t a);
-#define HDC_IO_NOTE(a) \
-    do { if (__builtin_expect(hdc_io_watch, 0)) hdc_trace_io((uint32_t)(a)); } while (0)
-
 #ifdef PISTORM_BANK_PROFILE
 #include <signal.h>
 #include <stdio.h>
@@ -1815,7 +1804,6 @@ static uint32_t prof_page_w[0x10000]; /* per-64KB-page write hits */
     {                                        \
         prof_io_r++;                         \
         prof_page_r[((a) >> 16) & 0xffff]++; \
-        HDC_IO_NOTE(a);                      \
     } while (0)
 #define PROF_IO_W(a)                         \
     do                                       \
@@ -1910,7 +1898,7 @@ extern "C" void pistorm_bank_profile_init(void)
 #else
 #define PROF_DUMMY_R(a) ((void)0)
 #define PROF_DUMMY_W(a) ((void)0)
-#define PROF_IO_R(a) HDC_IO_NOTE(a)
+#define PROF_IO_R(a) ((void)0)
 #define PROF_IO_W(a) ((void)0)
 #define PROF_IDE_R(a) ((void)0)
 #define PROF_IDE_W(a) ((void)0)
@@ -1967,75 +1955,11 @@ extern volatile uint8_t g_buserr;
 static unsigned mfp_gpip_berr_retries;
 extern "C" void hdc_trace_tcdr(uint8_t v, int berr);   /* fdd/atari_fdd.c */
 
-/* With the diagnostic CPLD firmware (1.0b-diag, $43F) each one also says
- * WHY the CPLD reported it (ps_berr_cause): the ST's own BERR line, or
- * BGACK inside our cycle - as a real DMA tenure, or as a pulse too short
- * to be one. Tallied; the first 32 are listed, then a tally every 256. */
-static unsigned mfp_berr_cause_n[4];      /* glue, tenure, bgack pulse, none */
-enum { BERR_GLUE = 1, BERR_BGACK = 2, BERR_TENURE = 4 };  /* = PS_BERR_* in
-                                       gpio/ps_protocol.h (not included here) */
-
-static void mfp_berr_note(uaecptr a)
+static inline void mfp_berr_note(uaecptr a)
 {
-    int c = ps_berr_cause();
-    const char *why = "";
-    if (c >= 0) {
-        int k = (c & BERR_GLUE)   ? 0 :
-                (c & BERR_TENURE) ? 1 :
-                (c & BERR_BGACK)  ? 2 : 3;
-        static const char *const name[4] = {
-            " - cause: ST BERR line (GLUE)",
-            " - cause: BGACK inside our cycle, DMA tenure",
-            " - cause: BGACK_n pulse inside our cycle, too short for a tenure",
-            " - cause: none latched" };
-        mfp_berr_cause_n[k]++;
-        why = name[k];
-        if (c & BERR_GLUE && c & BERR_BGACK)
-            why = " - cause: ST BERR line AND BGACK inside our cycle";
-    }
-    /* page 2: how long our AS was low, and what else happened meanwhile */
-    char det[160] = "";
-    if (c >= 0) {
-        int d = ps_berr_detail();
-        if (d >= 0)
-            snprintf(det, sizeof det, "\n      AS low %s%u clk (%.2f us), DTACK %s, "
-                     "BR %s, BG %s, BGACK %s, VPA %s",
-                     (d & 0xFF) == 0xFF ? ">=" : "", (unsigned)(d & 0xFF),
-                     (d & 0xFF) / 8.0, (d & 0x100) ? "seen" : "never",
-                     (d & 0x400) ? "seen" : "no", (d & 0x200) ? "out" : "no",
-                     (d & 0x800) ? "seen" : "no", (d & 0x1000) ? "low" : "no");
-        else
-            snprintf(det, sizeof det, " (no page 2: diag build without it)");
-    }
-    /* small diag2b build ($43E) */
-    static unsigned b2_n, b2_long, b2_nodtk, b2_arb;
-    int b2 = (c < 0) ? ps_berr_diag2b() : -1;
-    if (b2 >= 0) {
-        b2_n++;
-        if (b2 & 8) b2_long++;
-        if (!(b2 & 2)) b2_nodtk++;
-        if (b2 & 4) b2_arb++;
-        snprintf(det, sizeof det, " - %s, AS low %s, DTACK %s, %s %s",
-                 (b2 & 1) ? "ST BERR line (GLUE)" : "not the BERR line (BGACK)",
-                 (b2 & 8) ? "2us+" : "under 2us",
-                 (b2 & 2) ? "seen" : "never",
-                 (b2 & 16) ? "BR already low when our cycle began:"
-                           : "BR/BG during cycle",
-                 (b2 & 4) ? "yes" : "no");
-    }
-    mfp_gpip_berr_retries++;
-    if (b2 >= 0 && (mfp_gpip_berr_retries % 256) == 0)
-        fprintf(stderr, "[MFP] %u bus errors: AS low 2us+ %u, no DTACK %u, "
-                "%s %u\n", b2_n, b2_long, b2_nodtk,
-                (b2 & 16) ? "BR before our cycle" : "BR/BG during cycle", b2_arb);
-    if (mfp_gpip_berr_retries <= 32)
-        fprintf(stderr, "[MFP] read $%06X bus error - retrying, %u so far%s%s\n",
-                (unsigned)a, mfp_gpip_berr_retries, why, det);
-    if (c >= 0 && (mfp_gpip_berr_retries % 256) == 0)
-        fprintf(stderr, "[MFP] %u bus errors: GLUE BERR %u, DMA tenure %u, "
-                "BGACK pulse %u, none %u\n", mfp_gpip_berr_retries,
-                mfp_berr_cause_n[0], mfp_berr_cause_n[1],
-                mfp_berr_cause_n[2], mfp_berr_cause_n[3]);
+    if (mfp_gpip_berr_retries++ < 32)
+        fprintf(stderr, "[MFP] read $%06X bus error (arbitration overlap?) "
+                "- retrying, %u so far\n", (unsigned)a, mfp_gpip_berr_retries);
 }
 
 static inline uae_u8 mfp_gpip_read(uaecptr a)
