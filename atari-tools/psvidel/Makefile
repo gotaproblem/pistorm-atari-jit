@@ -1,5 +1,5 @@
 # PSVIDEL.PRG - Falcon Videl + SuperVidel XBIOS for the HDMI output
-# (see README.md and ../../PSVIDEL.md). 68000, no libc, no relocations.
+# (see README.md and ../../doc/PSVIDEL.md). 68000, no libc, no relocations.
 
 CROSS  ?= m68k-atari-mint-
 CC      = $(CROSS)gcc

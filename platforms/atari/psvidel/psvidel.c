@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /*
  * PSVIDEL - Falcon Videl + SuperVidel, emulated on the host, HDMI only.
- * See psvidel.h for the thread contract and PSVIDEL.md for the design.
+ * See psvidel.h for the thread contract and doc/PSVIDEL.md for the design.
  *
  * Three ways to reach a picture, one model underneath:
  *

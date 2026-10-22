@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 //
-// PSCTRL — read-only PiStorm status NatFeat (phase 1 of PSCTRL-DESIGN.md /
-// PSMON-DESIGN.md). Host-side sampler + indexed PS_GETINT value namespace.
+// PSCTRL — read-only PiStorm status NatFeat (phase 1 of doc/PSCTRL-DESIGN.md /
+// doc/PSMON-DESIGN.md). Host-side sampler + indexed PS_GETINT value namespace.
 //
 // The sampler runs on its own thread at a fixed 500 ms wall-clock tick and
 // publishes finished, pre-divided values; the NatFeat read is O(1) and free
 // of side effects, so guest poll rate cannot distort the numbers (see
-// PSMON-DESIGN.md section 1). Everything here is read-only: no JIT state is
+// doc/PSMON-DESIGN.md section 1). Everything here is read-only: no JIT state is
 // ever mutated from a NatFeat handler (see the JIT invariant comment in
 // atari_natfeat.cpp).
 

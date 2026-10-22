@@ -4920,7 +4920,7 @@ static addrbank pistorm_fvdi_bank = {
 
 
 /* ================================================================== */
-/* PSVIDEL banks (32-bit machines, cfg `psvidel`) - see PSVIDEL.md      */
+/* PSVIDEL banks (32-bit machines, cfg `psvidel`) - see doc/PSVIDEL.md      */
 /*   0xA0000000  16MB  alias of the low 16MB: SuperVidel software draws  */
 /*                     into Mxalloc(ST)|0xA0000000 and shows it via the  */
 /*                     24-bit base registers - the same bytes            */

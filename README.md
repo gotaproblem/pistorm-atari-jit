@@ -19,10 +19,29 @@ Then add-ons can be developed, such as
 - [x] FDD Emulation [implemented]
 - [x] Host MP3 playback via NatFeats (mixed with ST sound, SDL3) [implemented]
 - [x] A/V screen recording (hardware H.264 + sound, see capmux.sh) [implemented]
-- [x] Host VIDEO playback via NatFeats - MP4/MKV/AVI, hardware H.264, own DRM overlay plane (see VIDEO.md) [implemented]
-- [x] Falcon Videl + SuperVidel on HDMI - Falcon/SV modes, video RAM, SuperBlitter, XBIOS TSR (see PSVIDEL.md) [implemented]
+- [x] Host VIDEO playback via NatFeats - MP4/MKV/AVI, hardware H.264, own DRM overlay plane (see [doc/VIDEO.md](doc/VIDEO.md)) [implemented]
+- [x] Falcon Videl + SuperVidel on HDMI - Falcon/SV modes, video RAM, SuperBlitter, XBIOS TSR (see [doc/PSVIDEL.md](doc/PSVIDEL.md)) [implemented]
 - [x] Falcon DSP56001 + sound matrix/DMA on HDMI - clean-room 56001 core, host port, SSI, CODEC (see platforms/atari/falcon/README.md) [implemented]
 - [ ] Additional SVGA Cards
+## Documentation
+Everything beyond this README is in [`doc/`](doc/):
+
+| Document | What it covers |
+|---|---|
+| [INSTALL-README.md](doc/INSTALL-README.md) | the installer (`install-full.sh`), file layout, the setup page |
+| [PSCTRL-CFG.md](doc/PSCTRL-CFG.md) | `psctrl.cfg`, key by key |
+| [PERF-TUNING.md](doc/PERF-TUNING.md) | performance tuning |
+| [VIDEO.md](doc/VIDEO.md) | host video playback (VIDPLAY NatFeat) |
+| [PSVIDEL.md](doc/PSVIDEL.md) | Falcon Videl and SuperVidel on HDMI |
+| [FALCON-DSP.md](doc/FALCON-DSP.md) | Falcon DSP56001 and sound matrix |
+| [ACSI-DESIGN.md](doc/ACSI-DESIGN.md) | emulated ACSI hard-disk targets |
+| [NATFEATS.md](doc/NATFEATS.md) | Native Features |
+| [GAMEPAD_README.md](doc/GAMEPAD_README.md) | USB/Bluetooth game controllers as joysticks |
+| [KBD_USB_README.md](doc/KBD_USB_README.md) | USB/Bluetooth keyboard and mouse |
+| [PSCTRL-DESIGN.md](doc/PSCTRL-DESIGN.md) | PSCTRL design notes |
+| [PSMON-DESIGN.md](doc/PSMON-DESIGN.md) | PSMON design notes |
+| [STBOX-DESIGN.md](doc/STBOX-DESIGN.md) | STBOX design notes |
+
 ## Requirements
 This is not for newbies, a good amount of linux development knowledge is needed.
 At some point I will include binaries for those technically challanged ;)
@@ -79,7 +98,7 @@ sudo apt upgrade
 As is always the case, you must install a bunch of packages and libraries to build the binaries.
 >sudo apt install build-essential g++ make pkg-config cmake git libsdl3-dev libmpg123-dev libjpeg-dev libdrm-dev libslirp-dev zlib1g-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev libpoppler-glib-dev libcairo2-dev poppler-data fonts-urw-base35 libasound2-dev ffmpeg cifs-utils
 
-*(**install-full.sh** installs exactly this list for you. **libzstd-dev** and **libcurl4-openssl-dev** used to be listed here and are not used by anything - dropped. **cifs-utils** is for mounting a media share from a NAS or PC; see INSTALL-README.md.)*
+*(**install-full.sh** installs exactly this list for you. **libzstd-dev** and **libcurl4-openssl-dev** used to be listed here and are not used by anything - dropped. **cifs-utils** is for mounting a media share from a NAS or PC; see [doc/INSTALL-README.md](doc/INSTALL-README.md).)*
 
 ##### Clone
 Everything is ready to clone this repository
@@ -107,10 +126,10 @@ make
 >make ffmpeg-status
 ldd ./emulator | grep libav
 
-See **VIDEO.md** for the full story, including how to publish a build for other people.
+See **[doc/VIDEO.md](doc/VIDEO.md)** for the full story, including how to publish a build for other people.
 
 ## Configuring
-Run the installer to build the file tree and copy files into place (see **INSTALL-README.md**)
+Run the installer to build the file tree and copy files into place (see **[doc/INSTALL-README.md](doc/INSTALL-README.md)**)
 >./install-full.sh
 
 For the complete **APJ-OS** distribution (this emulator plus FreeMiNT/XaAES, the Bespoke Desktop, the PS GEM apps and a ready Atari boot disk) see [gotaproblem/apj-os](https://github.com/gotaproblem/apj-os): a flashable SD-card image, or `install.sh` on stock Raspberry Pi OS Lite, which runs this installer for you.
@@ -130,7 +149,7 @@ If the tests fail then there is no point in continuing until the hardware issues
 ### Step 2
 The configuration is one file, **../configs/psctrl.cfg** (the installer puts it there from `configs/psctrl.cfg.default`). It holds a `[psctrl]` block and one `[section]` per **build** - a build is a complete machine. Two come ready: `[gem]` (a plain TOS/EmuTOS desktop on the ST video) and `[apj-os]` (FreeMiNT + XaAES + fVDI on HDMI). The file is annotated.
 
-You do not have to edit it by hand: the **setup page** does that (Step 3), and shows every key the emulator accepts with its choices and ranges. **PSCTRL-CFG.md** documents every key.
+You do not have to edit it by hand: the **setup page** does that (Step 3), and shows every key the emulator accepts with its choices and ranges. **[doc/PSCTRL-CFG.md](doc/PSCTRL-CFG.md)** documents every key.
 
 ### Step 3
 So the tests pass, run the emulator through its launcher (it asks for sudo itself and relaunches on a Restart from the taskbar)

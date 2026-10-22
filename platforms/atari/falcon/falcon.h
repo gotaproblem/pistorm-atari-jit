@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /*
  * Falcon DSP + sound subsystem for the PiStorm (cfg `falcon_dsp`),
- * HDMI only. See FALCON-DSP.md.
+ * HDMI only. See doc/FALCON-DSP.md.
  *
  *   dsp56k.c         the DSP56001 core
  *   falcon_hw.c      host port ($FFA200), SSI, bootstrap, the switching

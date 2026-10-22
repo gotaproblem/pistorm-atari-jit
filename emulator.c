@@ -914,7 +914,7 @@ static void *ipl_task(void *)
    * writes back (old - cycles) - positive unless the budget was nearly
    * spent anyway - and the request is gone: compiled code keeps
    * chaining until the countdown runs out ON ITS OWN, one whole
-   * jit_power budget. That fits what PERF-TUNING.md
+   * jit_power budget. That fits what doc/PERF-TUNING.md
    * records - a bigger jit_power makes the keyboard beep - when with a
    * reliable exit request the budget would have nothing to do with
    * interrupt latency at all.
@@ -2636,9 +2636,9 @@ int main (int argc, char *argv[])
     PS_INFO ("[INIT] YM2149 emulation disabled\n");
   }
 
-  /* Falcon DSP56001 + sound matrix (FALCON-DSP.md): its engine thread
+  /* Falcon DSP56001 + sound matrix (doc/FALCON-DSP.md): its engine thread
    * is created here, on the main thread, with explicit scheduling -
-   * never from the CPU thread (VIDEO.md, "scheduling inheritance") */
+   * never from the CPU thread (doc/VIDEO.md, "scheduling inheritance") */
   if (config->falcon_dsp) {
     uint32_t gsz = 0x01000000u + (tt_ram_available ? tt_ram_size : 0u);
     if (falcon_init (natmem_offset, gsz) != 0)

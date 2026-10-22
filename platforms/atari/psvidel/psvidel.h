@@ -7,7 +7,7 @@
  * extended modes and video RAM, and its SuperBlitter - all emulated on
  * the host and shown on the Pi's HDMI through the same render thread and
  * staging buffer as fVDI. The ST's own monitor keeps showing what the
- * real shifter shows. See PSVIDEL.md.
+ * real shifter shows. See doc/PSVIDEL.md.
  *
  * Nothing here is visible to the guest until the PSVIDEL.PRG TSR arms it
  * (NatFeat ENABLE), so boot-time hardware probes (EmuTOS looks for a

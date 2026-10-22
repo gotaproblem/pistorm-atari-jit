@@ -307,7 +307,7 @@ say "Installing default configs / EmuTOS / blank floppy (existing files kept)"
 # with; the page's N key makes more). copy_once, so your own file is
 # never overwritten. atari.cfg is the old flat single-machine file,
 # still shipped for anyone who runs --config with one; the annotated
-# master.cfg is retired - PSCTRL-CFG.md documents every key.
+# master.cfg is retired - doc/PSCTRL-CFG.md documents every key.
 copy_once "$HERE/configs/psctrl.cfg.default" "$ROOT/configs/psctrl.cfg"
 copy_once "$HERE/configs/atari.cfg"         "$ROOT/configs/atari.cfg"
 copy_once "$HERE/configs/emutos-aranym.rom" "$ROOT/roms/emutos-aranym.rom"
@@ -880,7 +880,7 @@ fi
 echo "  Media on another PC or NAS? cifs-utils is installed. Mount the share"
 echo "  as a subdirectory of atari-share and it appears on the HOSTFS drive:"
 echo "      mkdir -p $ROOT/atari-share/media"
-echo "  then one line in /etc/fstab - INSTALL-README.md has the full recipe,"
+echo "  then one line in /etc/fstab - doc/INSTALL-README.md has the full recipe,"
 echo "  including why 'nofail' is not optional on a headless Pi."
 echo
 warn "Reboot to apply the boot-file changes:  sudo reboot"

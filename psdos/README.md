@@ -29,7 +29,7 @@ per line. Rebuilding psdos alone:
   coming to the top releases too.
 - Pads (`usb gamepad`, USB or Bluetooth, and the ST joystick ports) are
   DOS's whenever the window is on top - no capture needed. See
-  GAMEPAD_README.md. DOSBox Pure's start menu (L/R tabs) has the Gamepad
+  doc/GAMEPAD_README.md. DOSBox Pure's start menu (L/R tabs) has the Gamepad
   Mapper.
 
 ## Performance and limits

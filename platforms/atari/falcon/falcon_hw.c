@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /*
  * Falcon DSP host port, SSI, bootstrap, switching matrix and sound DMA,
- * and the engine thread that clocks them. See falcon.h / FALCON-DSP.md.
+ * and the engine thread that clocks them. See falcon.h / doc/FALCON-DSP.md.
  *
  * Register layouts are the Falcon's (Falcon specification 1992 and the
  * released machine's sound registers); the DSP56001 host interface and SSI

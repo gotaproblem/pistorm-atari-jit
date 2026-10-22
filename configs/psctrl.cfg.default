@@ -2,14 +2,14 @@
 #
 # One [psctrl] block and any number of builds - a build is a [section]
 # that describes a whole machine. The pre-boot setup page reads and
-# writes this file (INSTALL-README.md, "The setup page"), and so does
+# writes this file (doc/INSTALL-README.md, "The setup page"), and so does
 # PSCTRL.ACC inside APJ-OS.
 #
 #   [psctrl]   the setup page's own keys - never a machine
 #   [gem]      the plain GEM machine (TOS/EmuTOS desktop, ST video)
 #   [apj-os]   the APJ-OS machine (FreeMiNT + XaAES + fVDI, ET4000 on HDMI)
 #   [native]   the real machine - written by the emulator at its first
-#              start from what the board answers (PSCTRL-CFG.md)
+#              start from what the board answers (doc/PSCTRL-CFG.md)
 #
 # The emulator loads ONE build, whichever the setup page picked (or the
 # `boot` key below). Each build is complete on its own: nothing is
@@ -28,7 +28,7 @@
 # the lines it owns and copies everything else through byte for byte.
 #
 # Replaces the old atari.cfg / apj-os.cfg / master.cfg / autoboot.cfg.
-# PSCTRL-CFG.md in the source tree documents every key.
+# doc/PSCTRL-CFG.md in the source tree documents every key.
 
 [psctrl]
 # Seconds the setup page waits before booting the last choice. 0 boots

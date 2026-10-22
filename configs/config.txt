@@ -23,7 +23,7 @@ core_freq=500
 # --- Clock ---------------------------------------------------------------
 # CoreMark scales linearly with arm_freq (Emu68 chart: 1020 @1.5 GHz CM4 vs
 # 1572 @2.2 GHz Pi 4B). 1500 is the safe, silent default. The two lines
-# below are the tested overclock (see PERF-TUNING.md): needs a heatsink and
+# below are the tested overclock (see doc/PERF-TUNING.md): needs a heatsink and
 # ideally a fan; temp_limit=80 below throttles before harm. Uncomment both.
 #over_voltage=6
 #arm_freq=2100

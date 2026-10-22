@@ -1,7 +1,7 @@
 /*
  * acsi.c - emulated ACSI hard-disk target(s) on the Atari DMA port
  *
- * See acsi.h / ACSI-DESIGN.md. Command semantics follow the Adaptec
+ * See acsi.h / doc/ACSI-DESIGN.md. Command semantics follow the Adaptec
  * ACB-4000 bridge flavour that period drivers (AHDI, ICD, PP) and
  * Spectre talk to; cross-checked against Hatari's hdc.c, which is the
  * proven reference for this dialect.

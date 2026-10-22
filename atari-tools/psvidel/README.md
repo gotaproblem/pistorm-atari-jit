@@ -2,7 +2,7 @@
 
 AUTO-folder TSR, 68000, position independent, ~2 KB resident. It is the
 XBIOS half of the host's emulated Falcon Videl / SuperVidel (cfg
-`psvidel`, see `../../PSVIDEL.md`): the part a Falcon's TOS 4 and the
+`psvidel`, see `../../doc/PSVIDEL.md`): the part a Falcon's TOS 4 and the
 SuperVidel's SV_XBIOS would provide on real hardware.
 
 * Arms the host's register emulation: `$FF8266` SPSHIFT, `$FF8210` line
@@ -21,7 +21,7 @@ SuperVidel's SV_XBIOS would provide on real hardware.
   Dsp_Unlock (104/105) and the sound calls locksnd ... buffptr (128-141).
   Everything else goes straight to TOS.
 * Also arms the Falcon DSP host port (`$FFA200`) and sound registers
-  (`$FF8900-$FF8943`) when the cfg has `falcon_dsp` (`../../FALCON-DSP.md`).
+  (`$FF8900-$FF8943`) when the cfg has `falcon_dsp` (`../../doc/FALCON-DSP.md`).
 
 ## Install
 

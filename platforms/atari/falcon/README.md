@@ -3,12 +3,12 @@
 The Falcon's Motorola DSP56001, its host port, the SSI serial port, the
 4x4 sound switching matrix, the 16-bit sound DMA (play and record) and the
 CODEC's DAC, all emulated on the Pi, with the sound coming out of HDMI.
-Together with PSVIDEL (the Falcon's video chip, see `PSVIDEL.md`) it lets
+Together with PSVIDEL (the Falcon's video chip, see `doc/PSVIDEL.md`) it lets
 Falcon software that talks to the DSP directly run on an ST or STE with
 a PiSTorm. Beats of Rage (Dune, 2013) is the reference title: its DSPMOD
 music player, sound effects and both screens work.
 
-`FALCON-DSP.md` in the repository root is the design note - how the DSP
+`doc/FALCON-DSP.md` is the design note - how the DSP
 time is clocked, why, and what is measured. This file is the user side.
 
 ## Setting it up

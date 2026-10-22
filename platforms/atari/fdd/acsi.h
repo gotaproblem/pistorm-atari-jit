@@ -1,7 +1,7 @@
 /*
  * acsi.h - emulated ACSI hard-disk target(s) on the Atari DMA port
  *
- * See ACSI-DESIGN.md. Serves image files as ACSI targets with the
+ * See doc/ACSI-DESIGN.md. Serves image files as ACSI targets with the
  * Adaptec ACB-4000-bridge command flavour (the one AHDI/ICD/PP drivers
  * and Spectre expect; command semantics cross-checked against Hatari's
  * hdc.c). Plugs into atari_fdd.c's existing FDC/HDC routing on the
@@ -15,7 +15,7 @@
  *   - Command-complete / next-byte requests assert the shared GPIP5
  *     disk interrupt via fdd_gpip(), same line as the WD1772.
  *
- * Image flavours by suffix (see ACSI-DESIGN.md for the rationale):
+ * Image flavours by suffix (see doc/ACSI-DESIGN.md for the rationale):
  *   *.hfs      bare Macintosh HFS volume; sector 0 (an AHDI root sector
  *              with one MAC-type partition starting at sector 1) is
  *              SYNTHESIZED, LBA n>=1 maps to file offset (n-1)*512.

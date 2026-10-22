@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * vidplay.c - host video playback (MP4 / MKV / AVI / ...) for the Atari guest.
- * See vidplay.h for the design summary, VIDEO.md for the user-facing docs.
+ * See vidplay.h for the design summary, doc/VIDEO.md for the user-facing docs.
  *
  * HARD RULE (inherited from avrecord.c / the MP3 work): the emulator never
  * spawns external processes for media work. Children inherit the emulator CPU

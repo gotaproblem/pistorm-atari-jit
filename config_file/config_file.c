@@ -1128,7 +1128,7 @@ struct emulator_config *load_config_file_section(char *filename,
            * disk_path, as for hdd). The images are attached after the
            * file is read, and only if the switch is on - so the switch
            * may sit anywhere in the section. .hfs images are bare Mac
-           * HFS volumes (ACSI-DESIGN.md). */
+           * HFS volumes (doc/ACSI-DESIGN.md). */
           if (is_bool_true(parse_line + str_pos) || is_bool_false(parse_line + str_pos)) {
             int on = get_bool_default_true(parse_line + str_pos) ? 1 : 0;
             /* Two switch lines in one section is a broken file, and the
@@ -1327,7 +1327,7 @@ struct emulator_config *load_config_file_section(char *filename,
         break;
 
       case CONFITEM_PSVIDEL:
-        /* Falcon Videl + SuperVidel, HDMI only (PSVIDEL.md). Needs
+        /* Falcon Videl + SuperVidel, HDMI only (doc/PSVIDEL.md). Needs
          * PSVIDEL.PRG in AUTO to arm it; the 0xA0000000 video RAM window
          * needs a 32-bit bus (ttram or addr32). */
         cfg->psvidel = get_bool_default_true(parse_line + str_pos);
@@ -1337,7 +1337,7 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_FALCON_DSP:
         /* Falcon DSP56001 + sound matrix/DMA, audio on HDMI
-         * (FALCON-DSP.md). Armed by PSVIDEL.PRG like PSVIDEL. */
+         * (doc/FALCON-DSP.md). Armed by PSVIDEL.PRG like PSVIDEL. */
         cfg->falcon_dsp = get_bool_default_true(parse_line + str_pos);
         printf ("[CFG] Falcon DSP + sound %s\n",
                 cfg->falcon_dsp ? "enabled" : "disabled");
