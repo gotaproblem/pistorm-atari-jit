@@ -2508,8 +2508,13 @@ int main (int argc, char *argv[])
     et4k_addr_ptr = &et4kaddresses[et4k_driver()];
   }
 
-  if (config->ide)
+  if (config->ide) {
+    ide_set_byteorder(config->ide_byteorder);
+    printf("[MAIN] IDE data port byte order: %s\n",
+           config->ide_byteorder ? "native (cfg ide_byteorder native)"
+                                 : "swapped (default; ide_byteorder native for HDDRIVER/AHDI)");
     InitIDE();
+  }
 
   /* 24-bit address space decision, needed BEFORE the bank table is
    * built: map_region replicates every mapping across the 256 16MB

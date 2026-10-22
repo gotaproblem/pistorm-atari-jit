@@ -81,6 +81,10 @@ int IDE_attach(struct ide_controller *c, int drive, int fd);
 int ide_attach_st(struct ide_controller *c, int drive, int fd);
 int ide_attach_hdf(struct ide_controller *c, int drive, int fd);
 int ide_make_ident(int drive, uint16_t c, uint8_t h, uint8_t s, char *name, uint16_t *target);
+#ifdef __cplusplus
+extern "C"
+#endif
+void ide_set_byteorder(int native);   /* cfg ide_byteorder: 1 = native (C linkage: emulator.c is C++) */
 void ide_detach(struct ide_drive *d);
 void ide_free(struct ide_controller *c);
 

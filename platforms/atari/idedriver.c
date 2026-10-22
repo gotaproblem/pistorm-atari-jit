@@ -62,9 +62,18 @@
  * C: from the root sector but could not read the FAT16 partition.
  * Hatari presents a standard image to a Falcon the same way (ide.c:
  * byteswap for a non-swapped image). EmuTOS and TOS 1/2: unchanged. */
+/* cfg `ide_byteorder native` (ide_set_byteorder, from emulator.c before
+ * InitIDE): HDDRIVER / AHDI on TOS 1/2 want the native order too. */
+static int ide_cfg_native;
+
+void ide_set_byteorder(int native)
+{
+  ide_cfg_native = native ? 1 : 0;
+}
+
 static inline int ide_native_order(void)
 {
-  return IDE_NATIVE_BYTEORDER || emulator_falcon_tos();
+  return IDE_NATIVE_BYTEORDER || ide_cfg_native || emulator_falcon_tos();
 }
 
 #define IDE_IDLE	0

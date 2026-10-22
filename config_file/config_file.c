@@ -35,6 +35,7 @@ typedef enum {
   CONFITEM_ADDR32,
   CONFITEM_ROM,
   CONFITEM_IDE,
+  CONFITEM_IDE_BYTEORDER,
   CONFITEM_HDD,
   CONFITEM_FDD,
   CONFITEM_ACSI,
@@ -102,6 +103,7 @@ static const config_switch_def config_switches[] = {
   { "addr32", CONFITEM_ADDR32 },
   { "rom", CONFITEM_ROM },
   { "ide", CONFITEM_IDE },
+  { "ide_byteorder", CONFITEM_IDE_BYTEORDER },
   { "hdd", CONFITEM_HDD },
   { "fdd", CONFITEM_FDD },
   { "acsi", CONFITEM_ACSI },
@@ -1048,6 +1050,26 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_IDE:
         cfg->ide = get_bool_default_true(parse_line + str_pos);
+        break;
+
+      case CONFITEM_IDE_BYTEORDER:
+        /* `ide_byteorder native` - first sector byte on D8-D15, the order
+         * HDDRIVER / AHDI expect (field case 22 Oct: HDDRIVER under TOS
+         * 2.06 read every word of the IDE images byte-swapped - partition
+         * found, boot sector `3C EB 50 90 ...`, drive unreadable).
+         * `swapped` (default) - the twisted-cable order PP-prepared images
+         * need; EmuTOS detects and adapts to either. Falcon TOS is always
+         * native. */
+        {
+          const char *arg = parse_line + str_pos;
+          if (!strncasecmp(arg, "native", 6))
+            cfg->ide_byteorder = 1;
+          else if (!strncasecmp(arg, "swapped", 7) || !strncasecmp(arg, "twisted", 7))
+            cfg->ide_byteorder = 0;
+          else
+            printf ("[CFG] ide_byteorder '%s' not understood - use native or swapped\n", arg);
+          printf ("[CFG] IDE byte order %s\n", cfg->ide_byteorder ? "native" : "swapped");
+        }
         break;
 
       case CONFITEM_HDD:
