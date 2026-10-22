@@ -795,6 +795,7 @@ struct emulator_config *load_config_file_section(char *filename,
   static char acsi_img[8][512];
   cfg->jit = true;
   cfg->blitter = true;
+  cfg->ide_byteorder = 1;     /* IDE data port native unless cfg says swapped */
   cfg->native_hdmi = false;   /* default off: shifter is the game display;
                                  HDMI shows the splash unless enabled */
   
@@ -1057,8 +1058,8 @@ struct emulator_config *load_config_file_section(char *filename,
          * HDDRIVER / AHDI expect (field case 22 Oct: HDDRIVER under TOS
          * 2.06 read every word of the IDE images byte-swapped - partition
          * found, boot sector `3C EB 50 90 ...`, drive unreadable).
-         * `swapped` (default) - the twisted-cable order PP-prepared images
-         * need; EmuTOS detects and adapts to either. Falcon TOS is always
+         * Default when absent. `swapped` - the twisted-cable order
+         * PP-prepared images need; EmuTOS detects and adapts to either. Falcon TOS is always
          * native. */
         {
           const char *arg = parse_line + str_pos;

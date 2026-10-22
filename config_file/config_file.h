@@ -102,8 +102,8 @@ struct emulator_config {
   ROM_s rom;//rom[2];
   //int rom_count;
   bool ide;
-  int  ide_byteorder;  /* IDE data port: 0 swapped (default - PP-prepared
-                          images, EmuTOS adapts), 1 native (HDDRIVER/AHDI) */
+  int  ide_byteorder;  /* IDE data port: 1 native (default - HDDRIVER/AHDI),
+                          0 swapped (PP-prepared images, EmuTOS adapts) */
   HDD_s hdd [8];
   FDD_s fdd;
   bool dma_sound;
