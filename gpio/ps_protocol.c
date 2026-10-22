@@ -1484,8 +1484,9 @@ int ps_st_reset_pin ( void )
 #else
   uint16_t fw = ps_fw_rev;
 
+  /* alpha EPM240 rev 256+, or any beta (EPM240 $4xx / EPM570 $5xx) */
   if ( !( ((fw & 0x700) == 0x200 && fw >= CPLD_FW_RESET_PIN) ||
-          (fw & 0x700) == 0x400 ) )
+          (fw & 0x600) == 0x400 ) )
     return -1;
 
   return ( *ioread & PIN_ST_RESET ) ? 0 : 1;
