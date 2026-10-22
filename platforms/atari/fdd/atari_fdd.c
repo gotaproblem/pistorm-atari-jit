@@ -45,7 +45,19 @@ static int acsi_dbg_on(void)
     return pst_dbg_acsi;
 }
 static int acsi_dbg_count;
-#define ACSI_DBG_LIMIT 2000
+/* 2000 lines is used up by the TOS boot's floppy traffic before a driver
+ * started from the desktop sends anything (field case 22 Oct). Default
+ * kept; PISTORM_ACSI_DEBUG_LIMIT=n raises it. */
+static int acsi_dbg_limit(void)
+{
+    static int lim = -1;
+    if (lim < 0) {
+        const char *e = getenv("PISTORM_ACSI_DEBUG_LIMIT");
+        lim = (e && atoi(e) > 0) ? atoi(e) : 2000;
+    }
+    return lim;
+}
+#define ACSI_DBG_LIMIT acsi_dbg_limit()
 
 
 #include "acsi.h"
