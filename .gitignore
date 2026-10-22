@@ -1,25 +1,29 @@
-*.d
+# Build output
 *.o
-*.img
-*.stackdump
-*.vscode
-.smbdelete*
-.fuse_*
-._*
-.DS_Store
-perf.data
-perf.data.old
-!/platforms/atari/*.img.bak
+*.d
+emulator
+ataritest
+drmprobe
 /m68kmake
 /m68kmake.exe
 /m68kops.c
 /m68kops.h
-/rtl/._*
-nprog_log.txt
-*.log
-session-*.patch
-ataritest
-emulator
+/cdev/
+psweb/psweb
+psdos/psdos
+psdos/dosbox_pure_libretro.so
+psdos/dosbox-pure-*/
+psdos/*.ppm
+tools/dosbench/dosbench
+tools/dosbench/*.ppm
+tools/pdfbench/pdfbench
+tools/webbench/webbench
+tools/webbench/*.ppm
+tools/atariclean/tests/out/
+psweb-phase0-out/
+__pycache__/
+*.whl
+
 # V4L2-Request FFmpeg fetched or built by `make ffmpeg` - never committed.
 # It is 25-35MB of shared objects that Git would keep a copy of forever; it
 # belongs in a release tarball, not in history.
@@ -28,24 +32,23 @@ emulator
 pistorm-rpi-ffmpeg-*.tar.gz
 pistorm-rpi-ffmpeg-*.tar.gz.sha256
 /.ffmpeg-choice
-drmprobe
-/cdev/
-emulator
-ataritest
-*.o
-*.d
+
+# Disk images, logs, profiling, run-time leftovers
+*.img
+!/platforms/atari/*.img.bak
+*.log
+nprog_log.txt
+*.stackdump
+perf.data
+perf.data.old
+session-*.patch
+
+# Editor / macOS / SMB share droppings
+*.vscode
+.DS_Store
+._*
+.smbdelete*
+.fuse_*
 
 # session notes dropped beside the tree; the Drive folder is their home
 Claude outputs/
-._*
-.smbdelete*
-__pycache__/
-tools/atariclean/tests/out/
-Claude outputs/
-psweb-phase0-out/
-psdos/psdos
-psdos/dosbox_pure_libretro.so
-psdos/dosbox-pure-*/
-psdos/*.ppm
-tools/dosbench/dosbench
-tools/dosbench/*.ppm
