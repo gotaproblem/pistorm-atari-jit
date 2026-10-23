@@ -7045,6 +7045,12 @@ bool atari_natfeat_handle_opcode(uae_u32 opcode, uae_u32 *cycles)
   m68k_dreg(regs, 0) = result;
 
   m68k_incpc_normal(2);
+  /* The prefetch-accurate core (cpu_compatible) executes regs.ir, not
+   * the word at the PC: without a refill it runs this $7300/$7301 again
+   * at every following PC (field case 23 Oct: EmuTOS's NatFeat probe at
+   * $E0A2A6, then $7300 "executed" two bytes at a time through the rest
+   * of the ROM). A no-op for the other cores. */
+  fill_prefetch();
   if (cycles)
     *cycles = (1 * 4 * CYCLE_UNIT / 2) * 4;
   return true;
