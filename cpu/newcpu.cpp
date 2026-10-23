@@ -179,6 +179,20 @@ static inline void pistorm_pc_ring_push(uaecptr pc)
 	if (d)
 		pistorm_pc_ring_frozen = 1;
 }
+/* A slide through zero words (ori.b #0,d0 - which no real code writes)
+ * inside DECODED space - ROM padding, empty RAM - is a wild jump too, but
+ * not one the dummy-bank rule above sees (field case 23 Oct, EmuTOS on
+ * the compat core: 256 entries of $E3FExx, the ROM's zero padding). Freeze
+ * at its first instruction. Called only when the opcode word is 0. */
+static void pistorm_pc_ring_zero_slide(uaecptr pc)
+{
+	if (pistorm_pc_ring_frozen)
+		return;
+	if (get_word(pc + 2) != 0)
+		return;                      /* a real ori.b #n,d0 */
+	pistorm_pc_ring_frozen = 1;
+	fprintf(stderr, "[PCRING] frozen: zero-word slide starts at pc=%08X\n", (unsigned)pc);
+}
 #endif
 #include "savestate.h"
 #include "blitter.h"
@@ -7872,6 +7886,8 @@ static void m68k_run_1()
 				r->instruction_pc = m68k_getpc();
 #if CPU_PC_RING
 				pistorm_pc_ring_push(r->instruction_pc);   /* compat core too */
+				if (__builtin_expect(r->opcode == 0, 0))
+					pistorm_pc_ring_zero_slide(r->instruction_pc);
 #endif
 				cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) & 0xffff;
 				if (!regs.loop_mode)
