@@ -422,7 +422,14 @@ uint8_t readIDEB ( uint32_t address )
         * not busy / not ready -> the driver falls through to its no-drive
         * path. Other registers keep the floating-bus 0xFF so the ATA
         * signature check still fails and reports "no device". */
-      if (base == GSTATUS_OFFSET || base == GCTRL_OFFSET) {
+      /* ... and at one byte lower too: when the normal registers do not
+        * answer, EmuTOS's ide_interface_exists() retries the interface as
+        * a twisted cable (base - 1), polling the alternate status at +$38
+        * for BSY to clear. 0xFF there kept it spinning until its timeout
+        * on every empty port (field case 23 Oct: 49,581 polls of $F000B8,
+        * the slow boot). */
+      if (base == GSTATUS_OFFSET || base == GCTRL_OFFSET ||
+          base == GSTATUS_OFFSET - 1 || base == GCTRL_OFFSET - 1) {
           IDE_LOG_STAT(address, port, base, 0x00);
           return 0x00;
       }
