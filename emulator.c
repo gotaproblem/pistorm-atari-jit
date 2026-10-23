@@ -56,6 +56,7 @@ extern "C"
   extern void jit_cpu_set_speed(int khz);
   extern void jit_cpu_set_mmu(int model);
   extern void pistorm_reset_state_dump(void);   /* cpu/newcpu.cpp */
+  extern void pistorm_exit_state_dump(void);    /* cpu/newcpu.cpp, PISTORM_CPU_DIAG */
   extern uint8_t pistorm_mfp_gpip_shim(uint8_t); /* pistorm_natmem.cpp */
   extern void pistorm_rez_sync_trace(uint32_t a, uint8_t v); /* pistorm_natmem.cpp */
   extern void jit_cpu_reset(void);
@@ -1942,6 +1943,9 @@ static void orderly_teardown(void)
   cpu_emulation_running = 0;
 
   printf("\n[MAIN] Exiting\n");
+
+  usleep(20000);                /* let the CPU thread leave its loop */
+  pistorm_exit_state_dump();    /* PISTORM_CPU_DIAG=1: where the CPU was */
 
   /* JIT statistics (PROFILE_UNTRANSLATED_INSNS: top-50 interpreted opcodes) */
   compiler_dump_stats();

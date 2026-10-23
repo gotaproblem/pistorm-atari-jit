@@ -4795,6 +4795,38 @@ static void pistorm_dump_stack_longs(const char *tag, uae_u32 sp)
 	fprintf(stderr, "\n");
 }
 
+/* PISTORM_CPU_DIAG=1: where the CPU was when the emulator is stopped
+ * (Ctrl-C / restart / shutdown) - for a guest that hangs without an
+ * exception, which leaves nothing else in the log. Called from
+ * emulator.c's orderly_teardown after the CPU thread has been told to
+ * stop. */
+extern "C" void pistorm_exit_state_dump(void)
+{
+	if (!pistorm_cpu_diag())
+		return;
+	fprintf(stderr, "[EXIT] pc=%08X sr=%04X (%s) usp=%08X isp=%08X stopped=%d\n",
+		m68k_getpc(), regs.sr, regs.s ? "SUP" : "usr", regs.usp, regs.isp,
+		regs.stopped);
+	fprintf(stderr, "[EXIT]   D:");
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, " %08X", m68k_dreg(regs, i));
+	fprintf(stderr, "\n[EXIT]   A:");
+	for (int i = 0; i < 8; i++)
+		fprintf(stderr, " %08X", m68k_areg(regs, i));
+	fprintf(stderr, "\n");
+	pistorm_dump_stack_longs("ssp", regs.s ? m68k_areg(regs, 7) : regs.isp);
+	void pistorm_exc_ring_dump(void);
+	pistorm_exc_ring_dump();
+#if CPU_PC_RING
+	fprintf(stderr, "[PCRING] last 256 pcs, oldest first:");
+	for (unsigned k = 0; k < 256; k++)
+		fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[PCRING] ",
+			pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255]);
+	fprintf(stderr, "\n");
+#endif
+	fflush(stderr);
+}
+
 /* Always on: a RESET is rare, and TOS issues one first thing after a
  * restart - so on a silent reboot this is the only record of who jumped
  * into the ROM. The stacks are still the jumper's at that point (TOS has
@@ -7838,6 +7870,9 @@ static void m68k_run_1()
 				}
 #endif
 				r->instruction_pc = m68k_getpc();
+#if CPU_PC_RING
+				pistorm_pc_ring_push(r->instruction_pc);   /* compat core too */
+#endif
 				cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) & 0xffff;
 				if (!regs.loop_mode)
 					regs.ird = regs.opcode;
