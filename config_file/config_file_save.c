@@ -171,19 +171,10 @@ static int render_boot_key(const char *key, const struct emulator_config *c,
     snprintf(out, n, "jit_cache %d", c->jit_cache);
     return 1;
   }
-  if (!strcmp(key, "m68k_speed")) {
-    if (!c->m68k_speed_set)
+  if (!strcmp(key, "cpu_speed")) {
+    if (!c->cpu_speed_khz)
       return 0;
-    if (c->m68k_speed < 0)
-      snprintf(out, n, "m68k_speed max");
-    else
-      snprintf(out, n, "m68k_speed %d", c->m68k_speed);
-    return 1;
-  }
-  if (!strcmp(key, "cpu_clock_multiplier")) {
-    if (!c->cpu_clock_multiplier_set)
-      return 0;
-    snprintf(out, n, "cpu_clock_multiplier %d", c->cpu_clock_multiplier);
+    snprintf(out, n, "cpu_speed %dmhz", c->cpu_speed_khz / 1000);
     return 1;
   }
   return 0;

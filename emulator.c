@@ -53,6 +53,7 @@ extern "C"
                                        int jit_cache, int jit_cache_set);
   extern void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit);
   extern void jit_cpu_set_compatible(int on);
+  extern void jit_cpu_set_speed(int khz);
   extern void jit_cpu_set_mmu(int model);
   extern void pistorm_reset_state_dump(void);   /* cpu/newcpu.cpp */
   extern uint8_t pistorm_mfp_gpip_shim(uint8_t); /* pistorm_natmem.cpp */
@@ -2786,6 +2787,7 @@ int main (int argc, char *argv[])
   PS_INFO("[MAIN] calling jit_cpu_init cpu_type=%d\n", cpu_type);
   fflush(stderr);
   jit_cpu_set_compatible(config->cpu_compatible ? 1 : 0);
+  jit_cpu_set_speed(config->cpu_speed_khz);
   jit_cpu_set_mmu(config->mmu ? 1 : 0);
 
   /* Monitor-detect force lives at the ps_protocol layer (see the note

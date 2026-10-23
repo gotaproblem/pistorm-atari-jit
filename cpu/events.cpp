@@ -14,6 +14,8 @@
 #include "options.h"
 #include "uae.h"
 #include "events.h"
+
+extern "C" int pistorm_gov_khz;   /* cfg cpu_speed (kHz), jit_glue.cpp */
 #ifdef WITH_PPC
 #include "uae/ppc.h"
 #endif
@@ -361,6 +363,8 @@ void do_cycles_slow(int cycles_to_add)
 	 * cpu_clock_multiplier already scales the per-instruction consumption
 	 * (via cpucycleunit), so it directly scales the governed speed:
 	 * unset/256 = 8MHz, 512 = 16MHz, plain 2 = 4MHz.
+	 * The target is cfg cpu_speed (8/16/32 MHz, jit_glue.cpp sets
+	 * m68k_speed=0 and no multiplier for it), else PISTORM_GOV_KHZ, else 8 MHz.
 	 * Active ONLY with m68k_speed=0 and the JIT off (interpreter); the
 	 * default max-speed configs never enter this block.
 	 * Sleeps are capped at 1ms per check so level-6 interrupt latency
@@ -384,7 +388,7 @@ void do_cycles_slow(int cycles_to_add)
 				 * ST), so a slightly higher target here compensates the
 				 * average - tune to taste, e.g. 9000-10000. */
 				const char *env = getenv("PISTORM_GOV_KHZ");
-				gov_khz = env ? atoll(env) : 8000;
+				gov_khz = env ? atoll(env) : pistorm_gov_khz ? pistorm_gov_khz : 8000;
 				if (gov_khz < 1000 || gov_khz > 64000)
 					gov_khz = 8000;
 				fprintf(stderr, "[GOV] 68k governor active: %lld kHz\n",
@@ -395,7 +399,30 @@ void do_cycles_slow(int cycles_to_add)
 		if (currcycle >= gov_next) {
 			struct timespec ts;
 			clock_gettime(CLOCK_MONOTONIC, &ts);
-			int64_t real_ns = ((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec) - gov_ns0;
+			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+			/* Can the interpreter keep up? Measured over 5 s windows of
+			 * real time; said once if a window falls below 90% of the
+			 * target (cpu_speed 32mhz may be more than the Pi delivers). */
+			{
+				static int64_t win_ns0;
+				static evt_t win_cyc0;
+				static int said;
+				if (!win_ns0 || currcycle < win_cyc0) {
+					win_ns0 = now_ns;
+					win_cyc0 = currcycle;
+				} else if (now_ns - win_ns0 >= 5000000000LL) {
+					int64_t khz = (int64_t)((currcycle - win_cyc0) / (CYCLE_UNIT / 2))
+					              * 1000000LL / (now_ns - win_ns0);
+					if (!said && khz * 10 < gov_khz * 9) {
+						said = 1;
+						fprintf(stderr, "[GOV] reaching %lld kHz of the %lld kHz target "
+						        "(5 s average)\n", (long long)khz, (long long)gov_khz);
+					}
+					win_ns0 = now_ns;
+					win_cyc0 = currcycle;
+				}
+			}
+			int64_t real_ns = now_ns - gov_ns0;
 			int64_t virt_ns = (int64_t)((currcycle - gov_cyc0) / (CYCLE_UNIT / 2))
 			                  * 1000000LL / gov_khz;
 			int64_t ahead_ns = virt_ns - real_ns;

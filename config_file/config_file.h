@@ -127,6 +127,8 @@ struct emulator_config {
   uint32_t falcon_stram; /* Falcon ST-RAM bytes, 14MB = Pi-backed above 4MB (0 = 4MB) */
   bool native_hdmi;
   bool hdmi_only;     /* nobody watches the ST's own video output */
+  int  cpu_speed_khz;     /* cpu_speed: governed 68000 speed in kHz, 0 = unthrottled.
+                            Interpreter only (jit_power 0) */
   bool cpu_clock_multiplier_set;
   int cpu_clock_multiplier;
   bool m68k_speed_set;

@@ -165,6 +165,16 @@ extern "C" void jit_cpu_set_mmu(int on)
     cfg_mmu_enable = on != 0;
 }
 
+/* cfg 'cpu_speed' (kHz, 0 = unthrottled), set from emulator.c before
+ * jit_cpu_init(). Read by the governor in cpu/events.cpp. */
+static int cfg_cpu_speed_khz;
+extern "C" { int pistorm_gov_khz = 0; }
+
+extern "C" void jit_cpu_set_speed(int khz)
+{
+    cfg_cpu_speed_khz = khz > 0 ? khz : 0;
+}
+
 extern "C" void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
                                          int m68k_speed, int m68k_speed_set,
                                          int jit_cache, int jit_cache_set)
@@ -343,6 +353,19 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
         }
     }
 
+    /* cpu_speed: the governor paces the interpreter at a real 68000
+     * clock. It needs timed scheduling (m68k_speed 0) and the default
+     * cycle unit (no multiplier), and does nothing with the JIT on. */
+    if (cfg_cpu_speed_khz) {
+        if (disable_jit) {
+            m68k_speed = 0;
+            cpu_clock_multiplier = 0;
+            pistorm_gov_khz = cfg_cpu_speed_khz;
+        } else {
+            fprintf(stderr, "[JITGLUE] cpu_speed %d MHz ignored: it needs the JIT off (jit_power 0)\n",
+                    cfg_cpu_speed_khz / 1000);
+        }
+    }
     if (cpu_clock_multiplier < 0)
         cpu_clock_multiplier = 0;
     if (cpu_clock_multiplier != 0 && m68k_speed < 0) {

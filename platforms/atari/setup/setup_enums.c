@@ -45,6 +45,10 @@ static const char *fvdiscale_l[]= { "fit - fill keeping aspect (default)",
                                     "fit_sharp - fill keeping aspect, no smoothing" };
 /* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
  * log2 ladder, 256 << (n-1), so 3 is the 1024 default (psctrl_settings.cpp) */
+/* cpu_speed: the interpreter paced at a real 68000 clock (JIT off) */
+static const char *cpuspeed[]  = { "8mhz", "16mhz", "32mhz" };
+static const char *cpuspeed_l[]= { "8mhz - a real ST", "16mhz - a Mega STE",
+                                   "32mhz - if the Pi keeps up" };
 static const char *jitpow[]  = { "0", "1", "2", "3", "4", "5", "6" };
 static const char *jitpow_l[]= { "0 - JIT disabled", "1 - 256", "2 - 512",
                                  "3 - 1024 (default)", "4 - 2048",
@@ -123,6 +127,7 @@ static const struct table tables[] = {
     T("audio_frames", frames),
     TL("fvdi_scale", fvdiscale, fvdiscale_l),
     TL("jit_power", jitpow, jitpow_l),
+    TL("cpu_speed", cpuspeed, cpuspeed_l),
     TL("stram_size", stram, stram_l),
     TL("falcon_stram", fstram, fstram_l),
 };
@@ -174,6 +179,7 @@ static const struct { const char *key; int env; } env_of[] = {
     { "shifter",        SE_GEM },
     /* slow the machine down to ST speed - for ST software, not a desktop */
     { "cpu_compatible", SE_GEM },
+    { "cpu_speed",      SE_GEM },
     { "m68k_speed",     SE_GEM },
     { "cpu_clock_multiplier", SE_GEM },
     /* vga is NOT here: a GEM build drives the ET4000 through NVDI.
@@ -194,7 +200,8 @@ static const struct { const char *key; int env; } env_of[] = {
  * Developer: real, but tuning/debug knobs - hidden unless Tab. */
 static const char *retired[]   = { "vga_render", "loopcycles", "rtc", "fps" };
 static const char *developer[] = { "addr32", "stram_cache", "stram_direct",
-                                   "network_debug", "jit" };
+                                   "network_debug", "jit",
+                                   "m68k_speed", "cpu_clock_multiplier" };
 
 int se_retired(const char *key)
 {
@@ -265,6 +272,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "stbox_tos",      SE_TAB_MACHINE, SE_K_TEXT,   ""        },
     { "stbox_machine",  SE_TAB_MACHINE, SE_K_LIST,   "ste"     },
     { "cpu_compatible", SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
+    { "cpu_speed",      SE_TAB_MACHINE, SE_K_LIST,   "8mhz"    },
     /* Video */
     { "vga",            SE_TAB_VIDEO,   SE_K_LIST,   "ET4000AX FVDI" },
     { "native_hdmi",    SE_TAB_VIDEO,   SE_K_SWITCH, "enabled" },
@@ -309,8 +317,10 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "network_debug",  SE_TAB_NETWORK, SE_K_SWITCH, "enabled" },
     /* Tuning - live tunables and developer knobs */
     { "jit",            SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
-    { "m68k_speed",     SE_TAB_TUNING,  SE_K_INT,    "0"       },
-    { "cpu_clock_multiplier", SE_TAB_TUNING, SE_K_INT, "1"     },
+    /* replaced by cpu_speed: developer keys, so a build that still has
+     * one shows it (and can drop it) but none is offered new */
+    { "m68k_speed",     SE_TAB_TUNING,  SE_K_INT,    "-1"      },
+    { "cpu_clock_multiplier", SE_TAB_TUNING, SE_K_INT, "0"     },
     { "stram_cache",    SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "stram_direct",   SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "addr32",         SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },

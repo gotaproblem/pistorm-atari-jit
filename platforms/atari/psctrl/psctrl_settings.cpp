@@ -412,48 +412,6 @@ static int js_power(const struct ps_item *it, int v)
   return PS_R_OK;
 }
 
-static int jg_speed(const struct ps_item *it)  { (void)it; return currprefs.m68k_speed; }
-static int js_speed(const struct ps_item *it, int v)
-{
-  if (v < it->min || v > it->max)
-    return PS_R_REJECT;
-  currprefs.m68k_speed = changed_prefs.m68k_speed = v;
-  boot_seed();                     /* the .cfg writer renders m68k_speed from here */
-  g_boot.m68k_speed = v;
-  g_boot.m68k_speed_set = true;
-  return PS_R_OK;
-}
-
-/*
- * The clock multiplier is a SLOWDOWN, and 0 is off.
- *
- * update_68k_cycles() reads it as: 0 leaves cpucycleunit at its default
- * and the CPU is not clock-limited at all; 1..255 make cpucycleunit
- * CYCLE_UNIT * n, which is n times SLOWER; 256 and up are a fixed-point
- * divider (n >> 8), so 512 would be twice as fast - a range this dialog
- * does not offer and the emulator does not use. jit_cpu_init() also
- * clamps a negative value to 0, so -1 is not a faster setting, it is 0
- * spelt differently; and it turns m68k_speed=max into timed scheduling
- * the moment it is non-zero. So 0 is the fastest setting and it must be
- * reachable - the row shipped with min 1, which put the default out of
- * range of its own slider.
- *
- * Writing currprefs directly did nothing useful either: cpucycleunit is
- * derived in update_68k_cycles(), which is not called for a poke. Set
- * changed_prefs and let the CPU loop apply it at a mode change, which is
- * what the deferred queue is for.
- */
-static int jg_mult(const struct ps_item *it)   { (void)it; return changed_prefs.cpu_clock_multiplier; }
-static int js_mult(const struct ps_item *it, int v)
-{
-  if (v < it->min || v > it->max)
-    return PS_R_REJECT;
-  boot_seed();                     /* the .cfg writer renders it from here */
-  g_boot.cpu_clock_multiplier = v;
-  g_boot.cpu_clock_multiplier_set = true;
-  return defer(item_index("cpu_clock_multiplier"), v);
-}
-
 static const int cache_kb[] = { 0, 2048, 4096, 8192, 16384 };
 
 static int jg_cache(const struct ps_item *it)
@@ -682,10 +640,6 @@ static const struct ps_item g_items[] = {
 /* ------------------------------------------------------------- JIT --- */
 ITEM("jit_power", "JIT power", PS_TAB_JIT, PS_K_INT, PS_C_LIVE, PS_U_NONE,
      0, 6, 1, NULL, 0, 0, NULL, jg_power, js_power, NULL),
-ITEM("m68k_speed", "68k speed", PS_TAB_JIT, PS_K_INT, PS_C_LIVE, PS_U_NONE,
-     -1, 20, 1, NULL, 0, 0, NULL, jg_speed, js_speed, NULL),
-ITEM("cpu_clock_multiplier", "CPU slowdown", PS_TAB_JIT, PS_K_INT,
-     PS_C_DEFER, PS_U_NONE, 0, 8, 1, NULL, 0, 0, NULL, jg_mult, js_mult, NULL),
 ITEM("jit_cache", "Translation cache", PS_TAB_JIT, PS_K_ENUM, PS_C_DEFER,
      PS_U_NONE, 0, 4, 1, L_cache, 5, PS_F_NEWLINE, NULL, jg_cache, js_cache, NULL),
 /* tgt makes these .cfg keys (`compnf 0`); the value shown is currprefs */
@@ -942,13 +896,6 @@ void psctrl_apply_pending(void)
     } else if (!strcmp(nm, "compfpu")) {
       changed_prefs.compfpu = v ? true : false;
       check_prefs_changed_comp(false);
-    } else if (!strcmp(nm, "cpu_clock_multiplier")) {
-      /* changed_prefs already holds it; config_changed is what makes
-       * check_prefs_changed_cpu() look, and the mode change is where
-       * update_68k_cycles() re-derives cpucycleunit */
-      changed_prefs.cpu_clock_multiplier = v;
-      config_changed = 1;
-      check_prefs_changed_cpu();
     } else if (!strcmp(nm, "jit_flush")) {
       psctrl_jit_flush_now();
     }
@@ -1313,7 +1260,7 @@ static const char *const g_bootkeys[] = {
   "stram_size", "ttram", "addr32", "stram_cache", "stram_direct",
   "native_hdmi", "psvidel", "vga", "monitor", "ym2149", "dma_sound", "falcon_dsp",
   "ide", "kbd", "network", "network_irq", "rom", "stbox_tos",
-  "stbox_plane", "jit_cache", "m68k_speed", "cpu_clock_multiplier"
+  "stbox_plane", "jit_cache", "cpu_speed"
 };
 #define NBOOTKEYS ((int)(sizeof(g_bootkeys) / sizeof(g_bootkeys[0])))
 

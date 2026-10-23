@@ -74,6 +74,8 @@ extern "C" uint32_t psctrl_getint(uint32_t index)
 }
 
 extern "C" int stbox_running(void) { return 0; }
+extern "C" const char *emulator_config_section(void) { return ""; }   /* config_file.c */
+extern "C" int emulator_gemdos_to_host(const char *gem, char *out, size_t n) { (void)gem; (void)out; (void)n; return 0; }   /* atari_natfeat.cpp */
 extern "C" void ym2149_settings_changed(void) { }
 extern "C" void kbd_usb_mouse_cfg_changed(void) { }
 
@@ -219,7 +221,6 @@ int main(void)
            "/home/pistorm/roms/tos206uk.img");
   currprefs.cachesize = changed_prefs.cachesize = 8192;
   currprefs.m68k_speed = -1;
-  currprefs.cpu_clock_multiplier = 2;
   currprefs.compnf = currprefs.comp_constjump = true;
   psctrl_tunables_init();
 
@@ -388,36 +389,12 @@ int main(void)
       break;
     }
 
-    /*
-     * The clock multiplier is a SLOWDOWN and 0 is off - the fastest
-     * setting, and the one the emulator boots with. The row shipped
-     * with min 1, so its own default was outside its slider. It must
-     * reach 0, it must not pretend to apply live (cpucycleunit is
-     * derived in update_68k_cycles(), not poked), and a negative value
-     * is not a faster setting - jit_cpu_init() clamps it to 0.
-     */
+    /* m68k_speed and cpu_clock_multiplier were replaced by the .cfg
+     * key cpu_speed (setup page only): PSCTRL no longer offers them */
     for (i = 0; i < n; i++) {
       parse(i, &r);
-      if (strcmp(r.name, "cpu_clock_multiplier"))
-        continue;
-      if (r.min != 0)
-        fail("the clock multiplier cannot reach 0, its own default");
-      if (r.klass != PS_C_DEFER)
-        fail("the clock multiplier claims to apply live");
-      if ((int)psctrl_settings_call(PSCTRL_SETINT, i, -1, 0, 0) != PS_R_REJECT)
-        fail("a negative clock multiplier was accepted");
-      if ((int)psctrl_settings_call(PSCTRL_SETINT, i, 4, 0, 0) != PS_R_DEFER)
-        fail("the clock multiplier was not deferred");
-      if (currprefs.cpu_clock_multiplier == 4)
-        fail("the clock multiplier reached currprefs before the boundary");
-      psctrl_apply_pending();
-      if (currprefs.cpu_clock_multiplier != 4)
-        fail("the clock multiplier did not apply at the boundary");
-      if ((int)psctrl_settings_call(PSCTRL_SETINT, i, 0, 0, 0) != PS_R_DEFER)
-        fail("the clock multiplier could not be set back to 0");
-      psctrl_apply_pending();
-      if (currprefs.cpu_clock_multiplier != 0)
-        fail("the clock multiplier did not go back to 0 (off)");
+      if (!strcmp(r.name, "m68k_speed") || !strcmp(r.name, "cpu_clock_multiplier"))
+        fail("%s is still a PSCTRL setting", r.name);
       break;
     }
   }

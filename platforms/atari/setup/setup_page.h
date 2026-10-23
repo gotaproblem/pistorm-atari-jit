@@ -32,6 +32,15 @@ const char *sp_row_value(const char *key, const char *val, char *buf,
 const char *sp_value_from_edit(const char *key, const char *typed, char *buf,
                                unsigned long n);
 
+/* The JIT and what depends on it (see setup_page.c). sp_jit_rule: why a
+ * key cannot be ticked now, or NULL. sp_jit_follow: after `key` changed,
+ * bring jit_cache / cpu_compatible / cpu_speed / jit_power into line;
+ * `did` says what it changed ("" = nothing). Exposed for the harness. */
+struct sc_cfg;
+const char *sp_jit_rule(const struct sc_cfg *c, const char *sec, const char *key);
+void        sp_jit_follow(struct sc_cfg *c, const char *sec, const char *key,
+                          char *did, unsigned long n);
+
 enum sp_result {
     SP_BOOT = 0,      /* boot the section named in `chosen`        */
     SP_QUIT,          /* leave without booting (the test tool)     */

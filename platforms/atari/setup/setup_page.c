@@ -790,6 +790,78 @@ static void build_drive_rows(struct state *st)
     settle(st);
 }
 
+/*
+ * The JIT and what hangs off it. jit_power 0 (or `jit disabled`) is the
+ * JIT off, and an absent jit_power is the JIT on at its default.
+ *   - jit_cache only means something with the JIT on: when jit_power is
+ *     unticked or set to 0, jit_cache goes too.
+ *   - cpu_compatible (the prefetch-accurate core) and cpu_speed (the
+ *     paced interpreter) only work with the JIT off: ticking
+ *     cpu_compatible sets jit_power 0, drops jit_cache and adds
+ *     cpu_speed 8mhz; turning the JIT back on drops both.
+ * Rows that cannot apply are greyed with the reason - unless already
+ * ticked, so a leftover line can still be removed.
+ */
+static int jit_is_off(const struct sc_cfg *c, const char *sec)
+{
+    const char *jp = sc_get(c, sec, "jit_power");
+    const char *j  = sc_get(c, sec, "jit");
+    return (jp && strtol(jp, NULL, 0) == 0) || (j && !sp_row_on("jit", j));
+}
+
+const char *sp_jit_rule(const struct sc_cfg *c, const char *sec, const char *key)
+{
+    if (!strcasecmp(key, "jit_cache") && jit_is_off(c, sec))
+        return "the JIT is off (jit_power 0)";
+    if (!strcasecmp(key, "cpu_speed") && !jit_is_off(c, sec))
+        return "needs the JIT off (jit_power 0)";
+    return NULL;
+}
+
+void sp_jit_follow(struct sc_cfg *c, const char *sec, const char *key,
+                   char *did, unsigned long n)
+{
+    did[0] = '\0';
+#define DID(...) snprintf(did + strlen(did), n - strlen(did), __VA_ARGS__)
+    int jp_key = !strcasecmp(key, "jit_power") || !strcasecmp(key, "jit");
+    if (!strcasecmp(key, "cpu_compatible")) {
+        const char *cc = sc_get(c, sec, "cpu_compatible");
+        if (cc && sp_row_on("cpu_compatible", cc)) {
+            if (!jit_is_off(c, sec) && sc_set(c, sec, "jit_power", "0") == 0)
+                DID("%sjit_power 0", *did ? ", " : "");
+            if (!sc_get(c, sec, "cpu_speed") && sc_set(c, sec, "cpu_speed", "8mhz") == 0)
+                DID("%scpu_speed 8mhz", *did ? ", " : "");
+            jp_key = 1;
+        }
+    }
+    if (!jp_key)
+        return;
+    const char *jp = sc_get(c, sec, "jit_power");
+    if ((!jp || jit_is_off(c, sec)) && sc_get(c, sec, "jit_cache") &&
+        sc_set(c, sec, "jit_cache", NULL) == 0)
+        DID("%s-jit_cache", *did ? ", " : "");
+    if (!jit_is_off(c, sec)) {
+        const char *cc = sc_get(c, sec, "cpu_compatible");
+        if (cc && sp_row_on("cpu_compatible", cc) &&
+            sc_set(c, sec, "cpu_compatible", NULL) == 0)
+            DID("%s-cpu_compatible", *did ? ", " : "");
+        if (sc_get(c, sec, "cpu_speed") && sc_set(c, sec, "cpu_speed", NULL) == 0)
+            DID("%s-cpu_speed", *did ? ", " : "");
+    }
+#undef DID
+}
+
+static void jit_follow(struct state *st, const char *key)
+{
+    char did[48];
+    sp_jit_follow(&st->cfg, st->sec, key, did, sizeof did);
+    if (*did) {
+        char was[sizeof st->msg];
+        snprintf(was, sizeof was, "%s", st->msg);
+        snprintf(st->msg, sizeof st->msg, "%.21s; %.40s", was, did);
+    }
+}
+
 static void build_rows(struct state *st)
 {
     const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
@@ -820,6 +892,7 @@ static void build_rows(struct state *st)
         r->why = se_env_rule(k, st->sec);
         if (!r->why) r->why = se_cpu_rule(k, cpu);
         if (!r->why) r->why = se_machine_rule(k, machine);
+        if (!r->why && !r->ticked) r->why = sp_jit_rule(&st->cfg, st->sec, k);
     }
     st->row[st->nrow].kind = ROW_SAVE; st->row[st->nrow++].text[0] = '\0';
     st->row[st->nrow].kind = ROW_BOOT; st->row[st->nrow++].text[0] = '\0';
@@ -949,7 +1022,20 @@ static void slot_line(struct state *st, struct row *r)
     r->ord = sl >= 0 && sl < DRIVE_SLOTS ? map[sl] : -1;
 }
 
+static void tick_row(struct state *st, int open_editor_for_text);
+
 static void tick(struct state *st, int open_editor_for_text)
+{
+    struct row *r = &st->row[st->sel];
+    char key[sizeof r->text];
+    snprintf(key, sizeof key, "%s", r->text);
+    int was_key = r->kind == ROW_KEY;
+    tick_row(st, open_editor_for_text);
+    if (was_key)
+        jit_follow(st, key);
+}
+
+static void tick_row(struct state *st, int open_editor_for_text)
 {
     struct row *r = &st->row[st->sel];
     if (r->kind == ROW_SLOT || r->kind == ROW_ADD) {
@@ -1147,6 +1233,7 @@ static void choose_accept(struct state *st)
         }
         if (!strcasecmp(r->text, "machine"))
             apply_machine(st);
+        jit_follow(st, r->text);
     }
 }
 

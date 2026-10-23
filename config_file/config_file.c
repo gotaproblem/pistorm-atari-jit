@@ -36,6 +36,7 @@ typedef enum {
   CONFITEM_ROM,
   CONFITEM_IDE,
   CONFITEM_IDE_BYTEORDER,
+  CONFITEM_CPU_SPEED,
   CONFITEM_HDD,
   CONFITEM_FDD,
   CONFITEM_ACSI,
@@ -120,6 +121,7 @@ static const config_switch_def config_switches[] = {
   { "hdmi_only", CONFITEM_HDMI_ONLY },
   { "psvidel", CONFITEM_PSVIDEL },
   { "falcon_dsp", CONFITEM_FALCON_DSP },
+  { "cpu_speed", CONFITEM_CPU_SPEED },
   { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
   { "m68k_speed", CONFITEM_M68K_SPEED },
   { "jit_cache", CONFITEM_JIT_CACHE },
@@ -1343,16 +1345,38 @@ struct emulator_config *load_config_file_section(char *filename,
                 cfg->falcon_dsp ? "enabled" : "disabled");
         break;
 
+      case CONFITEM_CPU_SPEED:
+        /* `cpu_speed 8mhz | 16mhz | 32mhz`: pace the interpreter at that
+         * 68000 clock (the governor in cpu/events.cpp). JIT off only -
+         * jit_glue.cpp says so and ignores it with the JIT on. `max` (or
+         * no line) = unthrottled. Replaces m68k_speed and
+         * cpu_clock_multiplier, which are still read below. */
+        {
+          const char *arg = parse_line + str_pos;
+          int mhz = atoi(arg);
+          if (!strncasecmp(arg, "max", 3))
+            cfg->cpu_speed_khz = 0;
+          else if (mhz == 8 || mhz == 16 || mhz == 32)
+            cfg->cpu_speed_khz = mhz * 1000;
+          else
+            printf ("[CFG] cpu_speed '%s' not understood - use 8mhz, 16mhz or 32mhz\n", arg);
+        }
+        break;
+
+      /* The two UAE knobs cpu_speed replaces. Still honoured so an old
+       * .cfg keeps doing what it did; the setup page and PSCTRL no longer
+       * offer them. */
       case CONFITEM_CPU_CLOCK_MULTIPLIER:
         cfg->cpu_clock_multiplier = (int)get_int(parse_line + str_pos);
         cfg->cpu_clock_multiplier_set = true;
-        printf ("[CFG] CPU clock multiplier %d\n", cfg->cpu_clock_multiplier);
+        printf ("[CFG] cpu_clock_multiplier %d (old key - cpu_speed replaces it)\n",
+                cfg->cpu_clock_multiplier);
         break;
 
       case CONFITEM_M68K_SPEED:
         cfg->m68k_speed = get_signed_int(parse_line + str_pos);
         cfg->m68k_speed_set = true;
-        printf ("[CFG] m68k_speed %d\n", cfg->m68k_speed);
+        printf ("[CFG] m68k_speed %d (old key - cpu_speed replaces it)\n", cfg->m68k_speed);
         break;
 
       case CONFITEM_JIT_CACHE:

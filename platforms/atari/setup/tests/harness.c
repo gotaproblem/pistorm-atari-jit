@@ -755,6 +755,72 @@ static void run_relevance(void)
     CHECK(se_index("stram_size", "4M") == 6, "stram_size 4M not last");
 }
 
+/* The JIT and what depends on it: jit_cache, cpu_compatible, cpu_speed. */
+static void run_jit_rules(void)
+{
+    static struct sc_cfg c;
+    char did[64];
+    const char *v;
+    printf("JIT rules:\n");
+
+    /* jit_power unticked (line removed) -> jit_cache goes */
+    CHECK(sc_load_text(&c, "[gem]\ncpu 68000\njit_power 3\njit_cache 16384\n") == 0, "parse");
+    sc_set(&c, "gem", "jit_power", NULL);
+    sp_jit_follow(&c, "gem", "jit_power", did, sizeof did);
+    CHECK(!sc_get(&c, "gem", "jit_cache"), "jit_power removed, jit_cache stayed");
+
+    /* jit_power 0 -> jit_cache goes */
+    CHECK(sc_load_text(&c, "[gem]\ncpu 68000\njit_power 3\njit_cache 16384\n") == 0, "parse");
+    sc_set(&c, "gem", "jit_power", "0");
+    sp_jit_follow(&c, "gem", "jit_power", did, sizeof did);
+    CHECK(!sc_get(&c, "gem", "jit_cache"), "jit_power 0, jit_cache stayed");
+
+    /* jit_power 1..6 with jit_cache: nothing changes */
+    CHECK(sc_load_text(&c, "[gem]\ncpu 68000\njit_power 3\njit_cache 16384\n") == 0, "parse");
+    sc_set(&c, "gem", "jit_power", "5");
+    sp_jit_follow(&c, "gem", "jit_power", did, sizeof did);
+    CHECK(sc_get(&c, "gem", "jit_cache"), "jit_power 5 dropped jit_cache");
+    CHECK(!*did, "jit_power 5 changed something: %s", did);
+
+    /* cpu_compatible on -> jit_power 0, no jit_cache, cpu_speed 8mhz */
+    CHECK(sc_load_text(&c, "[gem]\ncpu 68000\njit_power 3\njit_cache 16384\n") == 0, "parse");
+    sc_set(&c, "gem", "cpu_compatible", "enabled");
+    sp_jit_follow(&c, "gem", "cpu_compatible", did, sizeof did);
+    v = sc_get(&c, "gem", "jit_power");
+    CHECK(v && !strcmp(v, "0"), "cpu_compatible: jit_power is %s", v ? v : "(none)");
+    CHECK(!sc_get(&c, "gem", "jit_cache"), "cpu_compatible: jit_cache stayed");
+    v = sc_get(&c, "gem", "cpu_speed");
+    CHECK(v && !strcmp(v, "8mhz"), "cpu_compatible: cpu_speed is %s", v ? v : "(none)");
+
+    /* ... a cpu_speed already chosen is kept */
+    CHECK(sc_load_text(&c, "[gem]\ncpu 68000\njit_power 0\ncpu_speed 16mhz\n") == 0, "parse");
+    sc_set(&c, "gem", "cpu_compatible", "enabled");
+    sp_jit_follow(&c, "gem", "cpu_compatible", did, sizeof did);
+    v = sc_get(&c, "gem", "cpu_speed");
+    CHECK(v && !strcmp(v, "16mhz"), "cpu_compatible overwrote cpu_speed: %s", v ? v : "(none)");
+
+    /* JIT back on -> cpu_compatible and cpu_speed go */
+    sc_set(&c, "gem", "jit_power", "3");
+    sp_jit_follow(&c, "gem", "jit_power", did, sizeof did);
+    CHECK(!sc_get(&c, "gem", "cpu_compatible"), "JIT on, cpu_compatible stayed");
+    CHECK(!sc_get(&c, "gem", "cpu_speed"), "JIT on, cpu_speed stayed");
+
+    /* what can be ticked */
+    CHECK(sc_load_text(&c, "[gem]\njit_power 0\n") == 0, "parse");
+    CHECK(sp_jit_rule(&c, "gem", "jit_cache") != NULL, "jit_cache offered with the JIT off");
+    CHECK(sp_jit_rule(&c, "gem", "cpu_speed") == NULL, "cpu_speed refused with the JIT off");
+    CHECK(sc_load_text(&c, "[gem]\njit_power 2\n") == 0, "parse");
+    CHECK(sp_jit_rule(&c, "gem", "jit_cache") == NULL, "jit_cache refused with the JIT on");
+    CHECK(sp_jit_rule(&c, "gem", "cpu_speed") != NULL, "cpu_speed offered with the JIT on");
+    CHECK(sc_load_text(&c, "[gem]\ncpu 68000\n") == 0, "parse");
+    CHECK(sp_jit_rule(&c, "gem", "cpu_speed") != NULL, "no jit_power = JIT on, cpu_speed offered");
+
+    /* the old knobs are no longer offered */
+    CHECK(se_developer("m68k_speed") && se_developer("cpu_clock_multiplier"),
+          "m68k_speed / cpu_clock_multiplier still offered");
+    CHECK(se_count("cpu_speed") == 3, "cpu_speed has %d choices", se_count("cpu_speed"));
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -772,6 +838,7 @@ int main(void)
     run_enums();
     run_no_shifter();
     run_relevance();
+    run_jit_rules();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;
