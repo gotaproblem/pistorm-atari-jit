@@ -506,7 +506,15 @@ uint16_t readIDE ( uint32_t address )
 
   if ( atariIDE [port] ) 
   {
-    if ( base == GDATA_OFFSET ) 
+    /* The data register's slot is 4 bytes wide (the task-file registers
+     * sit at +5, +9 ...), and a 68000 does a long access as two word
+     * cycles, at the address and at +2. So a word read at +2 is the data
+     * register too: EmuTOS reads sectors with move.l from $F00000, which
+     * the prefetch core (cpu_compatible) issues exactly that way (field
+     * case 23 Oct: IDENTIFY words interleaved with "wget @F00002 => 8000
+     * (unhandled)", EmuTOS found the disks but read garbage). Word
+     * WRITES already go to the data register at any offset. */
+    if ( base == GDATA_OFFSET || base == GDATA_OFFSET + 2 ) 
     {
       ide_stats.data_words++;
       {
