@@ -165,7 +165,7 @@ extern "C" void jit_cpu_set_mmu(int on)
     cfg_mmu_enable = on != 0;
 }
 
-/* cfg 'cpu_speed' (kHz, 0 = unthrottled), set from emulator.c before
+/* cfg 'cpu_speed' (8000 or 16000 kHz, 0 = unthrottled), set from emulator.c before
  * jit_cpu_init(). Read by the governor in cpu/events.cpp. */
 static int cfg_cpu_speed_khz;
 extern "C" { int pistorm_gov_khz = 0; }

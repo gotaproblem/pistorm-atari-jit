@@ -363,7 +363,7 @@ void do_cycles_slow(int cycles_to_add)
 	 * cpu_clock_multiplier already scales the per-instruction consumption
 	 * (via cpucycleunit), so it directly scales the governed speed:
 	 * unset/256 = 8MHz, 512 = 16MHz, plain 2 = 4MHz.
-	 * The target is cfg cpu_speed (8/16/32 MHz, jit_glue.cpp sets
+	 * The target is cfg cpu_speed (8/16 MHz, jit_glue.cpp sets
 	 * m68k_speed=0 and no multiplier for it), else PISTORM_GOV_KHZ, else 8 MHz.
 	 * Active ONLY with m68k_speed=0 and the JIT off (interpreter); the
 	 * default max-speed configs never enter this block.
@@ -402,7 +402,7 @@ void do_cycles_slow(int cycles_to_add)
 			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 			/* Can the interpreter keep up? Measured over 5 s windows of
 			 * real time; said once if a window falls below 90% of the
-			 * target (cpu_speed 32mhz may be more than the Pi delivers). */
+			 * target (a Pi 4's interpreter tops out near 20 MHz). */
 			{
 				static int64_t win_ns0;
 				static evt_t win_cyc0;

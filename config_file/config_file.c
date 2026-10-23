@@ -1346,8 +1346,9 @@ struct emulator_config *load_config_file_section(char *filename,
         break;
 
       case CONFITEM_CPU_SPEED:
-        /* `cpu_speed 8mhz | 16mhz | 32mhz`: pace the interpreter at that
-         * 68000 clock (the governor in cpu/events.cpp). JIT off only -
+        /* `cpu_speed 8mhz | 16mhz`: pace the interpreter at that 68000
+         * clock (the governor in cpu/events.cpp). No 32mhz: a Pi 4's
+         * interpreter tops out near 20 MHz (governor, 23 Oct). JIT off only -
          * jit_glue.cpp says so and ignores it with the JIT on. `max` (or
          * no line) = unthrottled. Replaces m68k_speed and
          * cpu_clock_multiplier, which are still read below. */
@@ -1356,10 +1357,10 @@ struct emulator_config *load_config_file_section(char *filename,
           int mhz = atoi(arg);
           if (!strncasecmp(arg, "max", 3))
             cfg->cpu_speed_khz = 0;
-          else if (mhz == 8 || mhz == 16 || mhz == 32)
+          else if (mhz == 8 || mhz == 16)
             cfg->cpu_speed_khz = mhz * 1000;
           else
-            printf ("[CFG] cpu_speed '%s' not understood - use 8mhz, 16mhz or 32mhz\n", arg);
+            printf ("[CFG] cpu_speed '%s' not understood - use 8mhz or 16mhz\n", arg);
         }
         break;
 

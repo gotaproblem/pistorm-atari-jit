@@ -818,7 +818,7 @@ static void run_jit_rules(void)
     /* the old knobs are no longer offered */
     CHECK(se_developer("m68k_speed") && se_developer("cpu_clock_multiplier"),
           "m68k_speed / cpu_clock_multiplier still offered");
-    CHECK(se_count("cpu_speed") == 3, "cpu_speed has %d choices", se_count("cpu_speed"));
+    CHECK(se_count("cpu_speed") == 2, "cpu_speed has %d choices", se_count("cpu_speed"));
 }
 
 int main(void)

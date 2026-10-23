@@ -46,9 +46,8 @@ static const char *fvdiscale_l[]= { "fit - fill keeping aspect (default)",
 /* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
  * log2 ladder, 256 << (n-1), so 3 is the 1024 default (psctrl_settings.cpp) */
 /* cpu_speed: the interpreter paced at a real 68000 clock (JIT off) */
-static const char *cpuspeed[]  = { "8mhz", "16mhz", "32mhz" };
-static const char *cpuspeed_l[]= { "8mhz - a real ST", "16mhz - a Mega STE",
-                                   "32mhz - if the Pi keeps up" };
+static const char *cpuspeed[]  = { "8mhz", "16mhz" };
+static const char *cpuspeed_l[]= { "8mhz - a real ST", "16mhz - a Mega STE" };
 static const char *jitpow[]  = { "0", "1", "2", "3", "4", "5", "6" };
 static const char *jitpow_l[]= { "0 - JIT disabled", "1 - 256", "2 - 512",
                                  "3 - 1024 (default)", "4 - 2048",
