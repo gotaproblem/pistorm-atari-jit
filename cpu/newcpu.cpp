@@ -193,6 +193,40 @@ static void pistorm_pc_ring_zero_slide(uaecptr pc)
 	pistorm_pc_ring_frozen = 1;
 	fprintf(stderr, "[PCRING] frozen: zero-word slide starts at pc=%08X\n", (unsigned)pc);
 }
+
+/* The compat core (m68k_run_1) executes regs.ir, which the prefetch
+ * pipeline loaded from memory - so the opcode word it runs should be the
+ * word at the PC. PISTORM_CPU_DIAG=1 checks that on every instruction
+ * whose PC is in ST-RAM (host mirror) or the ROM, records the executed
+ * opcode beside each ring PC, and freezes the ring at the first mismatch
+ * (field case 23 Oct: EmuTOS slid through the ROM's zero padding two
+ * bytes at a time - a one-word opcode, not the ori.b #0,d0 in memory). */
+static uae_u16 pistorm_op_ring[256];
+static void pistorm_compat_op(unsigned slot_before, uaecptr pc, uae_u16 op)
+{
+	if (pistorm_pc_ring_i != slot_before)
+		pistorm_op_ring[(pistorm_pc_ring_i - 1) & 255] = op;
+	if (!pistorm_cpu_diag())
+		return;
+	static int said;
+	if (said)
+		return;
+	uaecptr a = pc & 0x00FFFFFEu;
+	uae_u16 mem;
+	if (a < 0x00400000u)
+		mem = (uae_u16)(natmem_offset[a] << 8 | natmem_offset[a + 1]);
+	else if (a >= 0x00E00000u && a < 0x00F00000u)
+		mem = (uae_u16)get_word(a);
+	else
+		return;
+	if (mem == op)
+		return;
+	said = 1;
+	pistorm_pc_ring_frozen = 1;
+	fprintf(stderr, "[PREFETCH] pc=%08X executes %04X but memory holds %04X "
+		"(irc=%04X sr=%04X) - ring frozen\n", (unsigned)pc, op, mem,
+		(unsigned)regs.irc, regs.sr);
+}
 #endif
 #include "savestate.h"
 #include "blitter.h"
@@ -4832,10 +4866,11 @@ extern "C" void pistorm_exit_state_dump(void)
 	void pistorm_exc_ring_dump(void);
 	pistorm_exc_ring_dump();
 #if CPU_PC_RING
-	fprintf(stderr, "[PCRING] last 256 pcs, oldest first:");
+	fprintf(stderr, "[PCRING] last 256 pcs:opcode executed, oldest first:");
 	for (unsigned k = 0; k < 256; k++)
-		fprintf(stderr, "%s%08X", (k & 7) ? " " : "\n[PCRING] ",
-			pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255]);
+		fprintf(stderr, "%s%08X:%04X", (k & 7) ? " " : "\n[PCRING] ",
+			pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255],
+			pistorm_op_ring[(pistorm_pc_ring_i + k) & 255]);
 	fprintf(stderr, "\n");
 #endif
 	fflush(stderr);
@@ -7885,7 +7920,11 @@ static void m68k_run_1()
 #endif
 				r->instruction_pc = m68k_getpc();
 #if CPU_PC_RING
-				pistorm_pc_ring_push(r->instruction_pc);   /* compat core too */
+				{
+					unsigned slot = pistorm_pc_ring_i;
+					pistorm_pc_ring_push(r->instruction_pc);   /* compat core too */
+					pistorm_compat_op(slot, r->instruction_pc, (uae_u16)r->opcode);
+				}
 				if (__builtin_expect(r->opcode == 0, 0))
 					pistorm_pc_ring_zero_slide(r->instruction_pc);
 #endif
