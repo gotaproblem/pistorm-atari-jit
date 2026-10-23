@@ -821,6 +821,61 @@ static void run_jit_rules(void)
     CHECK(se_count("cpu_speed") == 2, "cpu_speed has %d choices", se_count("cpu_speed"));
 }
 
+/* The shifter follows the machine; cpu_compatible is 68000-only. */
+static void run_machine_rules(void)
+{
+    static struct sc_cfg c;
+    char did[64];
+    const char *v;
+    printf("machine rules:\n");
+
+    CHECK(sc_load_text(&c, "[gem]\nmachine st\nshifter st\n") == 0, "parse");
+    sc_set(&c, "gem", "machine", "ste");
+    sp_shifter_follow(&c, "gem", "machine", did, sizeof did);
+    v = sc_get(&c, "gem", "shifter");
+    CHECK(v && !strcmp(v, "ste"), "machine ste: shifter is %s", v ? v : "(none)");
+
+    sc_set(&c, "gem", "machine", "st");
+    sp_shifter_follow(&c, "gem", "machine", did, sizeof did);
+    v = sc_get(&c, "gem", "shifter");
+    CHECK(v && !strcmp(v, "st"), "machine st: shifter is %s", v ? v : "(none)");
+
+    sc_set(&c, "gem", "machine", "megast");
+    sp_shifter_follow(&c, "gem", "machine", did, sizeof did);
+    v = sc_get(&c, "gem", "shifter");
+    CHECK(v && !strcmp(v, "st"), "machine megast: shifter is %s", v ? v : "(none)");
+
+    /* no shifter line yet: one is written */
+    CHECK(sc_load_text(&c, "[gem]\nmachine st\n") == 0, "parse");
+    sc_set(&c, "gem", "machine", "ste");
+    sp_shifter_follow(&c, "gem", "machine", did, sizeof did);
+    v = sc_get(&c, "gem", "shifter");
+    CHECK(v && !strcmp(v, "ste"), "machine ste, no line: shifter is %s", v ? v : "(none)");
+
+    /* shifter ste on an ST is refused; shifter st on an STE is allowed */
+    CHECK(sc_load_text(&c, "[gem]\nmachine st\nshifter st\n") == 0, "parse");
+    sc_set(&c, "gem", "shifter", "ste");
+    sp_shifter_follow(&c, "gem", "shifter", did, sizeof did);
+    v = sc_get(&c, "gem", "shifter");
+    CHECK(v && !strcmp(v, "st"), "shifter ste kept on an ST");
+    CHECK(sc_load_text(&c, "[gem]\nmachine ste\nshifter ste\n") == 0, "parse");
+    sc_set(&c, "gem", "shifter", "st");
+    sp_shifter_follow(&c, "gem", "shifter", did, sizeof did);
+    v = sc_get(&c, "gem", "shifter");
+    CHECK(v && !strcmp(v, "st"), "shifter st refused on an STE");
+
+    /* falcon: shifter untouched */
+    CHECK(sc_load_text(&c, "[gem]\nmachine st\nshifter st\n") == 0, "parse");
+    sc_set(&c, "gem", "machine", "falcon");
+    sp_shifter_follow(&c, "gem", "machine", did, sizeof did);
+    CHECK(!*did, "falcon changed the shifter: %s", did);
+
+    /* cpu_compatible: 68000 only */
+    CHECK(se_cpu_rule("cpu_compatible", "68000") == NULL, "cpu_compatible refused on a 68000");
+    CHECK(se_cpu_rule("cpu_compatible", "68010") != NULL, "cpu_compatible offered on a 68010");
+    CHECK(se_cpu_rule("cpu_compatible", "68030") != NULL, "cpu_compatible offered on a 68030");
+}
+
 int main(void)
 {
     gpip_mono = 1;
@@ -839,6 +894,7 @@ int main(void)
     run_no_shifter();
     run_relevance();
     run_jit_rules();
+    run_machine_rules();
 
     printf(fails ? "\nFAIL (%d)\n" : "\nPASS (%d failures)\n", fails);
     return fails != 0;

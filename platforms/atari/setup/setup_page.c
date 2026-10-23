@@ -606,6 +606,12 @@ static void apply_machine(struct state *st)
         se_machine_rule("cpu_compatible", m) &&
         sc_set(&st->cfg, st->sec, "cpu_compatible", NULL) == 0)
         DID("%s-cpu_compatible", *did ? " " : "");
+    {
+        char sh[48];
+        sp_shifter_follow(&st->cfg, st->sec, "machine", sh, sizeof sh);
+        if (*sh)
+            DID("%s%s", *did ? " " : "", sh);
+    }
 #undef DID
     if (*did)
         snprintf(st->msg, sizeof st->msg, "%.6s: %.54s", m ? m : "st", did);
@@ -862,6 +868,37 @@ static void jit_follow(struct state *st, const char *key)
     }
 }
 
+/*
+ * The shifter follows the machine: st and megast have the ST shifter,
+ * ste the STE one, so changing the machine sets `shifter` to match. On an
+ * STE `shifter st` stays choosable (config_file.c: an STE without the
+ * video personality); on an ST or Mega ST `shifter ste` is refused - the
+ * emulator ignores it there. The Falcon is left alone: its video is
+ * PSVIDEL's, and the emulator ignores `shifter` on it.
+ */
+void sp_shifter_follow(struct sc_cfg *c, const char *sec, const char *key,
+                       char *did, unsigned long n)
+{
+    did[0] = '\0';
+    const char *m  = sc_get(c, sec, "machine");
+    int mi = (m && *m) ? se_index("machine", m) : 0;      /* absent = st */
+    const char *mw = se_choice("machine", mi < 0 ? 0 : mi);
+    if (!mw || !strcasecmp(mw, "falcon"))
+        return;
+    int ste = !strcasecmp(mw, "ste");
+    const char *sh = sc_get(c, sec, "shifter");
+    int is_ste = sh && se_index("shifter", sh) >= 0 &&
+                 !strcasecmp(se_choice("shifter", se_index("shifter", sh)), "ste");
+    if (!strcasecmp(key, "machine")) {
+        const char *want = ste ? "ste" : "st";
+        if ((!sh || is_ste != ste) && sc_set(c, sec, "shifter", want) == 0)
+            snprintf(did, n, "shifter %s", want);
+    } else if (!strcasecmp(key, "shifter") && is_ste && !ste) {
+        if (sc_set(c, sec, "shifter", "st") == 0)
+            snprintf(did, n, "shifter ste needs machine ste - kept st");
+    }
+}
+
 static void build_rows(struct state *st)
 {
     const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
@@ -1031,8 +1068,20 @@ static void tick(struct state *st, int open_editor_for_text)
     snprintf(key, sizeof key, "%s", r->text);
     int was_key = r->kind == ROW_KEY;
     tick_row(st, open_editor_for_text);
-    if (was_key)
+    if (was_key) {
         jit_follow(st, key);
+        if (!strcasecmp(key, "shifter") || !strcasecmp(key, "machine")) {
+            char sh[48];
+            sp_shifter_follow(&st->cfg, st->sec, key, sh, sizeof sh);
+            if (*sh && !strcasecmp(key, "shifter")) {
+                snprintf(st->msg, sizeof st->msg, "%s", sh);
+            } else if (*sh) {                 /* machine line removed */
+                char was[sizeof st->msg];
+                snprintf(was, sizeof was, "%s", st->msg);
+                snprintf(st->msg, sizeof st->msg, "%.21s; %.40s", was, sh);
+            }
+        }
+    }
 }
 
 static void tick_row(struct state *st, int open_editor_for_text)
@@ -1234,6 +1283,12 @@ static void choose_accept(struct state *st)
         if (!strcasecmp(r->text, "machine"))
             apply_machine(st);
         jit_follow(st, r->text);
+        if (!strcasecmp(r->text, "shifter")) {
+            char sh[48];
+            sp_shifter_follow(&st->cfg, st->sec, r->text, sh, sizeof sh);
+            if (*sh)
+                snprintf(st->msg, sizeof st->msg, "%s", sh);
+        }
     }
 }
 

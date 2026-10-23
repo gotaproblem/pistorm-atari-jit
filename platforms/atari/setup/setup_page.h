@@ -40,6 +40,9 @@ struct sc_cfg;
 const char *sp_jit_rule(const struct sc_cfg *c, const char *sec, const char *key);
 void        sp_jit_follow(struct sc_cfg *c, const char *sec, const char *key,
                           char *did, unsigned long n);
+/* after `machine` or `shifter` changed: shifter st on st/megast, ste on ste */
+void        sp_shifter_follow(struct sc_cfg *c, const char *sec, const char *key,
+                              char *did, unsigned long n);
 
 enum sp_result {
     SP_BOOT = 0,      /* boot the section named in `chosen`        */
