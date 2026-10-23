@@ -45,6 +45,10 @@ static const char *fvdiscale_l[]= { "fit - fill keeping aspect (default)",
                                     "fit_sharp - fill keeping aspect, no smoothing" };
 /* jit_power: 0 is the JIT off; 1..6 is the compiled-chain budget on a
  * log2 ladder, 256 << (n-1), so 3 is the 1024 default (psctrl_settings.cpp) */
+/* ide_byteorder: the IDE data port's byte order (config_file.c) */
+static const char *ideorder[]  = { "native", "swapped" };
+static const char *ideorder_l[]= { "native - HDDRIVER / AHDI images (default)",
+                                   "swapped - PP-prepared images" };
 /* cpu_speed: the interpreter paced at a real 68000 clock (JIT off) */
 static const char *cpuspeed[]  = { "8mhz", "16mhz" };
 static const char *cpuspeed_l[]= { "8mhz - a real ST", "16mhz - a Mega STE" };
@@ -127,6 +131,7 @@ static const struct table tables[] = {
     TL("fvdi_scale", fvdiscale, fvdiscale_l),
     TL("jit_power", jitpow, jitpow_l),
     TL("cpu_speed", cpuspeed, cpuspeed_l),
+    TL("ide_byteorder", ideorder, ideorder_l),
     TL("stram_size", stram, stram_l),
     TL("falcon_stram", fstram, fstram_l),
 };
@@ -220,6 +225,7 @@ int se_developer(const char *key)
 
 /* Keys that only matter while another key is on. */
 static const struct { const char *key, *needs; } needs_of[] = {
+    { "ide_byteorder",    "ide" },
     { "network_backend",  "network" },
     { "network_tap",      "network" },
     { "network_base",     "network" },
@@ -299,6 +305,7 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "mouse_scale",    SE_TAB_INPUT,   SE_K_INT,    "1"       },
     /* Drives - the page expands hdd/acsi/hostfs into slots (step 3) */
     { "ide",            SE_TAB_DRIVES,  SE_K_SWITCH, "enabled" },
+    { "ide_byteorder",  SE_TAB_DRIVES,  SE_K_LIST,   "native"  },
     { "hdd",            SE_TAB_DRIVES,  SE_K_TEXT,   ""        },
     { "acsi",           SE_TAB_DRIVES,  SE_K_SWITCH, "enabled" },   /* the switch; images are the other acsi lines */
     { "fdd",            SE_TAB_DRIVES,  SE_K_TEXT,   ""        },

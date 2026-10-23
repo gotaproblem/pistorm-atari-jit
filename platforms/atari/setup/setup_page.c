@@ -762,6 +762,11 @@ static void build_drive_rows(struct state *st)
         r->ticked = fmap[i] >= 0;
         r->slot = i;
     }
+    /* the IDE data port's byte order, under the floppies: only means
+     * something with ide on. Absent = native (config_file.c). */
+    r = drow(st, ROW_KEY, "ide_byteorder", 0, 0, DRIVE_SLOTS + 6, "");
+    r->ticked = sc_get(&st->cfg, st->sec, "ide_byteorder") != NULL;
+    r->blocked = !ide_on;
     (void)nf;
     /* right column: acsi 0..7, then hostfs lines and an add row */
     /* a Falcon has no ACSI port: the column greys, the lines stay */
@@ -1373,7 +1378,14 @@ static void draw_drives(struct ss_screen *ss, const struct state *st)
         int on = st->sel == k, grey = 0;
         const char *v = sc_get_n(&st->cfg, st->sec, r->text, r->ord);
         switch (r->kind) {
-        case ROW_KEY:                         /* ide, acsi */
+        case ROW_KEY:                         /* ide, acsi, ide_byteorder */
+            if (!strcasecmp(r->text, "ide_byteorder")) {
+                snprintf(cell, sizeof cell, "%s byteorder %.20s",
+                         r->blocked ? "[-]" : r->ticked ? "[x]" : "[ ]",
+                         r->ticked && v ? v : "native (default)");
+                grey = r->blocked || !r->ticked;
+                break;
+            }
             snprintf(cell, sizeof cell, "%s %-6.6s(disk_path)", r->ticked ? "[x]" : "[ ]", r->text);
             grey = !r->ticked;
             break;
