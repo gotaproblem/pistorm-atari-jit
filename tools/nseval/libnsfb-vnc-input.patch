@@ -1,0 +1,175 @@
+diff --git a/src/surface/vnc.c b/src/surface/vnc.c
+index ca9455b..58da9b0 100644
+--- a/src/surface/vnc.c
++++ b/src/surface/vnc.c
+@@ -23,7 +23,36 @@
+ 
+ #define UNUSED(x) ((x) = (x))
+ 
+-static nsfb_event_t *gevent;
++/* Input from the VNC callbacks is queued: one rfbProcessEvents() call can
++ * deliver several pointer/key messages, and each must reach NetSurf. */
++#define VNC_EVQ_SIZE 256
++static nsfb_event_t vnc_evq[VNC_EVQ_SIZE];
++static unsigned int vnc_evq_head, vnc_evq_tail;
++
++static void vnc_evq_push(enum nsfb_event_type_e type, int code, int x, int y)
++{
++    nsfb_event_t *ev;
++
++    if (vnc_evq_tail - vnc_evq_head >= VNC_EVQ_SIZE)
++	return; /* full: drop */
++    ev = &vnc_evq[vnc_evq_tail++ % VNC_EVQ_SIZE];
++    ev->type = type;
++    if (type == NSFB_EVENT_MOVE_ABSOLUTE) {
++	ev->value.vector.x = x;
++	ev->value.vector.y = y;
++	ev->value.vector.z = 0;
++    } else {
++	ev->value.keycode = code;
++    }
++}
++
++static bool vnc_evq_pop(nsfb_event_t *event)
++{
++    if (vnc_evq_head == vnc_evq_tail)
++	return false;
++    *event = vnc_evq[vnc_evq_head++ % VNC_EVQ_SIZE];
++    return true;
++}
+ 
+ /* vnc special set codes */
+ static enum nsfb_key_code_e vnc_nsfb_map[256] = {
+@@ -288,56 +317,29 @@ static enum nsfb_key_code_e vnc_nsfb_map[256] = {
+ 
+ static void vnc_doptr(int buttonMask,int x,int y,rfbClientPtr cl)
+ {
++    static const enum nsfb_key_code_e btn[5] = {
++	NSFB_KEY_MOUSE_1, NSFB_KEY_MOUSE_2, NSFB_KEY_MOUSE_3,
++	NSFB_KEY_MOUSE_4, NSFB_KEY_MOUSE_5
++    };
+     static int prevbuttonMask = 0;
++    static int prevx = -1, prevy = -1;
++    int changed = prevbuttonMask ^ buttonMask;
++    int i;
+ 
+     UNUSED(cl);
+ 
+-    if (prevbuttonMask != buttonMask) {
+-	/* button click */
+-	if (((prevbuttonMask ^ buttonMask) & 0x01) == 0x01) {
+-	    if ((buttonMask & 0x01) == 0x01) {
+-		gevent->type = NSFB_EVENT_KEY_DOWN;
+-	    } else {
+-		gevent->type = NSFB_EVENT_KEY_UP;
+-	    }
+-	    gevent->value.keycode = NSFB_KEY_MOUSE_1;
+-	} else if (((prevbuttonMask ^ buttonMask) & 0x02) == 0x02) {
+-	    if ((buttonMask & 0x01) == 0x01) {
+-		gevent->type = NSFB_EVENT_KEY_DOWN;
+-	    } else {
+-		gevent->type = NSFB_EVENT_KEY_UP;
+-	    }
+-	    gevent->value.keycode = NSFB_KEY_MOUSE_2;
+-	} else if (((prevbuttonMask ^ buttonMask) & 0x04) == 0x04) {
+-	    if ((buttonMask & 0x01) == 0x01) {
+-		gevent->type = NSFB_EVENT_KEY_DOWN;
+-	    } else {
+-		gevent->type = NSFB_EVENT_KEY_UP;
+-	    }
+-	    gevent->value.keycode = NSFB_KEY_MOUSE_3;
+-	} else if (((prevbuttonMask ^ buttonMask) & 0x08) == 0x08) {
+-	    if ((buttonMask & 0x01) == 0x01) {
+-		gevent->type = NSFB_EVENT_KEY_DOWN;
+-	    } else {
+-		gevent->type = NSFB_EVENT_KEY_UP;
+-	    }
+-	    gevent->value.keycode = NSFB_KEY_MOUSE_4;
+-	} else if (((prevbuttonMask ^ buttonMask) & 0x10) == 0x10) {
+-	    if ((buttonMask & 0x01) == 0x01) {
+-		gevent->type = NSFB_EVENT_KEY_DOWN;
+-	    } else {
+-		gevent->type = NSFB_EVENT_KEY_UP;
+-	    }
+-	    gevent->value.keycode = NSFB_KEY_MOUSE_5;
+-	} 
+-	prevbuttonMask = buttonMask;
+-    } else {
+-	gevent->type = NSFB_EVENT_MOVE_ABSOLUTE;
+-	gevent->value.vector.x = x;
+-	gevent->value.vector.y = y;
+-	gevent->value.vector.z = 0;	
++    /* position first, so a click lands where the pointer is */
++    if (x != prevx || y != prevy) {
++	vnc_evq_push(NSFB_EVENT_MOVE_ABSOLUTE, 0, x, y);
++	prevx = x;
++	prevy = y;
+     }
+-
++    for (i = 0; i < 5; i++) {
++	if (changed & (1 << i))
++	    vnc_evq_push((buttonMask & (1 << i)) ? NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP,
++			 btn[i], 0, 0);
++    }
++    prevbuttonMask = buttonMask;
+ }
+ 
+ 
+@@ -355,14 +357,7 @@ static void vnc_dokey(rfbBool down, rfbKeySym key, rfbClientPtr cl)
+ 	keycode = vnc_nsfb_map[(key & 0xff)];
+     }
+ 
+-    if (down == 0) {
+-	/* key up */
+-	gevent->type = NSFB_EVENT_KEY_UP;
+-    } else {
+-	/* key down */
+-	gevent->type = NSFB_EVENT_KEY_DOWN;
+-    }
+-    gevent->value.keycode = keycode;
++    vnc_evq_push(down ? NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP, keycode, 0, 0);
+ 
+ }
+ 
+@@ -486,27 +481,23 @@ static int vnc_update(nsfb_t *nsfb, nsfb_bbox_t *box)
+ static bool vnc_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
+ {
+     rfbScreenInfoPtr vncscreen = nsfb->surface_priv;
+-    int ret;
+ 
+-    if (vncscreen != NULL) {
++    if (vncscreen == NULL)
++	return false;
+ 
+-	gevent = event; /* blergh - have to use global state to pass data */
+-
+-	/* set default to timeout */
+-	event->type = NSFB_EVENT_CONTROL;
+-	event->value.controlcode = NSFB_CONTROL_TIMEOUT;
+-
+-	ret = rfbProcessEvents(vncscreen, timeout * 1000);
+-	if (ret == 0) {
+-	    /* valid event */
+-	    return true;
+-	    
+-	} 
+-	
+-	/* connection error occurred */
++    /* rfbProcessEvents() returns TRUE when it sent an update to a client,
++     * not on error, so its result says nothing about input. */
++    if (!vnc_evq_pop(event)) {
++	rfbProcessEvents(vncscreen, timeout < 0 ? 100000 : timeout * 1000L);
++	if (!vnc_evq_pop(event)) {
++	    event->type = NSFB_EVENT_CONTROL;
++	    event->value.controlcode = NSFB_CONTROL_TIMEOUT;
++	}
++    } else {
++	/* still push pending screen updates out while draining input */
++	rfbProcessEvents(vncscreen, 0);
+     }
+-
+-    return false;
++    return true;
+ }
+ 
+ static int

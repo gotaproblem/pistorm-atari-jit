@@ -28,7 +28,10 @@ sudo apt install --no-install-recommends build-essential pkg-config git gperf \
 ```
 
 It clones NetSurf and its libraries from GitHub into `~/netsurf-eval`, prints
-each commit, then builds. The last line should list `netsurf/nsfb`.
+each commit, applies `libnsfb-vnc-input.patch`, then builds. The patch
+fixes libnsfb's VNC input: clicks and keys were dropped whenever a screen
+update went out, only one event survived each poll, and the scroll wheel
+never sent a press. The last line should list `netsurf/nsfb`.
 
 ## 3. Run
 
@@ -57,4 +60,5 @@ ps -o rss=,cmd= -C nsfb
 * Anything else you use from WEBGEM.
 
 For each, check: does the page look right? Is scrolling usable? Does what
-needs JavaScript (menus, logins, buttons) work? What is the RSS?
+needs JavaScript (menus, logins, buttons) work? What is the RSS? The status bar shows each page's load
+time (`Done (1.9s)`).

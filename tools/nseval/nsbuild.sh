@@ -7,11 +7,16 @@ INST=$WS/inst
 GH=https://github.com/netsurf-browser
 LIBS="libwapcaplet libparserutils libhubbub libdom libcss libnsgif libnsbmp libnsutils libnspsl libnslog libsvgtiny libnsfb"
 JOBS=$(nproc)
+HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$WS" && cd "$WS"
 for r in buildsystem nsgenbind $LIBS netsurf; do
     [ -d $r ] || git clone -q --depth 1 $GH/$r
     printf '%-16s %s\n' $r "$(git -C $r log -1 --format='%h %cs')"
 done
+# fix libnsfb's VNC input (dropped clicks/keys, broken scroll wheel)
+if git -C libnsfb apply --check "$HERE/libnsfb-vnc-input.patch" 2>/dev/null; then
+    git -C libnsfb apply "$HERE/libnsfb-vnc-input.patch" && echo "libnsfb: VNC input patch applied"
+fi
 export PKG_CONFIG_PATH=$INST/lib/pkgconfig
 export PATH=$INST/bin:$PATH
 export LD_LIBRARY_PATH=$INST/lib
@@ -22,5 +27,6 @@ for r in $LIBS; do
     make -C $r -j$JOBS install PREFIX=$INST >/dev/null
 done
 echo "building netsurf"
+rm -f netsurf/nsfb   # relink against the rebuilt static libraries
 make -C netsurf -j$JOBS TARGET=framebuffer PREFIX=$INST NETSURF_FB_FRONTEND=vnc NETSURF_FB_FONTLIB=freetype >/dev/null
 ls -l netsurf/nsfb
