@@ -341,7 +341,12 @@ static void on_mouse_target(WebKitWebView *view, WebKitHitTestResult *hit, guint
 static gboolean on_web_process_terminated(WebKitWebView *view, WebKitWebProcessTerminationReason why, gpointer u)
 {
     (void) view; (void) u;
-    DBG("web process terminated (%d)", (int) why);
+    /* Always logged: it is the only record of WHY WEBGEM shows "page
+     * crashed" (0 = crashed, 1 = over the memory limit, 2 = by the API). */
+    fprintf(stderr, "[psweb] web process terminated: %s\n",
+            why == WEBKIT_WEB_PROCESS_CRASHED ? "crashed" :
+            why == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "over the memory limit" :
+            "terminated by the API");
     V.flags |= PSWEB_FL_CRASHED;
     V.flags &= ~PSWEB_FL_LOADING;
     send_evt(PSWEB_EVT_CRASHED, (int32_t) why, 0, NULL);
@@ -722,6 +727,7 @@ static void handle_cmd(const struct psweb_cmd *c, const char *str)
             break;
         }
         case PSWEB_CMD_VIEW_FREE:
+            fprintf(stderr, "[psweb] view freed by the emulator%s\n", V.active ? "" : " (none open)");
             view_free();
             break;
         case PSWEB_CMD_VIEW_SIZE:
