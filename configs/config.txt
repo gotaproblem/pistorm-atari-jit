@@ -5,19 +5,14 @@
 # cryptodad
 # Sep 2023
 #
-
-[pi02]
-#overvoltage=6
-#arm_freq=1300
-core_freq=500
-gpu_mem=16
-
-
-[pi3]
-#overvoltage=6
-arm_freq=1500
-core_freq=500
-
+# One card, one emulator binary, every board: the firmware applies the
+# [model] section that matches the board it is running on, then [all].
+# ORDER MATTERS for keys that appear more than once - the LAST one wins -
+# so the per-board sections that override [all] come AFTER it, at the end.
+# A dtoverlay line is NOT a key: each one is loaded, and loading the same
+# overlay twice fails the boot (7 green flashes). vc4-kms-v3d therefore
+# appears once per board section and never in [all].
+#
 
 [pi4]
 # --- Clock ---------------------------------------------------------------
@@ -28,17 +23,10 @@ core_freq=500
 #over_voltage=6
 #arm_freq=2100
 arm_freq=1500
-
-
-[pi5]
-# Tested: CoreMark about 2700 at the stock 2.4 GHz - no overclock needed.
-# The JIT protects its memory in 4K pages; the Pi 5's default kernel
-# (kernel_2712.img) uses 16K pages. Boot the 4K-page kernel instead.
-kernel=kernel8.img
-
-
-[all]
-arm64bit=1
+# force_turbo pins the clocks at the arm_freq above: steadier bus timing.
+# Pi 4 only - see the [pi3]/[pi02] note below for why not on BCM2837.
+force_turbo=1
+arm_boost=1
 # 128 MB minimum - do NOT reduce. The VPU H.264 decoder (VIDPLAY film
 # playback) and encoder (avrecord screen recording) allocate their frame
 # buffers from gpu_mem. At 32 MB the decoder OPENS but never emits a frame
@@ -46,9 +34,25 @@ arm64bit=1
 # killing it wedges the VPU ('failed to create component ril.video_decode'
 # in dmesg) until the next reboot.
 gpu_mem=128
-boot_delay=0
+# --- CRITICAL: Driver Compatibility ---
+# PiSTorm JIT needs this
+dtoverlay=vc4-kms-v3d
+
+
+[pi5]
+# Tested: CoreMark about 2700 at the stock 2.4 GHz - no overclock needed.
+# The JIT protects its memory in 4K pages; the Pi 5's default kernel
+# (kernel_2712.img) uses 16K pages. Boot the 4K-page kernel instead.
+kernel=kernel8.img
 force_turbo=1
 arm_boost=1
+gpu_mem=128
+dtoverlay=vc4-kms-v3d
+
+
+[all]
+arm64bit=1
+boot_delay=0
 initial_turbo=5
 temp_limit=80
 
@@ -69,10 +73,6 @@ temp_limit=80
 # - every pixel resampled, soft text. Off = 1:1 with the panel.
 disable_overscan=1
 
-# --- CRITICAL: Driver Compatibility ---
-# PiSTorm JIT needs this
-dtoverlay=vc4-kms-v3d
-
 # --- Visual Clean-up ---
 disable_splash=1
 
@@ -82,3 +82,38 @@ dtoverlay=gpio-no-irq
 # Disable Bluetooth
 dtoverlay=disable-bt
 
+
+# --- BCM2837 boards: Pi 3B / 3B+ / 3A+, Zero 2 W ----------------------------
+# Verified on a Pi 3A+ (18 Oct 2026):
+#
+# force_turbo: NOT on these boards. With force_turbo=1 the firmware refuses
+#   the vc4-hdmi driver's pixel-clock request (clk_summary showed fw-clk-pixel
+#   at a nonsense 2.4 GHz, pllh_pix idle at 86.4 MHz, vcgencmd measure_clock
+#   pixel = 86.4 MHz against a 1080p mode) and the monitor reports "invalid
+#   format" from the moment KMS binds. Stock clocks, HDMI works. The Pi 4's
+#   clock path does not go through that request, which is why it is fine there.
+#
+# core_freq: leave at the firmware default (400 on a 3A+/Zero 2 W). The old
+#   core_freq=500 came from the 3B+ and is a 25% overclock on the 3A+'s core;
+#   ataritest --memory was already clean at 400 once the read settle landed.
+#
+# Memory: a 512 MB board had gpu_mem=128 + the overlay's default 256 MB CMA
+#   taken before the kernel started, leaving ~150 MB for Linux + the emulator
+#   (whose pages are mlocked) - not enough. 64 + 128 leaves ~300 MB.
+#   gpu_mem=64 still runs the HDMI desktop at 1080p; VIDPLAY film playback
+#   and avrecord need the full 128 (see the [pi4] note) - not for these boards.
+#   [pi3] also matches the 3B (1 GB), which gets the same settings; raise
+#   gpu_mem back to 128 there if you use VIDPLAY/avrecord on a 3B.
+[pi3]
+#overvoltage=6
+#arm_freq=1500
+#core_freq=500
+gpu_mem=64
+dtoverlay=vc4-kms-v3d,cma-128
+
+[pi02]
+#overvoltage=6
+#arm_freq=1300
+#core_freq=500
+gpu_mem=64
+dtoverlay=vc4-kms-v3d,cma-128
