@@ -79,8 +79,9 @@ disable_splash=1
 # currently have to disable gpio irq
 dtoverlay=gpio-no-irq
 
-# Disable Bluetooth
-dtoverlay=disable-bt
+# Bluetooth stays ON: Xbox / Bluetooth game controllers (`usb gamepad`) and
+# Bluetooth keyboards need it. Uncomment only if nothing uses Bluetooth.
+#dtoverlay=disable-bt
 
 
 # --- BCM2837 boards: Pi 3B / 3B+ / 3A+, Zero 2 W ----------------------------

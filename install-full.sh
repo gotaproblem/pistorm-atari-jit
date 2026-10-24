@@ -431,6 +431,11 @@ if [ -e "$HERE/configs/config.txt" ]; then
     warn "config.txt already contains the PiStorm block — left as-is."
   else
     say "Appending PiStorm block to config.txt"
+    # The block loads vc4-kms-v3d once per board section (with cma-128 on
+    # the 512 MB boards). Stock Raspberry Pi OS loads it globally too, and a
+    # second load fails the boot on BCM2837 (7 green flashes) - so comment
+    # the stock line(s) out; the backup above keeps the original.
+    sudo sed -i 's/^\(dtoverlay=vc4-kms-v3d.*\)$/#\1   # PiStorm: loaded per board below/' "$BOOT/config.txt"
     printf '\n' | sudo tee -a "$BOOT/config.txt" >/dev/null
     sudo tee -a "$BOOT/config.txt" < "$HERE/configs/config.txt" >/dev/null
   fi
