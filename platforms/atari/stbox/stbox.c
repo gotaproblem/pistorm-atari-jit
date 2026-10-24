@@ -62,8 +62,15 @@
  * machine: worst case ~one slice (~0.4 us) plus this cap is added to its
  * IPL sample latency. 1500 ns reaches full speed with margin; the IPL
  * confirm window itself is 2000 ns. 0 = one slice per pass (old
- * behaviour). Override live with PISTORM_STBOX_SLICE_NS. */
-#define SLICE_HOST_CAP_NS 1500
+ * behaviour). Override live with PISTORM_STBOX_SLICE_NS.
+ *
+ * BCM2837 (Pi 3B/3A+/Zero 2 W): a slice takes ~1.3 us of A53 against ~0.4
+ * of A72, so 1500 ns fitted 1-2 slices per pass and every burst ended on
+ * the cap - measured 18 Oct 2026 on a 3A+: slices/s 86k, cps 5.5-7.5M,
+ * stop:cap == calls/s, games visibly slow. 3000 ns reaches full speed
+ * there and the main machine (APJ-OS, native mouse) still behaves. */
+#define SLICE_HOST_CAP_NS       1500
+#define SLICE_HOST_CAP_NS_A53   3000
 /* If the box falls behind (host stall, heavy IPL traffic), never try to
  * catch up more than one frame - drop the debt instead of marathoning. */
 #define MAX_DEBT_CYC   CYC_PER_VBL
@@ -97,13 +104,28 @@ static int64_t  g_cyc_debt_fp;     /* owed guest cycles, 32.32, SIGNED:
 static uint64_t g_fp_step;         /* (ST_CPU_HZ << 32) / cntfrq        */
 static uint64_t g_slice_cap_ticks; /* SLICE_HOST_CAP_NS in arch ticks; 0=off */
 static int      g_slice_cap_ns = -1;
+/* 1 on BCM2837, from the device tree the same way ps_peri_base() does it;
+ * self-contained so the headless harness (tools/stbox-harness, no gpio/)
+ * still links. Unknown/unreadable = 0 = Pi 4 default. */
+static int host_is_bcm2837(void)
+{
+    FILE *f = fopen("/proc/device-tree/compatible", "r");
+    char buf[128] = {0};
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    for (size_t i = 0; i + 7 < n; i++)       /* NUL-separated string list */
+        if (!memcmp(buf + i, "bcm2837", 7)) return 1;
+    return 0;
+}
 static int slice_cap_ns(void)
 {
     if (g_slice_cap_ns < 0) {
+        const int dflt = host_is_bcm2837() ? SLICE_HOST_CAP_NS_A53 : SLICE_HOST_CAP_NS;
         const char *e = getenv("PISTORM_STBOX_SLICE_NS");
-        g_slice_cap_ns = e ? atoi(e) : SLICE_HOST_CAP_NS;
+        g_slice_cap_ns = e ? atoi(e) : dflt;
         if (g_slice_cap_ns < 0 || g_slice_cap_ns > 10000)
-            g_slice_cap_ns = SLICE_HOST_CAP_NS;
+            g_slice_cap_ns = dflt;
     }
     return g_slice_cap_ns;
 }

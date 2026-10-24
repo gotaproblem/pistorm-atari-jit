@@ -5605,7 +5605,35 @@ static void do_interrupt (int nr)
 				(unsigned)m68k_getpc(), regs.stopped, spurious_iack_count + 1);
 			}
 			spurious_iack_count++;
-			if (++noack_retries < 2)
+			/* FIRST, not after two retries: did the MFP service this IACK?
+			 * Pi 3A+ / H5, 2026-10-18 (ataritest --mfp iack=yes): the IACK
+			 * cycle has an intrinsic failure rate on this board - 5 bus
+			 * errors in 100000 with the CPU halted, ~1e-3 live - where the
+			 * 68901 sets the channel in service and drops IRQ but the
+			 * cycle is reported BERR to the Pi. That is CPLD-vs-MFP IACK
+			 * termination timing (firmware), not something this side can
+			 * cure; but the chip itself says which channel it acked, so
+			 * one ISR read delivers the right vector at once instead of
+			 * two more failed bus IACKs (the retry path fired them into a
+			 * now-idle MFP: erratic mouse, keyboard-buffer beeps). Only
+			 * if nothing is in service did the cycle not reach the MFP,
+			 * and then the old retry logic applies unchanged. */
+			const uae_u8 early_isr_vector = atari_recover_mfp_vector_from_isrb();
+			if (early_isr_vector >= 0x40 && early_isr_vector <= 0x4F)
+			{
+				static uint32_t fast_recover_count;
+				pistorm_iack_vector = early_isr_vector;
+				if (ATARI_MFP_IACK_DIAG && (fast_recover_count < 8 || (fast_recover_count & 0x3ff) == 0))
+				{
+					fprintf(stderr, "[MFPACK->ISRFAST] vec=%02X pc=%08X stopped=%d count=%u\n",
+						(unsigned)pistorm_iack_vector, (unsigned)m68k_getpc(),
+						regs.stopped, fast_recover_count + 1);
+				}
+				fast_recover_count++;
+				noack_retries = 0;
+				noack_candidate_vec = 0;
+			}
+			else if (++noack_retries < 2)
 			{
 				pistorm_iack_vector = 0xFFFF;
 				interrupt_taken = false;

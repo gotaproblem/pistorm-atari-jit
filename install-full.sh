@@ -192,7 +192,8 @@ require_jit() {
     *"Pi 4"*|*"Pi 400"*|*"Compute Module 4"*) ;;
     *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*) ;;
     *"Pi 3 Model B"*) ;;                       # 3B / 3B+: 1 GB RAM
-    *) warn "Unrecognised board '$model' — supported: Pi 4, Pi 3B/3B+ (Pi 5 experimental). Pi 3A+ / Zero 2 W have only 512 MB" ;;
+    *"Pi 3 Model A"*|*"Zero 2"*) warn "512 MB board — runs, but build with 'make HEAVY_OPT=-O0' or on a bigger Pi and copy the binary (one build runs on every board)" ;;
+    *) warn "Unrecognised board '$model' — supported: Pi 4, Pi 3B/3B+/3A+, Zero 2 W (Pi 5 experimental)" ;;
   esac
   # RAM — compiling the CPU/JIT units is memory-hungry.
   local memmb; memmb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))

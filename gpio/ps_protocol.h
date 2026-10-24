@@ -86,8 +86,8 @@ void ps_bus_unlock (void);
 #endif
 
 /* Compile-time fallback only. The real base is found at run time from the
- * device tree (ps_peri_base() in ps_protocol.c), so one binary finds the
- * Pi 4's (BCM2711, 0xFE000000) and a Pi 3's (BCM2837, 0x3F000000) GPIO.
+ * device tree (ps_peri_base() below) so ONE binary runs on the Pi 4 (BCM2711,
+ * 0xFE000000) and on the Pi 3B / 3A+ / Zero 2 W (BCM2837, 0x3F000000).
  * -DPI3 just picks which guess to use if the device tree can't be read. */
 #ifndef PI3
   #define BCM2708_PERI_BASE	0xFE000000

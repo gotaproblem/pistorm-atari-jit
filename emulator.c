@@ -2,9 +2,9 @@
 
 #include <signal.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/mman.h>
@@ -2029,7 +2029,6 @@ void *cpu_task(void *)
   param.sched_priority = 99; // Highest possible priority
   sched_setscheduler(0, SCHED_FIFO, &param);
 
-  // Lock memory to prevent swapping to SD card (causes random hangs)
   /* Lock memory to prevent swapping to SD card (causes random hangs).
    *
    * MCL_ONFAULT: lock pages as they are first touched instead of faulting
@@ -2037,10 +2036,11 @@ void *cpu_task(void *)
    * natmem reserve (ST 16 MB + the 256 MB TT-RAM ceiling), the 16 MB fVDI
    * framebuffer and the 112 MB PSVIDEL VRAM window regardless of what the
    * cfg actually uses - ~300 MB locked (~410 MB with psvidel) before TOS
-   * runs a byte; the MAP_NORESERVE on those mmaps was being defeated here.
+   * runs a byte, which is why the 512 MB boards (Pi 3A+, Zero 2 W) could
+   * not boot. The MAP_NORESERVE on those mmaps was being defeated here.
    * Pages the guest never touches now cost nothing; pages it does touch are
-   * locked exactly as before. PISTORM_MLOCK=all restores the old behaviour.
-   * (From branch small-boards, c9b8ff2.) */
+   * locked exactly as before. PISTORM_MLOCK=all restores the old behaviour
+   * for A/B testing on big-RAM boards. */
   {
     const char *m = getenv("PISTORM_MLOCK");
     int flags = MCL_CURRENT | MCL_FUTURE;
