@@ -192,7 +192,8 @@ require_jit() {
     *"Pi 4"*|*"Pi 400"*|*"Compute Module 4"*) ;;
     *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*) ;;
     *"Pi 3 Model B"*) ;;                       # 3B / 3B+: 1 GB RAM
-    *) warn "Unrecognised board '$model' — supported: Pi 4, Pi 3B/3B+ (Pi 5 experimental). Pi 3A+ / Zero 2 W have only 512 MB" ;;
+    *"Pi 3 Model A"*|*"Zero 2"*) warn "512 MB board — runs, but build with 'make HEAVY_OPT=-O0' or on a bigger Pi and copy the binary (one build runs on every board)" ;;
+    *) warn "Unrecognised board '$model' — supported: Pi 4, Pi 3B/3B+/3A+, Zero 2 W (Pi 5 experimental)" ;;
   esac
   # RAM — compiling the CPU/JIT units is memory-hungry.
   local memmb; memmb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo) / 1024 ))
@@ -431,6 +432,11 @@ if [ -e "$HERE/configs/config.txt" ]; then
     warn "config.txt already contains the PiStorm block — left as-is."
   else
     say "Appending PiStorm block to config.txt"
+    # The block loads vc4-kms-v3d once per board section (with cma-128 on
+    # the 512 MB boards). Stock Raspberry Pi OS loads it globally too, and a
+    # second load fails the boot on BCM2837 (7 green flashes) - so comment
+    # the stock line(s) out; the backup above keeps the original.
+    sudo sed -i 's/^\(dtoverlay=vc4-kms-v3d.*\)$/#\1   # PiStorm: loaded per board below/' "$BOOT/config.txt"
     printf '\n' | sudo tee -a "$BOOT/config.txt" >/dev/null
     sudo tee -a "$BOOT/config.txt" < "$HERE/configs/config.txt" >/dev/null
   fi

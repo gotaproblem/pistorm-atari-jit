@@ -111,6 +111,11 @@ volatile uint32_t g_buserr_addr = 0;
 
 static atomic_flag ps_txn_lock = ATOMIC_FLAG_INIT;
 
+/* Extra GPLEV samples after TXN falls on a read, before the data is taken.
+ * Set in ps_setup_protocol: 0 on BCM2711, 2 on BCM2837, PISTORM_RD_SETTLE
+ * overrides (0..8). See the comment in ps_read_txn. */
+static int ps_rd_settle = 0;
+
 /* Raised for the whole time a thread owns the bus - i.e. the window in
  * which the Pi may be DRIVING the GPIO bank (address/data phases flip
  * GPFSEL to output). GPLEV0 then reads back the driven values, so an
@@ -304,11 +309,63 @@ static void rp1_setup_pins ( void )
   *rio_oe_set = PS_OUT_PINS;
 }
 #else
-static void create_dev_mem_mapping () 
+/* Peripheral base from the device tree, so one build serves every board.
+ * /proc/device-tree/soc/ranges is big-endian cells:
+ *   BCM2837 (Pi 3B/3A+/Zero 2 W): <7e000000 3f000000 01000000>
+ *                                 child(1) parent(1) size(1)
+ *   BCM2711 (Pi 4/400/CM4):       <7e000000 00000000 fe000000 01800000> [...]
+ *                                 child(1) parent(2) size(1)
+ * The parent address is the cell(s) after the 0x7e000000 child address;
+ * the high parent cell is 0 on BCM2711, so the first non-zero cell wins. */
+uint32_t ps_peri_base ( void )
+{
+  static uint32_t base = 0;
+  if ( base )
+    return base;
+
+  uint8_t buf [64];
+  int fd = open ( "/proc/device-tree/soc/ranges", O_RDONLY );
+  if ( fd >= 0 )
+  {
+    ssize_t n = read ( fd, buf, sizeof buf );
+    close ( fd );
+    for ( int i = 1; n >= 12 && i < n / 4; i++ )
+    {
+      uint32_t c = (uint32_t)buf [4*i] << 24 | (uint32_t)buf [4*i+1] << 16 |
+                   (uint32_t)buf [4*i+2] << 8 | buf [4*i+3];
+      if ( c == 0 )
+        continue;                            /* high half of a 2-cell parent */
+      if ( c == 0x3F000000u || c == 0xFE000000u || c == 0x20000000u )
+      {
+        base = c;
+        break;
+      }
+      break;                                 /* unexpected layout: fall back */
+    }
+  }
+
+  if ( !base )
+  {
+    base = BCM2708_PERI_BASE;
+    printf ( "[GPIO] device tree unreadable - assuming peripheral base 0x%08X\n", base );
+  }
+  else
+    printf ( "[GPIO] peripheral base 0x%08X (%s)\n", base,
+             base == 0xFE000000u ? "BCM2711 / Pi 4" : "BCM2837 / Pi 3, Zero 2 W" );
+
+  return base;
+}
+
+int ps_host_is_bcm2837 ( void )
+{
+  return ps_peri_base () == 0x3F000000u;
+}
+
+static void create_dev_mem_mapping ()
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );
-  
-  if ( fd < 0 ) 
+
+  if ( fd < 0 )
   {
     printf ( "Unable to open /dev/mem.\n" );
     exit ( -1 );
@@ -320,7 +377,7 @@ static void create_dev_mem_mapping ()
       PROT_READ | PROT_WRITE,  // Enable reading & writting to mapped memory
       MAP_SHARED,              // Shared with other processes
       fd,                      // File to map
-      BCM2708_PERI_BASE        // Offset to GPIO peripheral
+      ps_peri_base ()          // Offset to GPIO peripheral (run-time detected)
   );
 
   close(fd);
@@ -441,6 +498,17 @@ void ps_setup_protocol ( void )
 {
   create_dev_mem_mapping ();
   setup_gpclk ();
+
+#ifndef PI5
+  {
+    const char *e = getenv ("PISTORM_RD_SETTLE");
+    ps_rd_settle = e ? atoi (e) : (ps_peri_base () == 0x3F000000u ? 2 : 0);
+    if (ps_rd_settle < 0) ps_rd_settle = 0;
+    if (ps_rd_settle > 8) ps_rd_settle = 8;
+    printf ("[GPIO] read settle %d GPLEV sample%s after TXN%s\n", ps_rd_settle,
+            ps_rd_settle == 1 ? "" : "s", e ? " (PISTORM_RD_SETTLE)" : "");
+  }
+#endif
 
 #ifdef PI5
   rp1_setup_pins ();
@@ -779,22 +847,20 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
    * on a clock edge with datasheet setup; this loop sampled on a race.
    *
    * Each extra GPLEV read adds ~50-100ns of settle after the TXN edge.
-   * Sweep result: 1 was not enough, 4 is clean. PISTORM_RD_SETTLE tunes. */
-#if (0)
-  {
-    static int rd_settle = -1;
+   * Sweep result: 1 was not enough, 4 is clean.
+   *
+   * 2026-10-18: BCM2837 (Pi 3A+/3B/Zero 2 W) reads the GPIO block faster
+   * than BCM2711, so with zero settle the sample lands on the edge and
+   * ataritest shows ~0.02% of reads returning 0000/FFFF or echoes of the
+   * opcode byte ($0300/$0100/$0081), at stock clocks. Sweep on a 3A+:
+   * 0 fails, 1..3 clean with identical throughput, so the BCM2837 default
+   * is 2 (one sample above the edge). BCM2711's ~74 ns GPLEV read is settle
+   * enough on its own, so the Pi 4 default stays 0.
+   * ps_rd_settle is set once in ps_setup_protocol (per SoC, or from
+   * PISTORM_RD_SETTLE); the loop below is one predictable branch when 0. */
+  for (int i = 0; i < ps_rd_settle; i++)
+    status = *lev;
 
-    if (__builtin_expect(rd_settle < 0, 0)) {
-      const char *e = getenv("PISTORM_RD_SETTLE");
-      rd_settle = e ? atoi(e) : 4;
-      if (rd_settle < 0) rd_settle = 0;
-      if (rd_settle > 8) rd_settle = 8;
-    }
-
-    for (int i = 0; i < rd_settle; i++)
-      status = *lev;
-  }
-#endif
   *clr = TXN_END;
   PS_BUS_OUT ();
   ps_io->berr = CHECK_BERR (status);
@@ -836,19 +902,28 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
          * changes after four consecutive reads agree, 80 ms at TOS's
          * poll rate, so a real monitor swap still works. */
         static int run = 0;
+        static uint16_t bad_val = 0; static uint32_t bad_st = 0;
         int bit = (ps_io->data & 0x0080u) ? 1 : 0;
         if (ps_gpip7_stable < 0)
           ps_gpip7_stable = bit;
         else if (bit != ps_gpip7_stable) {
+          bad_val = (uint16_t)ps_io->data; bad_st = status;   /* what was actually read */
           if (++run >= 4) {
             ps_gpip7_stable = bit; run = 0;
             fprintf (stderr, "[GPIP] monitor detect now %s\n", bit ? "COLOUR" : "MONO");
           }
         } else if (run) {
           if (ps_gpip7_glitches < 8)
-            fprintf (stderr, "[GPIP] monitor-detect glitch: read %s %d time%s, kept %s\n",
+            /* The byte read on the last disagreeing sample is the fact that
+             * matters: $6F (bit 7 alone) = the wire went low; $00/$80/$FF or
+             * other bits off = a corrupted transfer. Also the raw GPLEV word
+             * (status bits 0-7 = CPLD status incl. IPL/BERR) and the size. */
+            fprintf (stderr, "[GPIP] monitor-detect glitch: read %s %d time%s, kept %s "
+                             "(value $%0*X %s, gplev=%08X)\n",
                      ps_gpip7_stable ? "mono" : "colour", run, run == 1 ? "" : "s",
-                     ps_gpip7_stable ? "colour" : "mono");
+                     ps_gpip7_stable ? "colour" : "mono",
+                     ps_io->io_type == READ_BYTE ? 2 : 4, bad_val,
+                     ps_io->io_type == READ_BYTE ? "byte $FFFA01" : "word $FFFA00", bad_st);
           ps_gpip7_glitches++;
           run = 0;
         }

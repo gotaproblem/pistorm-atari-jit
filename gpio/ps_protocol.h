@@ -85,11 +85,23 @@ void ps_bus_unlock (void);
   #error "USING_PI_CLK (GPCLK0 on GPIO4) is not implemented for the Pi 5 / RP1"
 #endif
 
+/* Compile-time fallback only. The real base is found at run time from the
+ * device tree (ps_peri_base() below) so ONE binary runs on the Pi 4 (BCM2711,
+ * 0xFE000000) and on the Pi 3B / 3A+ / Zero 2 W (BCM2837, 0x3F000000).
+ * -DPI3 just picks which guess to use if the device tree can't be read. */
 #ifndef PI3
   #define BCM2708_PERI_BASE	0xFE000000
 #else
   #define BCM2708_PERI_BASE 0x3F000000
 #endif
+
+/* Physical address of the BCM283x/BCM2711 peripheral window, read from
+ * /proc/device-tree/soc/ranges the way bcm_host_get_peripheral_address()
+ * does; falls back to BCM2708_PERI_BASE. Cached after the first call. */
+uint32_t ps_peri_base ( void );
+/* 1 on BCM2837 boards (Pi 3B/3B+/3A+, Zero 2 W: peripheral base 0x3F000000),
+ * 0 on the Pi 4. For behaviour measured and needed only on the small boards. */
+int ps_host_is_bcm2837 ( void );
 
 #define BCM2708_PERI_SIZE 0x01000000
 

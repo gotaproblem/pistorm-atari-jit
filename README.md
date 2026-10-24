@@ -31,6 +31,7 @@ Everything beyond this README is in [`doc/`](doc/):
 | [INSTALL-README.md](doc/INSTALL-README.md) | the installer (`install-full.sh`), file layout, the setup page |
 | [PSCTRL-CFG.md](doc/PSCTRL-CFG.md) | `psctrl.cfg`, key by key |
 | [PERF-TUNING.md](doc/PERF-TUNING.md) | performance tuning |
+| [SMALL-BOARDS.md](doc/SMALL-BOARDS.md) | Pi 3A+ / Zero 2 W (512 MB, BCM2837): findings, budget, recovery |
 | [VIDEO.md](doc/VIDEO.md) | host video playback (VIDPLAY NatFeat) |
 | [PSVIDEL.md](doc/PSVIDEL.md) | Falcon Videl and SuperVidel on HDMI |
 | [FALCON-DSP.md](doc/FALCON-DSP.md) | Falcon DSP56001 and sound matrix |

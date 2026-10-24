@@ -58,6 +58,7 @@ int  memTest ( int direction, int type, uint32_t startAdd, uint32_t length, uint
 void clearmem ( uint32_t length, uint32_t *duration, uint16_t pattern, int8_t loop );
 void setMemory ( uint32_t size );
 void peek ( uint32_t start );
+void mfptest ( uint32_t count, int irq, int iack );
 void poke ( uint32_t address, uint8_t data );
 void dump ( uint32_t ROMsize, uint32_t ROMaddress );
 void memspeed ( uint32_t length );
@@ -84,6 +85,10 @@ int errorStop;
 uint32_t padd;
 uint8_t pdata;
 int cmdPeek = 0;
+int cmdMfp = 0;
+int mfpIrq = 0;
+int mfpIack = 0;
+uint32_t mfpCount = 100000;
 int cmdPoke = 0;
 int cmdMem = 0;
 int cmdDump = 0;
@@ -324,6 +329,9 @@ int main ( int argc, char *argv[] )
                 peek ( padd );
         }
 
+        if ( cmdMfp )
+            mfptest ( mfpCount, mfpIrq, mfpIack );
+
         if ( cmdDump )
         {
             printf ( "Dumping onboard ATARI ROM from 0x%X to file tos.rom\n", ROMaddress );
@@ -483,6 +491,11 @@ test_loop:
                  "     At least one test must be supplied.\n"
                  "     <loop> repeats tests until CNTRL-C is entered.\n"
                  "     <stop> aborts tests on an error.\n"
+                 "--mfp <count=N> <irq=yes> <iack=yes>\n"
+                 "     Read-stability test of MFP/ACIA registers (bit errors on\n"
+                 "     peripheral reads). Default 100000 reads per register.\n"
+                 "     <irq=yes> holds an MFP interrupt asserted during the reads.\n"
+                 "     <iack=yes> adds real level-6 IACK cycles with a GPIP read after each.\n"
                  "--peek address=xxxxxx <loop=yes>\n"
                  "     examine address.\n"
                  "     displays 256 bytes from address.\n"
@@ -558,6 +571,192 @@ void memspeed ( uint32_t length )
         ( 1.0 / ( (float)(nanoEnd - nanoStart) ) * length ) / 1024 );     /* MB/s */
 }
 
+
+
+/* --mfp count=N
+ *
+ * Bit-error rate on reads of the MFP and the keyboard ACIA, with the 68k
+ * halted (PiStorm holds the bus, so nothing else touches these chips).
+ * Written for the Pi 3A+: ataritest --memory was clean while the emulator
+ * saw GPIP bit 7 read low and IACK vectors read $4F for $45 - both bit
+ * errors on D0-D7 of DTACK-terminated 68901 reads, which --memory never
+ * exercises. Every register here is static with the CPU halted, so any
+ * disagreement between consecutive reads IS a bus read error.
+ *   $FFFA01 GPIP  - bit 7 = monitor detect (1 = colour with an ST-SCART lead)
+ *   $FFFA03 AER, $FFFA05 DDR, $FFFA07 IERA, $FFFA09 IERB, $FFFA17 VR
+ *   $FFFC00 ACIA keyboard status - a VPA / E-clock cycle, the slowest on
+ *                the bus and the one the H5 hang was seen on
+ *   $000600 RAM byte as the control
+ * Prints, per register: distinct values seen with their counts, the number
+ * of reads that differed from the majority value, and bus errors.
+ *
+ * irq=yes: before the loop, Timer D is set to interrupt (TDDR=1, /4
+ * prescale, IERB/IMRB bit 4) and is never acknowledged, so the 68901 holds
+ * IRQ asserted - IPL=6 on the CPLD - for every read. That is the one
+ * condition the halted test lacks and the live emulator always has while
+ * the keyboard ISR reads GPIP (it runs straight after the IACK, with the
+ * ACIA line active). Registers are restored afterwards. */
+void mfptest ( uint32_t count, int irq, int iack )
+{
+    static const struct { uint32_t addr; const char *name; } regs [] = {
+        { 0xFFFA01, "GPIP  " }, { 0xFFFA03, "AER   " }, { 0xFFFA05, "DDR   " },
+        { 0xFFFA07, "IERA  " }, { 0xFFFA09, "IERB  " }, { 0xFFFA17, "VR    " },
+        { 0xFFFC00, "ACIAst" }, { 0x000600, "RAM   " },
+    };
+    const int nregs = (int)(sizeof regs / sizeof regs [0]);
+    uint32_t total_bad = 0;
+
+    uint8_t sv_ierb = 0, sv_imrb = 0, sv_tcdcr = 0, sv_tddr = 0, sv_vr = 0;
+    if ( irq )
+    {
+        uint8_t b;
+        sv_ierb  = ps_read_8_fc ( 0xFFFA09, fc, &b );
+        sv_imrb  = ps_read_8_fc ( 0xFFFA15, fc, &b );
+        sv_tcdcr = ps_read_8_fc ( 0xFFFA1D, fc, &b );
+        sv_tddr  = ps_read_8_fc ( 0xFFFA25, fc, &b );
+        sv_vr    = ps_read_8_fc ( 0xFFFA17, fc, &b );
+        ps_write_8 ( 0xFFFA1D, sv_tcdcr & 0xF0 );     /* Timer D stopped */
+        /* A channel left in-service by a crashed guest (software EOI
+         * mode) masks every lower channel: seen ISRB=$40 (keyboard ACIA)
+         * blocking Timer D. Clear in-service and pending on both halves. */
+        ps_write_8 ( 0xFFFA0F, 0x00 );                /* ISRA */
+        ps_write_8 ( 0xFFFA11, 0x00 );                /* ISRB */
+        ps_write_8 ( 0xFFFA0B, 0x00 );                /* IPRA */
+        ps_write_8 ( 0xFFFA0D, 0x00 );                /* IPRB */
+        ps_write_8 ( 0xFFFA17, 0x48 );                /* vector base $40, S=1 (software EOI) */
+        ps_write_8 ( 0xFFFA25, 0x01 );                /* TDDR = 1 */
+        ps_write_8 ( 0xFFFA09, sv_ierb | 0x10 );      /* IERB bit 4 = Timer D */
+        ps_write_8 ( 0xFFFA15, sv_imrb | 0x10 );      /* IMRB bit 4 */
+        ps_write_8 ( 0xFFFA1D, (sv_tcdcr & 0xF0) | 0x01 ); /* /4: fires in ~2 us, every 2 us */
+        usleep ( 100 );
+        {
+            uint8_t ipl = 0, ipr = ps_read_8_fc ( 0xFFFA0D, fc, &b ), isr = ps_read_8_fc ( 0xFFFA11, fc, &b );
+            ps_read_ipl ( &ipl );
+            printf ( "\nIRQ held: MFP IPRB=$%02X ISRB=$%02X, CPLD IPL=%u%s\n", ipr, isr, ipl,
+                     ipl == 6 ? "" : "  (expected 6 - the MFP is NOT asserting; results below are without IRQ)" );
+        }
+    }
+
+    printf ( "\nMFP / ACIA read stability - %u reads per register, CPU halted%s\n\n", count,
+             irq ? ", MFP IRQ asserted throughout" : "" );
+    printf ( " reg      addr     majority  errors  berr   values seen (value:count)\n" );
+
+    for ( int r = 0; r < nregs; r++ )
+    {
+        uint32_t hist [256];
+        uint32_t berrs = 0;
+        memset ( hist, 0, sizeof hist );
+
+        for ( uint32_t i = 0; i < count; i++ )
+        {
+            uint8_t berr = 0;
+            uint8_t v = ps_read_8_fc ( regs [r].addr, fc, &berr );
+            if ( berr )
+                berrs++;
+            else
+                hist [v]++;
+        }
+
+        int maj = 0;
+        for ( int v = 1; v < 256; v++ )
+            if ( hist [v] > hist [maj] )
+                maj = v;
+
+        uint32_t errors = 0;
+        for ( int v = 0; v < 256; v++ )
+            if ( v != maj )
+                errors += hist [v];
+        total_bad += errors + berrs;
+
+        printf ( " %s  $%06X  $%02X       %-7u %-6u", regs [r].name, regs [r].addr,
+                 maj, errors, berrs );
+        int shown = 0;
+        for ( int v = 0; v < 256; v++ )
+        {
+            if ( !hist [v] )
+                continue;
+            if ( shown++ == 12 ) { printf ( " ..." ); break; }
+            printf ( " $%02X:%u", v, hist [v] );
+        }
+        printf ( "\n" );
+
+        if ( regs [r].addr == 0xFFFA01 && errors )
+        {
+            /* which bits flip relative to the majority */
+            uint32_t bitflip [8] = { 0 };
+            for ( int v = 0; v < 256; v++ )
+                if ( hist [v] && v != maj )
+                    for ( int b = 0; b < 8; b++ )
+                        if ( ((v ^ maj) >> b) & 1 )
+                            bitflip [b] += hist [v];
+            printf ( "          GPIP bits that read wrong:" );
+            for ( int b = 7; b >= 0; b-- )
+                if ( bitflip [b] )
+                    printf ( " D%d:%u", b, bitflip [b] );
+            printf ( "\n" );
+        }
+    }
+
+    /* iack=yes (needs irq=yes): the real thing the live system does and
+     * nothing above does - a level-6 IACK cycle (FC=7, $FFFFFD), vector
+     * expected $44 (base $40 + Timer D ch4), then a GPIP read immediately
+     * after, as the keyboard ISR does. Software-EOI mode leaves ch4 in
+     * service, which drops IRQ; clear ISRB to re-arm, wait for IPRB bit 4
+     * (Timer D fires every ~2 us), repeat. */
+    if ( irq && iack )
+    {
+        uint32_t vhist [256], ghist [256], berrs = 0, noirq = 0, gpip_bad = 0, vbad = 0;
+        uint32_t n = count / 10 < 1000 ? 1000 : count / 10;   /* each pass is several cycles */
+        memset ( vhist, 0, sizeof vhist );
+        memset ( ghist, 0, sizeof ghist );
+
+        for ( uint32_t i = 0; i < n; i++ )
+        {
+            uint8_t b = 0, ipl = 0;
+            int w;
+            ps_write_8 ( 0xFFFA11, 0x00 );                 /* ISRB: end of service */
+            for ( w = 0; w < 1000; w++ )                    /* wait for Timer D to re-pend */
+            {
+                ps_read_ipl ( &ipl );
+                if ( ipl == 6 ) break;
+            }
+            if ( ipl != 6 ) { noirq++; continue; }
+
+            uint8_t v = ps_read_8_fc ( 0x00FFFFFDu, 7, &b );
+            if ( b ) { berrs++; continue; }
+            vhist [v]++;
+            if ( v != 0x44 ) vbad++;
+
+            uint8_t g = ps_read_8_fc ( 0xFFFA01, fc, &b );
+            ghist [g]++;
+            if ( g != 0xEF ) gpip_bad++;
+        }
+
+        printf ( "\nIACK cycles: %u  vector!=$44: %u  berr: %u  no-IRQ (timer did not re-pend): %u\n",
+                 n, vbad, berrs, noirq );
+        printf ( "  vectors seen:" );
+        for ( int v = 0; v < 256; v++ ) if ( vhist [v] ) printf ( " $%02X:%u", v, vhist [v] );
+        printf ( "\n  GPIP read right after IACK: %u != $EF; values:", gpip_bad );
+        for ( int v = 0; v < 256; v++ ) if ( ghist [v] ) printf ( " $%02X:%u", v, ghist [v] );
+        printf ( "\n" );
+        total_bad += vbad + berrs + gpip_bad;
+    }
+
+    if ( irq )
+    {
+        ps_write_8 ( 0xFFFA1D, sv_tcdcr & 0xF0 );
+        ps_write_8 ( 0xFFFA09, sv_ierb );
+        ps_write_8 ( 0xFFFA15, sv_imrb );
+        ps_write_8 ( 0xFFFA0D, 0xEF );                /* clear Timer D pending */
+        ps_write_8 ( 0xFFFA11, 0xEF );                /* and in-service */
+        ps_write_8 ( 0xFFFA25, sv_tddr );
+        ps_write_8 ( 0xFFFA1D, sv_tcdcr );
+        ps_write_8 ( 0xFFFA17, sv_vr );
+    }
+
+    printf ( "\n%s: %u bad reads in total%s\n\n", total_bad ? "FAIL" : "PASS", total_bad,
+             irq ? " (IRQ asserted)" : "" );
+}
 
 void peek ( uint32_t start )
 {
@@ -1885,6 +2084,41 @@ int parser ( int argc, char **argv )
             {
                 cmdClear = 1; 
             }   
+        }
+
+        if ( strcmp ( cmdptr, "mfp" ) == 0 )
+        {
+            valid = 1;
+            cmdMfp = 1;
+            substring = strtok_r ( NULL, " ", &strSave );
+
+            for ( ; substring != NULL; substring = strtok_r ( NULL, " ", &strSave ) )
+            {
+                aptr = strtok ( substring, "=" );
+
+                if ( strcmp ( aptr, "count" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    mfpCount = (uint32_t)atoi ( tptr );
+                    if ( mfpCount < 1000 ) mfpCount = 1000;
+                }
+
+                else if ( strcmp ( aptr, "irq" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    mfpIrq = ( strcmp ( tptr, "yes" ) == 0 );
+                }
+
+                else if ( strcmp ( aptr, "iack" ) == 0 )
+                {
+                    tptr = strtok ( NULL, "" );
+                    mfpIack = ( strcmp ( tptr, "yes" ) == 0 );
+                    if ( mfpIack ) mfpIrq = 1;
+                }
+
+                else
+                    valid = 0;
+            }
         }
 
         if ( strcmp ( cmdptr, "peek" ) == 0 )

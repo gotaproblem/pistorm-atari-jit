@@ -2,6 +2,7 @@
 
 #include <signal.h>
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -2028,16 +2029,35 @@ void *cpu_task(void *)
   param.sched_priority = 99; // Highest possible priority
   sched_setscheduler(0, SCHED_FIFO, &param);
 
-  // Lock memory to prevent swapping to SD card (causes random hangs)
-  mlockall(MCL_CURRENT | MCL_FUTURE);
+  /* Lock memory to prevent swapping to SD card (causes random hangs).
+   *
+   * MCL_ONFAULT: lock pages as they are first touched instead of faulting
+   * every mapping in now. Without it, MCL_CURRENT pre-populates the whole
+   * natmem reserve (ST 16 MB + the 256 MB TT-RAM ceiling), the 16 MB fVDI
+   * framebuffer and the 112 MB PSVIDEL VRAM window regardless of what the
+   * cfg actually uses - ~300 MB locked (~410 MB with psvidel) before TOS
+   * runs a byte, which is why the 512 MB boards (Pi 3A+, Zero 2 W) could
+   * not boot. The MAP_NORESERVE on those mmaps was being defeated here.
+   * Pages the guest never touches now cost nothing; pages it does touch are
+   * locked exactly as before. PISTORM_MLOCK=all restores the old behaviour
+   * for A/B testing on big-RAM boards. */
+  {
+    const char *m = getenv("PISTORM_MLOCK");
+    int flags = MCL_CURRENT | MCL_FUTURE;
+    if (!(m && !strcmp(m, "all")))
+      flags |= MCL_ONFAULT;
+    if (mlockall(flags) != 0)
+      printf("[CPU] mlockall failed: %s\n", strerror(errno));
+  }
 
   while (!cpu_emulation_running);
 
   /* main() has now returned from jit_cpu_init(), so the translation cache
-   * exists, and mlockall(MCL_CURRENT|MCL_FUTURE) has faulted every mapping
-   * in: this is the moment the 2 MB-page coverage of natmem / JIT cache /
+   * exists: this is the moment the 2 MB-page coverage of natmem / JIT cache /
    * fVDI FB is final. (Before the spin-wait it would race jit_cpu_init and
-   * usually miss the cache.) One pass over /proc/self/smaps, once. */
+   * usually miss the cache.) With MCL_ONFAULT only the pages touched so far
+   * are resident, so natmem coverage reads lower than it used to; that is
+   * the point. One pass over /proc/self/smaps, once. */
   pistorm_hugepage_report();
 
   usleep(1000000);
