@@ -356,6 +356,11 @@ uint32_t ps_peri_base ( void )
   return base;
 }
 
+int ps_host_is_bcm2837 ( void )
+{
+  return ps_peri_base () == 0x3F000000u;
+}
+
 static void create_dev_mem_mapping ()
 {
   int fd = open ( "/dev/mem", O_RDWR | O_SYNC );

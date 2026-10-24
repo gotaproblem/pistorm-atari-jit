@@ -107,6 +107,7 @@ extern "C"
     /* ps_protocol.c (pointer convention - see gpio/ps_protocol.h) */
     void ps_read_ipl(uint8_t *);
     uint8_t ps_read_8_fc(uint32_t, uint8_t, uint8_t *);
+    int ps_host_is_bcm2837(void);
     uint16_t ps_read_16_fc(uint32_t, uint8_t, uint8_t *);
 
     /* pistorm_natmem.cpp */
@@ -640,10 +641,17 @@ void intlev_ack (uint8_t nr)
      * asserted either: it samples IPL at the start of the cycle. So:
      * re-read IPL now; if it is below `nr`, report no-ack WITHOUT touching
      * the bus and let the retry path above re-evaluate. Counted and logged
-     * (first 16, then every 1024th). PISTORM_IACK_CHECK=0 disables. */
+     * (first 16, then every 1024th).
+     *
+     * BCM2837 boards only (measured on the 3A+; the Pi 4 keeps main's
+     * behaviour until tested there). PISTORM_IACK_CHECK=1 forces it on,
+     * =0 off, on any board. */
     {
         static int chk = -1;
-        if (chk < 0) { const char *e = getenv("PISTORM_IACK_CHECK"); chk = !(e && *e == '0'); }
+        if (chk < 0) {
+            const char *e = getenv("PISTORM_IACK_CHECK");
+            chk = e ? (*e != '0') : ps_host_is_bcm2837();
+        }
         if (chk && nr >= 6)
         {
             uint8_t live = 0;

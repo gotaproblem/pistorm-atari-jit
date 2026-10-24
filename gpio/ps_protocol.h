@@ -99,6 +99,9 @@ void ps_bus_unlock (void);
  * /proc/device-tree/soc/ranges the way bcm_host_get_peripheral_address()
  * does; falls back to BCM2708_PERI_BASE. Cached after the first call. */
 uint32_t ps_peri_base ( void );
+/* 1 on BCM2837 boards (Pi 3B/3B+/3A+, Zero 2 W: peripheral base 0x3F000000),
+ * 0 on the Pi 4. For behaviour measured and needed only on the small boards. */
+int ps_host_is_bcm2837 ( void );
 
 #define BCM2708_PERI_SIZE 0x01000000
 

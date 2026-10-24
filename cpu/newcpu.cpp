@@ -3274,6 +3274,7 @@ static bool set_interrupt_mask_from_vector(const int nr)
 	return true;
 }
 
+extern "C" int ps_host_is_bcm2837(void);
 static uae_u8 atari_recover_mfp_vector_from_isrb(void)
 {
 #ifdef PISTORM_ATARI
@@ -5617,9 +5618,18 @@ static void do_interrupt (int nr)
 			 * two more failed bus IACKs (the retry path fired them into a
 			 * now-idle MFP: erratic mouse, keyboard-buffer beeps). Only
 			 * if nothing is in service did the cycle not reach the MFP,
-			 * and then the old retry logic applies unchanged. */
-			const uae_u8 early_isr_vector = atari_recover_mfp_vector_from_isrb();
-			if (early_isr_vector >= 0x40 && early_isr_vector <= 0x4F)
+			 * and then the old retry logic applies unchanged.
+			 * BCM2837 boards only (measured on the 3A+): the Pi 4 keeps
+			 * main's retry-first path until tested there.
+			 * PISTORM_IACK_ISRFAST=1 forces it on, =0 off, on any board. */
+			static int isr_fast = -1;
+			if (isr_fast < 0)
+			{
+				const char *e = getenv("PISTORM_IACK_ISRFAST");
+				isr_fast = e ? (*e != '0') : ps_host_is_bcm2837();
+			}
+			const uae_u8 early_isr_vector = isr_fast ? atari_recover_mfp_vector_from_isrb() : 0;
+			if (isr_fast && early_isr_vector >= 0x40 && early_isr_vector <= 0x4F)
 			{
 				static uint32_t fast_recover_count;
 				pistorm_iack_vector = early_isr_vector;
