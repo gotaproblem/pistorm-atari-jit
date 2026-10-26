@@ -343,13 +343,14 @@ chmod +x "$HERE/capmux.sh" 2>/dev/null || true
 # which that glob could never match - PSCTRL is an accessory.
 #
 # The fVDI/video tools ride along in the same folder: FVDIMODE (.PRG/.ACC)
-# is run from there; FVDICON.PRG, PSVIDEL.PRG and SETMCH.PRG belong in the
-# Atari's AUTO folder and are shipped here for copying across. SETMCH.PRG
-# is listed although it is not built yet (atari-tools/setmch, make on the
-# cross toolchain) - the warning below is how that shows.
+# is run from there; FVDICON.PRG and PSVIDEL.PRG belong in the Atari's
+# AUTO folder and are shipped here for copying across. SETMCH.PRG is not
+# listed: the cfg's `machine` key sets the _MCH cookie from the host, so
+# the emulator never needs it (atari-tools/setmch remains for real
+# hardware). DOSGEM.PRG is built from apj-os-tools/dosgem.
 GEM_APPS="PSCTRL.ACC PSCTRL.PRG PSMON.ACC PSMON.PRG MP3GEM.PRG VIDGEM.PRG \
           PDFGEM.PRG WEBGEM.PRG DOSGEM.PRG PSCLEAN.PRG \
-          FVDIMODE.PRG FVDIMODE.ACC FVDICON.PRG PSVIDEL.PRG SETMCH.PRG"
+          FVDIMODE.PRG FVDIMODE.ACC FVDICON.PRG PSVIDEL.PRG"
 GEM_DEST="$ROOT/atari-share/apj-os/natfeats"
 if [ -d "$HERE/configs/gem-binaries" ]; then
   say "Installing GEM programs into $GEM_DEST"

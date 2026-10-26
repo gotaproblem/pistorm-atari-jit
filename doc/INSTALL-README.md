@@ -196,11 +196,11 @@ built yourself more recently.
 | `VIDGEM.PRG`  | Video player (host/VPU decode, VIDPLAY NatFeat) |
 | `PDFGEM.PRG`  | PDF viewer (host poppler, PSPDF NatFeat) |
 | `WEBGEM.PRG`  | Web browser (needs `WEB=1` on the Pi) |
+| `DOSGEM.PRG`  | DOS games window (needs `DOS=1` on the Pi) |
 | `PSCLEAN.PRG` | Removes Mac/SMB litter from Atari drives |
 | `FVDIMODE.PRG` / `.ACC` | fVDI resolution and colour-depth switcher |
 | `FVDICON.PRG` | TOS VT52 console on the fVDI screen - goes in the AUTO folder |
 | `PSVIDEL.PRG` | Arms the PSVIDEL (Falcon Videl on HDMI) - goes in the AUTO folder |
-| `SETMCH.PRG`  | Forces the `_MCH` cookie - goes in the AUTO folder (built from `atari-tools/setmch`) |
 | `STBOX.PRG`   | A sandboxed ST in a GEM window (installed to `apj-os/STBox/`) |
 
 The installer also sets up two first-boot helpers used by the APJ-OS SD

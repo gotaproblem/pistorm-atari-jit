@@ -41,8 +41,8 @@ full redraw and carries on.
 | Shared with the ST | `$FF8201/03/0D` screen base and `$FF8260` ST shift still go to the real chip and are snooped |
 | SuperVidel | extended modes, video RAM at `$A1000000-$A7FFFFFF` (112 MB), the `$A0000000` alias of the low 16 MB, SuperBlitter + firmware version at `$80010000` |
 
-`_MCH` is left alone - use `SETMCH.PRG` if a program insists on a Falcon
-machine cookie.
+`_MCH` is left alone - put `machine falcon` in the cfg if a program
+insists on a Falcon machine cookie.
 
 ### Modes
 
