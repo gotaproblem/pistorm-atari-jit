@@ -55,6 +55,8 @@ fpu
 ym2149
 blitter
 ttram 128M
+# Q: on plain TOS / EmuTOS needs AUTO\PSHOSTFS.PRG (dkimages/fdd/pshostfs.st)
+hostfs Q /home/pistorm/gem-share
 rom emutos-aranym.rom
 ide
 hdd 0:dk0.img
