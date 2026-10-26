@@ -347,7 +347,27 @@ done:   movem.l (sp)+,d1-d2/a0-a2
         rte
 
 | --- Pexec 0/3 of a program on a host drive --------------------------------
-pexec:  move.w  2(a0),-(sp)             | [mode]
+| The child runs inside this handler, so everything below is on the
+| supervisor stack for as long as the child runs, and every interrupt the
+| child takes stacks up underneath it. On the stack the caller came in on
+| (the desktop's) that is ~90 bytes more than TOS's own Pexec uses, and
+| PAULA.APP started from a host drive crashed out of a Timer C interrupt
+| with the SSP at $175E, in TOS's low-RAM work area, while the same program
+| from A: ran fine (field log 26 Oct 2026; GEMDRIVE hit and fixed the same
+| thing with a private stack). So switch to our own stack here - unless we
+| are already on it (a program on a host drive starting another one) - and
+| keep the caller's SSP on top of it for pex_out to go back to.
+pexec:  move.l  sp,a1                   | the caller's SSP (our saved regs)
+        lea     pstack_lo(pc),a2
+        cmp.l   a2,a1
+        bls.s   1f                      | below our stack: switch
+        lea     pstack_hi(pc),a2
+        cmp.l   a2,a1
+        bls.s   2f                      | on our stack already: stay
+1:      lea     pstack_hi(pc),a2
+        move.l  a2,sp
+2:      move.l  a1,-(sp)                | [caller SSP]
+        move.w  2(a0),-(sp)             | [mode][caller SSP]
         move.l  8(a0),a1                | command line
         move.l  12(a0),a2               | environment
         move.w  gemver(pc),d1           | GEMDOS 0.19: Pexec 7 with prgflags
@@ -428,6 +448,7 @@ pex_pop:
         addq.l  #4,sp
 pex_out:
         addq.l  #2,sp
+        move.l  (sp),sp                 | back to the caller's stack
         bra     done
 pex_bp: move.l  (sp),d0                 | mode 3: the caller gets the basepage
         bra.s   pex_pop
@@ -507,3 +528,11 @@ msg_twice: .asciz "HOSTDOS: already installed\r\n"
 msg_nodrv: .asciz "HOSTDOS: no hostfs drive left to serve - not installed\r\n"
         .even
 msgbuf:    .space 96
+
+| Private supervisor stack for a host-drive program (see pexec). It holds
+| HOSTDOS's Pexec frame and everything the child does in supervisor mode -
+| its GEMDOS/BIOS/XBIOS calls and every interrupt it takes - so it is
+| generous. Kept resident by Ptermres with the rest of the text.
+        .even
+pstack_lo: .space 4096
+pstack_hi:
