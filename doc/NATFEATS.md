@@ -54,14 +54,45 @@ currently refused (`EROFS`), so the share is effectively read-only from the
 Atari side.
 
 Notes:
-- Requires FreeMiNT with NatFeats enabled and `hostfs.xfs` installed; plain TOS
-  cannot see HOSTFS drives.
+- Requires FreeMiNT with NatFeats enabled and `hostfs.xfs` installed. Plain
+  TOS / EmuTOS reach the same drives through **HOSTDOS** (below).
 - Host Unix permissions are honoured (a file needs `x` on the Pi to be
   `Pexec`'d from the share).
 - Cookie nodes are deduplicated by path so the node table is bounded by
   distinct paths, not operation count. `PISTORM_HOSTFS_DEDUP=0` restores the
   old (leaky) per-lookup allocation as an escape hatch.
 - `PISTORM_HOSTFS_DEBUG=1` traces every HOSTFS call on the console.
+
+### HOSTDOS
+The `hostfs` drives for plain TOS / EmuTOS GEM, read **and write**. Guest half:
+`atari-tools/hostdos/HOSTDOS.PRG`, an AUTO-folder TSR that hooks trap #1 and
+forwards every GEMDOS call naming a HOSTFS drive - by path (or the current
+drive), by one of its handles 64..95, or by a DTA its Fsfirst marked - here;
+all other calls go to the ROM untouched. Host half:
+`platforms/atari/network/hostdos.cpp` (no CPU-core dependencies; the same file
+builds into `tools/hostdos-test/`).
+
+| Sub-op | Name     | Arguments / result                                         |
+|--------|----------|------------------------------------------------------------|
+| 0      | VERSION  | -> HOSTDOS API version (1)                                 |
+| 1      | INSTALL  | fresh boot: drop all state -> A..Z drive bits configured   |
+| 2      | DISPATCH | p0 GEMDOS argument block, p1 drive, p2 current basepage, p3 DTA -> GEMDOS result, `0x80000000` = not ours (TSR jumps to the ROM), `0x80000001` = Pexec 0/3 of a program on our drive |
+| 3      | PTERM    | p0 basepage: close the handles that process owns           |
+| 4      | PRGFLAGS | -> prgflags of the pending Pexec                           |
+| 5      | LOAD     | p0 basepage from Pexec 5/7: copy, relocate, clear BSS (and the heap unless fastload) |
+
+- Calls handled: Fsfirst/Fsnext, Fopen, Fcreate, Fclose, Fread, Fwrite, Fseek,
+  Fdelete, Frename, Fattrib, Fdatime, Dcreate, Ddelete, Dsetpath, Dgetpath,
+  Dfree, Pexec 0/3. Pterm/Pterm0/Ptermres close the leaver's handles.
+- Names are mapped per folder to 8.3: valid 8.3 names are upper-cased, the
+  rest become `BASE~N.EXT` in host-name order; dot-files are hidden. MP3PLAY,
+  VIDPLAY, PSIMG, PSPDF and STBOX take these 8.3 paths too when MiNT has not
+  mounted the drive.
+- Read-only means the file has no write permission bits (the emulator runs as
+  root, so `access()` would always say writable). `ro` on the cfg line makes
+  every write fail with -13 (write-protected).
+- Not for MiNT: HOSTDOS.PRG refuses to install when the `MiNT` cookie exists,
+  and DISPATCH answers "not ours" once `hostfs.xfs` has mounted a drive.
 
 ### fVDI
 Host-accelerated graphics backend for the fVDI driver (`aranym.sys`), ARAnyM

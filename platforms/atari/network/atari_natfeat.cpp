@@ -5,6 +5,7 @@
 
 #include "platforms/atari/network/atari_natfeat.h"
 #include "platforms/atari/network/pistorm_net.h"
+#include "platforms/atari/network/hostdos.h"
 #include "platforms/atari/psctrl/psctrl.h"
 #include "platforms/atari/psctrl/psctrl_settings.h"
 #include "platforms/atari/psctrl/psctrl_tunables.h"
@@ -121,6 +122,7 @@ enum nf_feature_index {
   NF_FEATURE_FVDICON,
   NF_FEATURE_PSVIDEL,
   NF_FEATURE_PSDOS,
+  NF_FEATURE_HOSTDOS,
   NF_FEATURE_COUNT
 };
 
@@ -299,7 +301,8 @@ static const char *nf_feature_names[NF_FEATURE_COUNT] = {
   "PSWEB",
   "FVDICON",
   "PSVIDEL",
-  "PSDOS"
+  "PSDOS",
+  "HOSTDOS"
 };
 
 extern "C" uint32_t pistorm_fvdi_fb_base(void);
@@ -1217,6 +1220,8 @@ static uae_u32 nf_get_id(uaecptr stack)
       if (i == NF_FEATURE_PSVIDEL && !psvidel_configured() &&
           !falcon_configured())
         return 0;                  /* neither psvidel nor falcon_dsp */
+      if (i == NF_FEATURE_HOSTDOS && !hostfs_is_enabled())
+        return 0;                  /* no hostfs lines: HOSTDOS.PRG says so */
       if (i == NF_FEATURE_HOSTFS && !hostfs_is_enabled()) {
         HOSTFS_LOG("[NF] GET_ID(\"%s\") -> 0 (hostfs disabled)\n", name);
         return 0;
@@ -1279,6 +1284,8 @@ static uae_u32 nfeth_get_text_param(uaecptr params, const char *text)
   return (uae_u32)strlen(text);
 }
 
+static void hostdos_attach(void);  /* HOSTDOS glue, further down */
+
 extern "C" void atari_natfeat_set_config(const atari_natfeat_config_t *config)
 {
   hostfs_close_all_files();
@@ -1294,6 +1301,7 @@ extern "C" void atari_natfeat_set_config(const atari_natfeat_config_t *config)
   g_hostfs_next_file_id = 1;
   if (config)
     g_nf_config = *config;
+  hostdos_attach();
 }
 
 static const char *nfeth_config_text(const char *name, const char *configured, const char *fallback)
@@ -4551,6 +4559,7 @@ static uae_u32 nf_call_hostfs(uae_u32 subid, uaecptr params)
         return TOS_EDRIVE;
       }
 
+      hostdos_note_mint();           /* MiNT owns trap #1 from here on */
       g_hostfs_mounts[idx].mounted = true;
       g_hostfs_mounts[idx].dev = dev ? (uint16_t)dev : (uint16_t)(HOSTFS_MINT_DEV_BASE + idx);
       g_hostfs_mounts[idx].fs_ptr = filesys;
@@ -5411,8 +5420,15 @@ static bool mp3_gemdos_to_host(const char *gem_in, char *out, size_t outsz)
       if (dl == letter) { root = g_hostfs_mounts[i].drive->path; break; }
     }
   }
-  if (!root)
-    return false;
+  if (!root) {
+    /* plain TOS: no hostfs.xfs mount, HOSTDOS.PRG serves the drive and
+     * the name the guest has is its 8.3 view of the folder */
+    char tos[512];
+    snprintf(tos, sizeof tos, "%c:%s", letter, rest);
+    for (char *p = tos + 2; *p; p++)
+      if (*p == '/') *p = '\\';
+    return hostdos_gemdos_to_host(tos, out, outsz) != 0;
+  }
 
   while (*rest == '\\' || *rest == '/') rest++;
   int n = snprintf(out, outsz, "%s/%s", root, rest);
@@ -6972,6 +6988,74 @@ static uae_u32 nf_call_psvidel(uae_u32 subid, uaecptr params)
   return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* HOSTDOS: HOSTFS drives under plain TOS (hostdos.cpp, HOSTDOS.PRG)     */
+/* ------------------------------------------------------------------ */
+static void hostdos_mem_read(uint32_t addr, void *dst, uint32_t n)
+{
+  uae_u8 *p;
+  if (nf_host_ram_ptr(addr, n, &p)) {
+    memcpy(dst, p, n);
+    return;
+  }
+  uae_u8 *d = (uae_u8 *)dst;
+  for (uint32_t i = 0; i < n; i++)
+    d[i] = nf_read_byte(addr + i);
+}
+
+/* ST-RAM goes through pistorm_dma_to_stram one 4 KB page at a time: it
+ * checks only the first and last page of a call for compiled code, so a
+ * page-sized chunk keeps a program load or a big Fread honest with the
+ * JIT. TT-RAM is a plain copy - a page holding compiled code is host
+ * write-protected and the TTSMC handler flushes on the fault. */
+static void hostdos_mem_write(uint32_t addr, const void *src, uint32_t n)
+{
+  const uae_u8 *s = (const uae_u8 *)src;
+  uint32_t top = pistorm_stram_top();
+  while (n) {
+    uae_u8 *p;
+    if (addr < top) {
+      uint32_t k = 0x1000u - (addr & 0xFFFu);
+      if (k > n) k = n;
+      if (k > top - addr) k = top - addr;
+      pistorm_dma_to_stram(addr, s, k);
+      addr += k; s += k; n -= k;
+    } else if (nf_host_ram_ptr(addr, n, &p)) {
+      memcpy(p, s, n);
+      return;
+    } else {
+      nf_write_byte(addr, *s);
+      addr++; s++; n--;
+    }
+  }
+}
+
+static int hostdos_debug(void)
+{
+  return hostfs_debug_enabled() ? 1 : 0;
+}
+
+static void hostdos_attach(void)
+{
+  static const hostdos_mem_t mem = { hostdos_mem_read, hostdos_mem_write };
+  hostdos_drive_t d[HOSTDOS_DRIVES];
+  memset(d, 0, sizeof d);
+  for (unsigned i = 0; i < HOSTDOS_DRIVES && i < ATARI_NATFEAT_HOSTFS_MAX_DRIVES; i++) {
+    d[i].enabled = g_nf_config.hostfs[i].enabled && g_nf_config.hostfs[i].path[0];
+    d[i].readonly = g_nf_config.hostfs[i].readonly;
+    snprintf(d[i].path, sizeof d[i].path, "%s", g_nf_config.hostfs[i].path);
+  }
+  hostdos_init(d, &mem, hostdos_debug);
+}
+
+static uae_u32 nf_call_hostdos(uae_u32 subid, uaecptr params)
+{
+  uint32_t p[4];
+  for (unsigned i = 0; i < 4; i++)
+    p[i] = nf_get_param(params, i);
+  return hostdos_call(subid, p);
+}
+
 extern "C" volatile uint32_t pistorm_cpu_hostop;   /* emulator.c */
 
 static uae_u32 nf_call(uaecptr stack)
@@ -7022,6 +7106,8 @@ static uae_u32 nf_call(uaecptr stack)
       return nf_call_psvidel(subid, params);
     case NF_FEATURE_PSDOS:
       return nf_call_psdos(subid, params);
+    case NF_FEATURE_HOSTDOS:
+      return nf_call_hostdos(subid, params);
   }
 
   return 0;
