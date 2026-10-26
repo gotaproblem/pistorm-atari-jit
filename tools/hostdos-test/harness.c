@@ -37,6 +37,7 @@ static uint8_t ram[RAMSIZE];
 #define FAKERET   0x0A08u   /* 7FFE rte */
 #define FAULT     0x0A0Cu   /* 7FFD */
 #define SSP_TOP   0x00008000u
+#define SUPSTK_TOP (SSP_TOP - 0x100)   /* GEMDOS system stack top: every process starts here */
 #define RESULTS   0x00008000u
 #define HEAP_LO   0x00010000u
 #define HEAP_HI   0x00F00000u
@@ -123,6 +124,7 @@ typedef struct {
   uint32_t regs[16], usp, ssp, parent, child;
   int mode;
   int from_super;   /* the Pexec go came from supervisor mode */
+  uint8_t frame[8]; /* a user-mode caller's trap frame, kept as GEMDOS does */
 } ctx_t;
 static ctx_t ctx[16];
 static int nctx;
@@ -174,6 +176,10 @@ static void start_child(uint32_t bp, int mode)
   c->usp = m68k_get_reg(NULL, M68K_REG_USP);
   c->ssp = m68k_get_reg(NULL, M68K_REG_A7);
   c->from_super = (rd16(c->ssp) & 0x2000) != 0;   /* caller's SR in the frame */
+  /* A user-mode caller's context lives in its PD/user stack in GEMDOS, so
+   * the child cannot touch it; keep its frame. A supervisor-mode caller's
+   * frame stays where it is, on the caller's own stack - as in GEMDOS. */
+  for (int i = 0; i < 8; i++) c->frame[i] = (uint8_t)rd8(c->ssp + i);
   c->parent = run();
   c->child = bp;
   c->mode = mode;
@@ -185,7 +191,14 @@ static void start_child(uint32_t bp, int mode)
   uint32_t usp = rd32(bp + 4) - 8;
   wr32(usp + 4, bp);
   m68k_set_reg(M68K_REG_USP, usp);
-  push_frame_and_go(c->ssp, rd32(bp + 8), 0x0000);
+  /* GEMDOS starts every process with the supervisor stack reset to the top
+   * of its system stack (EmuTOS proc_go(): other_sp = &supstk[SUPSIZ], after
+   * Atari's GEMDOS) - NOT below the parent's frames. So a child's traps and
+   * interrupts overwrite whatever its parent left there, e.g. the parent's
+   * own trap #1 frame. Field case 26 Oct 2026: !RUNME.TOS -> COREMARK.TOS,
+   * HOSTDOS returned to RUNME through a frame COREMARK had overwritten with
+   * its Pterm trap frame and landed back in COREMARK after the Pterm. */
+  push_frame_and_go(SUPSTK_TOP, rd32(bp + 8), 0x0000);
 }
 
 static void terminate(int code, int keep)
@@ -213,6 +226,7 @@ static void terminate(int code, int keep)
   } else {
     for (int i = 0; i < 16; i++) m68k_set_reg(M68K_REG_D0 + i, c->regs[i]);
     m68k_set_reg(M68K_REG_USP, c->usp);
+    for (int i = 0; i < 8; i++) wr8(c->ssp + i, c->frame[i]);
   }
   m68k_set_reg(M68K_REG_A7, c->ssp);
   wr32(RUNP, c->parent);
@@ -360,7 +374,7 @@ static int run_prg(uint32_t bp)
   m68k_set_reg(M68K_REG_SR, 0x2700);
   m68k_set_reg(M68K_REG_A7, SSP_TOP - 0x100);
   m68k_set_reg(M68K_REG_USP, usp);
-  push_frame_and_go(SSP_TOP - 0x100, rd32(bp + 8), 0x0000);
+  push_frame_and_go(SUPSTK_TOP, rd32(bp + 8), 0x0000);
   for (int i = 0; i < 2000 && !stop_flag; i++)
     m68k_execute(100000);
   if (!stop_flag) { printf("\nTIMEOUT pc=%08X\n", m68k_get_reg(NULL, M68K_REG_PC)); return -9998; }
@@ -527,6 +541,16 @@ int main(int argc, char **argv)
   CHECK(R(39) == -778, "Fread handle 100 (not ours) reaches the ROM (%d)", R(39));
   CHECK(R(45) == R(46), "Pexec 0 leaves no block behind (%d before, %d after)", R(45), R(46));
   CHECK(R(50) == R(51), "Pexec 0 from a program: its stack pointer survives (%08X before, %08X after)", R(50), R(51));
+  /* two levels: TEST.PRG -> (HOSTDOS) CHILD.PRG "X" -> (HOSTDOS) CHILD.PRG "Y",
+   * the !RUNME.TOS -> COREMARK.TOS shape of 26 Oct 2026 */
+  CHECK(rd32(RESULTS + 0x1E0) == 42, "nested: CHILD.PRG's own Pexec of CHILD.PRG -> 42 (%d)",
+        (int32_t)rd32(RESULTS + 0x1E0));
+  CHECK(rd32(RESULTS + 0x1E4) == rd32(RESULTS + 0x1E8),
+        "nested: the launching child's stack pointer survives (%08X before, %08X after)",
+        rd32(RESULTS + 0x1E4), rd32(RESULTS + 0x1E8));
+  CHECK(rd32(RESULTS + 0x1EC) == 0x7777D7D7u && rd32(RESULTS + 0x1F0) == 0xA6A6A6A6u,
+        "nested: the launching child's d3-d7/a3-a6 survive (d7 %08X a6 %08X)",
+        rd32(RESULTS + 0x1EC), rd32(RESULTS + 0x1F0));
   CHECK(R(52) == 0x7777D7D7u && R(53) == 0xA6A6A6A6u,
         "Pexec 0 from a program: its d3-d7/a3-a6 survive (d7 %08X a6 %08X)", R(52), R(53));
   CHECK(bad_mfree == 0, "no Mfree of a block that does not exist (%d)", bad_mfree);

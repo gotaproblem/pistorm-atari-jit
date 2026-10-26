@@ -45,6 +45,7 @@ COOKIES =       0x5A0
 TRAP1   =       0x84
 
 PASS    =       0x80000000              | host: not ours
+PS_GEMDOS =     256                     | room left for what GEMDOS saves at a go
 PEXEC   =       0x80000001              | host: load this program here
 
 _start:
@@ -177,6 +178,10 @@ install:
         bne.s   6f
         move.l  #0x873C,a1
 6:      lea     runp(pc),a0
+        move.l  a1,(a0)
+
+        lea     pstack_hi(pc),a1        | our launch stack: empty
+        lea     pstack_cur(pc),a0
         move.l  a1,(a0)
 
         lea     old1(pc),a0             | hook trap #1
@@ -347,27 +352,48 @@ done:   movem.l (sp)+,d1-d2/a0-a2
         rte
 
 | --- Pexec 0/3 of a program on a host drive --------------------------------
-| The child runs inside this handler, so everything below is on the
-| supervisor stack for as long as the child runs, and every interrupt the
-| child takes stacks up underneath it. On the stack the caller came in on
-| (the desktop's) that is ~90 bytes more than TOS's own Pexec uses, and
-| PAULA.APP started from a host drive crashed out of a Timer C interrupt
-| with the SSP at $175E, in TOS's low-RAM work area, while the same program
-| from A: ran fine (field log 26 Oct 2026; GEMDRIVE hit and fixed the same
-| thing with a private stack). So switch to our own stack here - unless we
-| are already on it (a program on a host drive starting another one) - and
-| keep the caller's SSP on top of it for pex_out to go back to.
-pexec:  move.l  sp,a1                   | the caller's SSP (our saved regs)
-        lea     pstack_lo(pc),a2
-        cmp.l   a2,a1
-        bls.s   1f                      | below our stack: switch
-        lea     pstack_hi(pc),a2
-        cmp.l   a2,a1
-        bls.s   2f                      | on our stack already: stay
-1:      lea     pstack_hi(pc),a2
-        move.l  a2,sp
-2:      move.l  a1,-(sp)                | [caller SSP]
-        move.w  2(a0),-(sp)             | [mode][caller SSP]
+| The child runs inside this handler, and two things about that matter:
+|
+|  1. GEMDOS starts every process with the supervisor stack reset to the
+|     top of its system stack (EmuTOS proc_go(): other_sp = &supstk[SUPSIZ],
+|     after Atari's GEMDOS). A caller in user mode - a program, e.g.
+|     !RUNME.TOS starting COREMARK.TOS - came in through a trap frame on
+|     that very stack, with our saved d1-d2/a0-a2 above it, so the child's
+|     traps and interrupts overwrite both. Returning through them then
+|     landed back in the child after its Pterm (field case 26 Oct 2026:
+|     COREMARK's Pterm "returned" to its own bra.s *).
+|  2. Everything we keep while the child runs adds to the stack it runs
+|     over: ~90 bytes more than TOS's own Pexec on the desktop's stack, and
+|     PAULA.APP from a host drive crashed out of a Timer C interrupt with
+|     the SSP at $175E (same day; GEMDRIVE hit and fixed the same thing
+|     with a private stack).
+|
+| So the whole launch runs on our own stack. The caller's saved registers
+| and trap frame are COPIED onto it (and copied back at pex_out, just
+| before `done` returns through them), and pstack_cur marks how far down
+| it is in use, so a launch from inside a launched program goes below the
+| outer one instead of over it.
+|
+| Stack here: [our d1-d2/a0-a2 (20)][frame (6, or 8 with _longframe)]
+pexec:  moveq   #20+6,d1                | bytes to carry over
+        tst.w   LONGFRM.w
+        beq.s   1f
+        addq.l  #2,d1
+1:      move.l  sp,a1                   | caller's area
+        move.l  pstack_cur(pc),a2
+        sub.l   d1,a2
+        move.l  a2,d2                   | its copy, at the bottom of what is in use
+        move.w  d1,d0
+        lsr.w   #1,d0
+        subq.w  #1,d0
+2:      move.w  (a1)+,(a2)+
+        dbra    d0,2b
+        move.l  sp,a1
+        move.l  d2,sp                   | onto our stack: [copy]
+        move.l  pstack_cur(pc),-(sp)    | [outer pstack_cur][copy]
+        move.l  a1,-(sp)                | [caller area][outer cur][copy]
+        move.w  d1,-(sp)                | [size][caller area][outer cur][copy]
+        move.w  2(a0),-(sp)             | [mode][size][caller area]...
         move.l  8(a0),a1                | command line
         move.l  12(a0),a2               | environment
         move.w  gemver(pc),d1           | GEMDOS 0.19: Pexec 7 with prgflags
@@ -390,7 +416,7 @@ pexec:  move.l  sp,a1                   | the caller's SSP (our saved regs)
         trap    #1
         lea     16(sp),sp
         tst.l   d0
-        bmi.s   pex_out                 | no basepage: TOS's error
+        bmi     pex_out                 | no basepage: TOS's error
         move.l  d0,-(sp)                | [basepage][mode]
         move.l  d0,-(sp)                | host: load + relocate into it
         move.l  id_load(pc),-(sp)
@@ -400,7 +426,7 @@ pexec:  move.l  sp,a1                   | the caller's SSP (our saved regs)
         tst.l   d0
         bmi.s   pex_free
         cmp.w   #3,4(sp)
-        beq.s   pex_bp
+        beq     pex_bp
         moveq   #6,d2                   | go: 6 frees it all at Pterm
         move.w  gemver(pc),d1
         cmp.w   #0x15,d1
@@ -419,6 +445,9 @@ pexec:  move.l  sp,a1                   | the caller's SSP (our saved regs)
 3:      move.l  usp,a1
         move.l  a1,-(sp)                | [usp][basepage][mode]
         movem.l d3-d7/a3-a6,-(sp)       | [36 regs][usp][basepage][mode]
+        lea     -PS_GEMDOS(sp),a1       | while the child runs, a launch from
+        lea     pstack_cur(pc),a2       | inside it starts below this and
+        move.l  a1,(a2)                 | below what GEMDOS saves here
         clr.l   -(sp)                   | Pexec(d2, 0, basepage, 0)
         move.l  4+40(sp),-(sp)          | basepage, past the regs and usp
         clr.l   -(sp)
@@ -447,8 +476,18 @@ pex_free:                               | Mfree environment + basepage, keep d0
 pex_pop:
         addq.l  #4,sp
 pex_out:
-        addq.l  #2,sp
-        move.l  (sp),sp                 | back to the caller's stack
+        addq.l  #2,sp                   | [size][caller area][outer cur][copy]
+        move.w  (sp)+,d1
+        move.l  (sp)+,a1
+        lea     pstack_cur(pc),a2
+        move.l  (sp)+,(a2)              | the outer launch's mark again
+        move.l  a1,a2                   | copy the caller's regs + frame back
+        move.w  d1,d2                   | (d0 = our result, kept)
+        lsr.w   #1,d2
+        subq.w  #1,d2
+1:      move.w  (sp)+,(a2)+
+        dbra    d2,1b
+        move.l  a1,sp
         bra     done
 pex_bp: move.l  (sp),d0                 | mode 3: the caller gets the basepage
         bra.s   pex_pop
@@ -534,5 +573,6 @@ msgbuf:    .space 96
 | its GEMDOS/BIOS/XBIOS calls and every interrupt it takes - so it is
 | generous. Kept resident by Ptermres with the rest of the text.
         .even
+pstack_cur: .long 0                     | lowest byte in use (install: pstack_hi)
 pstack_lo: .space 4096
 pstack_hi:

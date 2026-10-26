@@ -4,6 +4,28 @@
 RES     =       0x8000
 _start:
         move.l  4(sp),a5
+| Launched with command line "X" (by TEST.PRG): first start ourselves again
+| through HOSTDOS with "Y" - a host-drive program starting another, as
+| !RUNME.TOS -> COREMARK.TOS - and check our stack and registers survive.
+| Results at RES+0x1E0 (grandchild's exit code), +0x1E4/+0x1E8 (sp before/
+| after), +0x1EC (d7) and +0x1F0 (a6). The "Y" run does not recurse.
+        cmp.b   #'X',0x81(a5)
+        bne.s   9f
+        move.l  sp,RES+0x1E4
+        move.l  #0x7777D7D7,d7
+        move.l  #0xA6A6A6A6,a6
+        clr.l   -(sp)                   | Pexec(0, S:\CHILD.PRG, "Y", 0)
+        pea     tail_y(pc)
+        pea     s_self(pc)
+        clr.w   -(sp)
+        move.w  #0x4B,-(sp)
+        trap    #1
+        lea     16(sp),sp
+        move.l  d0,RES+0x1E0
+        move.l  sp,RES+0x1E8
+        move.l  d7,RES+0x1EC
+        move.l  a6,RES+0x1F0
+9:
         move.l  #dval,a0                 | relocated
         move.l  (a0),RES+160
         move.l  #bssv,a0
@@ -32,5 +54,8 @@ _start:
         trap    #1
 dval:   .long   0x12345678
 s_inner: .asciz "INNER.DAT"
+s_self:  .asciz "S:\\CHILD.PRG"
+tail_y:  .byte 1,'Y',0
+        .even
         .bss
 bssv:   .space  4
