@@ -870,11 +870,22 @@ else
 fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
-echo "  HOSTFS on TOS: $ROOT/dkimages/fdd/pshostfs.st  (AUTO\\PSHOSTFS.PRG for plain TOS/EmuTOS)"
 echo "  GEM programs : $ROOT/atari-share/apj-os/natfeats/"
 [ -e "$ROOT/atari-share/APJOS.VER" ] && \
 echo "  APJ-OS       : v$(cat "$ROOT/atari-share/APJOS.VER")  (S:\\APJOS.VER)"
 echo "                 (point a HOSTFS drive at $ROOT/atari-share)"
+echo
+echo "  HOSTFS drives on plain TOS / EmuTOS (PSHOSTFS):"
+echo "      floppy image -> $ROOT/dkimages/fdd/pshostfs.st  (AUTO\\PSHOSTFS.PRG)"
+echo "      1. the cfg needs at least one hostfs line, e.g."
+echo "             hostfs S $ROOT/atari-share"
+echo "      2. mount the floppy as A: - in the cfg:"
+echo "             fdd $ROOT/dkimages/fdd/pshostfs.st"
+echo "         and boot TOS."
+echo "      3. it prints e.g. 'PSHOSTFS: S: on the Pi'. To keep it, copy"
+echo "         PSHOSTFS.PRG into C:\\AUTO and take the floppy out."
+echo "      On the TOS desktop: Install Disk Drive S, then Save Desktop."
+echo "      Not needed under MiNT (hostfs.xfs does it there)."
 echo
 echo "  STBOX (ST games in a GEM window):"
 echo "      TOS for the box -> $ROOT/roms/stbox-tos.rom"
