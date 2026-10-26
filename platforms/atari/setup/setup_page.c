@@ -1380,9 +1380,17 @@ static void draw_drives(struct ss_screen *ss, const struct state *st)
         switch (r->kind) {
         case ROW_KEY:                         /* ide, acsi, ide_byteorder */
             if (!strcasecmp(r->text, "ide_byteorder")) {
-                snprintf(cell, sizeof cell, "%s byteorder %.20s",
-                         r->blocked ? "[-]" : r->ticked ? "[x]" : "[ ]",
-                         r->ticked && v ? v : "native (default)");
+                /* Enter opens the native/swapped chooser (edit_row); the
+                 * row must show the choice being stepped through, or the
+                 * arrows look dead and the value looks fixed at native. */
+                if (on && st->choosing)
+                    snprintf(cell, sizeof cell, "%s byteorder < %.20s >",
+                             r->ticked ? "[x]" : "[ ]",
+                             se_choice(r->text, st->choice));
+                else
+                    snprintf(cell, sizeof cell, "%s byteorder %.20s",
+                             r->blocked ? "[-]" : r->ticked ? "[x]" : "[ ]",
+                             r->ticked && v ? v : "native (default)");
                 grey = r->blocked || !r->ticked;
                 break;
             }
