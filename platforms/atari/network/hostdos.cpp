@@ -718,8 +718,10 @@ static int32_t do_fopen(int d, uint32_t a, uint32_t bp)
   std::string host;
   struct stat st;
   int err = resolve(d, name, &host, &st);
-  if (err)
+  if (err) {
+    LOG("[HOSTDOS] Fopen '%s' mode %d -> %d (not found)\n", name.c_str(), mode, err);
     return err;
+  }
   if (S_ISDIR(st.st_mode))
     return EFILNF;
   if (mode != 0 && drive_ro(d))
@@ -981,15 +983,26 @@ static int32_t do_fattrib(int d, uint32_t a)
 static int32_t do_dsetpath(int d, uint32_t a)
 {
   std::string name = rdstr(rd32(a + 2));
-  if (name.empty() || (name.size() == 2 && name[1] == ':'))
-    return EPTHNF;
+  /* "" and "X:" name no folder: GEMDOS resolves them to the current folder
+   * and returns E_OK (EmuTOS xchdir() -> findit(), after Atari's own
+   * GEMDOS). Programs restore a saved Dgetpath() this way, and at the root
+   * that string is empty. Returning EPTHNF here, as this used to, failed
+   * PAULA.APP's restore on Q: (field log 26 Oct 2026). */
+  if (name.empty() || (name.size() == 2 && name[1] == ':')) {
+    LOG("[HOSTDOS] Dsetpath %c: '%s' -> 0 (current folder kept)\n", 'A' + d, name.c_str());
+    return 0;
+  }
   std::string host;
   struct stat st;
   std::vector<std::string> c;
   int err = resolve(d, name, &host, &st, &c);
-  if (err || !S_ISDIR(st.st_mode))
+  if (err || !S_ISDIR(st.st_mode)) {
+    LOG("[HOSTDOS] Dsetpath %c: '%s' -> -34 (%s)\n", 'A' + d, name.c_str(),
+        err ? "not found" : "not a folder");
     return EPTHNF;
+  }
   g_cwd[d] = c;
+  LOG("[HOSTDOS] Dsetpath %c: '%s' -> %s\n", 'A' + d, name.c_str(), host.c_str());
   return 0;
 }
 
@@ -1002,6 +1015,7 @@ static int32_t do_dgetpath(int d, uint32_t a)
   if (s.size() > 127)
     s.resize(127);
   g_mem.write(buf, s.c_str(), (uint32_t)s.size() + 1);
+  LOG("[HOSTDOS] Dgetpath %c: -> '%s'\n", 'A' + d, s.c_str());
   return 0;
 }
 

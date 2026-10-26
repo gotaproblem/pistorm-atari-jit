@@ -109,6 +109,15 @@ _start:
         move.w  #0x47,-(sp)
         trap    #1
         addq.l  #8,sp
+        pathcall 0x3B, s_empty          | 54: Dsetpath "" keeps \SUB
+        r       54
+        pathcall 0x3B, s_sdrv           | 55: Dsetpath "S:" keeps it too
+        r       55
+        clr.w   -(sp)                   | Dgetpath(RES+0x200, 0)
+        pea     RES+0x200
+        move.w  #0x47,-(sp)
+        trap    #1
+        addq.l  #8,sp
         fopen   s_inner                 | 7
         r       7
         fclose  d0
@@ -279,6 +288,8 @@ sup:    fopen   s_hello
         rts
 
 s_all:     .asciz "S:\\*.*"
+s_empty:   .asciz ""
+s_sdrv:    .asciz "S:"
 s_hello:   .asciz "S:\\HELLO.TXT"
 s_long:    .asciz "s:\\alongn~1.tex"
 s_sub:     .asciz "\\SUB"

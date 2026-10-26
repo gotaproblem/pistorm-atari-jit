@@ -487,6 +487,10 @@ int main(int argc, char **argv)
   CHECK(R(5) >= 64, "Fopen mangled name ALONGN~1.TEX (%d)", R(5));
   CHECK(R(6) == 0, "Dsetpath \\SUB on S: (%d)", R(6));
   CHECK(!strcmp((char *)ram + RESULTS + 0x380, "\\SUB"), "Dgetpath -> '%s'", (char *)ram + RESULTS + 0x380);
+  CHECK(R(54) == 0, "Dsetpath \"\" -> E_OK, as GEMDOS (%d)", R(54));
+  CHECK(R(55) == 0, "Dsetpath \"S:\" -> E_OK, as GEMDOS (%d)", R(55));
+  CHECK(!strcmp((char *)ram + RESULTS + 0x200, "\\SUB"), "Dsetpath \"\"/\"S:\" kept the folder ('%s')",
+        (char *)ram + RESULTS + 0x200);
   CHECK(R(7) >= 64, "Fopen INNER.DAT relative (%d)", R(7));
   CHECK(R(8) >= 64, "Fcreate NEW.TXT (%d)", R(8));
   CHECK(R(9) == 5, "Fwrite 5 (%d)", R(9));
