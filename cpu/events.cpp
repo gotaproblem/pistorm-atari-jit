@@ -8,6 +8,8 @@
 * Copyright 2000-2012 Toni Wilen
 */
 
+#include <errno.h>
+#include <time.h>
 #include "sysconfig.h"
 #include "sysdeps.h"
 
@@ -294,6 +296,205 @@ void do_cycles_normal(int cycles_to_add) { currcycle += cycles_to_add; }
 static int cycles_to_add_remain;
 
 //#ifdef AMIGA_
+#ifndef AMIGA_
+/* ===========================================================================
+ * PiStorm Atari: the 68000 speed governor (cfg `cpu_speed`)
+ * ===========================================================================
+ *
+ * WHAT IT DOES
+ *   Paces the interpreter so the guest gets exactly `cpu_speed` worth of
+ *   68000 cycles per second of real time (8 MHz = a real ST/STE, 16 MHz =
+ *   a Mega STE). The Amiga vsync machinery that once converted UAE cycles
+ *   into real time went with the chipset layer, so without this the CPU
+ *   runs at whatever speed the Pi manages (~20 MHz interpreted on a Pi 4).
+ *
+ * WHEN IT RUNS
+ *   Only with m68k_speed == 0 and the JIT off (currprefs.cachesize == 0).
+ *   cfg `cpu_speed 8mhz|16mhz` arranges that (jit_glue.cpp: m68k_speed 0,
+ *   no cpu_clock_multiplier, pistorm_gov_khz = target). JIT configs and the
+ *   default max-speed configs never call into the pacing below.
+ *
+ * HOW IT KEEPS TIME
+ *   Guest time   = cycles since the anchor / 8 MHz-units -> ns at gov_khz.
+ *   Real time    = CLOCK_MONOTONIC since the anchor (gov_ns0).
+ *   ahead_ns     = guest time - real time.
+ *   Every GOV_STEP guest cycles (250 = ~31 us at 8 MHz):
+ *     ahead  > 0 : wait until real time catches up (gov_wait_until).
+ *     behind     : run on to repay the debt, but no faster than
+ *                  GOV_CATCHUP_X times the target (see CATCH-UP below).
+ *     behind more than GOV_FORGIVE_NS: a real host stall - write off the
+ *                  excess so it is not repaid at all.
+ *
+ * WAITING (gov_wait_until)
+ *   This thread is SCHED_FIFO 99 pinned to core 2 (emulator.c cpu_task). A
+ *   pure spin never gives the core back, so waits sleep with
+ *   clock_nanosleep(TIMER_ABSTIME) to GOV_SPIN_NS before the deadline and
+ *   spin only the rest, which absorbs the wake-up latency. A single wait is
+ *   capped at 1 ms; with checks every ~31 us the CPU is never more than
+ *   ~31 us ahead of real time, so MFP / ACIA / IKBD interrupts (real chips,
+ *   real time) are seen within ~31 us of when a real 68000 would see them.
+ *
+ * CATCH-UP (repaying debt) - why it is capped
+ *   Bus-heavy code (YM writes, ST-RAM writes for a native display) costs
+ *   1-2 us of real time per access against 125-250 ns on a real ST, so the
+ *   guest falls behind during such stretches and makes it up in lighter
+ *   ones. Repaying flat out (~20 MHz) is a burst during which code that
+ *   times itself by counting instructions - delay loops between IKBD
+ *   commands, FDC/ACSI handshakes, raster tricks - runs too fast in real
+ *   time. GOV_CATCHUP_X bounds that: while behind, a step may take no less
+ *   real time than it would at GOV_CATCHUP_X x target. Default 2: a delay
+ *   loop is at worst 2x short, and only while debt remains.
+ *
+ * HISTORY / WHY THE NUMBERS
+ *   - Before 26 Oct 2026: checks every 1000 cycles, usleep() once more
+ *     than 150 us ahead, debt over 2 ms forgiven. With a YM MOD player on
+ *     a native ST at 8 MHz the playback was audibly slow, but correct
+ *     unthrottled. Modelled: bus-heavy stretches longer than ~5 ms ran up
+ *     more than 2 ms of debt, which was written off, so the average fell to
+ *     6.2-6.5 MHz while the Pi could average 8-10 MHz.
+ *   - 26 Oct 2026: GOV_STEP 250, exact waits, GOV_FORGIVE_NS 50 ms -> the
+ *     MOD plays correctly, [GOV] reports 7999-8000 kHz once booted (the
+ *     first windows after boot read lower: image loading is a real stall).
+ *     Paula 2.6 on an STE at 50 kHz still pins 100% at 8 MHz - matching
+ *     contemporary reviews of the real machine - and is clean at 16 MHz.
+ *   - 26 Oct 2026: GOV_CATCHUP_X added, before merge, to bound the
+ *     catch-up bursts the 50 ms window allows (see CATCH-UP).
+ *   - A first version waited by spinning only; HOSTDOS (hostfs on plain
+ *     TOS) seemed to stop starting. That turned out to be the build not
+ *     containing HOSTDOS (wrong branch), but the sleep-then-spin wait was
+ *     kept: a FIFO 99 thread should not monopolise its core.
+ *
+ * TUNING / DIAGNOSIS (environment)
+ *   PISTORM_GOV_KHZ=n       target in kHz, overriding cfg cpu_speed.
+ *   PISTORM_GOV_REPORT=1    print the achieved kHz every 5 s. Without it,
+ *                           only the first 5 s window under 90% is printed.
+ *   PISTORM_GOV_CATCHUP=x   catch-up cap as a multiple of the target
+ *                           (default 2, 0 = unlimited, i.e. flat out).
+ *   A report steady near the target with audio/timing still wrong means
+ *   the problem is not CPU speed (look at interrupt delivery instead).
+ * ======================================================================== */
+enum { GOV_STEP = 250 };                         /* guest 8 MHz cycles per check */
+static const int64_t GOV_FORGIVE_NS = 50000000LL; /* debt beyond this = host stall */
+static const int64_t GOV_SPIN_NS    = 50000LL;    /* spin this much before a deadline */
+static const int64_t GOV_WAIT_MAX   = 1000000LL;  /* cap on any single wait */
+
+static inline int64_t gov_now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* Wait until CLOCK_MONOTONIC reaches `until` (ns): sleep most of it, spin
+ * the last GOV_SPIN_NS. Returns the time on leaving. */
+static int64_t gov_wait_until(int64_t now, int64_t until)
+{
+	if (until - now > GOV_SPIN_NS) {
+		struct timespec dl;
+		int64_t wake = until - GOV_SPIN_NS;
+		dl.tv_sec = (time_t)(wake / 1000000000LL);
+		dl.tv_nsec = (long)(wake % 1000000000LL);
+		while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL) == EINTR)
+			;
+	}
+	do {
+		now = gov_now_ns();
+	} while (now < until);
+	return now;
+}
+
+static void pistorm_governor(void)
+{
+	if (currprefs.m68k_speed != 0 || currprefs.cachesize)
+		return;                                 /* JIT / max speed: not ours */
+
+	static int     gov_on;
+	static int     gov_report;
+	static int64_t gov_khz;                     /* target, kHz               */
+	static int64_t gov_catchup_x;               /* catch-up cap, x target    */
+	static evt_t   gov_cyc0;                    /* anchor: guest cycles ...  */
+	static int64_t gov_ns0;                     /* ... and real time         */
+	static evt_t   gov_next;                    /* next check, guest cycles  */
+	static evt_t   step_cyc;                    /* last check: guest cycles  */
+	static int64_t step_ns;                     /* ... and real time         */
+	const evt_t    unit = CYCLE_UNIT / 2;       /* currcycle units per 8 MHz cycle */
+
+	/* first call, or currcycle went backwards (reset): re-anchor */
+	if (!gov_on || currcycle < gov_cyc0) {
+		gov_ns0 = step_ns = gov_now_ns();
+		gov_cyc0 = step_cyc = currcycle;
+		gov_next = currcycle + (evt_t)GOV_STEP * unit;
+		if (!gov_on) {
+			const char *env = getenv("PISTORM_GOV_KHZ");
+			gov_khz = env ? atoll(env) : pistorm_gov_khz ? pistorm_gov_khz : 8000;
+			if (gov_khz < 1000 || gov_khz > 64000)
+				gov_khz = 8000;
+			const char *rep = getenv("PISTORM_GOV_REPORT");
+			gov_report = rep && *rep == '1';
+			const char *cu = getenv("PISTORM_GOV_CATCHUP");
+			gov_catchup_x = cu ? atoll(cu) : 2;
+			if (gov_catchup_x < 0 || gov_catchup_x > 100)
+				gov_catchup_x = 2;
+			fprintf(stderr, "[GOV] 68k governor active: %lld kHz, catch-up cap %s%lldx\n",
+			        (long long)gov_khz, gov_catchup_x ? "" : "off ",
+			        (long long)gov_catchup_x);
+		}
+		gov_on = 1;
+	}
+	if (currcycle < gov_next)
+		return;
+
+	int64_t now = gov_now_ns();
+
+	/* Achieved speed over 5 s windows of real time. Printed once if a
+	 * window falls below 90% of the target, or every window with
+	 * PISTORM_GOV_REPORT=1. A Pi 4's interpreter tops out near 20 MHz. */
+	{
+		static int64_t win_ns0;
+		static evt_t   win_cyc0;
+		static int     said;
+		if (!win_ns0 || currcycle < win_cyc0) {
+			win_ns0 = now;
+			win_cyc0 = currcycle;
+		} else if (now - win_ns0 >= 5000000000LL) {
+			int64_t khz = (int64_t)((currcycle - win_cyc0) / unit) * 1000000LL
+			              / (now - win_ns0);
+			if (gov_report || (!said && khz * 10 < gov_khz * 9)) {
+				said = 1;
+				fprintf(stderr, "[GOV] reaching %lld kHz of the %lld kHz target "
+				        "(5 s average)\n", (long long)khz, (long long)gov_khz);
+			}
+			win_ns0 = now;
+			win_cyc0 = currcycle;
+		}
+	}
+
+	int64_t virt_ns  = (int64_t)((currcycle - gov_cyc0) / unit) * 1000000LL / gov_khz;
+	int64_t ahead_ns = virt_ns - (now - gov_ns0);
+
+	if (ahead_ns > 0) {
+		/* ahead of real time: wait for it (at most GOV_WAIT_MAX per check) */
+		now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
+	} else {
+		if (ahead_ns < -GOV_FORGIVE_NS) {
+			/* a host stall, not bus time: write off all but GOV_FORGIVE_NS */
+			gov_ns0 -= ahead_ns + GOV_FORGIVE_NS;
+		}
+		/* repaying debt: this step may not have run faster than
+		 * gov_catchup_x times the target (see CATCH-UP above) */
+		if (gov_catchup_x) {
+			int64_t min_ns = (int64_t)((currcycle - step_cyc) / unit) * 1000000LL
+			                 / (gov_khz * gov_catchup_x);
+			if (now - step_ns < min_ns)
+				now = gov_wait_until(now, step_ns + min_ns);
+		}
+	}
+	step_ns  = now;
+	step_cyc = currcycle;
+	gov_next = currcycle + (evt_t)GOV_STEP * unit;
+}
+#endif
+
 void do_cycles_slow(int cycles_to_add)
 {
 #ifdef WITH_THREADED_CPU
@@ -354,91 +555,7 @@ void do_cycles_slow(int cycles_to_add)
 	currcycle += cycles_to_add;     /* PiStorm: advance the clock, no event dispatch */
 
 #ifndef AMIGA_
-	/* PiStorm Atari: wall-clock governor for real-68000-speed gaming.
-	 * The Amiga vsync-wait machinery that normally converts virtual cycles
-	 * into real time was swept out with the chipset layer, so m68k_speed=0
-	 * accounted cycles but nothing ever paced them - the CPU ran at Pi
-	 * speed regardless. This paces currcycle against CLOCK_MONOTONIC.
-	 * Reference: one 8MHz CPU cycle = CYCLE_UNIT/2 currcycle units = 125ns.
-	 * cpu_clock_multiplier already scales the per-instruction consumption
-	 * (via cpucycleunit), so it directly scales the governed speed:
-	 * unset/256 = 8MHz, 512 = 16MHz, plain 2 = 4MHz.
-	 * The target is cfg cpu_speed (8/16 MHz, jit_glue.cpp sets
-	 * m68k_speed=0 and no multiplier for it), else PISTORM_GOV_KHZ, else 8 MHz.
-	 * Active ONLY with m68k_speed=0 and the JIT off (interpreter); the
-	 * default max-speed configs never enter this block.
-	 * Sleeps are capped at 1ms per check so level-6 interrupt latency
-	 * stays well inside the ACIA's 2.5ms budget. */
-	if (currprefs.m68k_speed == 0 && !currprefs.cachesize) {
-		static evt_t gov_cyc0;
-		static int64_t gov_ns0;
-		static evt_t gov_next;
-		static int gov_on = 0;
-		static int64_t gov_khz;
-		if (!gov_on || currcycle < gov_cyc0) {
-			struct timespec ts;
-			clock_gettime(CLOCK_MONOTONIC, &ts);
-			gov_ns0 = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-			gov_cyc0 = currcycle;
-			gov_next = currcycle + (evt_t)1000 * (CYCLE_UNIT / 2);
-			if (!gov_on) {
-				/* Governed speed in kHz; default a real 8MHz ST. Bus-write
-				 * heavy code runs under budget regardless (each ST-RAM
-				 * write costs 1-2us of real bus time vs 500ns on a real
-				 * ST), so a slightly higher target here compensates the
-				 * average - tune to taste, e.g. 9000-10000. */
-				const char *env = getenv("PISTORM_GOV_KHZ");
-				gov_khz = env ? atoll(env) : pistorm_gov_khz ? pistorm_gov_khz : 8000;
-				if (gov_khz < 1000 || gov_khz > 64000)
-					gov_khz = 8000;
-				fprintf(stderr, "[GOV] 68k governor active: %lld kHz\n",
-				        (long long)gov_khz);
-			}
-			gov_on = 1;
-		}
-		if (currcycle >= gov_next) {
-			struct timespec ts;
-			clock_gettime(CLOCK_MONOTONIC, &ts);
-			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-			/* Can the interpreter keep up? Measured over 5 s windows of
-			 * real time; said once if a window falls below 90% of the
-			 * target (a Pi 4's interpreter tops out near 20 MHz). */
-			{
-				static int64_t win_ns0;
-				static evt_t win_cyc0;
-				static int said;
-				if (!win_ns0 || currcycle < win_cyc0) {
-					win_ns0 = now_ns;
-					win_cyc0 = currcycle;
-				} else if (now_ns - win_ns0 >= 5000000000LL) {
-					int64_t khz = (int64_t)((currcycle - win_cyc0) / (CYCLE_UNIT / 2))
-					              * 1000000LL / (now_ns - win_ns0);
-					if (!said && khz * 10 < gov_khz * 9) {
-						said = 1;
-						fprintf(stderr, "[GOV] reaching %lld kHz of the %lld kHz target "
-						        "(5 s average)\n", (long long)khz, (long long)gov_khz);
-					}
-					win_ns0 = now_ns;
-					win_cyc0 = currcycle;
-				}
-			}
-			int64_t real_ns = now_ns - gov_ns0;
-			int64_t virt_ns = (int64_t)((currcycle - gov_cyc0) / (CYCLE_UNIT / 2))
-			                  * 1000000LL / gov_khz;
-			int64_t ahead_ns = virt_ns - real_ns;
-			if (ahead_ns > 150000)
-				usleep(ahead_ns > 1000000 ? 1000 : (useconds_t)(ahead_ns / 1000));
-			else if (ahead_ns < -2000000LL) {
-				/* Behind by >2ms (bus-bound stretch, host stall): re-anchor
-				 * so the deficit is forgiven rather than repaid as an
-				 * unthrottled sprint through the next light section -
-				 * uniform pacing feels right, oscillation doesn't. */
-				gov_ns0 -= ahead_ns + 2000000LL;
-			}
-			/* next check after ~1000 guest cycles (~125us of guest time) */
-			gov_next = currcycle + (evt_t)1000 * (CYCLE_UNIT / 2);
-		}
-	}
+	pistorm_governor();             /* cpu_speed pacing - see the design note above pistorm_governor() */
 #endif
 #ifdef AMIGA_
 	while (cycles_to_add >= CYCLE_UNIT) {
