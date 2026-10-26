@@ -3,7 +3,7 @@
 AUTO-folder TSR (5.8 KB resident, 4 KB of it the stack programs started
 from a host drive run their launch on; 68000, position independent). Under FreeMiNT the
 emulator's `hostfs` drives come through `hostfs.xfs`; plain TOS has no
-file-system plug-ins, so without this a `hostfs S /home/pistorm/atari-share`
+file-system plug-ins, so without this a `hostfs Q /home/pistorm/gem-share`
 drive simply does not exist on TOS or EmuTOS. HOSTDOS hooks trap #1 (XBRA
 `PSHD`) and hands every GEMDOS call that names a HOSTFS drive to the host's
 `HOSTDOS` NatFeat (`platforms/atari/network/hostdos.cpp`), which runs it on
@@ -13,7 +13,7 @@ the Pi's folder. Everything else goes to the ROM untouched.
   `AUTO\PSHOSTFS.PRG` and a stock `DESKTOP.INF`: mount it as drive A: and boot
   to try it, or copy the program off it.
 * Put `PSHOSTFS.PRG` in `C:\AUTO` (any position). It prints the drives it
-  serves, e.g. `PSHOSTFS: S: on the Pi`, and adds them to `_drvbits`. On the
+  serves, e.g. `PSHOSTFS: Q: on the Pi`, and adds them to `_drvbits`. On the
   TOS desktop use *Install Disk Drive* once to give the drive an icon and
   *Save Desktop*; EmuTOS's desktop shows it by itself.
 * Read **and write**: open, read, write, seek, create, delete, rename, file

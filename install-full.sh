@@ -299,7 +299,9 @@ fi
 # 2. Runtime file tree (idempotent)
 # --------------------------------------------------------------------------
 say "Creating file structure under $ROOT"
-mkdir -p "$ROOT"/roms "$ROOT"/configs "$ROOT"/atari-share \
+# gem-share: an empty folder for PSHOSTFS (plain TOS / EmuTOS) to serve as
+# its own HOSTFS drive, kept apart from atari-share (the APJ-OS / MiNT tree).
+mkdir -p "$ROOT"/roms "$ROOT"/configs "$ROOT"/atari-share "$ROOT"/gem-share \
          "$ROOT"/dkimages/fdd "$ROOT"/screendumps
 
 say "Installing default configs / EmuTOS / blank floppy (existing files kept)"
@@ -878,13 +880,13 @@ echo
 echo "  HOSTFS drives on plain TOS / EmuTOS (PSHOSTFS):"
 echo "      floppy image -> $ROOT/dkimages/fdd/pshostfs.st  (AUTO\\PSHOSTFS.PRG)"
 echo "      1. the cfg needs at least one hostfs line, e.g."
-echo "             hostfs S $ROOT/atari-share"
+echo "             hostfs Q $ROOT/gem-share"
 echo "      2. mount the floppy as A: - in the cfg:"
 echo "             fdd $ROOT/dkimages/fdd/pshostfs.st"
 echo "         and boot TOS."
-echo "      3. it prints e.g. 'PSHOSTFS: S: on the Pi'. To keep it, copy"
+echo "      3. it prints e.g. 'PSHOSTFS: Q: on the Pi'. To keep it, copy"
 echo "         PSHOSTFS.PRG into C:\\AUTO and take the floppy out."
-echo "      On the TOS desktop: Install Disk Drive S, then Save Desktop."
+echo "      On the TOS desktop: Install Disk Drive Q, then Save Desktop."
 echo "      Not needed under MiNT (hostfs.xfs does it there)."
 echo
 echo "  STBOX (ST games in a GEM window):"
