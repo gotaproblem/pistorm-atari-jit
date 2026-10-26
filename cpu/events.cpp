@@ -8,6 +8,8 @@
 * Copyright 2000-2012 Toni Wilen
 */
 
+#include <errno.h>
+#include <time.h>
 #include "sysconfig.h"
 #include "sysdeps.h"
 
@@ -376,9 +378,9 @@ void do_cycles_slow(int cycles_to_add)
 	 *  - it checked every 1000 cycles and usleep()ed >= 150 us, waking
 	 *    late each time, while the real MFP's timer requests piled up.
 	 * Now: a check every GOV_STEP guest cycles (~31 us at 8 MHz); when
-	 * ahead, spin on the clock until real time catches up (the CPU
-	 * thread owns an isolated core - isolcpus - so spinning costs
-	 * nothing else, and the wait is exact); only a deficit beyond
+	 * ahead, sleep to just short of the moment real time catches up and
+	 * spin the last 50 us (exact, but the core is still given back -
+	 * see the wait below); only a deficit beyond
 	 * GOV_FORGIVE_NS (a real host stall) is written off. Any wait is
 	 * capped at 1 ms so level-6 interrupt latency stays inside the
 	 * ACIA's 2.5 ms budget. PISTORM_GOV_REPORT=1 prints every 5 s
@@ -442,8 +444,22 @@ void do_cycles_slow(int cycles_to_add)
 			                  * 1000000LL / gov_khz;
 			int64_t ahead_ns = virt_ns - (now_ns - gov_ns0);
 			if (ahead_ns > 0) {
-				/* spin until real time reaches guest time, at most 1 ms */
+				/* Wait until real time reaches guest time (at most 1 ms):
+				 * sleep to GOV_SPIN_NS short of the deadline, then spin the
+				 * rest. The sleep matters - this thread is SCHED_FIFO 99 on
+				 * core 2 and a pure spin starved everything else that core
+				 * must run (HostDOS stopped starting). The spin absorbs the
+				 * wake-up latency so the pacing stays exact. */
+				const int64_t GOV_SPIN_NS = 50000;
 				int64_t until = now_ns + (ahead_ns < 1000000LL ? ahead_ns : 1000000LL);
+				if (until - now_ns > GOV_SPIN_NS) {
+					struct timespec dl;
+					int64_t wake = until - GOV_SPIN_NS;
+					dl.tv_sec = (time_t)(wake / 1000000000LL);
+					dl.tv_nsec = (long)(wake % 1000000000LL);
+					while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL) == EINTR)
+						;
+				}
 				do {
 					clock_gettime(CLOCK_MONOTONIC, &ts);
 				} while ((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec < until);
