@@ -122,6 +122,7 @@ static int m_count(void)
 typedef struct {
   uint32_t regs[16], usp, ssp, parent, child;
   int mode;
+  int from_super;   /* the Pexec go came from supervisor mode */
 } ctx_t;
 static ctx_t ctx[16];
 static int nctx;
@@ -172,6 +173,7 @@ static void start_child(uint32_t bp, int mode)
   for (int i = 0; i < 16; i++) c->regs[i] = m68k_get_reg(NULL, M68K_REG_D0 + i);
   c->usp = m68k_get_reg(NULL, M68K_REG_USP);
   c->ssp = m68k_get_reg(NULL, M68K_REG_A7);
+  c->from_super = (rd16(c->ssp) & 0x2000) != 0;   /* caller's SR in the frame */
   c->parent = run();
   c->child = bp;
   c->mode = mode;
@@ -198,8 +200,20 @@ static void terminate(int code, int keep)
     return;
   }
   ctx_t *c = &ctx[--nctx];
-  for (int i = 0; i < 16; i++) m68k_set_reg(M68K_REG_D0 + i, c->regs[i]);
-  m68k_set_reg(M68K_REG_USP, c->usp);
+  if (c->from_super) {
+    /* Real TOS, Pexec 4/6 issued from SUPERVISOR mode (HOSTDOS runs the
+     * child from inside its trap #1 handler): field case 26 Oct 2026, a
+     * program on the host drive that Pexec'd another one crashed when the
+     * child ended (illegal instruction at $0000000C: rts through a stale
+     * user stack). Model the worst TOS may do here - only the supervisor
+     * stack comes back; the USP stays the child's and d1-d7/a0-a6 are
+     * whatever the child left - so HOSTDOS must keep them itself. */
+    for (int i = 1; i < 15; i++)
+      m68k_set_reg(M68K_REG_D0 + i, 0xDEAD0000u | (uint32_t)i);
+  } else {
+    for (int i = 0; i < 16; i++) m68k_set_reg(M68K_REG_D0 + i, c->regs[i]);
+    m68k_set_reg(M68K_REG_USP, c->usp);
+  }
   m68k_set_reg(M68K_REG_A7, c->ssp);
   wr32(RUNP, c->parent);
   m68k_set_reg(M68K_REG_D0, (uint32_t)code);
@@ -508,6 +522,9 @@ int main(int argc, char **argv)
   CHECK(R(38) >= 64, "Fopen left open for Pterm (%d)", R(38));
   CHECK(R(39) == -778, "Fread handle 100 (not ours) reaches the ROM (%d)", R(39));
   CHECK(R(45) == R(46), "Pexec 0 leaves no block behind (%d before, %d after)", R(45), R(46));
+  CHECK(R(50) == R(51), "Pexec 0 from a program: its stack pointer survives (%08X before, %08X after)", R(50), R(51));
+  CHECK(R(52) == 0x7777D7D7u && R(53) == 0xA6A6A6A6u,
+        "Pexec 0 from a program: its d3-d7/a3-a6 survive (d7 %08X a6 %08X)", R(52), R(53));
   CHECK(bad_mfree == 0, "no Mfree of a block that does not exist (%d)", bad_mfree);
 
   struct stat st;

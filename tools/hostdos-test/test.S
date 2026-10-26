@@ -188,8 +188,14 @@ _start:
         trap    #1
         addq.l  #2,sp
         r       45
+        move.l  sp,RES+4*50             | 50-53: the caller's stack and
+        move.l  #0x7777D7D7,d7          | registers must survive the child
+        move.l  #0xA6A6A6A6,a6          | (field case 26 Oct 2026)
         pexec   0, s_child              | 25
         r       25
+        move.l  sp,RES+4*51
+        move.l  d7,RES+4*52
+        move.l  a6,RES+4*53
         move.w  #0x7F,-(sp)             | 46: and after
         trap    #1
         addq.l  #2,sp

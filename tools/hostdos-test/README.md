@@ -27,3 +27,16 @@ generations switched back on (the STBOX build compiles them out).
 
 `BENCH_VERBOSE=1` lists every passing check; `HOSTDOS_DEBUG=1` shows the
 engine's `[HOSTDOS]` trace.
+
+## Strict TOS model for supervisor-mode Pexec
+
+HOSTDOS runs a host-drive program with a Pexec 4/6 issued from *inside*
+its trap #1 handler, i.e. in supervisor mode. When the child ends, the
+bench's fake TOS now hands back only the supervisor stack and d0: the
+user stack pointer stays the child's and d1-d7/a0-a6 are scrambled
+(`terminate()` in harness.c, `from_super`). That is the worst real TOS
+may do there, and it matches the field crash of 26 Oct 2026 (a program on
+S: that Pexec'd another crashed on its next `rts` once the child ended).
+TEST.PRG checks its stack pointer and d7/a6 across its Pexec of CHILD.PRG
+(slots 50-53), so HOSTDOS must keep the caller's USP and d3-d7/a3-a6
+itself - which it does around the Pexec in hostdos.S.

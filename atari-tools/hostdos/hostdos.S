@@ -386,13 +386,29 @@ pexec:  move.w  2(a0),-(sp)             | [mode]
         cmp.w   #0x15,d1
         bhs.s   3f
         moveq   #4,d2
-3:      clr.l   -(sp)
-        move.l  4(sp),-(sp)
+| The child runs from HERE, a supervisor-mode Pexec inside our trap #1
+| handler. When it ends, real TOS hands back the supervisor stack and d0
+| only: the user stack pointer is still the child's and d1-d7/a0-a6 hold
+| what the child left. A caller in user mode - a program on a host drive
+| starting another one - then resumed on the child's stack and crashed
+| (field case 26 Oct 2026: !RUNME.TOS running COREMARK.TOS, illegal
+| instruction at $0000000C on its next rts). So keep the caller's USP and
+| d3-d7/a3-a6 here, across the Pexec. (d1-d2/a0-a2 are restored at `done`;
+| d0 is the child's exit code.) The desktop calls Pexec in supervisor mode,
+| which is why programs started from it never showed this.
+3:      move.l  usp,a1
+        move.l  a1,-(sp)                | [usp][basepage][mode]
+        movem.l d3-d7/a3-a6,-(sp)       | [36 regs][usp][basepage][mode]
+        clr.l   -(sp)                   | Pexec(d2, 0, basepage, 0)
+        move.l  4+40(sp),-(sp)          | basepage, past the regs and usp
         clr.l   -(sp)
         move.w  d2,-(sp)
         move.w  #0x4B,-(sp)
         trap    #1
         lea     16(sp),sp
+        movem.l (sp)+,d3-d7/a3-a6       | (movem/move to An keep d0 and CCR)
+        move.l  (sp)+,a1
+        move.l  a1,usp                  | [basepage][mode] as before
         move.w  gemver(pc),d1
         cmp.w   #0x15,d1
         bhs.s   pex_pop
