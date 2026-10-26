@@ -9,6 +9,9 @@ drive simply does not exist on TOS or EmuTOS. HOSTDOS hooks trap #1 (XBRA
 `HOSTDOS` NatFeat (`platforms/atari/network/hostdos.cpp`), which runs it on
 the Pi's folder. Everything else goes to the ROM untouched.
 
+* `pshostfs.st` is a ready 720 KB floppy image (label PSHOSTFS) with
+  `AUTO\PSHOSTFS.PRG` and a stock `DESKTOP.INF`: mount it as drive A: and boot
+  to try it, or copy the program off it.
 * Put `PSHOSTFS.PRG` in `C:\AUTO` (any position). It prints the drives it
   serves, e.g. `PSHOSTFS: S: on the Pi`, and adds them to `_drvbits`. On the
   TOS desktop use *Install Disk Drive* once to give the drive an icon and
