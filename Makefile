@@ -107,6 +107,7 @@ PISTORM_CPP = emulator.c \
               platforms/atari/et4000/pcem/pcem_shim.c \
               platforms/atari/et4000/pcem/et4000_engine.c \
               platforms/atari/network/atari_natfeat.cpp \
+              platforms/atari/network/hostdos.cpp \
               platforms/atari/psctrl/psctrl.cpp \
               platforms/atari/psctrl/psctrl_settings.cpp \
               platforms/atari/psimg/psimg.cpp \

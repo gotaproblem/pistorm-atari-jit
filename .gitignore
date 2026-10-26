@@ -19,6 +19,8 @@ tools/dosbench/*.ppm
 tools/pdfbench/pdfbench
 tools/webbench/webbench
 tools/webbench/*.ppm
+tools/hostdos-test/hostdos-bench
+tools/hostdos-test/obj/
 tools/atariclean/tests/out/
 psweb-phase0-out/
 __pycache__/
