@@ -65,7 +65,7 @@ Notes:
 
 ### HOSTDOS
 The `hostfs` drives for plain TOS / EmuTOS GEM, read **and write**. Guest half:
-`atari-tools/hostdos/HOSTDOS.PRG`, an AUTO-folder TSR that hooks trap #1 and
+`atari-tools/hostdos/PSHOSTFS.PRG`, an AUTO-folder TSR that hooks trap #1 and
 forwards every GEMDOS call naming a HOSTFS drive - by path (or the current
 drive), by one of its handles 64..95, or by a DTA its Fsfirst marked - here;
 all other calls go to the ROM untouched. Host half:
@@ -91,7 +91,7 @@ builds into `tools/hostdos-test/`).
 - Read-only means the file has no write permission bits (the emulator runs as
   root, so `access()` would always say writable). `ro` on the cfg line makes
   every write fail with -13 (write-protected).
-- Not for MiNT: HOSTDOS.PRG refuses to install when the `MiNT` cookie exists,
+- Not for MiNT: PSHOSTFS.PRG refuses to install when the `MiNT` cookie exists,
   and DISPATCH answers "not ours" once `hostfs.xfs` has mounted a drive.
 
 ### fVDI

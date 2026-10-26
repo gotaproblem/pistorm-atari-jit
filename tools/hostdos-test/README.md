@@ -1,6 +1,6 @@
 # HOSTDOS host test bench
 
-Runs `atari-tools/hostdos/HOSTDOS.PRG` on any Linux host - no Pi, no ROM.
+Runs `atari-tools/hostdos/PSHOSTFS.PRG` on any Linux host - no Pi, no ROM.
 Musashi executes the TSR for real (its own install code, trap #1 hooked
 through the vector); a small fake GEMDOS stands in for the ROM, and the
 HOSTDOS NatFeat is the real `platforms/atari/network/hostdos.cpp` on a

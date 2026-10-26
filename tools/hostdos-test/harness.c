@@ -1,7 +1,7 @@
 /*
  * HOSTDOS host test bench (any Linux host, no Pi, no ROM).
  *
- * Musashi runs HOSTDOS.PRG for real - installed by its own code, trap #1
+ * Musashi runs PSHOSTFS.PRG for real - installed by its own code, trap #1
  * hooked through the vector - over a small fake GEMDOS standing in for the
  * ROM. The HOSTDOS NatFeat is the real engine, platforms/atari/network/
  * hostdos.cpp, on a temporary folder. TEST.PRG then makes GEMDOS calls and
@@ -14,7 +14,7 @@
  * ownership to the child, Pterm frees what the leaver owns and resumes
  * the parent after its Pexec trap.
  *
- *   ./hostdos-bench HOSTDOS.PRG TEST.PRG CHILD.PRG [68000|68030] [gemdos-ver]
+ *   ./hostdos-bench PSHOSTFS.PRG TEST.PRG CHILD.PRG [68000|68030] [gemdos-ver]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -432,7 +432,7 @@ static void writef(const char *p, const char *s)
 
 int main(int argc, char **argv)
 {
-  if (argc < 4) { fprintf(stderr, "usage: %s HOSTDOS.PRG TEST.PRG CHILD.PRG [68000|68030] [gemver]\n", argv[0]); return 2; }
+  if (argc < 4) { fprintf(stderr, "usage: %s PSHOSTFS.PRG TEST.PRG CHILD.PRG [68000|68030] [gemver]\n", argv[0]); return 2; }
   int cpu = M68K_CPU_TYPE_68000;
   longframe = 0;
   if (argc > 4 && !strcmp(argv[4], "68030")) { cpu = M68K_CPU_TYPE_68030; longframe = 1; }
@@ -466,14 +466,14 @@ int main(int argc, char **argv)
 
   printf("--- install (%s, GEMDOS %02X)\n", longframe ? "68030 long frames" : "68000", gemver);
   int r = run_prg(load_prg(argv[1]));
-  CHECK(r == 0, "HOSTDOS.PRG exits via Ptermres (got %d)", r);
+  CHECK(r == 0, "PSHOSTFS.PRG exits via Ptermres (got %d)", r);
   CHECK(strstr(outbuf, "R: S:") != NULL, "install line lists R: S: and not D: ('%s')", outbuf);
   CHECK(rd32(0x4C2) == (0x0Cu | (1u << 17) | (1u << 18)), "_drvbits %08X", rd32(0x4C2));
   CHECK(rd32(0x84) != FAKEDOS, "trap #1 hooked");
   outlen = 0; outbuf[0] = 0;
   r = run_prg(load_prg(argv[1]));
   outbuf[outlen] = 0;
-  CHECK(r == 0 && strstr(outbuf, "already installed"), "second HOSTDOS.PRG refuses ('%s')", outbuf);
+  CHECK(r == 0 && strstr(outbuf, "already installed"), "second PSHOSTFS.PRG refuses ('%s')", outbuf);
   int blocks_after_install = m_count();
 
   printf("--- TEST.PRG\n");

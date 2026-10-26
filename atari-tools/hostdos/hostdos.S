@@ -1,4 +1,7 @@
-| HOSTDOS.PRG - HOSTFS drives for plain TOS / EmuTOS GEM (see README.md).
+| PSHOSTFS.PRG - HOSTFS drives for plain TOS / EmuTOS GEM (see README.md).
+| (Called HOSTDOS.PRG until 26 Oct 2026. The NatFeat it talks to is still
+| named "HOSTDOS" - platforms/atari/network/hostdos.cpp - as are this
+| source, its folder and the bench in tools/hostdos-test.)
 |
 | AUTO-folder TSR. FreeMiNT reaches the emulator's HOSTFS drives through
 | hostfs.xfs; plain TOS has no file-system plug-ins, so this hooks trap #1
@@ -75,7 +78,7 @@ _start:
         cmp.l   #-4,d0
         beq.s   quit
 
-        lea     msgbuf(pc),a1           | "HOSTDOS: S: T: on the Pi\r\n"
+        lea     msgbuf(pc),a1           | "PSHOSTFS: S: T: on the Pi\r\n"
         lea     msg_head(pc),a0
 1:      move.b  (a0)+,(a1)+
         bne.s   1b
@@ -559,12 +562,12 @@ id_load:  .long 0
 gemver:   .word 0                       | 0x0015 = GEMDOS 0.15
 
 nf_name:   .asciz "HOSTDOS"
-msg_head:  .asciz "HOSTDOS: "
+msg_head:  .asciz "PSHOSTFS: "
 msg_tail:  .asciz "on the Pi\r\n"
-msg_nonf:  .asciz "HOSTDOS: no HOSTDOS NatFeat (needs pistorm-atari-jit and a hostfs line) - not installed\r\n"
-msg_mint:  .asciz "HOSTDOS: not needed under MiNT (hostfs.xfs serves the drives) - not installed\r\n"
-msg_twice: .asciz "HOSTDOS: already installed\r\n"
-msg_nodrv: .asciz "HOSTDOS: no hostfs drive left to serve - not installed\r\n"
+msg_nonf:  .asciz "PSHOSTFS: no HOSTDOS NatFeat (needs pistorm-atari-jit and a hostfs line) - not installed\r\n"
+msg_mint:  .asciz "PSHOSTFS: not needed under MiNT (hostfs.xfs serves the drives) - not installed\r\n"
+msg_twice: .asciz "PSHOSTFS: already installed\r\n"
+msg_nodrv: .asciz "PSHOSTFS: no hostfs drive left to serve - not installed\r\n"
         .even
 msgbuf:    .space 96
 

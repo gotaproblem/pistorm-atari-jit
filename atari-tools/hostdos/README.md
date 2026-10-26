@@ -1,6 +1,7 @@
 # HOSTDOS - HOSTFS drives under plain TOS / EmuTOS
 
-AUTO-folder TSR (1.6 KB, 68000, position independent). Under FreeMiNT the
+AUTO-folder TSR (5.8 KB resident, 4 KB of it the stack programs started
+from a host drive run their launch on; 68000, position independent). Under FreeMiNT the
 emulator's `hostfs` drives come through `hostfs.xfs`; plain TOS has no
 file-system plug-ins, so without this a `hostfs S /home/pistorm/atari-share`
 drive simply does not exist on TOS or EmuTOS. HOSTDOS hooks trap #1 (XBRA
@@ -8,8 +9,8 @@ drive simply does not exist on TOS or EmuTOS. HOSTDOS hooks trap #1 (XBRA
 `HOSTDOS` NatFeat (`platforms/atari/network/hostdos.cpp`), which runs it on
 the Pi's folder. Everything else goes to the ROM untouched.
 
-* Put `HOSTDOS.PRG` in `C:\AUTO` (any position). It prints the drives it
-  serves, e.g. `HOSTDOS: S: on the Pi`, and adds them to `_drvbits`. On the
+* Put `PSHOSTFS.PRG` in `C:\AUTO` (any position). It prints the drives it
+  serves, e.g. `PSHOSTFS: S: on the Pi`, and adds them to `_drvbits`. On the
   TOS desktop use *Install Disk Drive* once to give the drive an icon and
   *Save Desktop*; EmuTOS's desktop shows it by itself.
 * Read **and write**: open, read, write, seek, create, delete, rename, file
@@ -36,7 +37,7 @@ the Pi's folder. Everything else goes to the ROM untouched.
 
 ## Build
 
-`HOSTDOS.PRG` is committed prebuilt (`make binutils` with Debian/Ubuntu
+`PSHOSTFS.PRG` is committed prebuilt (`make binutils` with Debian/Ubuntu
 `binutils-m68k-linux-gnu`; `make` with the crossmint toolchain gives the same
 code). No libraries, no relocations - PC-relative throughout.
 

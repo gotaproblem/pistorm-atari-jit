@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /*
  * HOSTDOS engine - GEMDOS file calls on a HOSTFS directory, for plain TOS.
- * See hostdos.h for the split between this file and HOSTDOS.PRG.
+ * See hostdos.h for the split between this file and PSHOSTFS.PRG.
  *
  * Names. TOS only knows 8.3 upper-case names, the Pi's directories hold
  * anything. Every host directory is mapped once per change (dir mtime) to

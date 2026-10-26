@@ -1221,7 +1221,7 @@ static uae_u32 nf_get_id(uaecptr stack)
           !falcon_configured())
         return 0;                  /* neither psvidel nor falcon_dsp */
       if (i == NF_FEATURE_HOSTDOS && !hostfs_is_enabled())
-        return 0;                  /* no hostfs lines: HOSTDOS.PRG says so */
+        return 0;                  /* no hostfs lines: PSHOSTFS.PRG says so */
       if (i == NF_FEATURE_HOSTFS && !hostfs_is_enabled()) {
         HOSTFS_LOG("[NF] GET_ID(\"%s\") -> 0 (hostfs disabled)\n", name);
         return 0;
@@ -5421,7 +5421,7 @@ static bool mp3_gemdos_to_host(const char *gem_in, char *out, size_t outsz)
     }
   }
   if (!root) {
-    /* plain TOS: no hostfs.xfs mount, HOSTDOS.PRG serves the drive and
+    /* plain TOS: no hostfs.xfs mount, PSHOSTFS.PRG serves the drive and
      * the name the guest has is its 8.3 view of the folder */
     char tos[512];
     snprintf(tos, sizeof tos, "%c:%s", letter, rest);
@@ -6989,7 +6989,7 @@ static uae_u32 nf_call_psvidel(uae_u32 subid, uaecptr params)
 }
 
 /* ------------------------------------------------------------------ */
-/* HOSTDOS: HOSTFS drives under plain TOS (hostdos.cpp, HOSTDOS.PRG)     */
+/* HOSTDOS: HOSTFS drives under plain TOS (hostdos.cpp, PSHOSTFS.PRG)     */
 /* ------------------------------------------------------------------ */
 static void hostdos_mem_read(uint32_t addr, void *dst, uint32_t n)
 {

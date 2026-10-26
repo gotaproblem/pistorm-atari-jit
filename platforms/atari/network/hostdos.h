@@ -2,7 +2,7 @@
 /*
  * HOSTDOS - HOSTFS drives for plain TOS / EmuTOS (no MiNT).
  *
- * The guest half is atari-tools/hostdos/HOSTDOS.PRG, an AUTO-folder TSR
+ * The guest half is atari-tools/hostdos/PSHOSTFS.PRG, an AUTO-folder TSR
  * that hooks trap #1. For each GEMDOS call that names a HOSTFS drive (by
  * path, by one of our file handles, or by a DTA we filled) it hands the
  * caller's argument block to the HOSTDOS NatFeat, which runs the call on
