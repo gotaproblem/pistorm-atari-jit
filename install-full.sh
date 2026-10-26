@@ -314,6 +314,14 @@ copy_once "$HERE/configs/atari.cfg"         "$ROOT/configs/atari.cfg"
 copy_once "$HERE/configs/emutos-aranym.rom" "$ROOT/roms/emutos-aranym.rom"
 copy_once "$HERE/configs/720k.st"           "$ROOT/dkimages/fdd/720k.st"
 
+# PSHOSTFS floppy: AUTO\PSHOSTFS.PRG, which gives plain TOS / EmuTOS the
+# cfg's `hostfs` drives (MiNT has hostfs.xfs instead). Mount it as A: and
+# boot, or copy the program into C:\AUTO. copy_newer, not copy_once: it is
+# shipped and fixed like the GEM programs, so a re-run after a git pull
+# brings the new one. That also replaces a copy someone has written to -
+# keep your own floppies under another name.
+copy_newer "$HERE/atari-tools/hostdos/pshostfs.st" "$ROOT/dkimages/fdd/pshostfs.st"
+
 # capture muxer: shipped in configs/, run from the emulator directory
 copy_once "$HERE/configs/capmux.sh"         "$HERE/capmux.sh"
 chmod +x "$HERE/capmux.sh" 2>/dev/null || true
@@ -861,6 +869,7 @@ else
 fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
+echo "  HOSTFS on TOS: $ROOT/dkimages/fdd/pshostfs.st  (AUTO\\PSHOSTFS.PRG for plain TOS/EmuTOS)"
 echo "  GEM programs : $ROOT/atari-share/apj-os/natfeats/"
 [ -e "$ROOT/atari-share/APJOS.VER" ] && \
 echo "  APJ-OS       : v$(cat "$ROOT/atari-share/APJOS.VER")  (S:\\APJOS.VER)"
