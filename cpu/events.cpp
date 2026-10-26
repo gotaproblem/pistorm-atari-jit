@@ -367,30 +367,45 @@ void do_cycles_slow(int cycles_to_add)
 	 * m68k_speed=0 and no multiplier for it), else PISTORM_GOV_KHZ, else 8 MHz.
 	 * Active ONLY with m68k_speed=0 and the JIT off (interpreter); the
 	 * default max-speed configs never enter this block.
-	 * Sleeps are capped at 1ms per check so level-6 interrupt latency
-	 * stays well inside the ACIA's 2.5ms budget. */
+	 *
+	 * Pacing (26 Oct 2026): a MOD player with native YM output at
+	 * cpu_speed 8mhz averaged 6.9 MHz ([GOV] report) yet played correctly
+	 * unthrottled - the Pi had the speed, the governor lost it:
+	 *  - a deficit over 2 ms was forgiven, so the light stretches never
+	 *    repaid the bus-heavy ones and the average sank below target;
+	 *  - it checked every 1000 cycles and usleep()ed >= 150 us, waking
+	 *    late each time, while the real MFP's timer requests piled up.
+	 * Now: a check every GOV_STEP guest cycles (~31 us at 8 MHz); when
+	 * ahead, spin on the clock until real time catches up (the CPU
+	 * thread owns an isolated core - isolcpus - so spinning costs
+	 * nothing else, and the wait is exact); only a deficit beyond
+	 * GOV_FORGIVE_NS (a real host stall) is written off. Any wait is
+	 * capped at 1 ms so level-6 interrupt latency stays inside the
+	 * ACIA's 2.5 ms budget. PISTORM_GOV_REPORT=1 prints every 5 s
+	 * window, not only the first slow one. */
 	if (currprefs.m68k_speed == 0 && !currprefs.cachesize) {
+		enum { GOV_STEP = 250 };                       /* guest cycles   */
+		const int64_t GOV_FORGIVE_NS = 50000000LL;     /* 50 ms          */
 		static evt_t gov_cyc0;
 		static int64_t gov_ns0;
 		static evt_t gov_next;
 		static int gov_on = 0;
+		static int gov_report = 0;
 		static int64_t gov_khz;
 		if (!gov_on || currcycle < gov_cyc0) {
 			struct timespec ts;
 			clock_gettime(CLOCK_MONOTONIC, &ts);
 			gov_ns0 = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 			gov_cyc0 = currcycle;
-			gov_next = currcycle + (evt_t)1000 * (CYCLE_UNIT / 2);
+			gov_next = currcycle + (evt_t)GOV_STEP * (CYCLE_UNIT / 2);
 			if (!gov_on) {
-				/* Governed speed in kHz; default a real 8MHz ST. Bus-write
-				 * heavy code runs under budget regardless (each ST-RAM
-				 * write costs 1-2us of real bus time vs 500ns on a real
-				 * ST), so a slightly higher target here compensates the
-				 * average - tune to taste, e.g. 9000-10000. */
+				/* Governed speed in kHz; default a real 8MHz ST. */
 				const char *env = getenv("PISTORM_GOV_KHZ");
 				gov_khz = env ? atoll(env) : pistorm_gov_khz ? pistorm_gov_khz : 8000;
 				if (gov_khz < 1000 || gov_khz > 64000)
 					gov_khz = 8000;
+				const char *rep = getenv("PISTORM_GOV_REPORT");
+				gov_report = rep && *rep == '1';
 				fprintf(stderr, "[GOV] 68k governor active: %lld kHz\n",
 				        (long long)gov_khz);
 			}
@@ -402,7 +417,8 @@ void do_cycles_slow(int cycles_to_add)
 			int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 			/* Can the interpreter keep up? Measured over 5 s windows of
 			 * real time; said once if a window falls below 90% of the
-			 * target (a Pi 4's interpreter tops out near 20 MHz). */
+			 * target (a Pi 4's interpreter tops out near 20 MHz), or every
+			 * window with PISTORM_GOV_REPORT=1. */
 			{
 				static int64_t win_ns0;
 				static evt_t win_cyc0;
@@ -413,7 +429,7 @@ void do_cycles_slow(int cycles_to_add)
 				} else if (now_ns - win_ns0 >= 5000000000LL) {
 					int64_t khz = (int64_t)((currcycle - win_cyc0) / (CYCLE_UNIT / 2))
 					              * 1000000LL / (now_ns - win_ns0);
-					if (!said && khz * 10 < gov_khz * 9) {
+					if (gov_report || (!said && khz * 10 < gov_khz * 9)) {
 						said = 1;
 						fprintf(stderr, "[GOV] reaching %lld kHz of the %lld kHz target "
 						        "(5 s average)\n", (long long)khz, (long long)gov_khz);
@@ -422,21 +438,22 @@ void do_cycles_slow(int cycles_to_add)
 					win_cyc0 = currcycle;
 				}
 			}
-			int64_t real_ns = now_ns - gov_ns0;
 			int64_t virt_ns = (int64_t)((currcycle - gov_cyc0) / (CYCLE_UNIT / 2))
 			                  * 1000000LL / gov_khz;
-			int64_t ahead_ns = virt_ns - real_ns;
-			if (ahead_ns > 150000)
-				usleep(ahead_ns > 1000000 ? 1000 : (useconds_t)(ahead_ns / 1000));
-			else if (ahead_ns < -2000000LL) {
-				/* Behind by >2ms (bus-bound stretch, host stall): re-anchor
-				 * so the deficit is forgiven rather than repaid as an
-				 * unthrottled sprint through the next light section -
-				 * uniform pacing feels right, oscillation doesn't. */
-				gov_ns0 -= ahead_ns + 2000000LL;
+			int64_t ahead_ns = virt_ns - (now_ns - gov_ns0);
+			if (ahead_ns > 0) {
+				/* spin until real time reaches guest time, at most 1 ms */
+				int64_t until = now_ns + (ahead_ns < 1000000LL ? ahead_ns : 1000000LL);
+				do {
+					clock_gettime(CLOCK_MONOTONIC, &ts);
+				} while ((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec < until);
+			} else if (ahead_ns < -GOV_FORGIVE_NS) {
+				/* Behind by more than 50 ms - a host stall, not bus time:
+				 * write that off so it is not repaid as a long sprint, but
+				 * keep up to 50 ms of debt to be made up as normal. */
+				gov_ns0 -= ahead_ns + GOV_FORGIVE_NS;
 			}
-			/* next check after ~1000 guest cycles (~125us of guest time) */
-			gov_next = currcycle + (evt_t)1000 * (CYCLE_UNIT / 2);
+			gov_next = currcycle + (evt_t)GOV_STEP * (CYCLE_UNIT / 2);
 		}
 	}
 #endif
