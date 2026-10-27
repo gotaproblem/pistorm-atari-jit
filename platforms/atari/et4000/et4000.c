@@ -2886,6 +2886,24 @@ void et4000_native_vbl_snapshot(void)
     sn->lw  = ste ? rtg.linewidth : 0u;
     sn->hs  = ste ? (rtg.hscroll & 15u) : 0u;
 
+    {   /* PISTORM_VID_DEBUG=1: what the HDMI copy draws with, on change */
+        static int dbg = -1;
+        static uint32_t last = 0xFFFFFFFFu;
+        if (dbg < 0) {
+            const char *e = getenv("PISTORM_VID_DEBUG");
+            dbg = (e && *e == '1');
+        }
+        uint32_t now = (uint32_t)sn->rez | ((uint32_t)sn->lw << 8) |
+                       ((uint32_t)sn->hs << 16) | ((uint32_t)ste << 24) |
+                       ((uint32_t)rtg.linewidth << 25);
+        if (dbg && now != last) {
+            last = now;
+            fprintf(stderr, "[vid] HDMI draws rez %u linewidth %u fine scroll %u "
+                    "(shifter %s, snooped linewidth %u)\n", sn->rez, sn->lw, sn->hs,
+                    ste ? "STE" : "ST", rtg.linewidth);
+        }
+    }
+
     const uint32_t planes = sn->rez == 0 ? 4u : sn->rez == 1 ? 2u : 1u;
     const uint32_t rows   = sn->rez == 2 ? 400u : 200u;
     uint32_t stride = (sn->rez == 2 ? 80u : 160u) + (uint32_t)sn->lw * 2u +

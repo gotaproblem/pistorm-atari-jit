@@ -3159,11 +3159,6 @@ static inline void st_video_ste_extras_clear(void)
   rtg.hscroll = 0;
 }
 
-/* cpu/newcpu.cpp's GEMDOS hook: a program has ended (Pterm0/Pterm) */
-extern "C" void pistorm_ste_extras_reset(void)
-{
-  st_video_ste_extras_clear();
-}
 
 /* PISTORM_VID_DEBUG=1: trace every shifter-register write the guest
  * makes (base hi/mid, STE low/linewidth/hscroll, shift mode) so screen
@@ -3183,6 +3178,15 @@ static inline void vid_dbg_w(uint32_t a, uint32_t value)
 {
   if (vid_dbg())
     fprintf(stderr, "[vid] W %06X=%02X\n", a, value & 0xFF);
+}
+
+/* cpu/newcpu.cpp's GEMDOS hook: a program has ended (Pterm0/Pterm) */
+extern "C" void pistorm_ste_extras_reset(void)
+{
+  if (vid_dbg() && (rtg.low || rtg.linewidth || rtg.hscroll))
+    fprintf(stderr, "[vid] Pterm: STE extras reset (low %02X linewidth %02X hscroll %X)\n",
+            rtg.low, rtg.linewidth, rtg.hscroll);
+  st_video_ste_extras_clear();
 }
 
 static inline void st_video_snoop8(uint32_t address, uint8_t value)
