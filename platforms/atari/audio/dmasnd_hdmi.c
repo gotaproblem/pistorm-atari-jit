@@ -299,7 +299,16 @@ void dmasnd_set_mode(unsigned rate_hz, int stereo)
  * audio) drove the capture at ~32 MB/s into this stream, 1.5 GB in under a
  * minute, OOM, exit 137 with nothing on the console. Over the cap the new
  * data is dropped (audible as a gap, not a dead machine) and the first
- * overflow is reported once, with what the producer was doing. */
+ * overflow is reported once, with what the producer was doing.
+ *
+ * The test is on what is ALREADY queued, not queued + this write. One DMA
+ * frame is captured whole at its boundary, and a frame can be far longer
+ * than the cap: FastBobs loops its 345 KB soundtrack as ONE repeat frame
+ * (14 s at 25 kHz mono). With "queued + n > cap" the first loop went in
+ * (queue empty) and the second was dropped at its boundary with 941 bytes
+ * still queued - sound stopped after one pass. A producer that is really
+ * running ahead still trips this: its queue grows past the cap, and the
+ * most it can hold is the cap plus one frame (MAX_FRAME, 1 MB). */
 #define DMASND_QUEUE_MAX_S 2u
 
 static atomic_uint g_drops;          /* writes dropped at the cap */
@@ -315,7 +324,7 @@ void dmasnd_write_bytes(const void *src, unsigned n)
     unsigned cap  = bps * DMASND_QUEUE_MAX_S;
     int      q    = SDL_GetAudioStreamQueued(g_ste);
 
-    if (q > 0 && (unsigned)q + n > cap) {
+    if (q > 0 && (unsigned)q > cap) {
         unsigned d = atomic_fetch_add(&g_drops, 1u);
         if (d == 0 || (d & 0xFFFFu) == 0)
             fprintf(stderr, "[dmasnd] STE stream overflow: %d bytes queued "
