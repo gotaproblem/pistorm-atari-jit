@@ -3149,6 +3149,12 @@ static inline void st_video_ste_extras_clear(void)
   rtg.hscroll = 0;
 }
 
+/* cpu/newcpu.cpp's GEMDOS hook: a program has ended (Pterm0/Pterm) */
+extern "C" void pistorm_ste_extras_reset(void)
+{
+  st_video_ste_extras_clear();
+}
+
 /* PISTORM_VID_DEBUG=1: trace every shifter-register write the guest
  * makes (base hi/mid, STE low/linewidth/hscroll, shift mode) so screen
  * programming sequences are measured, not assumed. Low-rate registers:

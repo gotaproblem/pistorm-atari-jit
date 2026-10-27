@@ -4592,12 +4592,21 @@ static uae_u32 pistorm_cur_basepage(void)
  * EmuTOS left it at the ST rez and fVDI clips the pointer to it. */
 extern "C" void pistorm_fvdi_linea_restore(void);
 extern "C" void pistorm_fvdi_set_st_yield(int on);
+extern "C" void pistorm_ste_extras_reset(void);
 static void pistorm_gemdos_hook(void)
 {
-	if (!g_rez_owner)
-		return;
 	uae_u16 op = get_word(m68k_areg(regs, 7));
 	if (op != 0x00 && op != 0x4C)
+		return;
+	/* Any program ending (Pterm0/Pterm): drop the STE-only screen
+	 * extras the HDMI copy honours - base low byte, line width, fine
+	 * scroll. A demo that used them and exits leaves them set, and TOS
+	 * (which thinks it is on an ST) never writes them back: the real ST
+	 * shifter ignores them, the HDMI copy drew the desktop shifted
+	 * (field: Bad Apple's exit, medium-res desktop with the two planes
+	 * 16 px apart on HDMI, ST monitor fine). */
+	pistorm_ste_extras_reset();
+	if (!g_rez_owner)
 		return;
 	if (pistorm_cur_basepage() != g_rez_owner)
 		return;
