@@ -3136,12 +3136,22 @@ static inline uint32_t check_ff_st(uint32_t add)
 }
 
 /* In "shifter ste" mode the mirror acts as the STE shifter the ST host
- * lacks. Stale-value guard: an OS that believes the machine is an ST
- * (probe failed on the real bus) sets screens by writing ONLY hi/mid
- * and never clears the STE extras - EmuTOS's boot probe leaves a test
- * value in $FF820D that then skews the desktop forever. So a plain
- * hi/mid base write clears the STE extras; software that really uses
- * them (STE demos) rewrites them every frame and loses nothing. */
+ * lacks. A hi/mid base write clears ONLY the base low byte, as the STE
+ * shifter itself does - that alone is the stale-value guard for an OS
+ * that believes the machine is an ST: EmuTOS's boot probe leaves a test
+ * value in $FF820D that would otherwise skew the desktop forever.
+ * Line width ($FF820F) and fine scroll ($FF8265) survive base writes on
+ * the STE, and must here: FastBobs writes $FF820F=$30 (a 256-byte line)
+ * ONCE, then hi/mid every VBL to flip buffers - clearing all three per
+ * base write threw the line width away every frame and the HDMI copy
+ * showed the 256-byte screen at 160 bytes per line (bobs in stripes).
+ * The extras a finished program leaves set are dropped at its Pterm
+ * (pistorm_ste_extras_reset below) instead. */
+static inline void st_video_ste_base_written(void)
+{
+  rtg.low = 0;
+}
+
 static inline void st_video_ste_extras_clear(void)
 {
   rtg.low = 0;
@@ -3181,12 +3191,12 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
 
   if (a == 0x00FF8201) {
     rtg.high = value;
-    st_video_ste_extras_clear();
+    st_video_ste_base_written();
     vid_dbg_w(a, value);
   }
   else if (a == 0x00FF8203) {
     rtg.mid = value;
-    st_video_ste_extras_clear();
+    st_video_ste_base_written();
     vid_dbg_w(a, value);
   }
   else if (a == 0x00FF820D) {
@@ -3215,12 +3225,12 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
 
   if (a == 0x00FF8200) {
     rtg.high = (uint8_t)value;
-    st_video_ste_extras_clear();
+    st_video_ste_base_written();
     vid_dbg_w(a, value);
   }
   else if (a == 0x00FF8202) {
     rtg.mid = (uint8_t)value;
-    st_video_ste_extras_clear();
+    st_video_ste_base_written();
     vid_dbg_w(a, value);
   }
   else if (a == 0x00FF820C) {
@@ -3253,7 +3263,7 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
   if (a == 0x00FF8200) {
     rtg.high = (uint8_t)(value >> 16);
     rtg.mid = (uint8_t)value;
-    st_video_ste_extras_clear();
+    st_video_ste_base_written();
     vid_dbg_w(a, value >> 16);
     vid_dbg_w(a + 2, value);
   } else if (a == 0x00FF820C) {
