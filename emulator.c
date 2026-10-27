@@ -2803,8 +2803,14 @@ int main (int argc, char *argv[])
    * AUTO\SETMCH.PRG for emulator boots. */
   {
     uint32_t mch;
-    if (emulator_config_machine_set(&mch))
+    extern int emulator_config_machine_kind(void);
+    if (emulator_config_machine_set(&mch)) {
       machine_cookie_set(mch);
+      /* STE: _VDO and _SND too - TOS 2.06's STE probe fails on the real
+       * ST shifter and writes ST values (machine_cookie.c) */
+      if (emulator_config_machine_kind() == 1)
+        machine_cookie_set_ste_hw();
+    }
   }
 
   /* Initialise JIT CPU core */
