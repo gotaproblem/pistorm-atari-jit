@@ -1342,17 +1342,20 @@ static inline void vid_dbg_w(uint32_t a, uint32_t value)
         fprintf(stderr, "[vid] W %06X=%02X\n", a, value & 0xFFu);
 }
 
-/* Stale-STE-extras guard for 'shifter ste' mode: an OS that believes
- * the machine is an ST sets screens by writing ONLY hi/mid and never
- * clears $FF820D (EmuTOS's boot probe leaves residue there -> skewed
- * desktop). A plain hi/mid write clears the extras; STE software that
- * uses them programs base then extras (ascending register order) and
- * so keeps them. */
+/* Stale-value guard for 'shifter ste' mode: an OS that believes the
+ * machine is an ST sets screens by writing ONLY hi/mid and never clears
+ * $FF820D (EmuTOS's boot probe leaves residue there -> skewed desktop).
+ * A hi/mid write clears $FF820D and nothing else - exactly what the STE
+ * shifter does. Line width ($FF820F) and fine scroll ($FF8265) survive
+ * base writes on the STE and must here: FastBobs writes $FF820F=$30
+ * (256-byte lines) ONCE, then flips buffers with hi/mid every VBL;
+ * clearing all three threw the line width away every frame and HDMI
+ * showed the 256-byte screen at 160 bytes a line (bobs in stripes).
+ * Line width / fine scroll a finished program leaves set are dropped at
+ * its Pterm instead (emulator.c pistorm_ste_extras_reset). */
 static inline void st_video_ste_extras_clear(void)
 {
     rtg.low = 0;
-    rtg.linewidth = 0;
-    rtg.hscroll = 0;
 }
 
 static void st_rez_sync_trace(uint32_t a, uint8_t v);
