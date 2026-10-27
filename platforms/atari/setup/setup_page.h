@@ -57,6 +57,9 @@ enum sp_result {
  * as 640x400 XRGB; fills `path` with what it wrote. Unset = no dumps. */
 typedef int (*sp_dump_fn)(const uint32_t *xrgb, int w, int h, char *path, unsigned long n);
 void sp_set_dumper(sp_dump_fn fn);
+/* "F12" or "HELP": the dump key the builds screen names for a build whose
+ * `kbd` value is kbd_val (NULL = none) - F12 only when `kbd usb` is on. */
+const char *sp_dump_key(const char *kbd_val);
 
 enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                       char *chosen, unsigned long chosen_len);

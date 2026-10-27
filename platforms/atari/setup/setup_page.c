@@ -1297,6 +1297,18 @@ static void choose_accept(struct state *st)
     }
 }
 
+/* The dump key the builds screen names for a build whose `kbd` value is
+ * kbd_val (NULL = no kbd line): "F12" when the USB/BT keyboard is on
+ * (`kbd usb`, `kbd usb nograb`, ...), "HELP" (the ST keyboard) for
+ * anything else - absent, `kbd disabled`, `kbd usb off`. */
+const char *sp_dump_key(const char *kbd_val)
+{
+    const char *rest;
+    if (kbd_val && device_key("kbd", kbd_val, &rest) == 1 && sp_row_on("kbd", kbd_val))
+        return "F12";
+    return "HELP";
+}
+
 /* ================================================================== */
 /* drawing                                                             */
 /* ================================================================== */
@@ -1305,9 +1317,15 @@ static void draw_builds(struct ss_screen *ss, const struct state *st)
 {
     int ink = c_ink(ss), hi = c_hi(ss);
     char line[SS_COLS + 1];
-    static const struct help h[] = { { "Enter", "boot" }, { "E", "edit" },
-        { "N", "new" }, { "D", "delete" }, { "S", "save" }, { "ESC/pad X", "leave" },
-        { "F12", "dump" } };
+    /* The dump key shown follows the input of the build under the cursor:
+     * F12 when its `kbd usb` (usb/bt kbd/mouse) row is on, the ST's Help
+     * key otherwise. Both keys work either way (setup_input.c); this is
+     * only which one the line names. The pad still leaves with X and
+     * ticks with Y, but the help lines name keyboard keys only. */
+    const char *kv = st->nbuilds ? sc_get(&st->cfg, st->builds[st->bsel], "kbd") : NULL;
+    const struct help h[] = { { "Enter", "boot" }, { "E", "edit" },
+        { "N", "new" }, { "D", "delete" }, { "S", "save" }, { "ESC", "leave" },
+        { sp_dump_key(kv), "dump" } };
     static const struct help hn[] = { { "Enter", "next" }, { "ESC", "cancel" } };
     static const struct help hc[] = { { "Up/Down", "move" }, { "Enter", "create" },
         { "ESC", "cancel" } };
@@ -1469,7 +1487,7 @@ static void draw_edit(struct ss_screen *ss, const struct state *st)
     int ink = c_ink(ss), hi = c_hi(ss);
     char line[SC_LINE_LEN], vbuf[SC_LINE_LEN];
     static const struct help h[] = { { "Up/Down", "move" }, { "Left/Right", "tab" },
-        { "Space/pad Y", "tick" }, { "Enter", "edit" }, { "ESC/pad X", "back" } };
+        { "Space", "tick" }, { "Enter", "edit" }, { "ESC", "back" } };
     static const struct help he[] = { { "type", "a value" }, { "Enter", "accept" },
         { "ESC", "cancel" } };
     static const struct help hc[] = { { "Up/Down", "choose" }, { "Enter", "accept" },

@@ -437,7 +437,7 @@ listed and a countdown on the one booted last; any key stops the countdown.
 | `D` | delete the build under the cursor (asks `Y/N`; the last build cannot go) |
 | `S` | save |
 | `C` / `M` | title-bar clock: 24- or 12-hour; day first (`29 Apr 2026`) or month first |
-| `F12` (`Help` on the ST) | screen dump to `../screendumps/screendumpN.png` - on every screen |
+| `F12` (`Help` on the ST) | screen dump to `../screendumps/screendumpN.png` - on every screen. Both keys always work; the help line names `F12` when the build under the cursor has `kbd usb` on, `HELP` otherwise |
 | `ESC` / pad X | leave the page (boots the last build); says so first if there are unsaved changes |
 
 **Editor** - seven tabs (`Left`/`Right`): Machine, Video, Sound, Input,

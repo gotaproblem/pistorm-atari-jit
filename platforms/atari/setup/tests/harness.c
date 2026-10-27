@@ -501,6 +501,21 @@ static void run_labels(void)
     char buf[SC_LINE_LEN];
     printf("row labels:\n");
 
+    /* the builds screen's dump key follows the build's keyboard */
+    {
+        static const char *f12[] = { "usb", "usb nograb", "usb nograb merge",
+                                     "usb on", "usb enabled" };
+        static const char *help[] = { "disabled", "off", "usb off",
+                                      "usb disabled nograb", "disabled nograb" };
+        for (unsigned i = 0; i < sizeof f12 / sizeof f12[0]; i++)
+            CHECK(!strcmp(sp_dump_key(f12[i]), "F12"),
+                  "kbd %s names %s for dump", f12[i], sp_dump_key(f12[i]));
+        for (unsigned i = 0; i < sizeof help / sizeof help[0]; i++)
+            CHECK(!strcmp(sp_dump_key(help[i]), "HELP"),
+                  "kbd %s names %s for dump", help[i], sp_dump_key(help[i]));
+        CHECK(!strcmp(sp_dump_key(NULL), "HELP"), "no kbd line names %s",
+              sp_dump_key(NULL));
+    }
     CHECK(!strcmp(sp_row_label("kbd", "usb"), "usb/bt kbd/mouse"),
           "kbd reads as \"%s\"", sp_row_label("kbd", "usb"));
     CHECK(!strcmp(sp_row_label("usb", "gamepad"), "usb/bt gamepad"),
