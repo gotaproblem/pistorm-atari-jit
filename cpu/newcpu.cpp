@@ -4890,8 +4890,15 @@ extern "C" void pistorm_exit_state_dump(void)
  * restart - so on a silent reboot this is the only record of who jumped
  * into the ROM. The stacks are still the jumper's at that point (TOS has
  * not moved them yet), so their return addresses name the caller. */
+extern "C" void pistorm_ste_extras_reset(void);
 extern "C" void pistorm_reset_state_dump(void)
 {
+	/* TOS's own RESET at startup: a warm boot (Ctrl+Alt+Del, a demo that
+	 * leaves through the reset vector) must not carry STE line width /
+	 * fine scroll into the new session's HDMI copy. A base write no
+	 * longer clears them (STE-correct), and TOS here believes it is on
+	 * an ST, so it never writes them itself. */
+	pistorm_ste_extras_reset();
 	fprintf(stderr, "[RESET] RESET instruction at pc=%08X sr=%04X (%s) "
 			"usp=%08X isp=%08X\n",
 			m68k_getpc(), regs.sr, regs.s ? "SUP" : "usr",
