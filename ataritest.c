@@ -552,6 +552,8 @@ void m68k_set_irq ( unsigned int level )
 #ifdef PS_PROFILE
 extern uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
 extern void ps_prof_lock_pair ( void );
+extern uint16_t ps_prof_read16_nolock ( uint32_t addr );
+extern void ps_prof_write16_nolock ( uint32_t addr, uint16_t data );
 extern volatile uint32_t *ioread, *ioset;
 
 static double prof_now_ns ( void )
@@ -600,6 +602,34 @@ void busprofile ( void )
     printf ( "  write16 %7.1f ns/access = %.2f MB/s   polls %5.2f -> waiting ~%6.1f ns, Pi side ~%6.1f ns\n",
              wr, 2000.0 / wr, wpolls, wpolls * gplev, wr - wpolls * gplev );
     printf ( "  (a real 68000 bus cycle at 8 MHz is 500 ns = 4.00 MB/s)\n" );
+
+    /* Same accesses with no bus lock: if access time is quantised to the
+     * ST's 500 ns bus slots, removing ~77 ns either changes nothing or
+     * drops a whole slot - not 77 ns. */
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) sink += ps_prof_read16_nolock ( 0x10000 + ( (uint32_t)i << 1 ) );
+    rd = ( prof_now_ns () - t0 ) / N;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) ps_prof_write16_nolock ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+    wr = ( prof_now_ns () - t0 ) / N;
+    printf ( "  no lock:  read16 %7.1f ns   write16 %7.1f ns\n", rd, wr );
+
+    /* Slack: add k extra GPLEV reads (~75 ns each) of Pi time before each
+     * locked read. While the access still lands in the same slot the total
+     * grows by nothing; the k where it jumps by ~500 ns is how much Pi
+     * time is left before the next slot is missed. */
+    printf ( "  added Pi time before each read16 (slot quantisation):\n" );
+    for ( int k = 0; k <= 8; k++ )
+    {
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < N / 4; i++ )
+        {
+            for ( int j = 0; j < k; j++ ) sink += *ioread;
+            sink += read16 ( 0x10000 + ( (uint32_t)i << 1 ) );
+        }
+        rd = ( prof_now_ns () - t0 ) / ( N / 4 );
+        printf ( "    +%d GPLEV (~%4.0f ns): %7.1f ns/access\n", k, k * gplev, rd );
+    }
     (void)sink;
 }
 #else

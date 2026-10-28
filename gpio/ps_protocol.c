@@ -150,6 +150,8 @@ static inline void ps_unlock_bus(void)
 #ifdef PS_PROFILE
 uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
 void ps_prof_lock_pair (void) { ps_lock_bus (); ps_unlock_bus (); }
+uint16_t ps_prof_read16_nolock (uint32_t addr);   /* defined after ps_read_txn */
+void     ps_prof_write16_nolock (uint32_t addr, uint16_t data);
 #define PS_PROF_ADD(v, n) ((v) += (n))
 #else
 #define PS_PROF_ADD(v, n) ((void)0)
@@ -979,6 +981,24 @@ inline uint16_t ps_read_16 (uint32_t addr)
 
   return ps_io.data;
 }
+
+#ifdef PS_PROFILE
+/* the same transactions without the bus lock (ataritest is the only
+ * thread on the bus): what the lock and its two dmb sy barriers cost */
+uint16_t ps_prof_read16_nolock (uint32_t addr)
+{
+  ps_io_t io = { 0 };
+  io.addr = addr; io.fc = fc; io.io_type = READ_WORD;
+  ps_read_txn (&io);
+  return io.data;
+}
+void ps_prof_write16_nolock (uint32_t addr, uint16_t data)
+{
+  ps_io_t io = { 0 };
+  io.data = data; io.addr = addr; io.fc = fc; io.io_type = WRITE_WORD;
+  ps_write_txn (&io);
+}
+#endif
 
 inline uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 {
