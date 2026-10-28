@@ -684,7 +684,7 @@ void busprofile ( void )
      * ROM reads are checked against a normal read of the same ROM (stable),
      * RAM writes by reading the RAM back with the normal path. */
     {
-        enum { NL = 1, ND = 2, P1 = 4, P2 = 8 };
+        enum { NL = 1, ND = 2, P1 = 4, P2 = 8, WC = 16 };
         static const struct { int f; const char *nm; } V[] = {
             { 0,            "normal (lock, dir flip, 4+2 strobe)" },
             { NL,           "no lock" },
@@ -695,6 +695,11 @@ void busprofile ( void )
             { NL|P2,        "no lock + strobe 2" },
             { NL|ND|P2,     "no lock + no dir flip + strobe 2" },
             { NL|ND|P1,     "no lock + no dir flip + strobe 1" },
+            { P2|WC,        "strobe 2 + WR clr" },
+            { P1|WC,        "strobe 1 + WR clr" },
+            { NL|P2|WC,     "no lock + strobe 2 + WR clr" },
+            { NL|ND|P2|WC,  "no lock + no dir + strobe 2 + WR clr" },
+            { NL|ND|P1|WC,  "no lock + no dir + strobe 1 + WR clr" },
         };
         const int K = 32768;
         static uint16_t rom[32768];

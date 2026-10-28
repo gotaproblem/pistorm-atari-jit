@@ -1020,12 +1020,18 @@ void ps_prof_write16_ish (uint32_t addr, uint16_t data)
  *   PV_PULSE1  strobe = 1 WR set store (normal: 4 sets + 2 WR clears)
  *   PV_PULSE2  strobe = 2 WR set stores, no WR clears (TXN_END clears WR)
  * Only for ataritest: correctness is checked by the caller. */
-enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8 };
+/*   PV_WRCLR   with PULSE1/2: one WR-only clear before the TXN_END clear.
+ *              The CPLD arms rd_ok on the FALLING edge of WR, sampling
+ *              PI_CMD and PI_D[9]; when TXN_END clears WR, CMD and data in
+ *              one store, that edge sees CMD=REG_DATA and rd_ok never arms
+ *              - the read latch never reaches PI_D (the short-strobe read
+ *              corruption, reproduced in simulation). */
+enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8, PV_WRCLR = 16 };
 
 static inline void pv_pulse (volatile uint32_t *const set, volatile uint32_t *const clr, int f)
 {
-  if (f & PV_PULSE1) { *set = PIN_WR; *clr = TXN_END; return; }
-  if (f & PV_PULSE2) { *set = PIN_WR; *set = PIN_WR; *clr = TXN_END; return; }
+  if (f & PV_PULSE1) { *set = PIN_WR; if (f & PV_WRCLR) *clr = PIN_WR; *clr = TXN_END; return; }
+  if (f & PV_PULSE2) { *set = PIN_WR; *set = PIN_WR; if (f & PV_WRCLR) *clr = PIN_WR; *clr = TXN_END; return; }
   txn_pulse (set, clr);
 }
 
