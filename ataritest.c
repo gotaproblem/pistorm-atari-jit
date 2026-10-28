@@ -62,6 +62,7 @@ void mfptest ( uint32_t count, int irq, int iack );
 void poke ( uint32_t address, uint8_t data );
 void dump ( uint32_t ROMsize, uint32_t ROMaddress );
 void memspeed ( uint32_t length );
+void busprofile ( void );
 void hwTest ( void );
 void devTest ( int rw );
 void atariReset ( void );
@@ -95,6 +96,7 @@ int cmdDump = 0;
 int cmdClear = 0;
 int cmdInit = 0;
 int cmdMemSpeed = 0;
+int cmdBusProfile = 0;
 int targetF = 200;
 int cmdHWTEST = 0;
 int cmdDevTest = 0;
@@ -341,6 +343,9 @@ int main ( int argc, char *argv[] )
             printf ( "ATARI ROM dumped - %d KB\n", ROMsize );
         }
 
+        if ( cmdBusProfile )
+            busprofile ();
+
         if ( cmdMemSpeed )
         {
             printf ( "\nChecking ATARI ST RAM memory bandwidth - %d KB\n", testSize );
@@ -530,6 +535,76 @@ void m68k_set_irq ( unsigned int level )
 {
 }
 
+
+/* --busprofile: where does one bus access spend its time?
+ *
+ *   total   ns per read16 / write16 (lock + GPIO phases + waiting)
+ *   polls   GPLEV reads per access spent waiting for TXN to drop - the
+ *           CPLD running the real 68000 bus cycle on the ST
+ *   GPLEV   cost of one GPLEV read, measured here
+ *   GPSET   cost of one GPSET write (value 0: changes no pin), measured
+ *   lock    cost of one ps_lock_bus/ps_unlock_bus pair, measured
+ *
+ * waiting ~= polls x GPLEV; the rest of total is the Pi's own work. A
+ * 68000 bus cycle at 8 MHz is 500 ns, so waiting near 500 ns with total
+ * near 1000 ns says the host side costs as much as the bus cycle itself.
+ * Reads/writes go to ST RAM $10000-$8FFFF: the emulator must be stopped. */
+#ifdef PS_PROFILE
+extern uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
+extern void ps_prof_lock_pair ( void );
+extern volatile uint32_t *ioread, *ioset;
+
+static double prof_now_ns ( void )
+{
+    struct timespec t;
+    clock_gettime ( CLOCK_MONOTONIC, &t );
+    return (double)t.tv_sec * 1e9 + (double)t.tv_nsec;
+}
+
+void busprofile ( void )
+{
+    const int N = 262144, M = 1000000;
+    double t0, gplev, gpset, lock, rd, wr;
+    volatile uint32_t sink = 0;
+
+    printf ( "\nBus access profile (%d word reads, %d word writes)\n", N, N );
+
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < M; i++ ) sink += *ioread;
+    gplev = ( prof_now_ns () - t0 ) / M;
+
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < M; i++ ) *ioset = 0;
+    asm volatile ( "dmb sy" ::: "memory" );
+    gpset = ( prof_now_ns () - t0 ) / M;
+
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < M; i++ ) ps_prof_lock_pair ();
+    lock = ( prof_now_ns () - t0 ) / M;
+
+    ps_prof_rd_spins = 0;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) sink += read16 ( 0x10000 + ( (uint32_t)i << 1 ) );
+    rd = ( prof_now_ns () - t0 ) / N;
+
+    ps_prof_wr_spins = 0;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) write16 ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+    wr = ( prof_now_ns () - t0 ) / N;
+
+    double rpolls = (double)ps_prof_rd_spins / N, wpolls = (double)ps_prof_wr_spins / N;
+    printf ( "  GPLEV read   %6.1f ns    GPSET write %6.1f ns    lock+unlock %6.1f ns\n",
+             gplev, gpset, lock );
+    printf ( "  read16  %7.1f ns/access = %.2f MB/s   polls %5.2f -> waiting ~%6.1f ns, Pi side ~%6.1f ns\n",
+             rd, 2000.0 / rd, rpolls, rpolls * gplev, rd - rpolls * gplev );
+    printf ( "  write16 %7.1f ns/access = %.2f MB/s   polls %5.2f -> waiting ~%6.1f ns, Pi side ~%6.1f ns\n",
+             wr, 2000.0 / wr, wpolls, wpolls * gplev, wr - wpolls * gplev );
+    printf ( "  (a real 68000 bus cycle at 8 MHz is 500 ns = 4.00 MB/s)\n" );
+    (void)sink;
+}
+#else
+void busprofile ( void ) { printf ( "busprofile: build with -DPS_PROFILE\n" ); }
+#endif
 
 void memspeed ( uint32_t length )
 {
@@ -2253,6 +2328,12 @@ int parser ( int argc, char **argv )
 
             if ( valid )
                 cmdInit = 1;
+        }
+
+        if ( strcmp ( cmdptr, "busprofile" ) == 0 )
+        {
+            valid = 1;
+            cmdBusProfile = 1;
         }
 
         if ( strcmp ( cmdptr, "memspeed" ) == 0 )

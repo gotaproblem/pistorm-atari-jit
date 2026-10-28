@@ -142,6 +142,19 @@ static inline void ps_unlock_bus(void)
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
 
+/* PS_PROFILE (ataritest builds only - the emulator never defines it):
+ * count the GPLEV polls each transaction spends waiting for the CPLD,
+ * and expose one lock/unlock pair, so `ataritest --busprofile` can split
+ * an access into "the CPLD running the real bus cycle" and "the Pi's own
+ * GPIO work + lock" from measurements instead of estimates. */
+#ifdef PS_PROFILE
+uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
+void ps_prof_lock_pair (void) { ps_lock_bus (); ps_unlock_bus (); }
+#define PS_PROF_ADD(v, n) ((v) += (n))
+#else
+#define PS_PROF_ADD(v, n) ((void)0)
+#endif
+
 static inline void ps_wait_idle(void)
 {
   while ( __builtin_expect ((*ioread & PI_TXN_IN_PROGRESS), 1 ))
@@ -728,6 +741,7 @@ __attribute__((always_inline))  static inline uint32_t ps_write_txn ( ps_io_t *p
         spins = 0;
       }
     } while (status & PI_TXN_IN_PROGRESS);
+    PS_PROF_ADD (ps_prof_wr_spins, spins);
   }
 
   ps_io->berr = CHECK_BERR (status);
@@ -829,6 +843,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
         spins = 0;
       }
     } while (status & PI_TXN_IN_PROGRESS);
+    PS_PROF_ADD (ps_prof_rd_spins, spins);
   }
 
   /* RE-SAMPLE AFTER THE HANDSHAKE - the zero-margin contract was a fault.
