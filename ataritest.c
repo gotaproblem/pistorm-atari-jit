@@ -556,6 +556,9 @@ extern uint16_t ps_prof_read16_nolock ( uint32_t addr );
 extern void ps_prof_write16_nolock ( uint32_t addr, uint16_t data );
 extern uint16_t ps_prof_read16_ish ( uint32_t addr );
 extern void ps_prof_write16_ish ( uint32_t addr, uint16_t data );
+extern uint16_t ps_prof_read16_var ( uint32_t addr, int f, int *err );
+extern void ps_prof_write16_var ( uint32_t addr, uint16_t data, int f, int *err );
+extern void ps_prof_dir_pair ( void );
 extern volatile uint32_t *ioread, *ioset;
 
 static double prof_now_ns ( void )
@@ -674,6 +677,55 @@ void busprofile ( void )
                     printf ( " %s%4d-%-4d:%3u%%", b == 19 ? ">" : "", b * 125, b == 19 ? 9999 : b * 125 + 124,
                              hist[b] * 100 / M2 );
             printf ( "\n" );
+        }
+    }
+
+    /* Protocol variants: what each part costs, and is the data still right?
+     * ROM reads are checked against a normal read of the same ROM (stable),
+     * RAM writes by reading the RAM back with the normal path. */
+    {
+        enum { NL = 1, ND = 2, P1 = 4, P2 = 8 };
+        static const struct { int f; const char *nm; } V[] = {
+            { 0,            "normal (lock, dir flip, 4+2 strobe)" },
+            { NL,           "no lock" },
+            { ND,           "no dir flip" },
+            { P2,           "strobe 2 sets" },
+            { P1,           "strobe 1 set" },
+            { NL|ND,        "no lock + no dir flip" },
+            { NL|P2,        "no lock + strobe 2" },
+            { NL|ND|P2,     "no lock + no dir flip + strobe 2" },
+            { NL|ND|P1,     "no lock + no dir flip + strobe 1" },
+        };
+        const int K = 32768;
+        static uint16_t rom[32768];
+        int err = 0;
+
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < M; i++ ) ps_prof_dir_pair ();
+        printf ( "  GPFSEL flip in+out (6 writes): %.1f ns\n", ( prof_now_ns () - t0 ) / M );
+
+        for ( int i = 0; i < K; i++ ) rom[i] = read16 ( 0xE00000u + ( (uint32_t)i << 1 ) );
+
+        printf ( "  variant                              ROM rd    RAM rd    RAM wr   bad rd/wr\n" );
+        for ( unsigned v = 0; v < sizeof V / sizeof V[0]; v++ )
+        {
+            int f = V[v].f, bad_r = 0, bad_w = 0;
+            double rr, ra, wa;
+            err = 0;
+            t0 = prof_now_ns ();
+            for ( int i = 0; i < K; i++ )
+                if ( ps_prof_read16_var ( 0xE00000u + ( (uint32_t)i << 1 ), f, &err ) != rom[i] ) bad_r++;
+            rr = ( prof_now_ns () - t0 ) / K;
+            t0 = prof_now_ns ();
+            for ( int i = 0; i < K; i++ ) sink += ps_prof_read16_var ( 0x10000u + ( (uint32_t)i << 1 ), f, &err );
+            ra = ( prof_now_ns () - t0 ) / K;
+            t0 = prof_now_ns ();
+            for ( int i = 0; i < K; i++ ) ps_prof_write16_var ( 0x10000u + ( (uint32_t)i << 1 ), (uint16_t)( i * 0x9E37u ^ v ), f, &err );
+            wa = ( prof_now_ns () - t0 ) / K;
+            for ( int i = 0; i < K; i++ )
+                if ( read16 ( 0x10000u + ( (uint32_t)i << 1 ) ) != (uint16_t)( i * 0x9E37u ^ v ) ) bad_w++;
+            printf ( "  %-36s %7.1f   %7.1f   %7.1f   %d/%d%s\n", V[v].nm, rr, ra, wa, bad_r, bad_w,
+                     err ? "  (TXN STUCK)" : "" );
         }
     }
 
