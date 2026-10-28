@@ -185,7 +185,7 @@ static uint64_t ps_handoff_ns    = 500;
 static uint64_t ps_settle_ticks  = 9;           /* ~150 ns: the CPU's last posted GPIO writes */
 static int ps_held_req = 0;                     /* holder of ps_txn_lock raised ps_bus_req */
 static uint32_t ps_sample_seq;
-static int ps_ipl_handoff = 0;                  /* PISTORM_IPL_HANDOFF=1: IPL samples via the hand-off */                  /* ps_bus_trylock: seq seen before the sample */
+static int ps_ipl_handoff = 1;                  /* IPL samples via the hand-off (PISTORM_IPL_HANDOFF=0: seqlock) */                  /* ps_bus_trylock: seq seen before the sample */
 
 static inline uint64_t ps_ticks (void)
 {
@@ -285,7 +285,7 @@ void ps_bus_cpu_thread (int on)
     }
     printf ("[GPIO] CPU thread bus path: lock-free (hand-off %llu ns, IPL samples %s)\n",
             (unsigned long long)ps_handoff_ns,
-            ps_ipl_handoff ? "via hand-off (PISTORM_IPL_HANDOFF=1)" : "seqlock-checked");
+            ps_ipl_handoff ? "via hand-off" : "seqlock-checked (PISTORM_IPL_HANDOFF=0)");
   }
   while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
@@ -814,7 +814,10 @@ void ps_setup_protocol ( void )
     ps_handoff_ticks = (f * (uint64_t)ns) / 1000000000ull + 1;
     ps_handoff_ns = (uint64_t)ns;
     h = getenv ("PISTORM_IPL_HANDOFF");
-    ps_ipl_handoff = h && *h == '1';
+    /* default ON: seqlock-checked samples (no CPU stop) crashed Bad Apple
+     * at a 500 ns hand-off and not at 3000 ns; via the hand-off it runs
+     * (28 Oct 2026). PISTORM_IPL_HANDOFF=0 for the seqlock path. */
+    ps_ipl_handoff = !(h && *h == '0');
     ps_settle_ticks  = (f * 150ull) / 1000000000ull + 1;
   }
 }
