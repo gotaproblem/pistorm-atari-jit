@@ -1035,7 +1035,9 @@ void ps_prof_write16_ish (uint32_t addr, uint16_t data)
  *              one store, that edge sees CMD=REG_DATA and rd_ok never arms
  *              - the read latch never reaches PI_D (the short-strobe read
  *              corruption, reproduced in simulation). */
-enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8, PV_WRCLR = 16 };
+/*   PV_HICLR   the WR-only clear on a READ's ADDR_HI pulse only - the one
+ *              edge rd_ok is armed on; every other pulse stays short */
+enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8, PV_WRCLR = 16, PV_HICLR = 32 };
 
 static inline void pv_pulse (volatile uint32_t *const set, volatile uint32_t *const clr, int f)
 {
@@ -1066,7 +1068,7 @@ uint16_t ps_prof_read16_var (uint32_t addr, int f, int *err)
   *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
   pv_pulse (set, clr, f);
   *set = (((fc << 13) | READ_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
-  pv_pulse (set, clr, f);
+  pv_pulse (set, clr, (f & PV_HICLR) ? (f | PV_WRCLR) : f);
   if (!(f & PV_NODIR)) PS_BUS_IN ();
   *set = REG_DATA;
   *set = PIN_WR;
