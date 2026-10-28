@@ -134,6 +134,14 @@ static int ps_rd_settle = 0;
  * need a coherent 0/1. */
 volatile uint8_t ps_bus_active = 0;
 
+/* PS_NOLOCK (ataritest builds only): ataritest is the only thread on the
+ * bus, so the in-process lock and its two dmb sy barriers compile out.
+ * The emulator never defines it - its CPU, IPL and helper threads share
+ * the GPIO bank and need the lock. */
+#ifdef PS_NOLOCK
+static inline void ps_lock_bus(void) { ps_bus_active = 1; }
+static inline void ps_unlock_bus(void) { ps_bus_active = 0; }
+#else
 static inline void ps_lock_bus(void)
 {
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
@@ -148,6 +156,22 @@ static inline void ps_unlock_bus(void)
   ps_bus_active = 0;
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
+#endif
+
+/* PS_PROFILE (ataritest builds only - the emulator never defines it):
+ * count the GPLEV polls each transaction spends waiting for the CPLD,
+ * and expose one lock/unlock pair, so `ataritest --busprofile` can split
+ * an access into "the CPLD running the real bus cycle" and "the Pi's own
+ * GPIO work + lock" from measurements instead of estimates. */
+#ifdef PS_PROFILE
+uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
+void ps_prof_lock_pair (void) { ps_lock_bus (); ps_unlock_bus (); }
+uint16_t ps_prof_read16_nolock (uint32_t addr);   /* defined after ps_read_txn */
+void     ps_prof_write16_nolock (uint32_t addr, uint16_t data);
+#define PS_PROF_ADD(v, n) ((v) += (n))
+#else
+#define PS_PROF_ADD(v, n) ((void)0)
+#endif
 
 static inline void ps_wait_idle(void)
 {
@@ -818,6 +842,7 @@ __attribute__((always_inline))  static inline uint32_t ps_write_txn ( ps_io_t *p
         spins = 0;
       }
     } while (status & PI_TXN_IN_PROGRESS);
+    PS_PROF_ADD (ps_prof_wr_spins, spins);
   }
 
   ps_io->berr = CHECK_BERR (status);
@@ -919,6 +944,7 @@ __attribute__((always_inline)) static inline uint32_t ps_read_txn (ps_io_t *ps_i
         spins = 0;
       }
     } while (status & PI_TXN_IN_PROGRESS);
+    PS_PROF_ADD (ps_prof_rd_spins, spins);
   }
 
   /* RE-SAMPLE AFTER THE HANDSHAKE - the zero-margin contract was a fault.
@@ -1054,6 +1080,165 @@ inline uint16_t ps_read_16 (uint32_t addr)
 
   return ps_io.data;
 }
+
+#ifdef PS_PROFILE
+/* the same lock with inner-shareable barriers instead of full-system ones:
+ * does a lighter lock alone bring an access back inside the ST's slot? */
+static inline void ps_prof_lock_ish (void)
+{
+  while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
+    asm volatile ("yield" ::: "memory");
+  ps_bus_active = 1;
+  asm volatile ("dmb ish" ::: "memory");
+}
+static inline void ps_prof_unlock_ish (void)
+{
+  asm volatile ("dmb ish" ::: "memory");
+  ps_bus_active = 0;
+  atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
+}
+uint16_t ps_prof_read16_ish (uint32_t addr)
+{
+  ps_io_t io = { 0 };
+  io.addr = addr; io.fc = fc; io.io_type = READ_WORD;
+  ps_prof_lock_ish (); ps_read_txn (&io); ps_prof_unlock_ish ();
+  return io.data;
+}
+void ps_prof_write16_ish (uint32_t addr, uint16_t data)
+{
+  ps_io_t io = { 0 };
+  io.data = data; io.addr = addr; io.fc = fc; io.io_type = WRITE_WORD;
+  ps_prof_lock_ish (); ps_write_txn (&io); ps_prof_unlock_ish ();
+}
+
+/* VARIANTS of one transaction, for measuring what each part of the
+ * protocol costs and whether it can go. flags:
+ *   PV_NOLOCK  no ps_lock_bus / ps_unlock_bus
+ *   PV_NODIR   reads leave D0-D15 as Pi outputs (no GPFSEL flip) - the
+ *              pre-13-Oct behaviour, CPLD and Pi both driving the pins
+ *   PV_PULSE1  strobe = 1 WR set store (normal: 4 sets + 2 WR clears)
+ *   PV_PULSE2  strobe = 2 WR set stores, no WR clears (TXN_END clears WR)
+ * Only for ataritest: correctness is checked by the caller. */
+/*   PV_WRCLR   with PULSE1/2: one WR-only clear before the TXN_END clear.
+ *              The CPLD arms rd_ok on the FALLING edge of WR, sampling
+ *              PI_CMD and PI_D[9]; when TXN_END clears WR, CMD and data in
+ *              one store, that edge sees CMD=REG_DATA and rd_ok never arms
+ *              - the read latch never reaches PI_D (the short-strobe read
+ *              corruption, reproduced in simulation). */
+/*   PV_HICLR   the WR-only clear on a READ's ADDR_HI pulse only - the one
+ *              edge rd_ok is armed on; every other pulse stays short */
+/*   PV_LK_FULL / PV_LK_ATOM / PV_LK_DMB  an explicit lock, independent of
+ *              PS_NOLOCK: the emulator's lock (atomic + dmb sy each way), the
+ *              atomic acquire/release alone, or the two dmb sy alone - where
+ *              do its ~78 ns go? */
+enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8, PV_WRCLR = 16, PV_HICLR = 32,
+       PV_LK_FULL = 64, PV_LK_ATOM = 128, PV_LK_DMB = 256 };
+
+static inline void pv_lock (int f)
+{
+  if (f & (PV_LK_FULL | PV_LK_ATOM))
+    while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
+      asm volatile ("yield" ::: "memory");
+  if (f & (PV_LK_FULL | PV_LK_ATOM | PV_LK_DMB)) {
+    ps_bus_active = 1;
+    if (f & (PV_LK_FULL | PV_LK_DMB))
+      asm volatile ("dmb sy" ::: "memory");
+    return;
+  }
+  if (!(f & PV_NOLOCK)) ps_lock_bus ();
+}
+
+static inline void pv_unlock (int f)
+{
+  if (f & (PV_LK_FULL | PV_LK_ATOM | PV_LK_DMB)) {
+    if (f & (PV_LK_FULL | PV_LK_DMB))
+      asm volatile ("dmb sy" ::: "memory");
+    ps_bus_active = 0;
+    if (f & (PV_LK_FULL | PV_LK_ATOM))
+      atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
+    return;
+  }
+  if (!(f & PV_NOLOCK)) ps_unlock_bus ();
+}
+
+static inline void pv_pulse (volatile uint32_t *const set, volatile uint32_t *const clr, int f)
+{
+  if (f & PV_PULSE1) { *set = PIN_WR; if (f & PV_WRCLR) *clr = PIN_WR; *clr = TXN_END; return; }
+  if (f & PV_PULSE2) { *set = PIN_WR; *set = PIN_WR; if (f & PV_WRCLR) *clr = PIN_WR; *clr = TXN_END; return; }
+  txn_pulse (set, clr);
+}
+
+static int pv_wait (volatile uint32_t *const lev, uint32_t *st)
+{
+  uint32_t spins = 0, status;
+  do {
+    status = *lev;
+    if (++spins > 10000000u) { *st = status; return -1; }
+  } while (status & PI_TXN_IN_PROGRESS);
+  ps_prof_rd_spins += spins;
+  *st = status;
+  return 0;
+}
+
+uint16_t ps_prof_read16_var (uint32_t addr, int f, int *err)
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const lev = ioread;
+  uint32_t status;
+  pv_lock (f);
+  *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
+  pv_pulse (set, clr, f);
+  *set = (((fc << 13) | READ_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
+  pv_pulse (set, clr, (f & PV_HICLR) ? (f | PV_WRCLR) : f);
+  if (!(f & PV_NODIR)) PS_BUS_IN ();
+  *set = REG_DATA;
+  *set = PIN_WR;
+  if (pv_wait (lev, &status)) *err = 1;
+  for (int i = 0; i < ps_rd_settle; i++)
+    status = *lev;
+  *clr = TXN_END;
+  if (!(f & PV_NODIR)) PS_BUS_OUT ();
+  pv_unlock (f);
+  return (uint16_t)(status >> 8);
+}
+
+void ps_prof_write16_var (uint32_t addr, uint16_t data, int f, int *err)
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const lev = ioread;
+  uint32_t status;
+  pv_lock (f);
+  *set = (data << 8) | REG_DATA;
+  pv_pulse (set, clr, f);
+  *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
+  pv_pulse (set, clr, f);
+  *set = (((fc << 13) | WRITE_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
+  pv_pulse (set, clr, f);
+  if (pv_wait (lev, &status)) *err = 1;
+  pv_unlock (f);
+}
+
+/* one GPFSEL flip each way (D0-D15 in, then back out), on an idle bus */
+void ps_prof_dir_pair (void) { PS_BUS_IN (); PS_BUS_OUT (); }
+
+/* the same transactions without the bus lock (ataritest is the only
+ * thread on the bus): what the lock and its two dmb sy barriers cost */
+uint16_t ps_prof_read16_nolock (uint32_t addr)
+{
+  ps_io_t io = { 0 };
+  io.addr = addr; io.fc = fc; io.io_type = READ_WORD;
+  ps_read_txn (&io);
+  return io.data;
+}
+void ps_prof_write16_nolock (uint32_t addr, uint16_t data)
+{
+  ps_io_t io = { 0 };
+  io.data = data; io.addr = addr; io.fc = fc; io.io_type = WRITE_WORD;
+  ps_write_txn (&io);
+}
+#endif
 
 inline uint16_t ps_read_16_fc (uint32_t addr, uint8_t fc_value, uint8_t *berr_out)
 {

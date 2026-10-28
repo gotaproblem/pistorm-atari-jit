@@ -62,6 +62,7 @@ void mfptest ( uint32_t count, int irq, int iack );
 void poke ( uint32_t address, uint8_t data );
 void dump ( uint32_t ROMsize, uint32_t ROMaddress );
 void memspeed ( uint32_t length );
+void busprofile ( void );
 void hwTest ( void );
 void devTest ( int rw );
 void atariReset ( void );
@@ -95,6 +96,7 @@ int cmdDump = 0;
 int cmdClear = 0;
 int cmdInit = 0;
 int cmdMemSpeed = 0;
+int cmdBusProfile = 0;
 int targetF = 200;
 int cmdHWTEST = 0;
 int cmdDevTest = 0;
@@ -341,6 +343,9 @@ int main ( int argc, char *argv[] )
             printf ( "ATARI ROM dumped - %d KB\n", ROMsize );
         }
 
+        if ( cmdBusProfile )
+            busprofile ();
+
         if ( cmdMemSpeed )
         {
             printf ( "\nChecking ATARI ST RAM memory bandwidth - %d KB\n", testSize );
@@ -530,6 +535,233 @@ void m68k_set_irq ( unsigned int level )
 {
 }
 
+
+/* --busprofile: where does one bus access spend its time?
+ *
+ *   total   ns per read16 / write16 (lock + GPIO phases + waiting)
+ *   polls   GPLEV reads per access spent waiting for TXN to drop - the
+ *           CPLD running the real 68000 bus cycle on the ST
+ *   GPLEV   cost of one GPLEV read, measured here
+ *   GPSET   cost of one GPSET write (value 0: changes no pin), measured
+ *   lock    cost of one ps_lock_bus/ps_unlock_bus pair, measured
+ *
+ * waiting ~= polls x GPLEV; the rest of total is the Pi's own work. A
+ * 68000 bus cycle at 8 MHz is 500 ns, so waiting near 500 ns with total
+ * near 1000 ns says the host side costs as much as the bus cycle itself.
+ * Reads/writes go to ST RAM $10000-$8FFFF: the emulator must be stopped. */
+#ifdef PS_PROFILE
+extern uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
+extern void ps_prof_lock_pair ( void );
+extern uint16_t ps_prof_read16_nolock ( uint32_t addr );
+extern void ps_prof_write16_nolock ( uint32_t addr, uint16_t data );
+extern uint16_t ps_prof_read16_ish ( uint32_t addr );
+extern void ps_prof_write16_ish ( uint32_t addr, uint16_t data );
+extern uint16_t ps_prof_read16_var ( uint32_t addr, int f, int *err );
+extern void ps_prof_write16_var ( uint32_t addr, uint16_t data, int f, int *err );
+extern void ps_prof_dir_pair ( void );
+extern volatile uint32_t *ioread, *ioset;
+
+static double prof_now_ns ( void )
+{
+    struct timespec t;
+    clock_gettime ( CLOCK_MONOTONIC, &t );
+    return (double)t.tv_sec * 1e9 + (double)t.tv_nsec;
+}
+
+void busprofile ( void )
+{
+    const int N = 262144, M = 1000000;
+    double t0, gplev, gpset, lock, rd, wr;
+    volatile uint32_t sink = 0;
+
+    printf ( "\nBus access profile (%d word reads, %d word writes)\n", N, N );
+
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < M; i++ ) sink += *ioread;
+    gplev = ( prof_now_ns () - t0 ) / M;
+
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < M; i++ ) *ioset = 0;
+    asm volatile ( "dmb sy" ::: "memory" );
+    gpset = ( prof_now_ns () - t0 ) / M;
+
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < M; i++ ) ps_prof_lock_pair ();
+    lock = ( prof_now_ns () - t0 ) / M;
+
+    ps_prof_rd_spins = 0;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) sink += read16 ( 0x10000 + ( (uint32_t)i << 1 ) );
+    rd = ( prof_now_ns () - t0 ) / N;
+
+    ps_prof_wr_spins = 0;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) write16 ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+    wr = ( prof_now_ns () - t0 ) / N;
+
+    double rpolls = (double)ps_prof_rd_spins / N, wpolls = (double)ps_prof_wr_spins / N;
+    printf ( "  GPLEV read   %6.1f ns    GPSET write %6.1f ns    lock+unlock %6.1f ns\n",
+             gplev, gpset, lock );
+    printf ( "  read16  %7.1f ns/access = %.2f MB/s   polls %5.2f -> waiting ~%6.1f ns, Pi side ~%6.1f ns\n",
+             rd, 2000.0 / rd, rpolls, rpolls * gplev, rd - rpolls * gplev );
+    printf ( "  write16 %7.1f ns/access = %.2f MB/s   polls %5.2f -> waiting ~%6.1f ns, Pi side ~%6.1f ns\n",
+             wr, 2000.0 / wr, wpolls, wpolls * gplev, wr - wpolls * gplev );
+    printf ( "  (a real 68000 bus cycle at 8 MHz is 500 ns = 4.00 MB/s)\n" );
+
+    /* Same accesses with no bus lock: if access time is quantised to the
+     * ST's 500 ns bus slots, removing ~77 ns either changes nothing or
+     * drops a whole slot - not 77 ns. */
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) sink += ps_prof_read16_nolock ( 0x10000 + ( (uint32_t)i << 1 ) );
+    rd = ( prof_now_ns () - t0 ) / N;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) ps_prof_write16_nolock ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+    wr = ( prof_now_ns () - t0 ) / N;
+    printf ( "  no lock:  read16 %7.1f ns   write16 %7.1f ns\n", rd, wr );
+
+    /* lock with dmb ish instead of dmb sy */
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) sink += ps_prof_read16_ish ( 0x10000 + ( (uint32_t)i << 1 ) );
+    rd = ( prof_now_ns () - t0 ) / N;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) ps_prof_write16_ish ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+    wr = ( prof_now_ns () - t0 ) / N;
+    printf ( "  ish lock: read16 %7.1f ns   write16 %7.1f ns\n", rd, wr );
+
+    /* repeat the main locked runs: is the first read16 figure stable? */
+    for ( int r = 0; r < 3; r++ )
+    {
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < N; i++ ) sink += read16 ( 0x10000 + ( (uint32_t)i << 1 ) );
+        rd = ( prof_now_ns () - t0 ) / N;
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < N; i++ ) write16 ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+        wr = ( prof_now_ns () - t0 ) / N;
+        printf ( "  repeat %d: read16 %7.1f ns   write16 %7.1f ns\n", r + 1, rd, wr );
+    }
+
+    /* Per-access histograms (CNTVCT, ~18.5 ns ticks on a Pi 4), 125 ns
+     * bins = one 8 MHz clock. Averages hide a mix of one-slot and
+     * two-slot accesses; this shows the mix. ROM ($E00000) has no MMU
+     * RAM slot, so its times are the Pi + CPLD loop on its own. */
+    {
+        static const char *nm[6] = { "RAM read  lock", "RAM read  nolock", "RAM write lock",
+                                     "RAM write nolock", "ROM read  lock", "ROM read  nolock" };
+        uint64_t frq;
+        asm volatile ( "mrs %0, cntfrq_el0" : "=r" ( frq ) );
+        const double tick = 1e9 / (double)frq;
+        printf ( "  per-access histograms (counter %.1f ns/tick, 125 ns bins, %% of accesses):\n", tick );
+        for ( int v = 0; v < 6; v++ )
+        {
+            unsigned hist[20] = { 0 };
+            const int M2 = 65536;
+            for ( int i = 0; i < M2; i++ )
+            {
+                uint32_t a = ( v >= 4 ? 0xE00000u : 0x10000u ) + ( ( (uint32_t)i << 1 ) & 0x1FFFFu );
+                uint64_t c0, c1;
+                asm volatile ( "isb; mrs %0, cntvct_el0" : "=r" ( c0 ) :: "memory" );
+                switch ( v )
+                {
+                case 0: case 4: sink += read16 ( a ); break;
+                case 1: case 5: sink += ps_prof_read16_nolock ( a ); break;
+                case 2: write16 ( a, 0x5a5a ); break;
+                case 3: ps_prof_write16_nolock ( a, 0x5a5a ); break;
+                }
+                asm volatile ( "isb; mrs %0, cntvct_el0" : "=r" ( c1 ) :: "memory" );
+                int b = (int)( (double)( c1 - c0 ) * tick / 125.0 );
+                hist[b > 19 ? 19 : b]++;
+            }
+            printf ( "    %-17s", nm[v] );
+            for ( int b = 0; b < 20; b++ )
+                if ( hist[b] * 100 >= (unsigned)M2 )
+                    printf ( " %s%4d-%-4d:%3u%%", b == 19 ? ">" : "", b * 125, b == 19 ? 9999 : b * 125 + 124,
+                             hist[b] * 100 / M2 );
+            printf ( "\n" );
+        }
+    }
+
+    /* Protocol variants: what each part costs, and is the data still right?
+     * ROM reads are checked against a normal read of the same ROM (stable),
+     * RAM writes by reading the RAM back with the normal path. */
+    {
+        enum { NL = 1, ND = 2, P1 = 4, P2 = 8, WC = 16, HC = 32, LF = 64, LA = 128, LD = 256 };
+        static const struct { int f; const char *nm; } V[] = {
+            { 0,            "normal (lock, dir flip, 4+2 strobe)" },
+            { NL,           "no lock" },
+            { ND,           "no dir flip" },
+            { P2,           "strobe 2 sets" },
+            { P1,           "strobe 1 set" },
+            { NL|ND,        "no lock + no dir flip" },
+            { NL|P2,        "no lock + strobe 2" },
+            { NL|ND|P2,     "no lock + no dir flip + strobe 2" },
+            { NL|ND|P1,     "no lock + no dir flip + strobe 1" },
+            { P2|WC,        "strobe 2 + WR clr" },
+            { P1|WC,        "strobe 1 + WR clr" },
+            { NL|P2|WC,     "no lock + strobe 2 + WR clr" },
+            { NL|ND|P2|WC,  "no lock + no dir + strobe 2 + WR clr" },
+            { NL|ND|P1|WC,  "no lock + no dir + strobe 1 + WR clr" },
+            { NL|P2|HC,     "no lock + strobe 2, rd HI WR clr" },
+            { NL|P1|HC,     "no lock + strobe 1, rd HI WR clr" },
+            { NL|ND|P1|HC,  "no lock + no dir + strobe 1, HI clr" },
+            { LF|P2|HC,     "emu lock (atomic+dmb sy) + s2 HI clr" },
+            { LA|P2|HC,     "atomic acq/rel only + s2 HI clr" },
+            { LD|P2|HC,     "dmb sy only + s2 HI clr" },
+            { LF,           "emu lock + normal strobe (= today)" },
+        };
+        const int K = 32768;
+        static uint16_t rom[32768];
+        int err = 0;
+
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < M; i++ ) ps_prof_dir_pair ();
+        printf ( "  GPFSEL flip in+out (6 writes): %.1f ns\n", ( prof_now_ns () - t0 ) / M );
+
+        for ( int i = 0; i < K; i++ ) rom[i] = read16 ( 0xE00000u + ( (uint32_t)i << 1 ) );
+
+        printf ( "  variant                              ROM rd    RAM rd    RAM wr   bad rd/wr\n" );
+        for ( unsigned v = 0; v < sizeof V / sizeof V[0]; v++ )
+        {
+            int f = V[v].f, bad_r = 0, bad_w = 0;
+            double rr, ra, wa;
+            err = 0;
+            t0 = prof_now_ns ();
+            for ( int i = 0; i < K; i++ )
+                if ( ps_prof_read16_var ( 0xE00000u + ( (uint32_t)i << 1 ), f, &err ) != rom[i] ) bad_r++;
+            rr = ( prof_now_ns () - t0 ) / K;
+            t0 = prof_now_ns ();
+            for ( int i = 0; i < K; i++ ) sink += ps_prof_read16_var ( 0x10000u + ( (uint32_t)i << 1 ), f, &err );
+            ra = ( prof_now_ns () - t0 ) / K;
+            t0 = prof_now_ns ();
+            for ( int i = 0; i < K; i++ ) ps_prof_write16_var ( 0x10000u + ( (uint32_t)i << 1 ), (uint16_t)( i * 0x9E37u ^ v ), f, &err );
+            wa = ( prof_now_ns () - t0 ) / K;
+            for ( int i = 0; i < K; i++ )
+                if ( read16 ( 0x10000u + ( (uint32_t)i << 1 ) ) != (uint16_t)( i * 0x9E37u ^ v ) ) bad_w++;
+            printf ( "  %-36s %7.1f   %7.1f   %7.1f   %d/%d%s\n", V[v].nm, rr, ra, wa, bad_r, bad_w,
+                     err ? "  (TXN STUCK)" : "" );
+        }
+    }
+
+    /* Slack: add k extra GPLEV reads (~75 ns each) of Pi time before each
+     * locked read. While the access still lands in the same slot the total
+     * grows by nothing; the k where it jumps by ~500 ns is how much Pi
+     * time is left before the next slot is missed. */
+    printf ( "  added Pi time before each read16 (slot quantisation):\n" );
+    for ( int k = 0; k <= 8; k++ )
+    {
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < N / 4; i++ )
+        {
+            for ( int j = 0; j < k; j++ ) sink += *ioread;
+            sink += read16 ( 0x10000 + ( (uint32_t)i << 1 ) );
+        }
+        rd = ( prof_now_ns () - t0 ) / ( N / 4 );
+        printf ( "    +%d GPLEV (~%4.0f ns): %7.1f ns/access\n", k, k * gplev, rd );
+    }
+    (void)sink;
+}
+#else
+void busprofile ( void ) { printf ( "busprofile: build with -DPS_PROFILE\n" ); }
+#endif
 
 void memspeed ( uint32_t length )
 {
@@ -2253,6 +2485,12 @@ int parser ( int argc, char **argv )
 
             if ( valid )
                 cmdInit = 1;
+        }
+
+        if ( strcmp ( cmdptr, "busprofile" ) == 0 )
+        {
+            valid = 1;
+            cmdBusProfile = 1;
         }
 
         if ( strcmp ( cmdptr, "memspeed" ) == 0 )
