@@ -637,6 +637,46 @@ void busprofile ( void )
         printf ( "  repeat %d: read16 %7.1f ns   write16 %7.1f ns\n", r + 1, rd, wr );
     }
 
+    /* Per-access histograms (CNTVCT, ~18.5 ns ticks on a Pi 4), 125 ns
+     * bins = one 8 MHz clock. Averages hide a mix of one-slot and
+     * two-slot accesses; this shows the mix. ROM ($E00000) has no MMU
+     * RAM slot, so its times are the Pi + CPLD loop on its own. */
+    {
+        static const char *nm[6] = { "RAM read  lock", "RAM read  nolock", "RAM write lock",
+                                     "RAM write nolock", "ROM read  lock", "ROM read  nolock" };
+        uint64_t frq;
+        asm volatile ( "mrs %0, cntfrq_el0" : "=r" ( frq ) );
+        const double tick = 1e9 / (double)frq;
+        printf ( "  per-access histograms (counter %.1f ns/tick, 125 ns bins, %% of accesses):\n", tick );
+        for ( int v = 0; v < 6; v++ )
+        {
+            unsigned hist[20] = { 0 };
+            const int M2 = 65536;
+            for ( int i = 0; i < M2; i++ )
+            {
+                uint32_t a = ( v >= 4 ? 0xE00000u : 0x10000u ) + ( ( (uint32_t)i << 1 ) & 0x1FFFFu );
+                uint64_t c0, c1;
+                asm volatile ( "isb; mrs %0, cntvct_el0" : "=r" ( c0 ) :: "memory" );
+                switch ( v )
+                {
+                case 0: case 4: sink += read16 ( a ); break;
+                case 1: case 5: sink += ps_prof_read16_nolock ( a ); break;
+                case 2: write16 ( a, 0x5a5a ); break;
+                case 3: ps_prof_write16_nolock ( a, 0x5a5a ); break;
+                }
+                asm volatile ( "isb; mrs %0, cntvct_el0" : "=r" ( c1 ) :: "memory" );
+                int b = (int)( (double)( c1 - c0 ) * tick / 125.0 );
+                hist[b > 19 ? 19 : b]++;
+            }
+            printf ( "    %-17s", nm[v] );
+            for ( int b = 0; b < 20; b++ )
+                if ( hist[b] * 100 >= (unsigned)M2 )
+                    printf ( " %s%4d-%-4d:%3u%%", b == 19 ? ">" : "", b * 125, b == 19 ? 9999 : b * 125 + 124,
+                             hist[b] * 100 / M2 );
+            printf ( "\n" );
+        }
+    }
+
     /* Slack: add k extra GPLEV reads (~75 ns each) of Pi time before each
      * locked read. While the access still lands in the same slot the total
      * grows by nothing; the k where it jumps by ~500 ns is how much Pi
