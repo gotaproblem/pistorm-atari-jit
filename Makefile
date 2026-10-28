@@ -449,7 +449,7 @@ platforms/atari/video/vidplane.o: platforms/atari/video/vidplane.c
 # -DPS_PROFILE: ataritest's copy of ps_protocol.c counts its waits for
 # --busprofile. The emulator's copy is built without it.
 ataritest: ataritest.c gpio/ps_protocol.c gpio/bus_lock.c
-	$(CC) $^ -o $@ $(CFLAGS) -DPS_PROFILE
+	$(CC) $^ -o $@ $(CFLAGS) -DPS_PROFILE -DPS_NOLOCK
 
 # Pre-boot setup page, step 1: drive the real shifter with the 68k halted.
 # Not part of `all`: stop the emulator first, then run ./setupvtest.

@@ -127,6 +127,14 @@ static int ps_rd_settle = 0;
  * need a coherent 0/1. */
 volatile uint8_t ps_bus_active = 0;
 
+/* PS_NOLOCK (ataritest builds only): ataritest is the only thread on the
+ * bus, so the in-process lock and its two dmb sy barriers compile out.
+ * The emulator never defines it - its CPU, IPL and helper threads share
+ * the GPIO bank and need the lock. */
+#ifdef PS_NOLOCK
+static inline void ps_lock_bus(void) { ps_bus_active = 1; }
+static inline void ps_unlock_bus(void) { ps_bus_active = 0; }
+#else
 static inline void ps_lock_bus(void)
 {
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
@@ -141,6 +149,7 @@ static inline void ps_unlock_bus(void)
   ps_bus_active = 0;
   atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
 }
+#endif
 
 /* PS_PROFILE (ataritest builds only - the emulator never defines it):
  * count the GPLEV polls each transaction spends waiting for the CPLD,
