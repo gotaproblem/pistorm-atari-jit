@@ -204,6 +204,8 @@ void ps_power_wait ( void );
  * A plain GPLEV0 read: no bus lock, no transaction, any thread. */
 #define CPLD_FW_RESET_PIN 0x256u   /* alpha 0.86a; released as 1.0b ($420) */
 int  ps_st_reset_pin ( void );
+/* 1 when GPCLK0 runs on GPIO4 as PI_CLK (CPLD firmware 2.x) */
+extern int ps_fastclk;
 
 
 #define read8 ps_read_8

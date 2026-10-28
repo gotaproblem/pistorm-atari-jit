@@ -96,9 +96,16 @@ static volatile uint32_t *rio_oe_clr;
  * MDIO/MDC. */
 static uint32_t gpfsel2_keep;          /* GPIO 24-29 function bits, as found */
 
-#define PS_BUS_IN()  do { gpio [0] = GPFSEL0_INPUT;  gpio [1] = GPFSEL1_INPUT; \
+/* GPFSEL0 as written by every direction flip. A variable, not the
+ * constant, because GPIO4's field changes at run time: an input (ST RESET
+ * from 1.x firmware) or ALT0 = GPCLK0 (PI_CLK for 2.x firmware, see
+ * ps_fastclk_start). Writing the constant would switch the clock off. */
+static uint32_t gpfsel0_in  = GPFSEL0_INPUT;
+static uint32_t gpfsel0_out = GPFSEL0_OUTPUT;
+
+#define PS_BUS_IN()  do { gpio [0] = gpfsel0_in;  gpio [1] = GPFSEL1_INPUT; \
                           gpio [2] = gpfsel2_keep | GPFSEL2_INPUT; } while (0)
-#define PS_BUS_OUT() do { gpio [0] = GPFSEL0_OUTPUT; gpio [1] = GPFSEL1_OUTPUT; \
+#define PS_BUS_OUT() do { gpio [0] = gpfsel0_out; gpio [1] = GPFSEL1_OUTPUT; \
                           gpio [2] = gpfsel2_keep | GPFSEL2_OUTPUT; } while (0)
 #endif
 
@@ -494,6 +501,87 @@ static void setup_gpclk ( void )
 }
 
 
+/* PI_CLK - GPCLK0 on GPIO4 for CPLD firmware 2.x (the fast-clock line).
+ *
+ * 2.x firmware times its read release with this clock (TXN drops 32-40 ns
+ * after the read latches are clocked, instead of a whole half-clock later
+ * at S7). 62.5 MHz from PLLD with an INTEGER divider - 750/12 on BCM2711,
+ * 500/8 on BCM2837 - so there is no MASH fractional jitter.
+ *
+ * Only started when the CPLD answers major version >= 2: 1.x firmware
+ * DRIVES GPIO4 (ST RESET to the Pi), and a Pi clock on the same wire would
+ * fight it. PISTORM_FASTCLK=0 keeps it off (2.x then releases reads at S7,
+ * exactly as 1.2e). The clock is stopped and GPIO4 made an input again at
+ * exit; after a kill -9, reboot the Pi before flashing a 1.x firmware. */
+int ps_fastclk = 0;
+static int fwrev_plausible (uint16_t fw);
+
+#define CM_PASSWD    0x5a000000u
+#define CM_SRC_PLLD  6u
+#define CM_ENAB      (1u << 4)
+#define CM_KILL      (1u << 5)
+#define CM_BUSY      (1u << 7)
+
+static void ps_fastclk_stop (void)
+{
+#ifndef PI5
+  if (!ps_fastclk)
+    return;
+  ps_fastclk = 0;
+  gpfsel0_in  = GPFSEL0_INPUT;          /* GPIO4 back to an input */
+  gpfsel0_out = GPFSEL0_OUTPUT;
+  gpio [0] = gpfsel0_out;
+  *clk_ctl = CM_PASSWD | CM_SRC_PLLD;   /* ENAB off: stops at a clean edge */
+  for (int i = 0; i < 100000 && (*clk_ctl & CM_BUSY); i++)
+    ;
+#endif
+}
+
+static void ps_fastclk_start (void)
+{
+#ifndef PI5
+  const char *e = getenv ("PISTORM_FASTCLK");
+  uint16_t fw = (uint16_t)((ps_read_status_reg () >> 8) & 0x07FF);
+  int beta_rel = (fw & 0x600) == 0x400 || (fw & 0x600) == 0x000;
+  int major = (fw >> 5) & 7;
+
+  if (!beta_rel || major < 2 || !fwrev_plausible (fw))
+    return;                             /* 1.x / alpha: GPIO4 is the CPLD's */
+  if (e && *e == '0') {
+    printf ("[GPIO] PI_CLK off (PISTORM_FASTCLK=0) - firmware releases reads at S7\n");
+    return;
+  }
+
+  uint32_t div = ps_host_is_bcm2837 () ? 8 : 12;   /* PLLD 500 / 750 MHz */
+
+  *clk_ctl = CM_PASSWD | CM_SRC_PLLD;   /* ENAB off, wait for it to stop */
+  for (int i = 0; i < 100000 && (*clk_ctl & CM_BUSY); i++)
+    ;
+  if (*clk_ctl & CM_BUSY) {
+    *clk_ctl = CM_PASSWD | CM_KILL;
+    usleep (10);
+  }
+  *clk_div = CM_PASSWD | (div << 12);  /* integer divider, MASH 0 */
+  usleep (10);
+  *clk_ctl = CM_PASSWD | CM_SRC_PLLD;
+  *clk_ctl = CM_PASSWD | CM_SRC_PLLD | CM_ENAB;
+  for (int i = 0; i < 100000 && !(*clk_ctl & CM_BUSY); i++)
+    ;
+
+  /* GPIO4 = ALT0 (GPCLK0) in both direction-flip words, then apply */
+  gpfsel0_in  = (gpfsel0_in  & ~(7u << 12)) | (4u << 12);
+  gpfsel0_out = (gpfsel0_out & ~(7u << 12)) | (4u << 12);
+  gpio [0] = gpfsel0_out;
+  ps_fastclk = 1;
+  atexit (ps_fastclk_stop);
+
+  printf ("[GPIO] PI_CLK on GPIO4: %s MHz (PLLD/%u) for CPLD firmware %d.%d - "
+          "reads released 32-40 ns after S6%s\n",
+          "62.5", (unsigned)div, major, fw & 0x1f,
+          (*clk_ctl & CM_BUSY) ? "" : " - WARNING: GPCLK0 did not report BUSY");
+#endif
+}
+
 void ps_setup_protocol ( void ) 
 {
   create_dev_mem_mapping ();
@@ -523,6 +611,8 @@ void ps_setup_protocol ( void )
 #endif
 
   *ioclr = TXN_END;
+
+  ps_fastclk_start ();                  /* 2.x firmware only */
 }
 
 typedef struct {
@@ -1554,6 +1644,8 @@ void ps_get_firmware_revision ( void )
  * but say "no pin" rather than pretend. */
 int ps_st_reset_pin ( void )
 {
+  if (ps_fastclk)
+    return -1;                           /* GPIO4 is PI_CLK (firmware 2.x) */
 #ifdef USING_PI_CLK
   return -1;                             /* GPIO4 is GPCLK0 in this build */
 #else

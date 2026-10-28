@@ -2875,6 +2875,7 @@ int main (int argc, char *argv[])
 
     printf("[MAIN] ST reset button sensing: %s\n",
            rsense ? "on (GPIO4)" :
+           ps_fastclk ? "off (GPIO4 is PI_CLK - firmware 2.x)" :
            ps_st_reset_pin() < 0 ? "off (CPLD firmware has no RESET pin - needs 1.0b)"
                                  : "off (PISTORM_RESET_PIN=0)");
 
