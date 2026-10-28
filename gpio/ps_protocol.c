@@ -983,6 +983,35 @@ inline uint16_t ps_read_16 (uint32_t addr)
 }
 
 #ifdef PS_PROFILE
+/* the same lock with inner-shareable barriers instead of full-system ones:
+ * does a lighter lock alone bring an access back inside the ST's slot? */
+static inline void ps_prof_lock_ish (void)
+{
+  while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
+    asm volatile ("yield" ::: "memory");
+  ps_bus_active = 1;
+  asm volatile ("dmb ish" ::: "memory");
+}
+static inline void ps_prof_unlock_ish (void)
+{
+  asm volatile ("dmb ish" ::: "memory");
+  ps_bus_active = 0;
+  atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
+}
+uint16_t ps_prof_read16_ish (uint32_t addr)
+{
+  ps_io_t io = { 0 };
+  io.addr = addr; io.fc = fc; io.io_type = READ_WORD;
+  ps_prof_lock_ish (); ps_read_txn (&io); ps_prof_unlock_ish ();
+  return io.data;
+}
+void ps_prof_write16_ish (uint32_t addr, uint16_t data)
+{
+  ps_io_t io = { 0 };
+  io.data = data; io.addr = addr; io.fc = fc; io.io_type = WRITE_WORD;
+  ps_prof_lock_ish (); ps_write_txn (&io); ps_prof_unlock_ish ();
+}
+
 /* the same transactions without the bus lock (ataritest is the only
  * thread on the bus): what the lock and its two dmb sy barriers cost */
 uint16_t ps_prof_read16_nolock (uint32_t addr)

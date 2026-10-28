@@ -554,6 +554,8 @@ extern uint64_t ps_prof_rd_spins, ps_prof_wr_spins;
 extern void ps_prof_lock_pair ( void );
 extern uint16_t ps_prof_read16_nolock ( uint32_t addr );
 extern void ps_prof_write16_nolock ( uint32_t addr, uint16_t data );
+extern uint16_t ps_prof_read16_ish ( uint32_t addr );
+extern void ps_prof_write16_ish ( uint32_t addr, uint16_t data );
 extern volatile uint32_t *ioread, *ioset;
 
 static double prof_now_ns ( void )
@@ -613,6 +615,27 @@ void busprofile ( void )
     for ( int i = 0; i < N; i++ ) ps_prof_write16_nolock ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
     wr = ( prof_now_ns () - t0 ) / N;
     printf ( "  no lock:  read16 %7.1f ns   write16 %7.1f ns\n", rd, wr );
+
+    /* lock with dmb ish instead of dmb sy */
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) sink += ps_prof_read16_ish ( 0x10000 + ( (uint32_t)i << 1 ) );
+    rd = ( prof_now_ns () - t0 ) / N;
+    t0 = prof_now_ns ();
+    for ( int i = 0; i < N; i++ ) ps_prof_write16_ish ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+    wr = ( prof_now_ns () - t0 ) / N;
+    printf ( "  ish lock: read16 %7.1f ns   write16 %7.1f ns\n", rd, wr );
+
+    /* repeat the main locked runs: is the first read16 figure stable? */
+    for ( int r = 0; r < 3; r++ )
+    {
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < N; i++ ) sink += read16 ( 0x10000 + ( (uint32_t)i << 1 ) );
+        rd = ( prof_now_ns () - t0 ) / N;
+        t0 = prof_now_ns ();
+        for ( int i = 0; i < N; i++ ) write16 ( 0x10000 + ( (uint32_t)i << 1 ), 0x5a5a );
+        wr = ( prof_now_ns () - t0 ) / N;
+        printf ( "  repeat %d: read16 %7.1f ns   write16 %7.1f ns\n", r + 1, rd, wr );
+    }
 
     /* Slack: add k extra GPLEV reads (~75 ns each) of Pi time before each
      * locked read. While the access still lands in the same slot the total
