@@ -5,7 +5,7 @@ ST-RAM at real 68000 bus speed: GEMBench (TOS 2.06, STE) RAM/ROM access
 
 | | `main` | `fastclk` |
 |---|---|---|
-| CPLD firmware | 1.1b (`$521`) | 2.1b (`$541`) |
+| CPLD firmware | 1.1b (`$521` EPM570, `$421` EPM240) | 2.1b (`$541` EPM570, `$441` EPM240) |
 | GPIO4 | ST RESET to the Pi | PI_CLK: GPCLK0 62.5 MHz into the CPLD |
 | WR strobe | 4 sets + 2 clears | 2 sets + 1 WR clear (2.x firmware only) |
 | CPU-thread bus lock | atomic + dmb sy | lock-free; other threads hand off |
@@ -42,7 +42,10 @@ as 1.2e (reads released at S7, no fast start).
 
 ## Firmware source
 
-`rtl/fastclk/` - Quartus project (run `makepi4.bat EPM570` from that folder):
+`rtl/fastclk/` - Quartus projects for both CPLDs (run `makepi4.bat EPM570`
+or `makepi4.bat EPM240` from that folder; the EPM240 build is the same logic
+and pinout, ~137 of its 240 LEs). Only the EPM570 bitstream has been built
+and tested so far (`rtl/EPM570_bitstream_dev_2_1b.svf`).
 2.1b = 1.2e + PI_CLK-timed read release (32-40 ns after S6) + fast start
 (AS as soon as TXN has been high 40-48 ns, anywhere in S1/S2).
 
