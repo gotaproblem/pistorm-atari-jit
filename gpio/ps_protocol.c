@@ -538,6 +538,7 @@ static void setup_gpclk ( void )
  * exactly as 1.2e). The clock is stopped and GPIO4 made an input again at
  * exit; after a kill -9, reboot the Pi before flashing a 1.x firmware. */
 int ps_fastclk = 0;
+static int ps_pulse_sets;
 static int fwrev_plausible (uint16_t fw);
 
 #define CM_PASSWD    0x5a000000u
@@ -571,6 +572,17 @@ static void ps_fastclk_start (void)
 
   if (!beta_rel || major < 2 || !fwrev_plausible (fw))
     return;                             /* 1.x / alpha: GPIO4 is the CPLD's */
+
+  /* 2.x protocol: short WR strobe (see txn_pulse) */
+  {
+    const char *st = getenv ("PISTORM_STROBE");
+    int n = st ? atoi (st) : 3;
+    ps_pulse_sets = (n == 2 || n == 3) ? n : 0;     /* 4 / other = 1.x strobe */
+    printf ("[GPIO] firmware %d.%d protocol: WR strobe %s%s\n", major, fw & 0x1f,
+            ps_pulse_sets == 3 ? "3 sets + WR clear" :
+            ps_pulse_sets == 2 ? "2 sets + WR clear" : "4 sets + 2 WR clears (1.x)",
+            st ? " (PISTORM_STROBE)" : "");
+  }
   if (e && *e == '0') {
     printf ("[GPIO] PI_CLK off (PISTORM_FASTCLK=0) - firmware releases reads at S7\n");
     return;
@@ -656,11 +668,36 @@ typedef struct {
  * spin loops' "memory"-clobbering yield (and any barrier) otherwise
  * forces the three GLOBAL pointers to be reloaded around every access.
  */
+/* WR strobe.
+ *
+ * 1.x firmware (ps_pulse_sets == 0): 4 WR sets, 2 WR-only clears, then
+ * TXN_END - unchanged (689ddc6: 4 stores of WR high).
+ *
+ * 2.x firmware: ps_pulse_sets WR sets (default 3, ~15 ns: the '374's
+ * minimum clock-high width), ONE WR-only clear, then TXN_END. The WR-only
+ * clear must stay: the CPLD captures a0 / op_rw / op_fc / op_uds/lds /
+ * status / rd_ok while WR is high and holds them as it falls - if TXN_END
+ * dropped WR, CMD and data in the same store, that edge would see CMD and
+ * data already cleared (ataritest --busprofile, 28 Oct 2026: reads 92%
+ * wrong without it, 0/32768 with it). PISTORM_STROBE=2|3|4 overrides the
+ * set count on 2.x firmware. Saves 2-3 GPIO stores per strobe, 3 strobes
+ * per write and 2 per read: ~25-45 ns of Pi time per transaction, the
+ * margin the next ST bus slot is won or lost by. */
+static int ps_pulse_sets = 0;
+
 __attribute__((always_inline)) static inline void txn_pulse (volatile uint32_t *const set,
                               volatile uint32_t *const clr)
 {
-  *set = PIN_WR; *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
-  *clr = PIN_WR; *clr = PIN_WR;
+  if (__builtin_expect (ps_pulse_sets == 3, 1)) {
+    *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
+    *clr = PIN_WR;
+  } else if (ps_pulse_sets == 2) {
+    *set = PIN_WR; *set = PIN_WR;
+    *clr = PIN_WR;
+  } else {
+    *set = PIN_WR; *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
+    *clr = PIN_WR; *clr = PIN_WR;
+  }
   *clr = TXN_END;
 }
 
