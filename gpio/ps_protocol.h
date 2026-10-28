@@ -35,6 +35,12 @@ void ps_gpip7_seed (void);
  * unlikely to collide - see ps_protocol.c. */
 int  ps_bus_trylock (void);
 void ps_bus_unlock (void);
+/* After ps_bus_trylock + a GPLEV0 read: 1 = the sample did not overlap a
+ * CPU-thread transaction (seqlock check, waits ~1 us). */
+int  ps_bus_sample_ok (void);
+/* The calling thread becomes (1) / stops being (0) THE CPU thread: its
+ * transactions then take no atomic and no barrier (see ps_protocol.c). */
+void ps_bus_cpu_thread (int on);
 
 
 #ifdef USING_PI_CLK

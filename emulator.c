@@ -974,7 +974,11 @@ static void *ipl_task(void *)
   uint64_t kick_latch_tick = 0;         /* when g_irq was raised          */
   uint64_t kick_last_tick = 0;          /* when the exit was last asked   */
   uint64_t busy_run_start = 0;          /* first failed trylock of a run  */
-  const uint64_t busy_spin_after = psctrl_cntfrq / 10000u;        /* 100 us */
+  /* 20 us: with the CPU thread's lock-free bus path a clean sample needs
+   * ~0.7 us with no CPU bus access, which heavy bus traffic rarely leaves;
+   * after 20 us of that the hand-off (ps_bus_lock_within) stops the CPU
+   * thread for one sample instead (~0.7 us). */
+  const uint64_t busy_spin_after = psctrl_cntfrq / 50000u;        /* 20 us */
   const uint64_t busy_spin_ticks = psctrl_cntfrq / 20000u;        /* 50 us  */
 #define IPL_KICK()                                                     \
   do {                                                                 \
@@ -1295,7 +1299,19 @@ static void *ipl_task(void *)
       continue;                         /* a transaction owns the bus */
     }
     status = *ioread;
-    ps_bus_unlock ();
+    {
+      /* the CPU thread is not stopped for this sample (ps_protocol.c BUS
+       * OWNERSHIP): keep it only if no CPU transaction overlapped it */
+      int samp_ok = ps_bus_sample_ok ();
+      ps_bus_unlock ();
+      if (!samp_ok)
+      {
+        pistorm_ipl_busy++;
+        if (!busy_run_start)
+          __asm__ volatile("mrs %0, cntvct_el0" : "=r"(busy_run_start));
+        continue;                       /* overlapped: same as a busy bus */
+      }
+    }
     if (busy_run_start)
     {
       /* a run of failed trylocks just ended: how long was the line
@@ -2025,6 +2041,10 @@ void *cpu_task(void *)
   thread = pthread_self();
   pthread_setaffinity_np(thread, sizeof(cpuset), &cpuset);
 
+  /* this thread's bus transactions take no lock (ps_protocol.c BUS
+   * OWNERSHIP); every other thread hands off to it */
+  ps_bus_cpu_thread(1);
+
   /* set real-time priority for this task */
   param.sched_priority = 99; // Highest possible priority
   sched_setscheduler(0, SCHED_FIFO, &param);
@@ -2071,6 +2091,7 @@ void *cpu_task(void *)
   }
 
   printf("[CPU] End of CPU thread\n");
+  ps_bus_cpu_thread(0);
 
   return (void *)NULL;
 }

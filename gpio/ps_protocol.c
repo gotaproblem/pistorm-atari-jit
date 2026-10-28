@@ -134,29 +134,161 @@ static int ps_rd_settle = 0;
  * need a coherent 0/1. */
 volatile uint8_t ps_bus_active = 0;
 
-/* PS_NOLOCK (ataritest builds only): ataritest is the only thread on the
- * bus, so the in-process lock and its two dmb sy barriers compile out.
- * The emulator never defines it - its CPU, IPL and helper threads share
- * the GPIO bank and need the lock. */
+/*
+ * BUS OWNERSHIP - CPU thread fast path, timed hand-off for everyone else.
+ *
+ * Firmware 2.1b starts a cycle as soon as TXN is up, and a RAM access then
+ * fits the ST's 500 ns slot only if the Pi turns round inside ~75 ns of
+ * margin (ataritest --busprofile slack sweep, 28 Oct 2026: 566 ns at +0,
+ * 1001 ns at +1 GPLEV). The old lock - atomic test-and-set + dmb sy, then
+ * dmb sy + release, around EVERY transaction - costs ~78 ns, and either
+ * half alone (atomic only / dmb only) was measured to cost the slot.
+ *
+ * So the CPU thread (registered with ps_bus_cpu_thread) takes NO atomic
+ * and NO barrier per transaction:
+ *   enter: ps_cpu_seq = odd (plain store), then look at ps_bus_req
+ *          (plain load, normally 0 and in this core's cache)
+ *   exit:  ps_cpu_seq = even (plain store)
+ *
+ * Every OTHER thread (and the CPU thread before it registers) takes
+ * ps_txn_lock among themselves as before, then, while a CPU thread is
+ * registered, raises ps_bus_req and WAITS PS_HANDOFF before looking at
+ * ps_cpu_seq. Why the wait is enough without a barrier on the CPU side:
+ * a store becomes visible to the other cores within D (store-buffer
+ * drain, tens of ns on the A72; the CPU thread is SCHED_FIFO on an
+ * isolated core). PS_HANDOFF is 500 ns (PISTORM_HANDOFF_NS, min 200). The CPU thread raises seq (odd) BEFORE it loads
+ * ps_bus_req, and touches no GPIO until that load says 0. So
+ *   - a CPU transaction that read req == 0 did so before req was visible
+ *     (< req + D); its odd seq was stored before that and is visible by
+ *     req + 2D, i.e. well inside PS_HANDOFF - the requester sees
+ *     it odd and waits for the even store at its end;
+ *   - a CPU transaction that starts later sees req == 1, puts seq back to
+ *     even (after a dmb sy - its earlier GPIO writes complete) and spins
+ *     until the requester clears req (after the requester's own dmb sy).
+ * The requester pays ~0.7 us per acquisition; the CPU thread pays two plain
+ * stores and one load.
+ *
+ * ipl_task's IPL sample does not stop the CPU thread at all: it samples
+ * GPLEV0 seqlock-style (ps_bus_trylock / ps_bus_sample_ok): seq even
+ * before, GPLEV read, PS_HANDOFF later seq unchanged - else the sample is
+ * thrown away, exactly as a busy trylock was before.
+ *
+ * PS_NOLOCK (old ataritest builds) still compiles all of it out.
+ */
+static __thread int ps_tls_cpu = 0;             /* this thread is the CPU thread */
+static volatile int ps_cpu_on = 0;              /* a CPU thread is registered     */
+static volatile uint32_t ps_cpu_seq __attribute__ ((aligned (64))) = 0;  /* odd = CPU thread in a transaction */
+static uint32_t ps_cpu_seq_local;               /* CPU thread only                */
+static volatile uint32_t ps_bus_req __attribute__ ((aligned (64))) = 0;  /* another thread wants the bus */
+static uint64_t ps_handoff_ticks = 28;          /* PS_HANDOFF (500 ns, PISTORM_HANDOFF_NS) in arch-timer ticks */
+static uint64_t ps_settle_ticks  = 9;           /* ~150 ns: the CPU's last posted GPIO writes */
+static int ps_held_req = 0;                     /* holder of ps_txn_lock raised ps_bus_req */
+static uint32_t ps_sample_seq;                  /* ps_bus_trylock: seq seen before the sample */
+
+static inline uint64_t ps_ticks (void)
+{
+  uint64_t t;
+  __asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r" (t) :: "memory");
+  return t;
+}
+
+static inline void ps_spin_ticks (uint64_t n)
+{
+  uint64_t t0 = ps_ticks ();
+  while (ps_ticks () - t0 < n)
+    asm volatile ("yield" ::: "memory");
+}
+
+static void __attribute__ ((noinline, cold)) ps_cpu_yield_bus (void)
+{
+  do {
+    asm volatile ("dmb sy" ::: "memory");      /* our GPIO writes have landed */
+    ps_cpu_seq = ++ps_cpu_seq_local;            /* even: not in a transaction  */
+    while (ps_bus_req)
+      asm volatile ("yield" ::: "memory");
+    asm volatile ("dmb sy" ::: "memory");      /* the requester's have too    */
+    ps_cpu_seq = ++ps_cpu_seq_local;            /* odd again                   */
+    asm volatile ("" ::: "memory");
+  } while (ps_bus_req);
+}
+
+/* Another thread's acquisition (ps_txn_lock already held) */
+static void ps_others_handoff (void)
+{
+  ps_bus_active = 1;
+  ps_held_req = 0;
+  if (ps_cpu_on) {
+    ps_bus_req = 1;
+    ps_held_req = 1;
+    asm volatile ("dmb sy" ::: "memory");
+    ps_spin_ticks (ps_handoff_ticks);           /* req visible to the CPU core */
+    while (ps_cpu_seq & 1)                      /* let its transaction finish  */
+      asm volatile ("yield" ::: "memory");
+    ps_spin_ticks (ps_settle_ticks);            /* its last posted GPIO writes */
+  }
+  asm volatile ("dmb sy" ::: "memory");
+}
+
+static void ps_others_release (void)
+{
+  asm volatile ("dmb sy" ::: "memory");        /* our GPIO writes have landed */
+  if (ps_held_req) {
+    ps_held_req = 0;
+    ps_bus_req = 0;
+  }
+  ps_bus_active = 0;
+  atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
+}
+
 #ifdef PS_NOLOCK
 static inline void ps_lock_bus(void) { ps_bus_active = 1; }
 static inline void ps_unlock_bus(void) { ps_bus_active = 0; }
 #else
 static inline void ps_lock_bus(void)
 {
+  if (__builtin_expect (ps_tls_cpu, 1)) {
+    ps_cpu_seq = ++ps_cpu_seq_local;            /* odd */
+    asm volatile ("" ::: "memory");
+    if (__builtin_expect (ps_bus_req, 0))
+      ps_cpu_yield_bus ();
+    return;
+  }
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
-  ps_bus_active = 1;
-  asm volatile ("dmb sy" ::: "memory");
+  ps_others_handoff ();
 }
 
 static inline void ps_unlock_bus(void)
 {
-  asm volatile ("dmb sy" ::: "memory");
-  ps_bus_active = 0;
-  atomic_flag_clear_explicit(&ps_txn_lock, memory_order_release);
+  if (__builtin_expect (ps_tls_cpu, 1)) {
+    asm volatile ("" ::: "memory");
+    ps_cpu_seq = ++ps_cpu_seq_local;            /* even */
+    return;
+  }
+  ps_others_release ();
 }
 #endif
+
+/* Register / unregister the calling thread as THE CPU thread (one at a
+ * time). Taken under ps_txn_lock, so no other thread is mid-acquisition. */
+void ps_bus_cpu_thread (int on)
+{
+  while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
+    asm volatile ("yield" ::: "memory");
+  if (on) {
+    ps_cpu_seq_local = ps_cpu_seq | 0;
+    if (ps_cpu_seq_local & 1)
+      ps_cpu_seq_local++;
+    ps_cpu_seq = ps_cpu_seq_local;              /* even */
+    ps_tls_cpu = 1;
+    ps_cpu_on = 1;
+  } else if (ps_tls_cpu) {
+    ps_cpu_on = 0;
+    ps_tls_cpu = 0;
+  }
+  asm volatile ("dmb sy" ::: "memory");
+  atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
+}
 
 /* PS_PROFILE (ataritest builds only - the emulator never defines it):
  * count the GPLEV polls each transaction spends waiting for the CPLD,
@@ -197,51 +329,58 @@ static inline void ps_wait_idle(void)
  * Returns 1 with the bus held (caller MUST call ps_bus_unlock), or 0. */
 int ps_bus_trylock (void)
 {
-  /* Look before writing. atomic_flag_test_and_set is a store even when
-   * it fails - on the Pi 4's A72 (ARMv8.0, no LSE) an exclusive
-   * load/store pair writing 1 over the 1 already there - so every failed
-   * attempt pulled the lock's cache line over to core 3 in exclusive
-   * state, and the CPU thread paid a miss on its next ps_lock_bus/ps_unlock_bus to
-   * get it back. ipl_task retries every 1 us while the bus is busy, i.e.
-   * throughout the CPU thread's heaviest bus traffic. A plain load of
-   * ps_bus_active (raised by every lock holder) only shares the line.
-   * It is only a hint: a stale 0 just before a lock is taken falls
-   * through to the test-and-set, which still decides; a stale 1 just
-   * after a release costs one skipped sample, the same as a busy bus. */
+  /* Look before writing (a failed test-and-set is still a store that
+   * steals the cache line). ps_bus_active is raised by every non-CPU
+   * holder; the CPU thread is excluded by the seqlock check below. */
   if (ps_bus_active)
     return 0;
   if (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
-    return 0;                       /* a transaction owns the bus */
+    return 0;                       /* another (non-CPU) thread owns the bus */
   ps_bus_active = 1;
+  ps_held_req = 0;
   asm volatile ("dmb sy" ::: "memory");
+  ps_sample_seq = ps_cpu_seq;
+  if (ps_cpu_on && (ps_sample_seq & 1)) {      /* CPU thread mid-transaction */
+    ps_bus_active = 0;
+    atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
+    return 0;
+  }
+  ps_spin_ticks (ps_settle_ticks);              /* a transaction that just ended:
+                                                 its posted GPIO writes land */
   return 1;
 }
 
-/* Take the bus for a thread that must not be starved of it, spinning
- * for at most `ticks` of the arch timer. ps_bus_trylock looks once;
- * against a thread that goes straight from one transaction to the next
- * - or two threads handing the lock back and forth - "once" can fail
- * for milliseconds: field-measured 2.56 ms with no successful sample,
- * during which the keyboard ACIA rescue could not run either. Spinning
- * on the flag here takes part in the hand-off instead of hoping to catch
- * the bus idle. Returns 1 with the bus held (caller MUST ps_bus_unlock),
- * 0 if it could not be had in time. */
+/* After ps_bus_trylock + the GPLEV0 read: was the sample exclusive? With a
+ * CPU thread registered it waits PS_HANDOFF and checks that ps_cpu_seq
+ * did not move - a CPU transaction that overlapped the read has, by then,
+ * made its odd store visible. 1 = keep the sample. Always 1 after
+ * ps_bus_lock_within (the CPU thread was stopped). */
+int ps_bus_sample_ok (void)
+{
+  if (ps_held_req || !ps_cpu_on)
+    return 1;
+  asm volatile ("dmb sy" ::: "memory");
+  ps_spin_ticks (ps_handoff_ticks);
+  return ps_cpu_seq == ps_sample_seq;
+}
+
+/* Take the bus for a thread that must not be starved of it (and that may
+ * run transactions with it), waiting at most `ticks` of the arch timer
+ * for the other threads; the CPU thread is then stopped by the timed
+ * hand-off (one transaction at most). Returns 1 with the bus held
+ * (caller MUST ps_bus_unlock), 0 if it could not be had in time. */
 int ps_bus_lock_within (uint64_t ticks)
 {
-  uint64_t t0, t;
-
-  __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (t0));
+  uint64_t t0 = ps_ticks ();
   for (;;)
   {
     if (!ps_bus_active &&
         !atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     {
-      ps_bus_active = 1;
-      asm volatile ("dmb sy" ::: "memory");
+      ps_others_handoff ();
       return 1;
     }
-    __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (t));
-    if (t - t0 >= ticks)
+    if (ps_ticks () - t0 >= ticks)
       return 0;
     asm volatile ("yield" ::: "memory");
   }
@@ -249,9 +388,7 @@ int ps_bus_lock_within (uint64_t ticks)
 
 void ps_bus_unlock (void)
 {
-  asm volatile ("dmb sy" ::: "memory");
-  ps_bus_active = 0;
-  atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
+  ps_others_release ();
 }
 
 
@@ -649,6 +786,16 @@ void ps_setup_protocol ( void )
   *ioclr = TXN_END;
 
   ps_fastclk_start ();                  /* 2.x firmware only */
+
+  {
+    uint64_t f;
+    const char *h = getenv ("PISTORM_HANDOFF_NS");
+    long ns = h ? atol (h) : 500;   /* > 2x store visibility, with margin */
+    if (ns < 200) ns = 200;
+    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
+    ps_handoff_ticks = (f * (uint64_t)ns) / 1000000000ull + 1;
+    ps_settle_ticks  = (f * 150ull) / 1000000000ull + 1;
+  }
 }
 
 typedef struct {
@@ -1893,15 +2040,12 @@ int ps_power_poll ( void )
 {
   if (ps_fw_rev == 0)
     return -1;
-  for (unsigned n = 0; ; n++) {
-    if (!atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
-      break;
-    if (n >= 5000)                      /* ~5 ms */
+  {
+    uint64_t f;
+    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
+    if (!ps_bus_lock_within (f / 200))  /* ~5 ms */
       return -1;
-    usleep (1);
   }
-  ps_bus_active = 1;
-  asm volatile ("dmb sy" ::: "memory");
 
   /* body of ps_read_status_reg, lock already held */
   PS_BUS_IN ();

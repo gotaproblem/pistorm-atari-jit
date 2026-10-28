@@ -262,6 +262,7 @@ int main ( int argc, char *argv[] )
     if ( parser ( argc, argv ) )
     {        
         ps_setup_protocol ();
+        ps_bus_cpu_thread (1);          /* the emulator CPU thread's lock path */
        
         if ( VERBOSE )
             ps_get_firmware_revision ();
