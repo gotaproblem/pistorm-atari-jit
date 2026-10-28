@@ -1037,7 +1037,39 @@ void ps_prof_write16_ish (uint32_t addr, uint16_t data)
  *              corruption, reproduced in simulation). */
 /*   PV_HICLR   the WR-only clear on a READ's ADDR_HI pulse only - the one
  *              edge rd_ok is armed on; every other pulse stays short */
-enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8, PV_WRCLR = 16, PV_HICLR = 32 };
+/*   PV_LK_FULL / PV_LK_ATOM / PV_LK_DMB  an explicit lock, independent of
+ *              PS_NOLOCK: the emulator's lock (atomic + dmb sy each way), the
+ *              atomic acquire/release alone, or the two dmb sy alone - where
+ *              do its ~78 ns go? */
+enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8, PV_WRCLR = 16, PV_HICLR = 32,
+       PV_LK_FULL = 64, PV_LK_ATOM = 128, PV_LK_DMB = 256 };
+
+static inline void pv_lock (int f)
+{
+  if (f & (PV_LK_FULL | PV_LK_ATOM))
+    while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
+      asm volatile ("yield" ::: "memory");
+  if (f & (PV_LK_FULL | PV_LK_ATOM | PV_LK_DMB)) {
+    ps_bus_active = 1;
+    if (f & (PV_LK_FULL | PV_LK_DMB))
+      asm volatile ("dmb sy" ::: "memory");
+    return;
+  }
+  if (!(f & PV_NOLOCK)) ps_lock_bus ();
+}
+
+static inline void pv_unlock (int f)
+{
+  if (f & (PV_LK_FULL | PV_LK_ATOM | PV_LK_DMB)) {
+    if (f & (PV_LK_FULL | PV_LK_DMB))
+      asm volatile ("dmb sy" ::: "memory");
+    ps_bus_active = 0;
+    if (f & (PV_LK_FULL | PV_LK_ATOM))
+      atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
+    return;
+  }
+  if (!(f & PV_NOLOCK)) ps_unlock_bus ();
+}
 
 static inline void pv_pulse (volatile uint32_t *const set, volatile uint32_t *const clr, int f)
 {
@@ -1064,7 +1096,7 @@ uint16_t ps_prof_read16_var (uint32_t addr, int f, int *err)
   volatile uint32_t *const clr = ioclr;
   volatile uint32_t *const lev = ioread;
   uint32_t status;
-  if (!(f & PV_NOLOCK)) ps_lock_bus ();
+  pv_lock (f);
   *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
   pv_pulse (set, clr, f);
   *set = (((fc << 13) | READ_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
@@ -1077,7 +1109,7 @@ uint16_t ps_prof_read16_var (uint32_t addr, int f, int *err)
     status = *lev;
   *clr = TXN_END;
   if (!(f & PV_NODIR)) PS_BUS_OUT ();
-  if (!(f & PV_NOLOCK)) ps_unlock_bus ();
+  pv_unlock (f);
   return (uint16_t)(status >> 8);
 }
 
@@ -1087,7 +1119,7 @@ void ps_prof_write16_var (uint32_t addr, uint16_t data, int f, int *err)
   volatile uint32_t *const clr = ioclr;
   volatile uint32_t *const lev = ioread;
   uint32_t status;
-  if (!(f & PV_NOLOCK)) ps_lock_bus ();
+  pv_lock (f);
   *set = (data << 8) | REG_DATA;
   pv_pulse (set, clr, f);
   *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
@@ -1095,7 +1127,7 @@ void ps_prof_write16_var (uint32_t addr, uint16_t data, int f, int *err)
   *set = (((fc << 13) | WRITE_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
   pv_pulse (set, clr, f);
   if (pv_wait (lev, &status)) *err = 1;
-  if (!(f & PV_NOLOCK)) ps_unlock_bus ();
+  pv_unlock (f);
 }
 
 /* one GPFSEL flip each way (D0-D15 in, then back out), on an idle bus */
