@@ -184,7 +184,8 @@ static uint64_t ps_handoff_ticks = 28;          /* PS_HANDOFF (500 ns, PISTORM_H
 static uint64_t ps_handoff_ns    = 500;
 static uint64_t ps_settle_ticks  = 9;           /* ~150 ns: the CPU's last posted GPIO writes */
 static int ps_held_req = 0;                     /* holder of ps_txn_lock raised ps_bus_req */
-static uint32_t ps_sample_seq;                  /* ps_bus_trylock: seq seen before the sample */
+static uint32_t ps_sample_seq;
+static int ps_ipl_handoff = 0;                  /* PISTORM_IPL_HANDOFF=1: IPL samples via the hand-off */                  /* ps_bus_trylock: seq seen before the sample */
 
 static inline uint64_t ps_ticks (void)
 {
@@ -282,8 +283,9 @@ void ps_bus_cpu_thread (int on)
       printf ("[GPIO] CPU thread bus path: old lock (PISTORM_CPULOCK=0)\n");
       return;
     }
-    printf ("[GPIO] CPU thread bus path: lock-free (hand-off %llu ns)\n",
-            (unsigned long long)ps_handoff_ns);
+    printf ("[GPIO] CPU thread bus path: lock-free (hand-off %llu ns, IPL samples %s)\n",
+            (unsigned long long)ps_handoff_ns,
+            ps_ipl_handoff ? "via hand-off (PISTORM_IPL_HANDOFF=1)" : "seqlock-checked");
   }
   while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
@@ -351,6 +353,10 @@ int ps_bus_trylock (void)
   ps_bus_active = 1;
   ps_held_req = 0;
   asm volatile ("dmb sy" ::: "memory");
+  if (ps_cpu_on && ps_ipl_handoff) {          /* PISTORM_IPL_HANDOFF=1:   */
+    ps_others_handoff ();                      /* stop the CPU thread for  */
+    return 1;                                  /* every sample (sample_ok = 1) */
+  }
   ps_sample_seq = ps_cpu_seq;
   if (ps_cpu_on && (ps_sample_seq & 1)) {      /* CPU thread mid-transaction */
     ps_bus_active = 0;
@@ -807,6 +813,8 @@ void ps_setup_protocol ( void )
     __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
     ps_handoff_ticks = (f * (uint64_t)ns) / 1000000000ull + 1;
     ps_handoff_ns = (uint64_t)ns;
+    h = getenv ("PISTORM_IPL_HANDOFF");
+    ps_ipl_handoff = h && *h == '1';
     ps_settle_ticks  = (f * 150ull) / 1000000000ull + 1;
   }
 }
