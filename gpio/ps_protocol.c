@@ -576,7 +576,7 @@ static void ps_fastclk_start (void)
   /* 2.x protocol: short WR strobe (see txn_pulse) */
   {
     const char *st = getenv ("PISTORM_STROBE");
-    int n = st ? atoi (st) : 3;
+    int n = st ? atoi (st) : 2;     /* 2.1b busprofile: 3.55 / 3.89 MB/s, 0/0 */
     ps_pulse_sets = (n == 2 || n == 3) ? n : 0;     /* 4 / other = 1.x strobe */
     printf ("[GPIO] firmware %d.%d protocol: WR strobe %s%s\n", major, fw & 0x1f,
             ps_pulse_sets == 3 ? "3 sets + WR clear" :
@@ -673,8 +673,9 @@ typedef struct {
  * 1.x firmware (ps_pulse_sets == 0): 4 WR sets, 2 WR-only clears, then
  * TXN_END - unchanged (689ddc6: 4 stores of WR high).
  *
- * 2.x firmware: ps_pulse_sets WR sets (default 3, ~15 ns: the '374's
- * minimum clock-high width), ONE WR-only clear, then TXN_END. The WR-only
+ * 2.x firmware: ps_pulse_sets WR sets (default 2 - firmware 2.1b,
+ * 28 Oct 2026: read16 3.55 MB/s, write16 3.89 MB/s, 0/0 data checks;
+ * 3 measured slower, 700 vs 545 ns reads), ONE WR-only clear, then TXN_END. The WR-only
  * clear must stay: the CPLD captures a0 / op_rw / op_fc / op_uds/lds /
  * status / rd_ok while WR is high and holds them as it falls - if TXN_END
  * dropped WR, CMD and data in the same store, that edge would see CMD and
@@ -688,11 +689,11 @@ static int ps_pulse_sets = 0;
 __attribute__((always_inline)) static inline void txn_pulse (volatile uint32_t *const set,
                               volatile uint32_t *const clr)
 {
-  if (__builtin_expect (ps_pulse_sets == 3, 1)) {
-    *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
-    *clr = PIN_WR;
-  } else if (ps_pulse_sets == 2) {
+  if (__builtin_expect (ps_pulse_sets == 2, 1)) {
     *set = PIN_WR; *set = PIN_WR;
+    *clr = PIN_WR;
+  } else if (ps_pulse_sets == 3) {
+    *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
     *clr = PIN_WR;
   } else {
     *set = PIN_WR; *set = PIN_WR; *set = PIN_WR; *set = PIN_WR;
