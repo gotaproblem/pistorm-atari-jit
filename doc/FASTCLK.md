@@ -9,7 +9,7 @@ ST-RAM at real 68000 bus speed: GEMBench (TOS 2.06, STE) RAM/ROM access
 | GPIO4 | ST RESET to the Pi | PI_CLK: GPCLK0 62.5 MHz into the CPLD |
 | WR strobe | 4 sets + 2 clears | 2 sets + 1 WR clear (2.x firmware only) |
 | CPU-thread bus lock | atomic + dmb sy | lock-free; other threads hand off |
-| Reset-button sensing | yes | no (GPIO4 is the clock) |
+| Reset-button sensing | GPIO4 | status word bit 12 (firmware 2.2b+) |
 
 ## Switching
 
@@ -48,6 +48,13 @@ and pinout, ~137 of its 240 LEs). Only the EPM570 bitstream has been built
 and tested so far (`rtl/EPM570_bitstream_dev_2_1b.svf`).
 2.1b = 1.2e + PI_CLK-timed read release (32-40 ns after S6) + fast start
 (AS as soon as TXN has been high 40-48 ns, anywhere in S1/S2).
+
+## Firmware versions
+
+- 2.1b (`$541` / `$441`): fast clock + fast start. Built and tested (EPM570).
+- 2.2b (`$542` / `$442`): 2.1b + reset button via status bit 12 (the CPLD's
+  filtered "RESET held >= 2 us, not by the Pi"). `rtl/fastclk/*.v` is 2.2b;
+  `*_2.1b.v` kept. Not yet built.
 
 ## Open
 

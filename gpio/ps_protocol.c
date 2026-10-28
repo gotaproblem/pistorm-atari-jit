@@ -2038,6 +2038,19 @@ void ps_get_firmware_revision ( void )
  * but say "no pin" rather than pretend. */
 int ps_st_reset_pin ( void )
 {
+  /* Firmware 2.x: GPIO4 is PI_CLK. From 2.2b the CPLD's filtered reset
+   * signal (RESET held >= 2 us, not by the Pi) is status-word bit 12,
+   * read through the bus hand-off (~2 us; the main thread polls every
+   * 10 ms). 2.0b / 2.1b have no such bit (bit 12 was HALT_n). */
+  {
+    uint16_t fw = ps_fw_rev;
+    int major = (fw >> 5) & 7, minor = fw & 0x1f;
+    if ((fw & 0x600) != 0x200 && major >= 2) {
+      if (major == 2 && minor < 2)
+        return -1;
+      return ((ps_read_status_reg () >> 8) & 0x1000) ? 0 : 1;
+    }
+  }
   if (ps_fastclk)
     return -1;                           /* GPIO4 is PI_CLK (firmware 2.x) */
 #ifdef USING_PI_CLK

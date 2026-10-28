@@ -1,4 +1,11 @@
 /*
+ * 2.2b (fwrev $542): 2.1b + the ST RESET button back for the Pi. GPIO4 is
+ * PI_CLK since 2.0b, so the filtered "RESET held >= 2 us, not by the Pi"
+ * signal (pi_reset_r, rev 256) is now status-word bit 12 (was HALT_n,
+ * unused by the Pi). Bit 13 stays raw RESET_n (power sensing).
+ */
+
+/*
  * 2.1b (fwrev $541): 2.0b + FAST START (see as_fast). The cycle starts as
  * soon as TXN has been high 40-48 ns (address latches valid), anywhere from
  * S1 until S3 - as the 2024 3.91 MB/s design did - instead of only on the
@@ -464,7 +471,7 @@ module pistormsxb_devEPM570(
 	 * should be set via .qsf file -> update_version.tcl
 	 */
 
-	`include "version_reg_570.v"	/* 2.1b: fwrev $541 */
+	`include "version_reg_570.v"	/* 2.2b: fwrev $542 */
 
 
 	wire CMDWR;
@@ -507,7 +514,7 @@ module pistormsxb_devEPM570(
 	assign trigger							= (cmd_status && !CMDWR && !st_wr_release);
 
 	/* bit 11 (raw GPIO19): arbitration active - BG out or foreign master */
-	assign PI_D 							= trigger ? {PI_IPL2, PI_IPL1, M68K_RESET_n, M68K_HALT_n, ~bus_mine, fwrev} : 16'bz;
+	/* 2.2b: status readback moved below the reset filter (bit 12 = pi_reset_r) */
 	
 	reg [15:0] status;
 	
@@ -647,7 +654,8 @@ module pistormsxb_devEPM570(
 	reg       rst_own						= 1'b0;
 	reg       pi_reset_r					= HI;
 
-	/* 2.0b: GPIO4 is PI_CLK now - pi_reset_r is left unconnected */
+	/* 2.0b: GPIO4 is PI_CLK now. 2.2b: pi_reset_r goes to the Pi in the
+	 * status word instead, bit 12 (was HALT_n, which the Pi never read) */
 
 	always @(negedge c8m) begin
 
@@ -661,6 +669,11 @@ module pistormsxb_devEPM570(
 		else
 			rst_cnt							<= rst_cnt + 4'd1;
 	end
+
+	/* status readback (combinational):
+	 *   15 IPL2  14 IPL1  13 RESET_n (raw)  12 ST RESET held, not by the Pi
+	 *   (pi_reset_r, active low - 2.2b; was HALT_n)  11 ~bus_mine  10:0 fwrev */
+	assign PI_D 							= trigger ? {PI_IPL2, PI_IPL1, M68K_RESET_n, pi_reset_r, ~bus_mine, fwrev} : 16'bz;
 	
   
 	/* 
