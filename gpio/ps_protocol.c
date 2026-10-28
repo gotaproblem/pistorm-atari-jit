@@ -181,6 +181,7 @@ static volatile uint32_t ps_cpu_seq __attribute__ ((aligned (64))) = 0;  /* odd 
 static uint32_t ps_cpu_seq_local;               /* CPU thread only                */
 static volatile uint32_t ps_bus_req __attribute__ ((aligned (64))) = 0;  /* another thread wants the bus */
 static uint64_t ps_handoff_ticks = 28;          /* PS_HANDOFF (500 ns, PISTORM_HANDOFF_NS) in arch-timer ticks */
+static uint64_t ps_handoff_ns    = 500;
 static uint64_t ps_settle_ticks  = 9;           /* ~150 ns: the CPU's last posted GPIO writes */
 static int ps_held_req = 0;                     /* holder of ps_txn_lock raised ps_bus_req */
 static uint32_t ps_sample_seq;                  /* ps_bus_trylock: seq seen before the sample */
@@ -273,6 +274,17 @@ static inline void ps_unlock_bus(void)
  * time). Taken under ps_txn_lock, so no other thread is mid-acquisition. */
 void ps_bus_cpu_thread (int on)
 {
+  /* PISTORM_CPULOCK=0: do not register - the CPU thread then takes the
+   * old lock (ps_txn_lock + dmb sy) like every other thread */
+  if (on) {
+    const char *e = getenv ("PISTORM_CPULOCK");
+    if (e && *e == '0') {
+      printf ("[GPIO] CPU thread bus path: old lock (PISTORM_CPULOCK=0)\n");
+      return;
+    }
+    printf ("[GPIO] CPU thread bus path: lock-free (hand-off %llu ns)\n",
+            (unsigned long long)ps_handoff_ns);
+  }
   while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
   if (on) {
@@ -794,6 +806,7 @@ void ps_setup_protocol ( void )
     if (ns < 200) ns = 200;
     __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
     ps_handoff_ticks = (f * (uint64_t)ns) / 1000000000ull + 1;
+    ps_handoff_ns = (uint64_t)ns;
     ps_settle_ticks  = (f * 150ull) / 1000000000ull + 1;
   }
 }
