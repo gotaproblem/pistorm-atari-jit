@@ -1012,6 +1012,78 @@ void ps_prof_write16_ish (uint32_t addr, uint16_t data)
   ps_prof_lock_ish (); ps_write_txn (&io); ps_prof_unlock_ish ();
 }
 
+/* VARIANTS of one transaction, for measuring what each part of the
+ * protocol costs and whether it can go. flags:
+ *   PV_NOLOCK  no ps_lock_bus / ps_unlock_bus
+ *   PV_NODIR   reads leave D0-D15 as Pi outputs (no GPFSEL flip) - the
+ *              pre-13-Oct behaviour, CPLD and Pi both driving the pins
+ *   PV_PULSE1  strobe = 1 WR set store (normal: 4 sets + 2 WR clears)
+ *   PV_PULSE2  strobe = 2 WR set stores, no WR clears (TXN_END clears WR)
+ * Only for ataritest: correctness is checked by the caller. */
+enum { PV_NOLOCK = 1, PV_NODIR = 2, PV_PULSE1 = 4, PV_PULSE2 = 8 };
+
+static inline void pv_pulse (volatile uint32_t *const set, volatile uint32_t *const clr, int f)
+{
+  if (f & PV_PULSE1) { *set = PIN_WR; *clr = TXN_END; return; }
+  if (f & PV_PULSE2) { *set = PIN_WR; *set = PIN_WR; *clr = TXN_END; return; }
+  txn_pulse (set, clr);
+}
+
+static int pv_wait (volatile uint32_t *const lev, uint32_t *st)
+{
+  uint32_t spins = 0, status;
+  do {
+    status = *lev;
+    if (++spins > 10000000u) { *st = status; return -1; }
+  } while (status & PI_TXN_IN_PROGRESS);
+  ps_prof_rd_spins += spins;
+  *st = status;
+  return 0;
+}
+
+uint16_t ps_prof_read16_var (uint32_t addr, int f, int *err)
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const lev = ioread;
+  uint32_t status;
+  if (!(f & PV_NOLOCK)) ps_lock_bus ();
+  *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
+  pv_pulse (set, clr, f);
+  *set = (((fc << 13) | READ_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
+  pv_pulse (set, clr, f);
+  if (!(f & PV_NODIR)) PS_BUS_IN ();
+  *set = REG_DATA;
+  *set = PIN_WR;
+  if (pv_wait (lev, &status)) *err = 1;
+  for (int i = 0; i < ps_rd_settle; i++)
+    status = *lev;
+  *clr = TXN_END;
+  if (!(f & PV_NODIR)) PS_BUS_OUT ();
+  if (!(f & PV_NOLOCK)) ps_unlock_bus ();
+  return (uint16_t)(status >> 8);
+}
+
+void ps_prof_write16_var (uint32_t addr, uint16_t data, int f, int *err)
+{
+  volatile uint32_t *const set = ioset;
+  volatile uint32_t *const clr = ioclr;
+  volatile uint32_t *const lev = ioread;
+  uint32_t status;
+  if (!(f & PV_NOLOCK)) ps_lock_bus ();
+  *set = (data << 8) | REG_DATA;
+  pv_pulse (set, clr, f);
+  *set = ((addr & 0xffff) << 8) | REG_ADDR_LO;
+  pv_pulse (set, clr, f);
+  *set = (((fc << 13) | WRITE_WORD | (addr >> 16)) << 8) | REG_ADDR_HI;
+  pv_pulse (set, clr, f);
+  if (pv_wait (lev, &status)) *err = 1;
+  if (!(f & PV_NOLOCK)) ps_unlock_bus ();
+}
+
+/* one GPFSEL flip each way (D0-D15 in, then back out), on an idle bus */
+void ps_prof_dir_pair (void) { PS_BUS_IN (); PS_BUS_OUT (); }
+
 /* the same transactions without the bus lock (ataritest is the only
  * thread on the bus): what the lock and its two dmb sy barriers cost */
 uint16_t ps_prof_read16_nolock (uint32_t addr)
