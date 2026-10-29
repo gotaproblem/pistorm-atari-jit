@@ -36,6 +36,8 @@ typedef enum {
   CONFITEM_ROM,
   CONFITEM_IDE,
   CONFITEM_IDE_BYTEORDER,
+  CONFITEM_HDD_ORDER,
+  CONFITEM_ACSI_ORDER,
   CONFITEM_CPU_SPEED,
   CONFITEM_HDD,
   CONFITEM_FDD,
@@ -105,6 +107,8 @@ static const config_switch_def config_switches[] = {
   { "rom", CONFITEM_ROM },
   { "ide", CONFITEM_IDE },
   { "ide_byteorder", CONFITEM_IDE_BYTEORDER },
+  { "hdd_order", CONFITEM_HDD_ORDER },
+  { "acsi_order", CONFITEM_ACSI_ORDER },
   { "hdd", CONFITEM_HDD },
   { "fdd", CONFITEM_FDD },
   { "acsi", CONFITEM_ACSI },
@@ -1071,6 +1075,33 @@ struct emulator_config *load_config_file_section(char *filename,
             cfg->ide_byteorder = 0;
           else
             printf ("[CFG] ide_byteorder '%s' not understood - use native or swapped\n", arg);
+        }
+        break;
+
+      case CONFITEM_HDD_ORDER:
+      case CONFITEM_ACSI_ORDER:
+        {
+          /* `hdd_order <slot> auto|native|swapped`, `acsi_order <id> ...`:
+           * how that image FILE is stored (disk_order.c). auto (default)
+           * reads sector 0; native/swapped override the detection. */
+          extern int  disk_order_parse_mode (const char *s);
+          extern void disk_order_set_hdd (int slot, int mode);
+          extern void disk_order_set_acsi (int id, int mode);
+          const char *a = parse_line + str_pos;
+          int is_hdd = !strcmp (cur_cmd, "hdd_order");
+          int n = -1, m = -1;
+          while (*a == ' ' || *a == '\t') a++;
+          if (*a >= '0' && *a <= '7' && (a[1] == ' ' || a[1] == '\t')) {
+            n = *a - '0';
+            m = disk_order_parse_mode (a + 2);
+          }
+          if (n < 0 || m < 0)
+            printf ("[CFG] %s: expected '<0-7> auto|native|swapped' on line %d\n",
+                    is_hdd ? "hdd_order" : "acsi_order", cur_line);
+          else if (is_hdd)
+            disk_order_set_hdd (n, m);
+          else
+            disk_order_set_acsi (n, m);
         }
         break;
 

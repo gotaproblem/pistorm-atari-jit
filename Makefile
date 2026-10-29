@@ -33,6 +33,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/IDE.c \
          platforms/atari/machine_cookie.c \
          platforms/atari/idedriver.c \
+         platforms/atari/disk_order.c \
          platforms/atari/fdd/atari_fdd.c \
          platforms/atari/fdd/acsi.c \
          platforms/atari/fdd/dma_snoop.c \

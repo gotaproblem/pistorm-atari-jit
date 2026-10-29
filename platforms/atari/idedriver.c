@@ -31,6 +31,7 @@
 
 #include "config_file/config_file.h"
 #include "idedriver.h"
+#include "disk_order.h"
 
 /* Data-port byte order (must be defined before any user below).
  * 0 (legacy): first sector byte in the LOW half of the word. EmuTOS
@@ -571,6 +572,12 @@ static int ide_read_sector(struct ide_drive *d)
     ide_xlate_errno(&d->taskfile, len);
     return -1;
   }
+  /* A byte-swapped image file (disk_order.c) is presented unswapped when
+   * the data port is in native order. In the legacy (swapped) port order
+   * the port's own swap already undoes the file's, so nothing is done -
+   * those images worked unchanged before. */
+  if (d->img_swapped && ide_native_order())
+    disk_swap512(d->data);
   //hexdump(d->data);
   d->offset += 512;
   return 0;
@@ -579,10 +586,17 @@ static int ide_read_sector(struct ide_drive *d)
 static int ide_write_sector(struct ide_drive *d)
 {
   int len;
+  uint8_t sw[512];
+  const uint8_t *src = d->data;
 
   ide_stats.sectors_written++;
   d->dptr = d->data;
-  if ((len = write(d->fd, d->data, 512)) != 512) {
+  if (d->img_swapped && ide_native_order()) {   /* back to the file's order */
+    memcpy(sw, d->data, 512);
+    disk_swap512(sw);
+    src = sw;
+  }
+  if ((len = write(d->fd, src, 512)) != 512) {
     d->taskfile.status |= ST_ERR;
     d->taskfile.status &= ~ST_DSC;
     ide_xlate_errno(&d->taskfile, len);

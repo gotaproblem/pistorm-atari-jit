@@ -9,6 +9,7 @@
 
 #define _LARGEFILE64_SOURCE 
 
+#include "disk_order.h"
 #include "platforms/atari/IDE.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -213,8 +214,12 @@ void InitIDE (void)
            * fails on an already-present slot or an undersized image. */
           if ( ide_attach_hdf ( atariIDE [port], i % 2, atarifd ) == 0 )
           {
+            char tag[24];
             num_IDE_drives++;
             printf ("[IDE%d] HDD%d Image Attached %s\n", port, i, atari_image_file[i]);
+            snprintf ( tag, sizeof tag, "[IDE%d] HDD%d", port, i );
+            atariIDE [port]->drive [i % 2].img_swapped =
+              disk_order_resolve ( atarifd, disk_order_get_hdd ( i ), tag, atari_image_file [i] );
           }
           else
             printf ("[IDE%d] HDD%d Image %s NOT attached\n", port, i, atari_image_file[i]);

@@ -12,6 +12,7 @@
  * stopped while we work, so driver timeouts cannot fire early.
  */
 
+#include "../disk_order.h"
 #include <stdio.h>
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
@@ -59,6 +60,7 @@ typedef struct {
     uint8_t  sense;              /* pending sense code (0 = none)         */
     uint32_t sense_lba;
     bool     probed;             /* first guest contact logged            */
+    bool     swapped;            /* image FILE stored byte-swapped        */
 } acsi_target_t;
 
 static acsi_target_t tgt[ACSI_MAX_TARGETS];
@@ -156,6 +158,7 @@ int acsi_attach_at(int id, const char *path)
 
     const char *dot = strrchr(path, '.');
     t->hfs = (dot && strcasecmp(dot, ".hfs") == 0);
+    t->swapped = false;
     uint32_t file_sectors = (uint32_t)(st.st_size / 512);
 
     t->fd = fd;
@@ -164,7 +167,10 @@ int acsi_attach_at(int id, const char *path)
         t->total_lba = file_sectors + 1;     /* +synthesized root      */
         synth_root(t, file_sectors);
     } else {
+        char tag[16];
         t->total_lba = file_sectors;
+        snprintf(tag, sizeof tag, "[ACSI] ID %d", id);
+        t->swapped = disk_order_resolve(fd, disk_order_get_acsi(id), tag, path);
     }
     t->sense = 0;
     n_targets++;
@@ -195,7 +201,11 @@ static int read_lba(acsi_target_t *t, uint32_t lba, uint8_t *buf)
         if (lba == 0) { memcpy(buf, t->root, 512); return 0; }
         return pread(t->fd, buf, 512, (off_t)(lba - 1) * 512) == 512 ? 0 : -1;
     }
-    return pread(t->fd, buf, 512, (off_t)lba * 512) == 512 ? 0 : -1;
+    if (pread(t->fd, buf, 512, (off_t)lba * 512) != 512)
+        return -1;
+    if (t->swapped)                       /* byte-swapped file: present it unswapped */
+        disk_swap512(buf);
+    return 0;
 }
 
 static int write_lba(acsi_target_t *t, uint32_t lba, const uint8_t *buf)
@@ -210,6 +220,12 @@ static int write_lba(acsi_target_t *t, uint32_t lba, const uint8_t *buf)
             return 0;
         }
         return pwrite(t->fd, buf, 512, (off_t)(lba - 1) * 512) == 512 ? 0 : -1;
+    }
+    if (t->swapped) {                     /* back to the file's order */
+        uint8_t sw[512];
+        memcpy(sw, buf, 512);
+        disk_swap512(sw);
+        return pwrite(t->fd, sw, 512, (off_t)lba * 512) == 512 ? 0 : -1;
     }
     return pwrite(t->fd, buf, 512, (off_t)lba * 512) == 512 ? 0 : -1;
 }
