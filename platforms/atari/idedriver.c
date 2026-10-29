@@ -223,6 +223,8 @@ static off_t xlate_block(struct ide_taskfile *t)
  * strict ROM probes (TOS 2.06's IDE boot detect in particular) spin waiting
  * for DSC after drive select and time out on DRDY alone. EmuTOS doesn't
  * check DSC, which is how the omission went unnoticed. */
+static void put_le16(uint16_t *p, unsigned int v);
+
 static void ready(struct ide_taskfile *tf)
 {
   tf->status &= ~(ST_BSY|ST_DRQ);
@@ -1083,6 +1085,23 @@ int ide_attach_hdf ( struct ide_controller *c, int drive, int fd )
 
 
   ide_make_ident ( drive, d->cylinders, d->heads, d->sectors, "PISTORM IDE DK", d->identify );
+
+  /* Words 60-61 must give the WHOLE image, not cyl*16*63.
+   * The cylinder count rounds down, so up to 1007 sectors at the end of
+   * the file were not reported. Partitioners fill the file to its last
+   * sector, and P. Putnik's IDE driver drops any partition whose end lies
+   * past words 60-61: 1GBIDE.img lost its 3rd partition (ends 1933611,
+   * reported 1933344) and the Satan image lost its only one (ends 475199,
+   * reported 474768). */
+  {
+    uint64_t total = (uint64_t)file_size / 512;
+    if (total > 0x0FFFFFFF) total = 0x0FFFFFFF;          /* LBA28 limit */
+    put_le16(d->identify + 60, total & 0xffff);
+    put_le16(d->identify + 61, total >> 16);
+    printf("[IDE] DK%d: %llu sectors (CHS %u/%u/%u = %u)\n", drive,
+           (unsigned long long)total, d->cylinders, d->heads, d->sectors,
+           (unsigned)(d->cylinders * d->heads * d->sectors));
+  }
 
   return 0;
 }
