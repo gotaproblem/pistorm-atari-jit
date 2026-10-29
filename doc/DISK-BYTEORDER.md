@@ -19,8 +19,8 @@ unrecognised sector 0 is "order unknown" and the image is used as it is.
 | Sector 0 of the file | IDE | ACSI |
 |---|---|---|
 | table/boot code native, or nothing to judge | native order (TOS, HDDRIVER, AHDI; EmuTOS copes either way) | as stored |
-| everything readable only word-swapped (ARAnyM, twisted-cable dumps) | swapped back per sector - a normal disk | swapped back per sector |
-| table native, 68000 boot code word-swapped (PP-prepared, e.g. 1GBIDE.img) | the twisted-cable (legacy) port order, which its boot driver needs | as stored |
+| everything readable only word-swapped (ARAnyM, twisted-cable dumps) | swapped back per sector to a normal disk, then the controller's order applies | swapped back per sector |
+| table native, 68000 boot code word-swapped (PP-prepared, e.g. 1GBIDE.img) | the twisted-cable (legacy) port order for BOTH drives on that controller - the PP driver expects every drive in it | as stored |
 
 Falcon TOS always gets the native IDE order. The file on disk is never
 rewritten in another order. This replaces the old cfg `ide_byteorder` (a
@@ -42,3 +42,13 @@ longer offers it.
 | 1GB, 1GBnew, apple-boot-acsi, Satan256Mb (all 3), apj-os-*, badapple, disktmp*, idetest, falcon*, falc512*, pistorm-jit-hd, freemint/mint-master, mymint, mymint-1, tuxies-Mint | native |
 | freemint/EasyMiNT_Master_Aranym, EasyMiNT_Slave_Aranym, card.img | byte-swapped (AHDI root) |
 | apple-boot-ide | unknown (sector 0-2 blank) - used as is |
+
+## The PP loader and several ACSI disks
+
+The PP boot loader (sector 0 of PP-prepared disks) always loads its driver
+from the first ACSI ID that answers, starting at ID 0, and hands the driver
+that ID - it ignores the boot device TOS passes in d7. TOS 1.04 runs every
+bootable root sector it finds, so two PP-bootable disks on ACSI load the
+driver for ID 0 twice: ID 0's partitions appear twice (C-E and F-H). Same on
+real hardware (checked 29 Oct with the images on SD cards on a real ACSI
+bus). Use one PP-bootable disk per bus, or a driver that scans all IDs.

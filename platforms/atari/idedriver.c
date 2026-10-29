@@ -569,11 +569,10 @@ static int ide_read_sector(struct ide_drive *d)
     ide_xlate_errno(&d->taskfile, len);
     return -1;
   }
-  /* A byte-swapped image file (disk_order.c) is presented unswapped when
-   * the data port is in native order. In the legacy (swapped) port order
-   * the port's own swap already undoes the file's, so nothing is done -
-   * those images worked unchanged before. */
-  if (d->img_swapped && ide_native_order(d))
+  /* A byte-swapped image file (disk_order.c) is turned back into a normal
+   * disk first; the port order (native, or twisted for a PP controller)
+   * then applies to it like to any other image. */
+  if (d->img_swapped)
     disk_swap512(d->data);
   //hexdump(d->data);
   d->offset += 512;
@@ -588,7 +587,7 @@ static int ide_write_sector(struct ide_drive *d)
 
   ide_stats.sectors_written++;
   d->dptr = d->data;
-  if (d->img_swapped && ide_native_order(d)) {   /* back to the file's order */
+  if (d->img_swapped) {                          /* back to the file's order */
     memcpy(sw, d->data, 512);
     disk_swap512(sw);
     src = sw;

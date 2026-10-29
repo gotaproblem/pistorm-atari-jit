@@ -231,6 +231,22 @@ void InitIDE (void)
     }
   }
 
+  /* The IDE port order is a property of the controller and the driver
+   * reading it, not of one image: the PP driver expects BOTH drives in the
+   * twisted-cable order (field case 29 Oct: 1GBIDE.img twisted on the
+   * master, Satan native on the slave - the PP driver showed the master's
+   * partitions twice). So one PP-prepared image puts its whole controller
+   * in the twisted order, exactly as the old `ide_byteorder swapped` did. */
+  for ( int n = 0; n < 4; n ++ )
+    if ( atariIDE [n] &&
+         ( atariIDE [n]->drive [0].twisted || atariIDE [n]->drive [1].twisted ) )
+    {
+      atariIDE [n]->drive [0].twisted = 1;
+      atariIDE [n]->drive [1].twisted = 1;
+      printf ( "[IDE%d] PP-prepared image on this controller - both drives in the "
+               "twisted-cable order\n", n );
+    }
+
   for ( int n = 0; n < 4; n ++ )
     if ( atariIDE [n] )
       IDE_reset_begin ( atariIDE [n] );
