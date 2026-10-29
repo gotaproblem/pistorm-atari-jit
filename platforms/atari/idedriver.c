@@ -31,6 +31,7 @@
 
 #include "config_file/config_file.h"
 #include "idedriver.h"
+#include "disk_order.h"
 
 /* Data-port byte order (must be defined before any user below).
  * 0 (legacy): first sector byte in the LOW half of the word. EmuTOS
@@ -55,25 +56,22 @@
 
 #include "platforms/atari/falcon/falcon_tos.h"
 
-/* The order the guest sees, per access. Falcon TOS: native - first
- * sector byte on D8-15, so a standard image reads as it lies on disk.
- * A Falcon's hard-disk drivers (HDDRIVER, AHDI 6) do not look for a
- * swapped MBR the way EmuTOS does: in the legacy order HDDRIVER made a
- * C: from the root sector but could not read the FAT16 partition.
- * Hatari presents a standard image to a Falcon the same way (ide.c:
- * byteswap for a non-swapped image). EmuTOS and TOS 1/2: unchanged. */
-/* cfg `ide_byteorder native` (ide_set_byteorder, from emulator.c before
- * InitIDE): HDDRIVER / AHDI on TOS 1/2 want the native order too. */
-static int ide_cfg_native;
-
-void ide_set_byteorder(int native)
+/* The order the guest sees, per drive and per access - automatic
+ * (disk_order.c, at attach): native (first sector byte on D8-15, what TOS,
+ * HDDRIVER and AHDI expect; EmuTOS copes with either) unless the image is
+ * PP-prepared - partition table native, boot code stored word-swapped -
+ * whose boot driver only runs in the twisted-cable (legacy) order. Falcon
+ * TOS is always native. This replaces the old cfg `ide_byteorder`. */
+static inline int ide_native_order(const struct ide_drive *d)
 {
-  ide_cfg_native = native ? 1 : 0;
+  return IDE_NATIVE_BYTEORDER || !d->twisted || emulator_falcon_tos();
 }
 
-static inline int ide_native_order(void)
+/* kept for callers built against the old interface: the order is
+ * per drive and automatic now, so this does nothing */
+void ide_set_byteorder(int native)
 {
-  return IDE_NATIVE_BYTEORDER || ide_cfg_native || emulator_falcon_tos();
+  (void)native;
 }
 
 #define IDE_IDLE	0
@@ -225,6 +223,8 @@ static off_t xlate_block(struct ide_taskfile *t)
  * strict ROM probes (TOS 2.06's IDE boot detect in particular) spin waiting
  * for DSC after drive select and time out on DRDY alone. EmuTOS doesn't
  * check DSC, which is how the omission went unnoticed. */
+static void put_le16(uint16_t *p, unsigned int v);
+
 static void ready(struct ide_taskfile *tf)
 {
   tf->status &= ~(ST_BSY|ST_DRQ);
@@ -339,7 +339,7 @@ static void cmd_identify_complete(struct ide_taskfile *tf)
 {
   struct ide_drive *d = tf->drive;
   memcpy(d->data, d->identify, 512);
-  if (ide_native_order())
+  if (ide_native_order(d))
   /* The identify block is synthesized HOST-side in the legacy per-word
    * layout. With the native data-port byte order the wire flips every
    * word, so pre-swap the copy once here: the guest then receives
@@ -412,7 +412,7 @@ static void cmd_readsectors_complete(struct ide_taskfile *tf)
       tf->count,
       (long long)d->offset,
       d->heads, d->sectors, d->header_present,
-      ide_native_order() ? "native" : "legacy");
+      ide_native_order(d) ? "native" : "legacy");
 #endif
   /* DRDY is not guaranteed here but at least one buggy RC2014 firmware
      expects it */
@@ -571,6 +571,11 @@ static int ide_read_sector(struct ide_drive *d)
     ide_xlate_errno(&d->taskfile, len);
     return -1;
   }
+  /* A byte-swapped image file (disk_order.c) is turned back into a normal
+   * disk first; the port order (native, or twisted for a PP controller)
+   * then applies to it like to any other image. */
+  if (d->img_swapped)
+    disk_swap512(d->data);
   //hexdump(d->data);
   d->offset += 512;
   return 0;
@@ -579,10 +584,17 @@ static int ide_read_sector(struct ide_drive *d)
 static int ide_write_sector(struct ide_drive *d)
 {
   int len;
+  uint8_t sw[512];
+  const uint8_t *src = d->data;
 
   ide_stats.sectors_written++;
   d->dptr = d->data;
-  if ((len = write(d->fd, d->data, 512)) != 512) {
+  if (d->img_swapped) {                          /* back to the file's order */
+    memcpy(sw, d->data, 512);
+    disk_swap512(sw);
+    src = sw;
+  }
+  if ((len = write(d->fd, src, 512)) != 512) {
     d->taskfile.status |= ST_ERR;
     d->taskfile.status &= ~ST_DSC;
     ide_xlate_errno(&d->taskfile, len);
@@ -618,7 +630,7 @@ static uint16_t ide_data_in(struct ide_drive *d, int len)
     v = *d->dptr;
     if (!d->eightbit) {
       if (len == 2) {
-        if (ide_native_order())
+        if (ide_native_order(d))
           v = (uint16_t)((v << 8) | d->dptr[1]);   /* first byte on D8-15 */
         else
           v |= (d->dptr[1] << 8);
@@ -669,7 +681,7 @@ static void ide_data_out(struct ide_drive *d, uint16_t v, int len)
   } else {
     if (d->eightbit)
       v &= 0xFF;
-    if (ide_native_order()) {
+    if (ide_native_order(d)) {
       if (!d->eightbit) {
         *d->dptr++ = (uint8_t)(v >> 8);          /* symmetric with reads */
         *d->dptr++ = (uint8_t)v;
@@ -1073,6 +1085,23 @@ int ide_attach_hdf ( struct ide_controller *c, int drive, int fd )
 
 
   ide_make_ident ( drive, d->cylinders, d->heads, d->sectors, "PISTORM IDE DK", d->identify );
+
+  /* Words 60-61 must give the WHOLE image, not cyl*16*63.
+   * The cylinder count rounds down, so up to 1007 sectors at the end of
+   * the file were not reported. Partitioners fill the file to its last
+   * sector, and P. Putnik's IDE driver drops any partition whose end lies
+   * past words 60-61: 1GBIDE.img lost its 3rd partition (ends 1933611,
+   * reported 1933344) and the Satan image lost its only one (ends 475199,
+   * reported 474768). */
+  {
+    uint64_t total = (uint64_t)file_size / 512;
+    if (total > 0x0FFFFFFF) total = 0x0FFFFFFF;          /* LBA28 limit */
+    put_le16(d->identify + 60, total & 0xffff);
+    put_le16(d->identify + 61, total >> 16);
+    printf("[IDE] DK%d: %llu sectors (CHS %u/%u/%u = %u)\n", drive,
+           (unsigned long long)total, d->cylinders, d->heads, d->sectors,
+           (unsigned)(d->cylinders * d->heads * d->sectors));
+  }
 
   return 0;
 }

@@ -53,6 +53,8 @@ struct ide_drive {
   off_t offset;
   int length;
   uint8_t header_present;
+  uint8_t img_swapped;   /* image FILE stored byte-swapped (disk_order.c)   */
+  uint8_t twisted;       /* PP-prepared image: legacy (twisted) port order  */
 };
 
 struct ide_controller {

@@ -2553,10 +2553,7 @@ int main (int argc, char *argv[])
   }
 
   if (config->ide) {
-    ide_set_byteorder(config->ide_byteorder);
-    if (!config->ide_byteorder)
-      printf("[MAIN] IDE data port byte order: swapped\n");
-    InitIDE();
+    InitIDE();   /* byte order per image, automatic (disk_order.c) */
   }
 
   /* 24-bit address space decision, needed BEFORE the bank table is

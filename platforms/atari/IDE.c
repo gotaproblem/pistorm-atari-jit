@@ -9,6 +9,7 @@
 
 #define _LARGEFILE64_SOURCE 
 
+#include "disk_order.h"
 #include "platforms/atari/IDE.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -213,8 +214,15 @@ void InitIDE (void)
            * fails on an already-present slot or an undersized image. */
           if ( ide_attach_hdf ( atariIDE [port], i % 2, atarifd ) == 0 )
           {
+            char tag[24];
             num_IDE_drives++;
             printf ("[IDE%d] HDD%d Image Attached %s\n", port, i, atari_image_file[i]);
+            snprintf ( tag, sizeof tag, "[IDE%d] HDD%d", port, i );
+            {
+              int o = disk_order_resolve ( atarifd, disk_order_get_hdd ( i ), tag, atari_image_file [i] );
+              atariIDE [port]->drive [i % 2].img_swapped = ( o == 1 );
+              atariIDE [port]->drive [i % 2].twisted     = ( o == 2 );
+            }
           }
           else
             printf ("[IDE%d] HDD%d Image %s NOT attached\n", port, i, atari_image_file[i]);
@@ -222,6 +230,22 @@ void InitIDE (void)
       }
     }
   }
+
+  /* The IDE port order is a property of the controller and the driver
+   * reading it, not of one image: the PP driver expects BOTH drives in the
+   * twisted-cable order (field case 29 Oct: 1GBIDE.img twisted on the
+   * master, Satan native on the slave - the PP driver showed the master's
+   * partitions twice). So one PP-prepared image puts its whole controller
+   * in the twisted order, exactly as the old `ide_byteorder swapped` did. */
+  for ( int n = 0; n < 4; n ++ )
+    if ( atariIDE [n] &&
+         ( atariIDE [n]->drive [0].twisted || atariIDE [n]->drive [1].twisted ) )
+    {
+      atariIDE [n]->drive [0].twisted = 1;
+      atariIDE [n]->drive [1].twisted = 1;
+      printf ( "[IDE%d] PP-prepared image on this controller - both drives in the "
+               "twisted-cable order\n", n );
+    }
 
   for ( int n = 0; n < 4; n ++ )
     if ( atariIDE [n] )

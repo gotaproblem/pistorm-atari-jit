@@ -885,11 +885,9 @@ static void run_machine_rules(void)
     sp_shifter_follow(&c, "gem", "machine", did, sizeof did);
     CHECK(!*did, "falcon changed the shifter: %s", did);
 
-    /* ide_byteorder is offered (Drives tab, needs ide) */
-    CHECK(se_kind("ide_byteorder") == SE_K_LIST && se_count("ide_byteorder") == 2,
-          "ide_byteorder is not a two-way list");
-    CHECK(se_needs("ide_byteorder") && !strcmp(se_needs("ide_byteorder"), "ide"),
-          "ide_byteorder does not hang off ide");
+    /* ide_byteorder is retired (automatic per image): not offered */
+    CHECK(se_kind("ide_byteorder") != SE_K_LIST,
+          "ide_byteorder is still offered - the order is automatic now");
 
     /* cpu_compatible: 68000 only */
     CHECK(se_cpu_rule("cpu_compatible", "68000") == NULL, "cpu_compatible refused on a 68000");

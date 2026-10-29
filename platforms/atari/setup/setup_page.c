@@ -762,11 +762,8 @@ static void build_drive_rows(struct state *st)
         r->ticked = fmap[i] >= 0;
         r->slot = i;
     }
-    /* the IDE data port's byte order, under the floppies: only means
-     * something with ide on. Absent = native (config_file.c). */
-    r = drow(st, ROW_KEY, "ide_byteorder", 0, 0, DRIVE_SLOTS + 6, "");
-    r->ticked = sc_get(&st->cfg, st->sec, "ide_byteorder") != NULL;
-    r->blocked = !ide_on;
+    /* (the ide_byteorder row is gone: the order is per image and
+     * automatic - platforms/atari/disk_order.c) */
     (void)nf;
     /* right column: acsi 0..7, then hostfs lines and an add row */
     /* a Falcon has no ACSI port: the column greys, the lines stay */
