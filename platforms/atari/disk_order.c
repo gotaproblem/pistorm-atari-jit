@@ -36,12 +36,14 @@ int disk_order_parse_mode (const char *s)
   if (!strncasecmp (s, "auto", 4))    return DISK_ORDER_AUTO;
   if (!strncasecmp (s, "native", 6))  return DISK_ORDER_NATIVE;
   if (!strncasecmp (s, "swapped", 7)) return DISK_ORDER_SWAPPED;
+  if (!strncasecmp (s, "bootswap", 8)) return DISK_ORDER_BOOTSWAP;
   return -1;
 }
 
 const char *disk_order_mode_name (int m)
 {
-  return m == DISK_ORDER_NATIVE ? "native" : m == DISK_ORDER_SWAPPED ? "swapped" : "auto";
+  return m == DISK_ORDER_NATIVE ? "native" : m == DISK_ORDER_SWAPPED ? "swapped" :
+         m == DISK_ORDER_BOOTSWAP ? "bootswap" : "auto";
 }
 
 static int score (const uint8_t *s, char *why, size_t n)
@@ -100,7 +102,18 @@ int disk_order_detect (int fd, char *why, size_t why_len)
   int b = score (sw, ws, sizeof ws);
 
   if (b >= 3 && b > a) { snprintf (why, why_len, "%sreadable swapped", ws); return 1; }
-  if (a >= 3 && a > b) { snprintf (why, why_len, "%sreadable as is", wr); return 0; }
+  if (a >= 3 && a > b) {
+    /* PP-prepared: table native, boot code word-swapped (1GBIDE.img:
+     * 1E 60 / 79 48 = BRA.S / PEA swapped, "PT" and the table native) */
+    int bra_raw = raw[0] == 0x60 && raw[1] && !(raw[1] & 1);
+    int bra_sw  = sw[0]  == 0x60 && sw[1]  && !(sw[1]  & 1);
+    if (bra_sw && !bra_raw) {
+      snprintf (why, why_len, "%sboot code word-swapped (PP-prepared)", wr);
+      return 2;
+    }
+    snprintf (why, why_len, "%sreadable as is", wr);
+    return 0;
+  }
   snprintf (why, why_len, "no MBR/AHDI/BPB either way round");
   return -1;
 }
@@ -109,13 +122,16 @@ int disk_order_resolve (int fd, int mode, const char *tag, const char *path)
 {
   char why[96];
 
-  if (mode == DISK_ORDER_NATIVE || mode == DISK_ORDER_SWAPPED) {
-    printf ("%s %s: stored %s (cfg)\n", tag, path,
-            mode == DISK_ORDER_SWAPPED ? "byte-swapped" : "native");
-    return mode == DISK_ORDER_SWAPPED;
+  if (mode != DISK_ORDER_AUTO) {
+    int r = mode == DISK_ORDER_SWAPPED ? 1 : mode == DISK_ORDER_BOOTSWAP ? 2 : 0;
+    printf ("%s %s: %s (cfg)\n", tag, path,
+            r == 1 ? "stored byte-swapped" : r == 2 ? "PP-prepared (boot code swapped)" : "stored native");
+    return r;
   }
   int r = disk_order_detect (fd, why, sizeof why);
-  printf ("%s %s: stored %s - %s\n", tag, path,
-          r == 1 ? "byte-swapped" : r == 0 ? "native" : "order unknown, used as is", why);
-  return r == 1;
+  printf ("%s %s: %s - %s\n", tag, path,
+          r == 1 ? "stored byte-swapped, presented unswapped" :
+          r == 2 ? "PP-prepared, presented in the twisted-cable order" :
+          r == 0 ? "stored native" : "order unknown, used as is", why);
+  return r < 0 ? 0 : r;
 }

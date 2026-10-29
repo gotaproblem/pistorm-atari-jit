@@ -170,7 +170,9 @@ int acsi_attach_at(int id, const char *path)
         char tag[16];
         t->total_lba = file_sectors;
         snprintf(tag, sizeof tag, "[ACSI] ID %d", id);
-        t->swapped = disk_order_resolve(fd, disk_order_get_acsi(id), tag, path);
+        /* ACSI has no port order: only a file stored swapped (1) is
+         * swapped back; a PP-prepared image (2) is used as stored */
+        t->swapped = disk_order_resolve(fd, disk_order_get_acsi(id), tag, path) == 1;
     }
     t->sense = 0;
     n_targets++;

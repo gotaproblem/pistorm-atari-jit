@@ -56,25 +56,22 @@
 
 #include "platforms/atari/falcon/falcon_tos.h"
 
-/* The order the guest sees, per access. Falcon TOS: native - first
- * sector byte on D8-15, so a standard image reads as it lies on disk.
- * A Falcon's hard-disk drivers (HDDRIVER, AHDI 6) do not look for a
- * swapped MBR the way EmuTOS does: in the legacy order HDDRIVER made a
- * C: from the root sector but could not read the FAT16 partition.
- * Hatari presents a standard image to a Falcon the same way (ide.c:
- * byteswap for a non-swapped image). EmuTOS and TOS 1/2: unchanged. */
-/* cfg `ide_byteorder native` (ide_set_byteorder, from emulator.c before
- * InitIDE): HDDRIVER / AHDI on TOS 1/2 want the native order too. */
-static int ide_cfg_native;
-
-void ide_set_byteorder(int native)
+/* The order the guest sees, per drive and per access - automatic
+ * (disk_order.c, at attach): native (first sector byte on D8-15, what TOS,
+ * HDDRIVER and AHDI expect; EmuTOS copes with either) unless the image is
+ * PP-prepared - partition table native, boot code stored word-swapped -
+ * whose boot driver only runs in the twisted-cable (legacy) order. Falcon
+ * TOS is always native. This replaces the old cfg `ide_byteorder`. */
+static inline int ide_native_order(const struct ide_drive *d)
 {
-  ide_cfg_native = native ? 1 : 0;
+  return IDE_NATIVE_BYTEORDER || !d->twisted || emulator_falcon_tos();
 }
 
-static inline int ide_native_order(void)
+/* kept for callers built against the old interface: the order is
+ * per drive and automatic now, so this does nothing */
+void ide_set_byteorder(int native)
 {
-  return IDE_NATIVE_BYTEORDER || ide_cfg_native || emulator_falcon_tos();
+  (void)native;
 }
 
 #define IDE_IDLE	0
@@ -340,7 +337,7 @@ static void cmd_identify_complete(struct ide_taskfile *tf)
 {
   struct ide_drive *d = tf->drive;
   memcpy(d->data, d->identify, 512);
-  if (ide_native_order())
+  if (ide_native_order(d))
   /* The identify block is synthesized HOST-side in the legacy per-word
    * layout. With the native data-port byte order the wire flips every
    * word, so pre-swap the copy once here: the guest then receives
@@ -413,7 +410,7 @@ static void cmd_readsectors_complete(struct ide_taskfile *tf)
       tf->count,
       (long long)d->offset,
       d->heads, d->sectors, d->header_present,
-      ide_native_order() ? "native" : "legacy");
+      ide_native_order(d) ? "native" : "legacy");
 #endif
   /* DRDY is not guaranteed here but at least one buggy RC2014 firmware
      expects it */
@@ -576,7 +573,7 @@ static int ide_read_sector(struct ide_drive *d)
    * the data port is in native order. In the legacy (swapped) port order
    * the port's own swap already undoes the file's, so nothing is done -
    * those images worked unchanged before. */
-  if (d->img_swapped && ide_native_order())
+  if (d->img_swapped && ide_native_order(d))
     disk_swap512(d->data);
   //hexdump(d->data);
   d->offset += 512;
@@ -591,7 +588,7 @@ static int ide_write_sector(struct ide_drive *d)
 
   ide_stats.sectors_written++;
   d->dptr = d->data;
-  if (d->img_swapped && ide_native_order()) {   /* back to the file's order */
+  if (d->img_swapped && ide_native_order(d)) {   /* back to the file's order */
     memcpy(sw, d->data, 512);
     disk_swap512(sw);
     src = sw;
@@ -632,7 +629,7 @@ static uint16_t ide_data_in(struct ide_drive *d, int len)
     v = *d->dptr;
     if (!d->eightbit) {
       if (len == 2) {
-        if (ide_native_order())
+        if (ide_native_order(d))
           v = (uint16_t)((v << 8) | d->dptr[1]);   /* first byte on D8-15 */
         else
           v |= (d->dptr[1] << 8);
@@ -683,7 +680,7 @@ static void ide_data_out(struct ide_drive *d, uint16_t v, int len)
   } else {
     if (d->eightbit)
       v &= 0xFF;
-    if (ide_native_order()) {
+    if (ide_native_order(d)) {
       if (!d->eightbit) {
         *d->dptr++ = (uint8_t)(v >> 8);          /* symmetric with reads */
         *d->dptr++ = (uint8_t)v;

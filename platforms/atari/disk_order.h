@@ -15,10 +15,12 @@
 extern "C" {
 #endif
 
-enum { DISK_ORDER_AUTO = 0, DISK_ORDER_NATIVE = 1, DISK_ORDER_SWAPPED = 2 };
+enum { DISK_ORDER_AUTO = 0, DISK_ORDER_NATIVE = 1, DISK_ORDER_SWAPPED = 2, DISK_ORDER_BOOTSWAP = 3 };
 
 /* 1 = the file is stored byte-swapped, 0 = native (big-endian, as an ST
- * writes it), -1 = cannot tell (blank / unknown sector 0). `why` gets a
+ * writes it), 2 = native partition table but 68000 boot code stored
+ * word-swapped (PP-prepared images: the boot driver expects the twisted-
+ * cable view), -1 = cannot tell (blank / unknown sector 0). `why` gets a
  * short reason for the log. Reads with pread: the file offset is kept. */
 int disk_order_detect (int fd, char *why, size_t why_len);
 
@@ -31,9 +33,9 @@ int  disk_order_get_acsi (int id);
 int  disk_order_parse_mode (const char *s);       /* -1 if not understood */
 const char *disk_order_mode_name (int mode);
 
-/* Decide for one image: the file's order from the override or, for
- * auto, from disk_order_detect. Logs one line with `tag`. Returns 1 if
- * the file is stored swapped. */
+/* Decide for one image: the result of disk_order_detect (auto) or the
+ * override (native -> 0, swapped -> 1). Logs one line with `tag`.
+ * Returns 0, 1 or 2 as disk_order_detect; unknown (-1) comes back as 0. */
 int disk_order_resolve (int fd, int mode, const char *tag, const char *path);
 
 static inline void disk_swap512 (uint8_t *b)

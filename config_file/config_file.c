@@ -1060,22 +1060,11 @@ struct emulator_config *load_config_file_section(char *filename,
         break;
 
       case CONFITEM_IDE_BYTEORDER:
-        /* `ide_byteorder native` - first sector byte on D8-D15, the order
-         * HDDRIVER / AHDI expect (field case 22 Oct: HDDRIVER under TOS
-         * 2.06 read every word of the IDE images byte-swapped - partition
-         * found, boot sector `3C EB 50 90 ...`, drive unreadable).
-         * Default when absent. `swapped` - the twisted-cable order
-         * PP-prepared images need; EmuTOS detects and adapts to either.
-         * Falcon TOS is always native. */
-        {
-          const char *arg = parse_line + str_pos;
-          if (!strncasecmp(arg, "native", 6))
-            cfg->ide_byteorder = 1;
-          else if (!strncasecmp(arg, "swapped", 7) || !strncasecmp(arg, "twisted", 7))
-            cfg->ide_byteorder = 0;
-          else
-            printf ("[CFG] ide_byteorder '%s' not understood - use native or swapped\n", arg);
-        }
+        /* retired: the IDE byte order is decided per image at attach
+         * (platforms/atari/disk_order.c) - native for TOS / HDDRIVER /
+         * AHDI images, the twisted-cable order for PP-prepared images,
+         * swapped files presented unswapped. Old cfg files keep loading. */
+        printf ("[CFG] ide_byteorder is automatic now (per image) - line %d ignored\n", cur_line);
         break;
 
       case CONFITEM_HDD_ORDER:

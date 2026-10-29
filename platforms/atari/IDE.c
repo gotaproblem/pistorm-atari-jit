@@ -218,8 +218,11 @@ void InitIDE (void)
             num_IDE_drives++;
             printf ("[IDE%d] HDD%d Image Attached %s\n", port, i, atari_image_file[i]);
             snprintf ( tag, sizeof tag, "[IDE%d] HDD%d", port, i );
-            atariIDE [port]->drive [i % 2].img_swapped =
-              disk_order_resolve ( atarifd, disk_order_get_hdd ( i ), tag, atari_image_file [i] );
+            {
+              int o = disk_order_resolve ( atarifd, disk_order_get_hdd ( i ), tag, atari_image_file [i] );
+              atariIDE [port]->drive [i % 2].img_swapped = ( o == 1 );
+              atariIDE [port]->drive [i % 2].twisted     = ( o == 2 );
+            }
           }
           else
             printf ("[IDE%d] HDD%d Image %s NOT attached\n", port, i, atari_image_file[i]);
