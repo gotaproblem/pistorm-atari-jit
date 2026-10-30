@@ -431,7 +431,8 @@ static int64_t gov_wait_until(int64_t now, int64_t until)
 	return now;
 }
 
-static void pistorm_governor(void)
+/* sync != 0: see pistorm_gov_sync() below */
+static void pistorm_governor(int sync)
 {
 	if (currprefs.m68k_speed != 0 || currprefs.cachesize)
 		return;                                 /* JIT / max speed: not ours */
@@ -469,7 +470,7 @@ static void pistorm_governor(void)
 		}
 		gov_on = 1;
 	}
-	if (currcycle < gov_next)
+	if (!sync && currcycle < gov_next)
 		return;
 
 	int64_t now = gov_now_ns();
@@ -500,7 +501,20 @@ static void pistorm_governor(void)
 	int64_t virt_ns  = (int64_t)((currcycle - gov_cyc0) / unit) * 1000000LL / gov_khz;
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 
-	if (pistorm_handler_running()) {
+	if (sync) {
+		/* a beam-timed register access: the guest and the real beam must
+		 * agree NOW. Ahead: wait out all of it (still capped). Behind:
+		 * write the debt off here instead of repaying it at up to
+		 * GOV_CATCHUP_X x speed - repayment compresses exactly the delay
+		 * loops a border routine times its next write with.
+		 * This comes BEFORE the handler test below: Turrican II's
+		 * lower-border sync is done from inside its Timer B handler, so a
+		 * handler must still line up with the beam when it asks to. */
+		if (ahead_ns > 0)
+			now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
+		else
+			gov_ns0 = now - virt_ns;
+	} else if (pistorm_handler_running()) {
 		/* inside an interrupt handler: no pause - it is paid back at the
 		 * next check outside. step_ns/step_cyc stay where they are, so
 		 * the catch-up cap there spans the handler too. */
@@ -508,8 +522,7 @@ static void pistorm_governor(void)
 			rt_gov(ahead_ns, 1);
 		gov_next = currcycle + (evt_t)GOV_STEP * unit;
 		return;
-	}
-	if (ahead_ns > 0) {
+	} else if (ahead_ns > 0) {
 		/* ahead of real time: wait for it (at most GOV_WAIT_MAX per check) */
 		rt_gov(ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX, 0);
 		now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
@@ -532,6 +545,25 @@ static void pistorm_governor(void)
 	step_ns  = now;
 	step_cyc = currcycle;
 	gov_next = currcycle + (evt_t)GOV_STEP * unit;
+}
+
+/* BEAM-TIMED ACCESSES. The governor checks every GOV_STEP (250) guest
+ * cycles, ~31 us at 8 MHz, and between checks the interpreter runs at the
+ * Pi's speed (~20 MHz); while behind it repays at up to GOV_CATCHUP_X x.
+ * Right for averages, wrong for code that times one hardware access off
+ * another by counting instructions. Turrican II's lower-border routine
+ * ($0114FE, 30 Oct 2026): poll the video counter low byte ($FF8209) until
+ * it reaches $D0, align with lsl.l, write 0 to $FF820A (60 Hz), dbra x9
+ * (~11 us on an ST), write 2 (50 Hz). The PISTORM_IPL_TIMELINE capture had
+ * that 60 -> 50 Hz gap at 4 us in 450 of 500 frames and 21-25 us in most
+ * of the rest - the border opened in some frames and not others. Called
+ * (pistorm_natmem.cpp) before the guest's accesses to the video counter
+ * $FF8205/07/09, the sync register $FF820A and the resolution register
+ * $FF8260 - rare outside such routines - so each lands at its guest time
+ * on the real clock. JIT / max speed: not ours, nothing happens. */
+extern "C" void pistorm_gov_sync(void)
+{
+	pistorm_governor(1);
 }
 #endif
 
@@ -595,7 +627,7 @@ void do_cycles_slow(int cycles_to_add)
 	currcycle += cycles_to_add;     /* PiStorm: advance the clock, no event dispatch */
 
 #ifndef AMIGA_
-	pistorm_governor();             /* cpu_speed pacing - see the design note above pistorm_governor() */
+	pistorm_governor(0);            /* cpu_speed pacing - see the design note above pistorm_governor() */
 #endif
 #ifdef AMIGA_
 	while (cycles_to_add >= CYCLE_UNIT) {
