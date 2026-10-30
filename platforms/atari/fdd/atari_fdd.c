@@ -1587,9 +1587,17 @@ uint32_t fdd_io_read(uint32_t addr, int size)
         } else if (addr == DMA_MODE_REG ||
                    addr == DMA_BASE_HIGH || addr == DMA_BASE_MID ||
                    addr == DMA_BASE_LOW) {
-            /* shared: DMA status and address counters follow ownership */
-            val = hdc_active ? bus_read(addr, size)
-                             : dma_read_addr(addr, size);
+            /* shared: DMA status and address counters follow ownership.
+             * An emulated ACSI target owns them while its command is
+             * current, even after a real device used the chip earlier
+             * (hdc_active stays 1 until an emulated FDC command). Field
+             * case 30 Oct: real SD cards on 0/1, image on 2 - HDDRIVER
+             * reads $8609/0B/0D after INQUIRY to see how much arrived,
+             * got the real chip's untouched counter (0 bytes), "flushed"
+             * 15 bytes of FIFO over the start of the reply and HDDRUTIL's
+             * Device Check showed the row blank. */
+            val = (hdc_active && !acsi_owns_dma()) ? bus_read(addr, size)
+                                                   : dma_read_addr(addr, size);
         } else
             val = dma_read_addr(addr, size);
     } else if (addr >= 0xFF8800u && addr <= 0xFF8803u) {
