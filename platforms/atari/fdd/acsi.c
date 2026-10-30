@@ -329,14 +329,14 @@ static void exec_write(acsi_target_t *t, uint32_t lba, uint32_t blocks)
     finish_good();
 }
 
-static void exec_inquiry(acsi_target_t *t, uint32_t alloc)
+static void exec_inquiry(acsi_target_t *t, uint32_t alloc, uint8_t pdt)
 {
     uint8_t d[48];
     memset(d, 0, sizeof d);
-    d[0] = 0x00;                     /* direct-access device            */
+    d[0] = pdt;                      /* $00 direct access, $7F no LUN   */
     d[1] = 0x00;                     /* not removable                   */
-    d[2] = 0x01;                     /* ANSI level, bridge-era          */
-    d[3] = 0x01;
+    d[2] = 0x02;                     /* SCSI-2, as the real adapters    */
+    d[3] = 0x02;                     /* response data format 2          */
     d[4] = 31;                       /* additional length               */
     memcpy(&d[8],  "PiStorm ", 8);   /* vendor  (8)                     */
     memcpy(&d[16], t->hfs ? "ACSI HFS DISK   "
@@ -428,6 +428,15 @@ static void exec_command(void)
     uint32_t len6 = c[4] ? c[4] : 256;
     uint8_t  lun  = (uint8_t)(c[1] >> 5);
 
+    if (!icd && lun != 0 && op == 0x12) {
+        /* INQUIRY to a LUN that isn't there: GOOD status with peripheral
+         * qualifier 3 / type $1F ($7F), as SCSI-2 says and as the real
+         * BBaN SD adapters on the same bus answer (HDC trace 30 Oct:
+         * 7F 80 02 02 20 ...). A CHECK CONDITION here made HDDRUTIL's
+         * Device Check blank the whole row for the emulated ID. */
+        exec_inquiry(t, c[4] ? c[4] : 5, 0x7F);
+        return;
+    }
     if (!icd && lun != 0) {
         finish_check(SENSE_INVALID_LUN, 0);
         return;
@@ -457,7 +466,7 @@ static void exec_command(void)
             else finish_check(SENSE_INVALID_LBA, lba6);
             break;
         case 0x12:                                    /* INQUIRY         */
-            exec_inquiry(t, c[4] ? c[4] : 5);
+            exec_inquiry(t, c[4] ? c[4] : 5, 0x00);
             break;
         case 0x15: {                                  /* MODE SELECT     */
             /* accept and discard the parameter list the guest DMAs out */
