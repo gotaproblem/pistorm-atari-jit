@@ -1859,6 +1859,8 @@ static void dma_write_addr(uint32_t addr, uint32_t val, int size)
     switch (addr) {
     case DMA_MODE_REG:
         FDD_DBG("DMA mode write: 0x%04X", v16);
+        if ((fdc.dma_mode ^ v16) & DMA_MODE_RW)
+            acsi_dma_fifo_reset();          /* direction toggle flushes it */
         fdc.dma_mode = v16;
         break;
 

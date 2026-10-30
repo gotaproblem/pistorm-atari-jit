@@ -261,19 +261,52 @@ static void finish_check(uint8_t sense, uint32_t lba) { finish(0x02, sense, lba)
 
 /* ---- data helpers ------------------------------------------------------ */
 
+/* The ST DMA chip moves device data to RAM in 16-byte bursts only. A
+ * tail under 16 bytes stays in its FIFO and goes out in front of the
+ * next transfer's data; toggling the direction bit ($FF8606 bit 8)
+ * empties it. HDDRUTIL relies on that: INQUIRY for 36 bytes leaves the
+ * counter +32 and the revision ("1.13") in the FIFO, and a following
+ * 15-byte INQUIRY pushes it out in front (HDC trace 30 Oct, real BBaN
+ * adapters: RAM $1844 = "1.13" 00 80 02 02 ...). Writing all 36 bytes
+ * at once, as before, sent it down its error path (REQUEST SENSE x4)
+ * and its Device Check showed the emulated ID blank. */
+static uint8_t  dma_fifo[16];
+static unsigned dma_fifo_n;
+
+void acsi_dma_fifo_reset(void) { dma_fifo_n = 0; }
+
 static void dma_out(const uint8_t *buf, uint32_t len)   /* device -> RAM */
 {
     if (!len) return;
+    uint32_t base0 = fdd_dma_base(), held0 = dma_fifo_n, moved = 0;
     if (acsi_trace() && len < 512) {   /* short replies: INQUIRY, SENSE... */
         char hx[3 * 48 + 1];
         uint32_t n = len < 48 ? len : 48;
         for (uint32_t i = 0; i < n; i++)
             snprintf(hx + 3 * i, 4, "%02X ", buf[i]);
-        ACSI_LOG("ID %d -> RAM $%06X %u B: %s", cur_id, fdd_dma_base(),
-                 (unsigned)len, hx);
+        ACSI_LOG("ID %d reply %u B: %s", cur_id, (unsigned)len, hx);
     }
-    fdd_dma_copy_to_ram(fdd_dma_base(), buf, len);
-    fdd_dma_base_advance(len);
+
+    while (len) {
+        if (dma_fifo_n == 0 && len >= 16) {          /* whole bursts */
+            uint32_t n = len & ~15u;
+            fdd_dma_copy_to_ram(fdd_dma_base(), buf, n);
+            fdd_dma_base_advance(n);
+            buf += n; len -= n; moved += n;
+            continue;
+        }
+        dma_fifo[dma_fifo_n++] = *buf++; len--;
+        if (dma_fifo_n == 16) {
+            fdd_dma_copy_to_ram(fdd_dma_base(), dma_fifo, 16);
+            fdd_dma_base_advance(16);
+            dma_fifo_n = 0; moved += 16;
+        }
+    }
+
+    if (acsi_trace() && moved + dma_fifo_n - held0 < 512)
+        ACSI_LOG("ID %d -> RAM $%06X: %u B to RAM, %u B left in the FIFO "
+                 "(%u were waiting from before)", cur_id, base0,
+                 (unsigned)moved, dma_fifo_n, (unsigned)held0);
 }
 
 static void dma_in(uint8_t *buf, uint32_t len)          /* RAM -> device */
