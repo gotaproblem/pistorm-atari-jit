@@ -32,7 +32,7 @@
  * virtual set, which is where every observed failure lived.
  *
  * Current virtual channels:
- *   ch  6 (GPIP4,  set B bit 6) keyboard/mouse injection - LEVEL source
+ *   ch  6 (GPIP4,  set B bit 6) keyboard/mouse injection - EDGE source
  *   ch 13 (TimerA, set A bit 5) dmasnd frame counter     - EVENT source
  *   ch 15 (GPIP7,  set A bit 7) dmasnd XSINT pulse       - EVENT source
  *
@@ -75,6 +75,20 @@ void mfp_hub_raise(int ch);
  * EOI while still asserted - real GPIP behaviour). One poll per channel. */
 void mfp_hub_register_level(int ch, int (*poll)(void));
 
+/* EDGE source registration: `poll` as for a level source, plus `seq`, an
+ * identifier of the current assertion (for the keyboard: the ring index
+ * of the byte at the head). The hub latches pending ONCE per seq value
+ * while `poll` is nonzero - a 68901 GPIP input interrupts on the edge
+ * (AER), not the level, so once the channel has been acknowledged, a
+ * handler that writes its in-service bit to 0 and lowers the IPL BEFORE
+ * reading the byte is not interrupted again for the same byte (Risky
+ * Woods' ACIA handler does exactly that; as a level source the hub
+ * re-delivered GPIP4 a dozen times nested, the re-entered IKBD parser
+ * corrupted memory, and the game crashed somewhere new each run). The
+ * next byte - a new seq - latches again. A channel disabled in IER is
+ * not latched until enabled. */
+void mfp_hub_register_edge(int ch, int (*poll)(void), uint32_t (*seq)(void));
+
 /* Timer A event-count mode (TACR=8): count one external event; raises
  * channel 13 when the programmed count expires. The TACR/TADR shadows
  * and countdown live in the hub - callers just report events. */
@@ -98,7 +112,8 @@ int mfp_hub_iack(void);
 /* Diagnostics: virtual IACKs taken on a channel since start. */
 uint32_t mfp_hub_iacks(int ch);
 
-/* Diagnostics: the shadows as they stand (pend includes live levels). */
+/* Diagnostics: the shadows as they stand (pend includes live levels
+ * and latches edge sources). */
 void mfp_hub_snapshot(uint16_t *ier, uint16_t *imr, uint16_t *pend,
                       uint16_t *isr, uint8_t *vr);
 
