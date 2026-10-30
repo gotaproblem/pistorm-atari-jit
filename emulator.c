@@ -238,6 +238,152 @@ volatile unsigned pistorm_ipl_trc_n = 0;      /* total, never wraps */
 volatile unsigned pistorm_ipl_trc_shown = 0;
 /* act: 0 line changed  1 DELIVERED  2 skipped HBL-is-RTE
  *      3 skipped refractory  4 blocked by av_held/level  5 sample discarded */
+/* PISTORM_IPL_TIMELINE=1 - EVERY interrupt decision and delivery, on
+ * one clock, to a file (PISTORM_IPL_TIMELINE_LOG, default
+ * /tmp/ipl-timeline.log). Turrican II, 30 Oct 2026: with Timer C at
+ * ~11.6 kHz the VBLs reached the CPU 10-29 ms apart, and the counters
+ * (and the 400-entry transition trace, ~15 ms at that rate) cannot say
+ * which step held each one. Two single-producer rings, stamped with the
+ * arch timer (CNTVCT, same clock on every core):
+ *   ipl_task  - confirmed line changes and every latch/skip decision
+ *               involving level 4 or 6, plus WHY a raised line was not
+ *               latched (logged when the reason changes, not per pass)
+ *   CPU       - every autovector/MFP exception taken (24-31, vector, the
+ *               SR mask it was taken at), and guest writes to the sync
+ *               ($FF820A) and resolution ($FF8260) registers, with the
+ *               real video counter after a return to 50 Hz
+ * A writer thread drains both every 100 ms and merges them by time, so
+ * nothing on core 3 ever touches a file. Off: one load of a flag. */
+#define TL_N (1u << 20)                         /* per ring, power of 2 */
+struct tl_e { uint64_t t; uint32_t d; uint8_t k, a, b, c; };
+static struct tl_e *tl_ring[2];                 /* 0 ipl_task, 1 CPU  */
+static volatile uint32_t tl_head[2];
+static int tl_on = -1;                          /* -1 = not decided   */
+static inline uint64_t tl_now(void)
+{
+  uint64_t t;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t));
+  return t;
+}
+static inline void tl_push(int r, uint8_t k, uint8_t a, uint8_t b,
+                           uint8_t c, uint32_t d)
+{
+  const uint32_t i = tl_head[r];
+  struct tl_e *e = &tl_ring[r][i & (TL_N - 1)];
+  e->t = tl_now(); e->k = k; e->a = a; e->b = b; e->c = c; e->d = d;
+  __atomic_store_n(&tl_head[r], i + 1, __ATOMIC_RELEASE);
+}
+extern "C" int pistorm_tl_enabled(void) { return tl_on == 1; }
+/* CPU-thread side (cpu/newcpu.cpp, pistorm_natmem.cpp) */
+extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c,
+                               uint32_t d)
+{
+  if (tl_on == 1)
+    tl_push(1, k, a, b, c, d);
+}
+static const char *const tl_act[8] = {
+  "line", "LATCH", "skip-hbl-rte", "skip-refract", "-", "-", "-", "LATCH-hub6"
+};
+static const char *const tl_why[4] = { "-", "av_held", "<=g_irq", "<=mask" };
+static void *tl_writer(void *)
+{
+  const char *fn = getenv("PISTORM_IPL_TIMELINE_LOG");
+  FILE *f = fopen(fn && *fn ? fn : "/tmp/ipl-timeline.log", "w");
+  if (!f)
+  {
+    fprintf(stderr, "[TL] cannot open the timeline log\n");
+    return NULL;
+  }
+  setvbuf(f, NULL, _IOFBF, 1 << 20);
+  fprintf(f, "# us  I from->to action g_irq mask      (ipl_task decision)\n"
+             "# us  B level not-latched-because g_irq mask\n"
+             "# us  X exception-nr vector sr-mask pc  (CPU took it)\n"
+             "# us  W reg=val [video counter - base = line:byte]\n");
+  uint32_t pos[2] = { 0, 0 };
+  uint64_t t0 = 0;
+  const uint64_t hz = psctrl_cntfrq ? psctrl_cntfrq : 54000000ULL;
+  for (;;)
+  {
+    struct timespec ts = { 0, 100000000 };
+    nanosleep(&ts, NULL);
+    uint32_t end[2];
+    for (int r = 0; r < 2; r++)
+    {
+      end[r] = __atomic_load_n(&tl_head[r], __ATOMIC_ACQUIRE);
+      if (end[r] - pos[r] > TL_N)
+      {
+        fprintf(f, "# ring %d overran: %u entries lost\n", r,
+                end[r] - pos[r] - TL_N);
+        pos[r] = end[r] - TL_N;
+      }
+    }
+    while (pos[0] != end[0] || pos[1] != end[1])
+    {
+      int r;
+      if (pos[0] == end[0]) r = 1;
+      else if (pos[1] == end[1]) r = 0;
+      else r = tl_ring[0][pos[0] & (TL_N - 1)].t <= tl_ring[1][pos[1] & (TL_N - 1)].t ? 0 : 1;
+      const struct tl_e e = tl_ring[r][pos[r] & (TL_N - 1)];
+      pos[r]++;
+      if (!t0) t0 = e.t;
+      const double us = (double)(e.t - t0) * 1e6 / (double)hz;
+      switch (e.k)
+      {
+        case 'I':
+          fprintf(f, "%.1f I %u->%u %s %u %u\n", us, e.a, e.b,
+                  tl_act[e.c & 7], (unsigned)(e.d >> 8) & 0xFF, (unsigned)e.d & 0xFF);
+          break;
+        case 'B':
+          fprintf(f, "%.1f B %u %s %u %u\n", us, e.a, tl_why[e.b & 3],
+                  (unsigned)(e.d >> 8) & 0xFF, (unsigned)e.d & 0xFF);
+          break;
+        case 'X':
+          fprintf(f, "%.1f X %u %02X %u %06X\n", us, e.a, e.b, e.c, e.d);
+          break;
+        case 'W':
+          if (e.d == 0xFFFFFFFFu)
+            fprintf(f, "%.1f W %02X=%02X\n", us, e.a, e.b);
+          else
+            fprintf(f, "%.1f W %02X=%02X off=%u %u:%u\n", us, e.a, e.b,
+                    e.d, e.d / 160u, e.d % 160u);
+          break;
+        default:
+          break;
+      }
+    }
+    fflush(f);
+  }
+  return NULL;
+}
+/* decided once, before ipl_task or the CPU thread run (main) */
+static void tl_init(void)
+{
+  const char *e = getenv("PISTORM_IPL_TIMELINE");
+  if (!e || *e != '1')
+  {
+    tl_on = 0;
+    return;
+  }
+  tl_ring[0] = (struct tl_e *)calloc(TL_N, sizeof(struct tl_e));
+  tl_ring[1] = (struct tl_e *)calloc(TL_N, sizeof(struct tl_e));
+  if (!tl_ring[0] || !tl_ring[1])
+  {
+    fprintf(stderr, "[TL] no memory for the timeline rings\n");
+    tl_on = 0;
+    return;
+  }
+  pthread_t tid;
+  if (pthread_create(&tid, NULL, &tl_writer, NULL) != 0)
+  {
+    tl_on = 0;
+    return;
+  }
+  pthread_setname_np(tid, "pistorm: iplTL");
+  pthread_detach(tid);
+  tl_on = 1;
+  fprintf(stderr, "[TL] IPL timeline on\n");
+}
+
 static const char *const ipl_trc_act[6] = {
     "line", "DELIVER", "skip-hbl-rte", "skip-refract", "blocked", "discard"
 };
@@ -872,6 +1018,10 @@ static void *ipl_task(void *)
   uint8_t trc_last = 0;                 /* last level put in the trace */
 #define IPL_TRC(f, t_, a)                                              \
   do {                                                                 \
+    if (tl_on == 1 && (a) != 2 &&                                      \
+        ((f) >= 4 || (t_) >= 4))                                       \
+      tl_push(0, 'I', (f), (t_), (a),                                  \
+              ((uint32_t)g_irq << 8) | g_irq_mask);                    \
     if (pst_dbg_ipl_stats && !pistorm_ipl_trc_shown) {                 \
       unsigned n_ = pistorm_ipl_trc_n % IPL_TRC_MAX;                   \
       uint64_t tt_;                                                    \
@@ -1470,6 +1620,19 @@ static void *ipl_task(void *)
 
     if (ipl != av_held)
       av_held = 0;                      /* line left the level: re-arm */
+    if (tl_on == 1 && ipl >= 4)
+    {
+      static uint8_t tl_last_why, tl_last_lvl;
+      const uint8_t why = ipl == av_held ? 1 : ipl <= g_irq ? 2
+                        : ipl <= g_irq_mask ? 3 : 0;
+      if (why != tl_last_why || ipl != tl_last_lvl)
+      {
+        if (why)
+          tl_push(0, 'B', ipl, why, 0, ((uint32_t)g_irq << 8) | g_irq_mask);
+        tl_last_why = why;
+        tl_last_lvl = ipl;
+      }
+    }
     if (ipl != 0 && ipl > g_irq && ipl > g_irq_mask && ipl != av_held)
     {
       /* HBL fast-reject: the GLUE asserts level 2 every scan line (~15 kHz).
@@ -1546,6 +1709,7 @@ static void *ipl_task(void *)
         if (g_irq == 4)
           av4_last_tick = 0;
       }
+      IPL_TRC(g_irq, 6, 7);
       g_irq = 6;
       IPL_KICK();
     }
@@ -2670,6 +2834,7 @@ int main (int argc, char *argv[])
   falcon_tos_arm(1);
 
   /* start threads */
+  tl_init();                            /* PISTORM_IPL_TIMELINE: before both */
   err = pthread_create(&cpu_tid, NULL, &cpu_task, NULL);
 
   if (err != 0)

@@ -5064,8 +5064,20 @@ static void pistorm_bad_opcode_dump(int nr)
 #endif
 }
 
+extern "C" int pistorm_tl_enabled(void);       /* emulator.c */
+extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
+
 void REGPARAM2 Exception(int nr)
 {
+	/* PISTORM_IPL_TIMELINE (emulator.c): every interrupt taken, with the
+	 * vector the IACK produced and the SR mask it was taken at */
+	if (nr >= 24 && nr <= 31 && pistorm_tl_enabled())
+	{
+		extern uae_u16 pistorm_iack_vector;
+		pistorm_tl_cpu('X', (uint8_t)nr,
+		               nr == 30 ? (uint8_t)(pistorm_iack_vector & 0xFFu) : (uint8_t)nr,
+		               (uint8_t)regs.intmask, m68k_getpc() & 0x00FFFFFFu);
+	}
 	/* illegal instruction only: Line F (vector 11) is routine - TOS 1.x
 	 * makes its internal calls through it, and Spectre/FPU emulators
 	 * trap through it constantly - so dumping it buried the console */

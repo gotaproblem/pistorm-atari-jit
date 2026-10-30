@@ -2631,6 +2631,51 @@ static void io_wput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); m68k_write_m
 static void io_bput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); m68k_write_memory_8 (a, (uint8_t)v); pistorm_buserr(a,v,false,sz_byte); }
 */
 
+/* PISTORM_IPL_TIMELINE (emulator.c): guest writes to the sync register
+ * $FF820A and resolution register $FF8260, in the interrupt timeline. After
+ * a write that puts $FF820A back to 50 Hz the real video counter is read
+ * and logged as its distance from the screen base (line:byte at 160 bytes
+ * a line) - where the real beam was. The 60 Hz write is only stamped: bus
+ * reads after it would delay the 50 Hz write that follows. The code
+ * around each new writing pc goes to stderr once. */
+extern "C" int pistorm_tl_enabled(void);
+extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
+static void tl_video_write(uaecptr a, uae_u32 v, int size)
+{
+    uae_u32 val;
+    a &= 0x00FFFFFFu;
+    if (a != 0x00FF820Au && a != 0x00FF8260u)
+        return;
+    val = size == 1 ? (v & 0xFF) : ((v >> 8) & 0xFF);
+    uint32_t off = 0xFFFFFFFFu;
+    if (a == 0x00FF820Au && (val & 0x02)) {
+        const uint8_t save_fc = fc;
+        fc = 0x5;
+        const uae_u32 cnt = ((uae_u32)ps_read_8(0x00FF8205u) << 16) |
+                            ((uae_u32)ps_read_8(0x00FF8207u) << 8) |
+                            (uae_u32)ps_read_8(0x00FF8209u);
+        fc = save_fc;
+        g_buserr = 0;
+        const uae_u32 base = ((uae_u32)rtg.high << 16) | ((uae_u32)rtg.mid << 8);
+        off = cnt - base;
+    }
+    pistorm_tl_cpu('W', (uint8_t)(a & 0xFF), (uint8_t)val, 0, off);
+
+    const uae_u32 pc = regs.instruction_pc & 0x00FFFFFFu;
+    static uae_u32 seen[32];
+    static int nseen;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i] == pc)
+            return;
+    if (nseen < 32 && pc >= 0x40u && pc + 32 < 0x00400000u) {
+        seen[nseen++] = pc;
+        fprintf(stderr, "[TL] CODE %06X:", (unsigned)pc);
+        for (uae_u32 q = pc - 32; q < pc + 32; q += 2)
+            fprintf(stderr, " %02X%02X", natmem_offset[q], natmem_offset[q + 1]);
+        fputc('\n', stderr);
+    }
+}
+
 static void io_lput(uaecptr a, uae_u32 v)
 {
     PROF_IO_W(a);
@@ -4154,6 +4199,8 @@ static void hw_wput(uaecptr a, uae_u32 v)
             st_video_snoop16(a, (uint16_t)v);
             psvidel_video_snoop(a, v & 0xFFFFu, 2);
             hw_bus_wput(a, v);
+            if (__builtin_expect(pistorm_tl_enabled(), 0))
+                tl_video_write(a, v, 2);
             stram_shadow_video_after(a, 2);
             break;
         case HW_PAGE_FDD_DMA:
@@ -4260,6 +4307,8 @@ static void hw_bput(uaecptr a, uae_u32 v)
             st_video_snoop8(a, (uint8_t)v);
             psvidel_video_snoop(a, v & 0xFFu, 1);
             hw_bus_bput(a, v);
+            if (__builtin_expect(pistorm_tl_enabled(), 0))
+                tl_video_write(a, v, 1);
             stram_shadow_video_after(a, 1);
             break;
         case HW_PAGE_FDD_DMA:
