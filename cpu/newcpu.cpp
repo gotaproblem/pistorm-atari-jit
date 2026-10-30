@@ -3022,6 +3022,7 @@ extern volatile uint8_t g_ipl;
 extern volatile uint8_t g_buserr;
 /* host-work marker sampled by ipl_task (emulator.c) */
 extern "C" volatile uint32_t pistorm_cpu_hostop;
+extern "C" volatile uint32_t pistorm_vbl_taken;   /* emulator.c */
 /* NOTE: the linked implementation (gpio/ps_protocol.c) takes a POINTER and
  * returns void - it waits for bus idle internally and stores the shifted
  * IPL value ((raw & 0x60) >> 4). The old zero-argument declaration here
@@ -5069,6 +5070,9 @@ extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint3
 
 void REGPARAM2 Exception(int nr)
 {
+	/* level-4 autovector taken: emulator.c ipl_task, VBL PRE-EMPTED */
+	if (nr == 28)
+		pistorm_vbl_taken++;
 	/* PISTORM_IPL_TIMELINE (emulator.c): every interrupt taken, with the
 	 * vector the IACK produced and the SR mask it was taken at */
 	if (nr >= 24 && nr <= 31 && pistorm_tl_enabled())

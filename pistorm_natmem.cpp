@@ -3750,6 +3750,17 @@ static void psvidel_ste_mirror(uaecptr a, uae_u32 v, int size)
 }
 
 /* the long handlers split PSVIDEL-touching accesses into word ones */
+/* cpu/events.cpp: put the guest on the real clock before a beam-timed
+ * access (video counter, sync, resolution) - see pistorm_gov_sync(). */
+extern "C" void pistorm_gov_sync(void);
+static inline int beam_timed_reg(uaecptr a)
+{
+    a &= 0x00FFFFFFu;
+    return a == 0x00FF8205u || a == 0x00FF8207u || a == 0x00FF8209u ||
+           a == 0x00FF8204u || a == 0x00FF8206u || a == 0x00FF8208u ||
+           a == 0x00FF820Au || a == 0x00FF8260u;
+}
+
 static uae_u32 hw_wget(uaecptr a);
 static void hw_wput(uaecptr a, uae_u32 v);
 
@@ -3890,6 +3901,8 @@ static uae_u32 hw_wget(uaecptr a)
     g_buserr = 0;
     fc_data();
     a = hw_fold_addr(a);
+    if (__builtin_expect(beam_timed_reg(a), 0))
+        pistorm_gov_sync();
 
     if (fpu_in_regs(a))
         return 0;
@@ -3970,6 +3983,8 @@ static uae_u32 hw_bget(uaecptr a)
     g_buserr = 0;
     fc_data();
     a = hw_fold_addr(a);
+    if (__builtin_expect(beam_timed_reg(a), 0))
+        pistorm_gov_sync();
 
     if (fpu_in_regs(a))
         return 0;
@@ -4198,6 +4213,8 @@ static void hw_wput(uaecptr a, uae_u32 v)
         case HW_PAGE_VIDEO:
             st_video_snoop16(a, (uint16_t)v);
             psvidel_video_snoop(a, v & 0xFFFFu, 2);
+            if (__builtin_expect(beam_timed_reg(a), 0))
+                pistorm_gov_sync();
             hw_bus_wput(a, v);
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 2);
@@ -4306,6 +4323,8 @@ static void hw_bput(uaecptr a, uae_u32 v)
         case HW_PAGE_VIDEO:
             st_video_snoop8(a, (uint8_t)v);
             psvidel_video_snoop(a, v & 0xFFu, 1);
+            if (__builtin_expect(beam_timed_reg(a), 0))
+                pistorm_gov_sync();
             hw_bus_bput(a, v);
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 1);

@@ -152,6 +152,10 @@ volatile unsigned pistorm_ipl4_gap[4], pistorm_ipl4_len[4];
 /* HBL no-op skips: level-2 assertions dropped at the sampler because the
  * guest's HBL vector is a bare RTE (see pistorm_hbl_handler_is_rte). */
 volatile unsigned pistorm_ipl_hbl_skipped = 0;
+/* VBLs the CPU has taken (cpu/newcpu.cpp Exception(), vector 28), and
+ * pre-empted VBLs re-latched inside the refractory - see VBL PRE-EMPTED. */
+extern "C" { volatile uint32_t pistorm_vbl_taken = 0; }
+volatile unsigned pistorm_ipl_vbl_rearm = 0;
 
 /* LOOP HEALTH. The ep and del counters say what we did with the line;
  * these say whether we were LOOKING at all. ipl_task should come round
@@ -808,6 +812,15 @@ static void *ipl_stats_task(void *)
             "[ipl] ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
             e2 - p2, e4 - p4, e6 - p6, d2 - q2, d4 - q4, d6 - q6);
     {
+      static uint32_t pv;
+      static unsigned pr;
+      uint32_t nv = pistorm_vbl_taken;
+      unsigned nr = pistorm_ipl_vbl_rearm;
+      fprintf(stderr, "[ipl]   vbl: taken=%u/s pre-empted+re-latched=%u/s\n",
+              (unsigned)(nv - pv), nr - pr);
+      pv = nv; pr = nr;
+    }
+    {
       static unsigned pp, pb, pt;
       unsigned np = pistorm_ipl_passes, nb = pistorm_ipl_busy,
                nt = pistorm_ipl_txn;
@@ -1043,6 +1056,21 @@ static void *ipl_task(void *)
   uint8_t  av_held = 0;                 /* autovector level already latched
                                            this assertion episode (2/4)   */
   uint64_t av4_last_tick = 0;           /* last level-4 latch (refractory) */
+  /* VBL PRE-EMPTED. A level-4 latch the CPU had not yet taken when a
+   * higher level overwrote g_irq. Turrican II (PISTORM_IPL_TIMELINE,
+   * 30 Oct 2026): the VBL latched 0.1 us after the line went to 4, Timer C
+   * raised the line to 6 about 18 us later - before the CPU took the 4 -
+   * and g_irq became 6. The line came back to 4 after Timer C's IACK, but
+   * the 5 ms refractory (meant for the SAME VBL seen again) refused it:
+   * that VBL arrived only when the refractory ran out, 5-10 ms late, and
+   * VBL-to-VBL ran 10-30 ms. The game re-syncs its raster code every VBL;
+   * the screen jumped. The refractory now lets the line back in once,
+   * but only if the CPU has still taken no VBL since this one latched
+   * (vbl_latch_seq vs pistorm_vbl_taken): an earlier attempt compared
+   * against the count at pre-emption time, raced a CPU that was already
+   * taking the 4, and gave ~10 doubled VBLs a second. */
+  uint8_t  vbl_preempt = 0;
+  uint32_t vbl_latch_seq = 0;
   {
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
@@ -1658,11 +1686,19 @@ static void *ipl_task(void *)
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
         if (nowt - av4_last_tick < av4_refract_ticks)
         {
-          IPL_TRC(g_ipl, ipl, 3);
-          continue;                     /* same VBL blanking interval */
+          if (!(vbl_preempt && pistorm_vbl_taken == vbl_latch_seq))
+          {
+            IPL_TRC(g_ipl, ipl, 3);
+            continue;                   /* same VBL blanking interval */
+          }
+          pistorm_ipl_vbl_rearm++;      /* pre-empted, never taken: again */
         }
         av4_last_tick = nowt;
+        vbl_preempt = 0;
+        vbl_latch_seq = pistorm_vbl_taken;
       }
+      if (g_irq == 4 && ipl > 4)
+        vbl_preempt = 1;                /* overwriting an untaken VBL */
       if (ipl == 2 || ipl == 4)
         av_held = ipl;                  /* one latch per assertion */
 #ifdef ATARI_LAT_DIAG
@@ -1707,7 +1743,7 @@ static void *ipl_task(void *)
       {
         av_held = 0;
         if (g_irq == 4)
-          av4_last_tick = 0;
+          vbl_preempt = 1;              /* see VBL PRE-EMPTED */
       }
       IPL_TRC(g_irq, 6, 7);
       g_irq = 6;
@@ -1725,7 +1761,7 @@ static void *ipl_task(void *)
       {
         av_held = 0;
         if (g_irq == 4)
-          av4_last_tick = 0;
+          vbl_preempt = 1;
       }
       g_irq = 6;
       IPL_KICK();
