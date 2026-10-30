@@ -13,6 +13,7 @@
 
 #include <stdatomic.h>
 #include <stdio.h>
+#include <time.h>
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
 
@@ -45,6 +46,100 @@ void mfp_hub_register_level(int ch, int (*poll)(void))
 {
     if (ch >= 0 && ch < 16)
         g_level_poll[ch] = poll;
+}
+
+/* edge sources: polled at arbitration like a level, but they LATCH
+ * pending once per assertion - one assertion per value of `seq` (see
+ * mfp_hub.h). g_edge_last holds the seq last latched, with bit 32 set
+ * (0 = nothing latched yet); g_edge_ns when it was latched. */
+static int      (*g_edge_poll[16])(void);
+static uint32_t (*g_edge_seq[16])(void);
+static _Atomic uint64_t g_edge_last[16];
+static _Atomic uint64_t g_edge_ns[16];
+
+/* Lost-edge safety net: an assertion latched this long ago whose source
+ * is still asserting on the SAME seq, with the channel neither pending
+ * nor in service, is latched again. Real hardware has no such thing - a
+ * 68901 that misses the edge waits forever - but here a pending latch
+ * can be cleared under the source (IPRB write, IER off and on) at
+ * moments real timing would not produce, and a stuck injected byte
+ * blocks every byte queued behind it. 50 ms is far beyond any handler's
+ * read of the byte it was interrupted for. */
+#define EDGE_RELATCH_NS 50000000ull
+
+void mfp_hub_register_edge(int ch, int (*poll)(void), uint32_t (*seq)(void))
+{
+    if (ch >= 0 && ch < 16 && poll && seq) {
+        g_edge_seq[ch]  = seq;
+        g_edge_poll[ch] = poll;
+    }
+}
+
+static uint64_t hub_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* Latch pending for every edge source that asserts with a seq it has not
+ * been latched for. Runs from both arbitration threads (ipl_task, CPU),
+ * so the latch is claimed by compare-exchange: exactly one caller ORs
+ * the pending bit per assertion, and an IACK that clears it in between
+ * cannot be followed by a second latch of the same assertion. */
+static void latch_edges(void)
+{
+    for (int ch = 0; ch < 16; ch++) {
+        if (!g_edge_poll[ch])
+            continue;
+        const uint16_t bit = (uint16_t)(1u << ch);
+        if (!(atomic_load(&g_ier) & bit))
+            continue;      /* disabled: not latched now; latched when
+                            * enabled if still asserting (benign - the
+                            * real chip would drop it, and a dropped
+                            * injected byte stalls the queue) */
+        /* seq around the poll: if the consumer moved on in between, the
+         * poll answered for a different assertion - try again next time */
+        const uint32_t s1 = g_edge_seq[ch]();
+        if (!g_edge_poll[ch]())
+            continue;
+        if (g_edge_seq[ch]() != s1)
+            continue;
+
+        const uint64_t cur = (1ull << 32) | s1;
+        uint64_t old = atomic_load(&g_edge_last[ch]);
+        /* the common case - latched, not yet read - must stay cheap: this
+         * runs in ipl_task's poll, so no clock read unless it can matter */
+        if (old == cur && ((atomic_load(&g_vpend) | atomic_load(&g_visr)) & bit))
+            continue;
+        const uint64_t now = hub_now_ns();
+        const char *why;
+        if (old != cur)
+            why = "edge";
+        else if (now - atomic_load(&g_edge_ns[ch]) >= EDGE_RELATCH_NS)
+            why = "relatch";
+        else
+            continue;
+        if (old == cur) {
+            /* claim the re-latch by moving the timestamp */
+            uint64_t t = atomic_load(&g_edge_ns[ch]);
+            if (now - t < EDGE_RELATCH_NS ||
+                !atomic_compare_exchange_strong(&g_edge_ns[ch], &t, now))
+                continue;
+        } else {
+            if (!atomic_compare_exchange_strong(&g_edge_last[ch], &old, cur))
+                continue;
+            atomic_store(&g_edge_ns[ch], now);
+        }
+        atomic_fetch_or(&g_vpend, bit);
+        if (hub_dbg()) {
+            static int shown;
+            if (shown < 32) {
+                shown++;
+                fprintf(stderr, "[mfphub] ch%d %s latch (seq %u)\n", ch, why, (unsigned)s1);
+            }
+        }
+    }
 }
 
 /* ---- guest write snoop ------------------------------------------------ */
@@ -120,6 +215,7 @@ void mfp_hub_write_snoop(uint32_t addr, uint32_t value, int is_word)
  * pending exactly while its line asserts - it never latches) */
 static uint16_t pending_now(void)
 {
+    latch_edges();
     uint16_t pend = atomic_load(&g_vpend);
     for (int ch = 0; ch < 16; ch++) {
         if (g_level_poll[ch] && g_level_poll[ch]())
@@ -294,6 +390,8 @@ void mfp_hub_reset(void)
 {
     atomic_store(&g_vpend, 0);
     atomic_store(&g_visr, 0);
+    for (int ch = 0; ch < 16; ch++)
+        atomic_store(&g_edge_last[ch], 0);  /* re-latch a waiting byte */
     atomic_store(&g_ier, 0xFFFF);
     atomic_store(&g_imr, 0xFFFF);
     atomic_store(&g_vr, 0x48);
