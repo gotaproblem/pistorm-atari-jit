@@ -318,7 +318,7 @@ static int cycles_to_add_remain;
  *   Guest time   = cycles since the anchor / 8 MHz-units -> ns at gov_khz.
  *   Real time    = CLOCK_MONOTONIC since the anchor (gov_ns0).
  *   ahead_ns     = guest time - real time.
- *   Every GOV_STEP guest cycles (250 = ~31 us at 8 MHz):
+ *   Every gov_step guest cycles (GOV_STEP, 32 = 4 us at 8 MHz):
  *     ahead  > 0 : wait until real time catches up (gov_wait_until).
  *     behind     : run on to repay the debt, but no faster than
  *                  GOV_CATCHUP_X times the target (see CATCH-UP below).
@@ -330,9 +330,11 @@ static int cycles_to_add_remain;
  *   pure spin never gives the core back, so waits sleep with
  *   clock_nanosleep(TIMER_ABSTIME) to GOV_SPIN_NS before the deadline and
  *   spin only the rest, which absorbs the wake-up latency. A single wait is
- *   capped at 1 ms; with checks every ~31 us the CPU is never more than
- *   ~31 us ahead of real time, so MFP / ACIA / IKBD interrupts (real chips,
- *   real time) are seen within ~31 us of when a real 68000 would see them.
+ *   capped at 1 ms; with checks every 4 us the CPU is never more than
+ *   4 us ahead of real time. A wait does not look at the interrupt lines:
+ *   an MFP / ACIA / VBL interrupt that arrives during one is taken when it
+ *   ends, so the step length IS the extra interrupt latency (see HISTORY,
+ *   30 Oct 2026).
  *
  * CATCH-UP (repaying debt) - why it is capped
  *   Bus-heavy code (YM writes, ST-RAM writes for a native display) costs
@@ -363,17 +365,30 @@ static int cycles_to_add_remain;
  *     TOS) seemed to stop starting. That turned out to be the build not
  *     containing HOSTDOS (wrong branch), but the sleep-then-spin wait was
  *     kept: a FIFO 99 thread should not monopolise its core.
+ *   - 30 Oct 2026: GOV_STEP 250 -> 32. Turrican II (PISTORM_IPL_TIMELINE):
+ *     from a fresh level-6 edge to the CPU taking it, only 25% of 270k
+ *     interrupts took the 2-4 us the delivery path needs; the rest spread
+ *     evenly out to a hard edge at 34 us - the 31 us step plus that path,
+ *     i.e. the interrupt sat out the governor's wait. The game's lower-
+ *     border Timer B handler must reach its $FF8209 poll inside the last
+ *     12 us of line 199; in 138 of 978 frames it arrived late, spun until
+ *     the next frame's display (VBL held off ~4 ms) and the screen jumped.
+ *     At 32 cycles a check costs one clock_gettime (vDSO) per ~4 us of
+ *     guest time, ~1-2% of the CPU thread. PISTORM_GOV_STEP overrides.
  *
  * TUNING / DIAGNOSIS (environment)
  *   PISTORM_GOV_KHZ=n       target in kHz, overriding cfg cpu_speed.
  *   PISTORM_GOV_REPORT=1    print the achieved kHz every 5 s. Without it,
  *                           only the first 5 s window under 90% is printed.
+ *   PISTORM_GOV_STEP=n      guest cycles between checks (default 32,
+ *                           8..2000; 250 = the pre-30 Oct 2026 behaviour).
  *   PISTORM_GOV_CATCHUP=x   catch-up cap as a multiple of the target
  *                           (default 2, 0 = unlimited, i.e. flat out).
  *   A report steady near the target with audio/timing still wrong means
  *   the problem is not CPU speed (look at interrupt delivery instead).
  * ======================================================================== */
-enum { GOV_STEP = 250 };                         /* guest 8 MHz cycles per check */
+enum { GOV_STEP = 32 };                          /* default guest 8 MHz cycles per check */
+static evt_t gov_step = GOV_STEP;                /* PISTORM_GOV_STEP may override */
 static const int64_t GOV_FORGIVE_NS = 50000000LL; /* debt beyond this = host stall */
 static const int64_t GOV_SPIN_NS    = 50000LL;    /* spin this much before a deadline */
 static const int64_t GOV_WAIT_MAX   = 1000000LL;  /* cap on any single wait */
@@ -424,8 +439,13 @@ static void pistorm_governor(int sync)
 	if (!gov_on || currcycle < gov_cyc0) {
 		gov_ns0 = step_ns = gov_now_ns();
 		gov_cyc0 = step_cyc = currcycle;
-		gov_next = currcycle + (evt_t)GOV_STEP * unit;
 		if (!gov_on) {
+			const char *stp = getenv("PISTORM_GOV_STEP");
+			if (stp) {
+				long long v = atoll(stp);
+				if (v >= 8 && v <= 2000)
+					gov_step = (evt_t)v;
+			}
 			const char *env = getenv("PISTORM_GOV_KHZ");
 			gov_khz = env ? atoll(env) : pistorm_gov_khz ? pistorm_gov_khz : 8000;
 			if (gov_khz < 1000 || gov_khz > 64000)
@@ -436,10 +456,12 @@ static void pistorm_governor(int sync)
 			gov_catchup_x = cu ? atoll(cu) : 2;
 			if (gov_catchup_x < 0 || gov_catchup_x > 100)
 				gov_catchup_x = 2;
-			fprintf(stderr, "[GOV] 68k governor active: %lld kHz, catch-up cap %s%lldx\n",
+			fprintf(stderr, "[GOV] 68k governor active: %lld kHz, catch-up cap %s%lldx, "
+			        "check every %lld cycles\n",
 			        (long long)gov_khz, gov_catchup_x ? "" : "off ",
-			        (long long)gov_catchup_x);
+			        (long long)gov_catchup_x, (long long)gov_step);
 		}
+		gov_next = currcycle + gov_step * unit;
 		gov_on = 1;
 	}
 	if (!sync && currcycle < gov_next)
@@ -502,11 +524,11 @@ static void pistorm_governor(int sync)
 	}
 	step_ns  = now;
 	step_cyc = currcycle;
-	gov_next = currcycle + (evt_t)GOV_STEP * unit;
+	gov_next = currcycle + gov_step * unit;
 }
 
-/* BEAM-TIMED ACCESSES. The governor checks every GOV_STEP (250) guest
- * cycles, ~31 us at 8 MHz, and between checks the interpreter runs at the
+/* BEAM-TIMED ACCESSES. The governor checked every 250 guest cycles (~31
+ * us at 8 MHz; now 32, see HISTORY), and between checks the interpreter runs at the
  * Pi's speed (~20 MHz); while behind it repays at up to GOV_CATCHUP_X x.
  * Right for averages, wrong for code that times one hardware access off
  * another by counting instructions. Turrican II's lower-border routine
