@@ -111,7 +111,9 @@ static _Atomic int      in_packet;       /* mid-injected-packet flag     */
  * copy here missed the in-service rule and nested the guest's handler
  * until the supervisor stack ran through the sysvars (Petra/Paula
  * corruption). This file only REPORTS its level: kbd_level_poll() below
- * is registered with the hub as channel 6 (GPIP4). */
+ * is registered with the hub as channel 6 (GPIP4), as an EDGE source -
+ * one interrupt per injected byte, keyed by the ring index of the byte
+ * at the head (kbd_head_seq), like the real ACIA line's falling edge. */
 
 /* ------------------------------------------------------------------ */
 /* Real IKBD presence state (see the detection section further down)   */
@@ -1638,7 +1640,8 @@ void kbd_usb_diag_tick(void) { }
 
 /* Level poll for the hub (channel 6 = GPIP4): asserting exactly while
  * injected bytes are waiting. Enable/mask/in-service/priority are the
- * hub's business, not ours. Registered in kbd_usb_init(). */
+ * hub's business, not ours. Registered in kbd_usb_init() as an edge
+ * source with kbd_head_seq() below. */
 static int kbd_level_poll(void)
 {
     if (!KBD_USB_enabled)
@@ -1649,6 +1652,16 @@ static int kbd_level_poll(void)
         return 1;
     }
     return 0;
+}
+
+/* Which assertion the level belongs to: the free-running ring index of
+ * the byte at the head. It moves only when the guest consumes a byte
+ * (kbd_usb_rx_read) or the ring is flushed, so "same seq" means "the same
+ * unread byte" and the hub raises GPIP4 once for it - see
+ * mfp_hub_register_edge(). */
+static uint32_t kbd_head_seq(void)
+{
+    return atomic_load_explicit(&ring_head, memory_order_acquire);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2460,7 +2473,7 @@ int kbd_usb_init(int grab, int devices)
     }
 
     /* channel 6 = GPIP4 (keyboard/MIDI ACIA IRQ) on the virtual MFP */
-    mfp_hub_register_level(6, kbd_level_poll);
+    mfp_hub_register_edge(6, kbd_level_poll, kbd_head_seq);
 
     in_state.grab_wanted = grab;
     atomic_store(&in_state.grab_active, grab);
