@@ -480,6 +480,9 @@ static const struct { const char *key; const char *off; } absent_on[] = {
     /* not an absent-on default: written out so the image lines below it
      * stay in the file, ignored, until the switch comes back */
     { "acsi",           "disabled" },
+    /* same for ide: unticking it used to drop the line, so the file
+     * showed no "ide" at all and the hdd lines below it looked live */
+    { "ide",            "disabled" },
 };
 
 const char *se_off_value(const char *key)
