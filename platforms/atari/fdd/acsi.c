@@ -251,6 +251,9 @@ static void finish(uint8_t st, uint8_t sense, uint32_t lba)
     status_valid = true;              /* this status describes a command */
     irq = true;                       /* command complete               */
     fdd_dma_note_ok(residual == 0);
+    if (acsi_trace())
+        ACSI_LOG("ID %d status $%02X sense $%02X residual %u", cur_id, st, sense,
+                 (unsigned)residual);
 }
 
 static void finish_good(void)  { finish(0x00, SENSE_NONE, 0); }
@@ -261,6 +264,14 @@ static void finish_check(uint8_t sense, uint32_t lba) { finish(0x02, sense, lba)
 static void dma_out(const uint8_t *buf, uint32_t len)   /* device -> RAM */
 {
     if (!len) return;
+    if (acsi_trace() && len < 512) {   /* short replies: INQUIRY, SENSE... */
+        char hx[3 * 48 + 1];
+        uint32_t n = len < 48 ? len : 48;
+        for (uint32_t i = 0; i < n; i++)
+            snprintf(hx + 3 * i, 4, "%02X ", buf[i]);
+        ACSI_LOG("ID %d -> RAM $%06X %u B: %s", cur_id, fdd_dma_base(),
+                 (unsigned)len, hx);
+    }
     fdd_dma_copy_to_ram(fdd_dma_base(), buf, len);
     fdd_dma_base_advance(len);
 }
