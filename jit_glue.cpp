@@ -398,10 +398,10 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     /* cryptodad optimisations */
     currprefs.turbo_emulation = changed_prefs.turbo_emulation = 0;
     currprefs.m68k_speed = changed_prefs.m68k_speed = m68k_speed;
-    /* build default 1 for both; the .cfg (compnf / comp_constjump, via
-     * PSCTRL's tunables) can turn either off */
-    currprefs.compnf = changed_prefs.compnf = pst_compnf >= 0 ? pst_compnf : 1;
-    currprefs.comp_constjump = changed_prefs.comp_constjump = pst_comp_constjump >= 0 ? pst_comp_constjump : 1;
+    /* off unless the .cfg turns them on (compnf / comp_constjump, via
+     * PSCTRL's tunables, -1 = no line) */
+    currprefs.compnf = changed_prefs.compnf = pst_compnf >= 0 ? pst_compnf : 0;
+    currprefs.comp_constjump = changed_prefs.comp_constjump = pst_comp_constjump >= 0 ? pst_comp_constjump : 0;
 
     init_m68k(); // prefs_changed_cpu(), init_table68k()
     // NOTE: build_cpufunctbl() is static inside newcpu.cpp and is invoked by

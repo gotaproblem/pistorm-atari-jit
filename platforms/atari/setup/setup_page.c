@@ -907,20 +907,40 @@ void sp_shifter_follow(struct sc_cfg *c, const char *sec, const char *key,
     }
 }
 
-/* Before a save: every build gets the lines the file always carries
- * (stram_cache, stram_direct, mouse_thresh, mouse_scale), with their
- * default, where it has none. */
-static void fill_always(struct sc_cfg *c)
+/* Before a save: every build gets a line for every switch it is
+ * missing, set to what the emulator does with no line, plus the typed
+ * numbers the file always carries (mouse_thresh, mouse_scale) - so the
+ * file shows every switch. Keys that do not belong to the build (apj-os
+ * only / gem only) are left out. */
+static int is_switch_line(const char *key, const char *v);
+void sp_fill_defaults(struct sc_cfg *c)
 {
     char secs[MAX_BUILDS + 1][SC_SEC_LEN];
     int ns = sc_sections(c, secs, MAX_BUILDS + 1);
     for (int s = 0; s < ns; s++) {
-        if (!strcasecmp(secs[s], "psctrl"))
+        const char *sec = secs[s];
+        if (!strcasecmp(sec, "psctrl"))
             continue;
+        const char *m = sc_get(c, sec, "machine");
+        for (int t = 0; t < SE_TAB_N; t++)
+            for (int i = 0; i < se_tab_count(t); i++) {
+                const char *k = se_tab_key(t, i);
+                const char *w = se_default_word(k, m);
+                if (!w || se_retired(k) || se_env_rule(k, sec))
+                    continue;
+                int have = 0;
+                if (!strcasecmp(k, "acsi")) {        /* image lines are not the switch */
+                    for (int n = 0; n < sc_count(c, sec, "acsi"); n++)
+                        have |= is_switch_line("acsi", sc_get_n(c, sec, "acsi", n));
+                } else
+                    have = sc_get(c, sec, k) != NULL;
+                if (!have)              /* append: never over an image line */
+                    sc_set_n(c, sec, k, sc_count(c, sec, k), w);
+            }
         const char *d;
         for (int i = 0; se_always(i, &d); i++)
-            if (!sc_get(c, secs[s], se_always(i, NULL)))
-                sc_set(c, secs[s], se_always(i, NULL), d);
+            if (!sc_get(c, sec, se_always(i, NULL)))
+                sc_set(c, sec, se_always(i, NULL), d);
     }
 }
 
@@ -1748,7 +1768,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     sc_set(&st.cfg, "psctrl", "date", date_mdy ? "mdy" : "dmy");
                 } else if (e.ch == 's' || e.ch == 'S') {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
-                    fill_always(&st.cfg);
+                    sp_fill_defaults(&st.cfg);
                     if (sc_save(&st.cfg, NULL) == 0) {
                         snprintf(st.msg, sizeof st.msg, "saved");
                         st.warned = 0;
@@ -1827,7 +1847,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             case SI_ENTER:
                 if (st.row[st.sel].kind == ROW_SAVE) {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
-                    fill_always(&st.cfg);
+                    sp_fill_defaults(&st.cfg);
                     if (sc_save(&st.cfg, NULL) == 0) {
                         snprintf(st.msg, sizeof st.msg, "saved");
                         st.warned = 0;
@@ -1861,7 +1881,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
 boot:
     sc_set(&st.cfg, "psctrl", "boot", st.boot);
     if (st.cfg.dirty) {
-        fill_always(&st.cfg);
+        sp_fill_defaults(&st.cfg);
         sc_save(&st.cfg, NULL);
     }
     snprintf(chosen, chosen_len, "%s", st.boot);

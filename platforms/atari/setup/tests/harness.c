@@ -693,7 +693,42 @@ static void run_relevance(void)
     CHECK(se_off_value("lmc") && !strcmp(se_off_value("lmc"), "0"), "lmc off is 0");
     CHECK(!se_absent_on("blitter"), "no blitter line must follow the machine, not mean on");
     CHECK(se_known_default("blitter") && !*se_known_default("blitter"), "blitter default is not-set");
-    CHECK(se_absent_on("comp_constjump") && se_absent_on("compnf"), "comp_* are on with no line");
+    CHECK(!se_absent_on("comp_constjump") && !se_absent_on("compnf"), "comp_constjump/compnf must be off with no line");
+    CHECK(!strcmp(se_default_word("comp_constjump", NULL), "0") &&
+          !strcmp(se_default_word("compnf", NULL), "0"), "comp_* written as 0");
+    CHECK(!strcmp(se_default_word("compfpu", NULL), "1"), "compfpu written as 1");
+    CHECK(se_default_word("jit", NULL) == NULL, "jit must not be written (jit_power owns it)");
+    CHECK(!strcmp(se_default_word("dma_sound", "ste"), "enabled") &&
+          !strcmp(se_default_word("dma_sound", "st"), "disabled"), "dma_sound default per machine");
+    CHECK(!strcmp(se_default_word("usb", NULL), "gamepad off"), "usb off spelling");
+    CHECK(!strcmp(se_default_word("kbd", NULL), "disabled"), "kbd off spelling");
+    CHECK(!strcmp(se_default_word("ide", NULL), "disabled") &&
+          !strcmp(se_default_word("stram_cache", NULL), "disabled") &&
+          !strcmp(se_default_word("lmc", NULL), "1") &&
+          !strcmp(se_default_word("drm_async", NULL), "0"), "switch default words");
+    CHECK(se_default_word("mouse_scale", NULL) == NULL, "a number is not a switch");
+    { struct sc_cfg fc;
+      CHECK(sc_load_text(&fc, "[gem]\nmachine ste\nacsi 0:a.img\njit_power 0\nkbd usb\n"
+                              "[apj-os]\nmachine st\n") == 0, "parse");
+      sp_fill_defaults(&fc);
+      CHECK(sc_get(&fc, "gem", "jit") == NULL, "jit written - it would undo jit_power 0");
+      CHECK(!strcmp(sc_get(&fc, "gem", "jit_power"), "0"), "jit_power touched");
+      CHECK(!strcmp(sc_get(&fc, "gem", "kbd"), "usb"), "an existing line was changed");
+      CHECK(sc_count(&fc, "gem", "acsi") == 2 &&
+            !strcmp(sc_get_n(&fc, "gem", "acsi", 1), "disabled"), "acsi switch not added beside the image line");
+      CHECK(!strcmp(sc_get(&fc, "gem", "dma_sound"), "enabled"), "STE dma_sound default");
+      CHECK(!strcmp(sc_get(&fc, "apj-os", "dma_sound"), "disabled"), "ST dma_sound default");
+      CHECK(!strcmp(sc_get(&fc, "gem", "comp_constjump"), "0") &&
+            !strcmp(sc_get(&fc, "gem", "compnf"), "0"), "comp_* not written 0");
+      CHECK(!strcmp(sc_get(&fc, "gem", "stram_cache"), "disabled") &&
+            !strcmp(sc_get(&fc, "gem", "stram_direct"), "disabled") &&
+            !strcmp(sc_get(&fc, "gem", "ide"), "disabled") &&
+            !strcmp(sc_get(&fc, "gem", "usb"), "gamepad off"), "switch defaults");
+      CHECK(!strcmp(sc_get(&fc, "gem", "mouse_thresh"), "0") &&
+            !strcmp(sc_get(&fc, "gem", "mouse_scale"), "1"), "mouse defaults");
+      CHECK(sc_get(&fc, "gem", "stbox_telemetry") == NULL, "an apj-os-only key went into gem");
+      CHECK(sc_get(&fc, "apj-os", "cpu_compatible") == NULL, "a gem-only key went into apj-os");
+      CHECK(sc_get(&fc, "psctrl", "ide") == NULL, "the psctrl block got settings"); }
     CHECK(!se_absent_on("ide") && !se_absent_on("acsi"), "ide/acsi are off with no line");
     CHECK(se_absent_on("dma_sound") && se_off_value("dma_sound") &&
           !strcmp(se_off_value("dma_sound"), "disabled"), "dma_sound on by default where it applies");
@@ -705,12 +740,10 @@ static void run_relevance(void)
     { const char *d = NULL; int seen = 0;
       for (int i = 0; se_always(i, &d); i++) {
           const char *k = se_always(i, NULL);
-          if (!strcmp(k, "stram_cache") || !strcmp(k, "stram_direct"))
-              { CHECK(!strcmp(d, "disabled"), "%s default %s", k, d); seen++; }
           if (!strcmp(k, "mouse_thresh")) { CHECK(!strcmp(d, "0"), "mouse_thresh %s", d); seen++; }
           if (!strcmp(k, "mouse_scale"))  { CHECK(!strcmp(d, "1"), "mouse_scale %s", d); seen++; }
       }
-      CHECK(seen == 4, "the always-written keys are not all there (%d)", seen); }
+      CHECK(seen == 2, "the always-written numbers are not all there (%d)", seen); }
     CHECK(se_off_value("fpu") == NULL, "fpu absent is off");
     /* developer switches stay in the build when unticked, or their row
      * (shown only while the line exists) would disappear for good */

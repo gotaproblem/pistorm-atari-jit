@@ -52,6 +52,9 @@ const char *se_known_default(const char *key);
 const char *se_always(int i, const char **dflt);
 /* 1 = the emulator has this switch ON when its line is absent */
 int         se_absent_on(const char *key);
+/* the value a switch is written with when a build has no line for it
+ * (its no-line default); NULL = not written */
+const char *se_default_word(const char *key, const char *machine);
 /* a list index by exact spelling, no aliases ("" = the not-set choice) */
 int         se_index_exact(const char *key, const char *val);
 

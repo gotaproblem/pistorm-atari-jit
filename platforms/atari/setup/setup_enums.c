@@ -158,12 +158,10 @@ static const struct { const char *key, *dflt; } known[] = {
     { "mouse_scale",  "1"        },
 };
 
-/* Keys every build carries in the file, written with their default on
- * save when a section has no line for them - so the file always says
- * what these are set to. */
+/* Typed numbers every build carries in the file, written with their
+ * default on save when a section has no line for them. Every switch is
+ * written the same way - se_default_word(). */
 static const struct { const char *key, *dflt; } always[] = {
-    { "stram_cache",  "disabled" },
-    { "stram_direct", "disabled" },
     { "mouse_thresh", "0"        },
     { "mouse_scale",  "1"        },
 };
@@ -462,6 +460,10 @@ const char *se_machine_rule(const char *key, const char *machine)
  * `blitter disabled` back on. A `real` blitter line counts as on and is
  * left alone. */
 static const struct { const char *machine, *key, *value; } mwants[] = {
+    /* DMA sound is the STE/Falcon default: a `dma_sound disabled` left
+     * from another machine is switched back on */
+    { "ste",    "dma_sound",  "enabled" },
+    { "falcon", "dma_sound",  "enabled" },
     { "ste",    "blitter",    "enabled" },
     { "megast", "blitter",    "enabled" },
     { "falcon", "blitter",    "enabled" },
@@ -490,16 +492,16 @@ const char *se_machine_min_cpu(const char *machine)
 
 /*
  * Switches the emulator has ON when the line is absent, and the word
- * that turns them off. config_file.c starts from all-zero except jit and
- * blitter; the PSCTRL tunables (psctrl_tunables.c) default lmc and
- * drm_dirtyband to 1 and comp_* to -1 (= the JIT's own default, on).
+ * that turns them off. config_file.c starts from all-zero except jit;
+ * the PSCTRL tunables (psctrl_tunables.c) default lmc and drm_dirtyband
+ * to 1, compfpu to -1 (on), comp_constjump / compnf to -1 = off.
  */
 static const struct { const char *key; const char *off; int on; } absent_on[] = {
     { "jit",            "disabled", 1 },
     { "lmc",            "0",        1 },
     { "drm_dirtyband",  "0",        1 },
-    { "comp_constjump", "0",        1 },
-    { "compnf",         "0",        1 },
+    { "comp_constjump", "0",        0 },   /* off unless given (jit_glue) */
+    { "compnf",         "0",        0 },
     { "compfpu",        "0",        1 },
     /* on with no line where it applies at all (machine ste / falcon -
      * se_machine_rule greys it elsewhere); `dma_sound disabled` turns
@@ -646,4 +648,28 @@ int se_index_exact(const char *key, const char *val)
         if (!strcasecmp(val, t->list[i]))
             return i;
     return -1;
+}
+
+/* The line a switch gets written with when a build has none: what the
+ * emulator does with no line, spelled so the parser reads it back the
+ * same. NULL: not a switch, or not written - `jit`, because jit_power
+ * also sets the JIT and whichever line comes last wins, so an appended
+ * `jit enabled` would undo a `jit_power 0`. */
+const char *se_default_word(const char *key, const char *machine)
+{
+    if (se_kind(key) != SE_K_SWITCH || !strcasecmp(key, "jit"))
+        return NULL;
+    int on = se_absent_on(key);
+    if (!strcasecmp(key, "dma_sound")) {        /* on for STE / Falcon */
+        const char *m = machine_word(machine);
+        on = !strcasecmp(m, "ste") || !strcasecmp(m, "falcon");
+    }
+    const char *t = se_tick_value(key);
+    if (on)
+        return t;
+    if (!strcmp(t, "1"))
+        return "0";
+    if (!strcasecmp(key, "usb"))                /* CONFITEM_USB: "gamepad off" */
+        return "gamepad off";
+    return "disabled";                          /* kbd: not "usb ..." = off */
 }
