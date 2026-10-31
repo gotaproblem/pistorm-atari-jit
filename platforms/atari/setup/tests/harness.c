@@ -697,7 +697,7 @@ static void run_relevance(void)
     CHECK(!strcmp(se_default_word("comp_constjump", NULL), "0") &&
           !strcmp(se_default_word("compnf", NULL), "0"), "comp_* written as 0");
     CHECK(!strcmp(se_default_word("compfpu", NULL), "1"), "compfpu written as 1");
-    CHECK(se_default_word("jit", NULL) == NULL, "jit must not be written (jit_power owns it)");
+    CHECK(se_retired("jit") && se_default_word("jit", NULL) == NULL, "jit is retired (jit_power)");
     CHECK(!strcmp(se_default_word("dma_sound", "ste"), "enabled") &&
           !strcmp(se_default_word("dma_sound", "st"), "disabled"), "dma_sound default per machine");
     CHECK(!strcmp(se_default_word("usb", NULL), "gamepad off"), "usb off spelling");

@@ -104,7 +104,7 @@ image picker lists.
 |---|---|---|
 | `cpu` | `68000` `68010` `68020` `68030` `68040` `68060` | the CPU the guest sees. 68000/010 are 24-bit and cannot have TT-RAM or the JIT; 68030 is the Falcon/TT baseline; 68040 is the fastest with the JIT. No key: a 68000 |
 | `fpu` | boolean | an FPU, where the CPU can have one (68020 and up) |
-| `jit` | boolean, default on | the JIT compiler. Off means the interpreter: several times slower, but exact |
+| `jit` | - | redundant: `jit_power` does it (0 = the interpreter, 1-6 = the JIT). Ignored with a console line saying so |
 | `jit_cache` | size, default 8192 (KB) | the translation cache. 16384 for big applications (APJ-OS ships with it). Means nothing with the JIT off: the setup page removes it when `jit_power` is unticked or set to 0 |
 | `mmu` | boolean | full MMU emulation, model from the `cpu` line (68030/040/060). Needed by guests that program real translation tables: Basilisk II, MagiCMac, MiNT memory protection. Interpreter only - forces the JIT off, expect half interpreter speed. A 68000/010/020 has no MMU and the key is ignored with a warning. Env: `PISTORM_MMU=1/0` overrides, `PISTORM_MMU_DEBUG=1` traces |
 | `cpu_compatible` | boolean | the prefetch-accurate 68000 core, whose bus-error frames carry the exact faulting PC and access address. For software that virtualises hardware through bus-error traps (Spectre GCR's Mac world-switch). Only honoured with `cpu 68000` and the JIT off. The setup page sets `jit_power 0` (dropping `jit_cache`) and `cpu_speed 8mhz` when it is ticked, and drops it again if the JIT is turned back on. Env: `PISTORM_CPU_COMPAT=1` |
@@ -116,7 +116,7 @@ image picker lists.
 | `stram_cache` | boolean | keep a copy of ST-RAM in the Pi and satisfy the CPU's reads from it, writing through to the board only what the real hardware must see (low memory, the screen). Much faster. Off unless given; the setup page writes `stram_cache disabled` into every build that has no line |
 | `stram_direct` | boolean | let the JIT read and write the ST-RAM copy inline. Faster again. Experimental: stupid fast for some software, breaks some. Off unless given; the setup page writes `stram_direct disabled` into every build that has no line |
 | `cpu_speed` | `8mhz` `16mhz` | run the interpreter at a real 68000 clock - for games and demos timed to the CPU. There is no 32mhz: a Pi 4's interpreter tops out near 20 MHz (measured with the governor asking for 32), so no key is already about as fast as it gets. JIT off only (`jit_power 0`): with the JIT on it is ignored with a warning. No key: as fast as the Pi goes. If the interpreter cannot keep up the emulator says so once (`[GOV] reaching N kHz of the M kHz target`). The setup page adds `cpu_speed 8mhz` when `cpu_compatible` is ticked. `PISTORM_GOV_KHZ=n` overrides the rate |
-| `cpu_clock_multiplier`, `m68k_speed` | - | retired: the UAE knobs `cpu_speed` replaced. Ignored with a note, never a row |
+| `cpu_clock_multiplier`, `m68k_speed` | - | redundant: the UAE knobs `cpu_speed` replaced. Ignored with a console line saying so, never a row |
 
 ## Video
 

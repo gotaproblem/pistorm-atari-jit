@@ -27,7 +27,6 @@ typedef enum {
   CONFITEM_CPU_COMPATIBLE,
   CONFITEM_MMU,
   CONFITEM_MONITOR,
-  CONFITEM_JIT,
   CONFITEM_FPU,
   CONFITEM_GRAPHICS_CARD,
   CONFITEM_FPS,
@@ -96,7 +95,6 @@ static const config_switch_def config_switches[] = {
   { "cpu_compatible", CONFITEM_CPU_COMPATIBLE },
   { "mmu", CONFITEM_MMU },
   { "monitor", CONFITEM_MONITOR },
-  { "jit", CONFITEM_JIT },
   { "fpu", CONFITEM_FPU },
   { "vga", CONFITEM_GRAPHICS_CARD },
   { "fps", CONFITEM_FPS },
@@ -432,31 +430,6 @@ unsigned int get_int(char *str) {
   }
 
   return (unsigned int)ret_int;
-}
-
-static int get_signed_int(char *str)
-{
-  while (*str == ' ' || *str == '\t')
-    str++;
-
-  if (*str == '\0')
-    return 0;
-
-  char value[32];
-  memset(value, 0, sizeof(value));
-  size_t n = 0;
-  while (str[n] && str[n] != ' ' && str[n] != '\t' && n + 1 < sizeof(value)) {
-    value[n] = (char)tolower((unsigned char)str[n]);
-    n++;
-  }
-
-  if (strcmp(value, "max") == 0 ||
-      strcmp(value, "fast") == 0 ||
-      strcmp(value, "fastest") == 0 ||
-      strcmp(value, "turbo") == 0)
-    return -1;
-
-  return (int)strtol(str, NULL, 0);
 }
 
 static int get_size_kb(char *str)
@@ -860,11 +833,6 @@ struct emulator_config *load_config_file_section(char *filename,
     {
       case CONFITEM_CPU:
         cfg->cpu_type = get_m68k_cpu_type(parse_line + str_pos) - 1;
-        break;
-
-      case CONFITEM_JIT:
-        cfg->jit = get_bool_default_true(parse_line + str_pos);
-        printf ("[CFG] JIT %s\n", cfg->jit ? "enabled" : "disabled");
         break;
 
       case CONFITEM_MONITOR:
@@ -1568,15 +1536,27 @@ struct emulator_config *load_config_file_section(char *filename,
           break;
         if (!strcasecmp(cur_cmd, "vga_render") ||
             !strcasecmp(cur_cmd, "loopcycles") ||
-            !strcasecmp(cur_cmd, "rtc") ||
-            /* the two UAE speed knobs cpu_speed replaced */
-            !strcasecmp(cur_cmd, "m68k_speed") ||
-            !strcasecmp(cur_cmd, "cpu_clock_multiplier")) {
+            !strcasecmp(cur_cmd, "rtc")) {
           /* Retired: parsed into the config and never read by anything
            * (the last two were marked deprecated years ago). Ignored
            * quietly so an old .cfg still loads. */
           printf ("[CFG] %s is retired and does nothing - ignored\n", cur_cmd);
           break;
+        }
+        {
+          /* Redundant: another key does the job now. Ignored, loudly, so
+           * the line can be taken out of the file. */
+          static const struct { const char *key, *by; } redundant[] = {
+            { "jit",                  "jit_power (0 = off, 1-6 = on)" },
+            { "m68k_speed",           "cpu_speed" },
+            { "cpu_clock_multiplier", "cpu_speed" },
+          };
+          for (unsigned r = 0; r < sizeof redundant / sizeof redundant[0]; r++)
+            if (!strcasecmp(cur_cmd, redundant[r].key)) {
+              printf ("[CFG] *** `%s` on line %d is redundant - replaced by %s - "
+                      "ignored, remove it ***\n", cur_cmd, cur_line, redundant[r].by);
+              goto skip_line;
+            }
         }
         printf ("[CFG] Unknown config item %s on line %d.\n", cur_cmd, cur_line);
         break;

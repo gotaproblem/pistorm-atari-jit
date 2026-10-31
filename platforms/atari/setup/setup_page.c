@@ -814,9 +814,8 @@ static void build_drive_rows(struct state *st)
  */
 static int jit_is_off(const struct sc_cfg *c, const char *sec)
 {
-    const char *jp = sc_get(c, sec, "jit_power");
-    const char *j  = sc_get(c, sec, "jit");
-    return (jp && strtol(jp, NULL, 0) == 0) || (j && !sp_row_on("jit", j));
+    const char *jp = sc_get(c, sec, "jit_power");     /* `jit` is retired */
+    return jp && strtol(jp, NULL, 0) == 0;
 }
 
 const char *sp_jit_rule(const struct sc_cfg *c, const char *sec, const char *key)
@@ -837,7 +836,7 @@ void sp_jit_follow(struct sc_cfg *c, const char *sec, const char *key,
 {
     did[0] = '\0';
 #define DID(...) snprintf(did + strlen(did), n - strlen(did), __VA_ARGS__)
-    int jp_key = !strcasecmp(key, "jit_power") || !strcasecmp(key, "jit");
+    int jp_key = !strcasecmp(key, "jit_power");
     if (!strcasecmp(key, "cpu_compatible")) {
         const char *cc = sc_get(c, sec, "cpu_compatible");
         if (cc && sp_row_on("cpu_compatible", cc)) {

@@ -218,10 +218,10 @@ static const struct { const char *key; int env; } env_of[] = {
  * note). Never a row, so a leftover line cannot pass for a setting.
  * Developer: real, but tuning/debug knobs - hidden unless Tab. */
 static const char *retired[]   = { "vga_render", "loopcycles", "rtc", "fps",
-                                   /* replaced by cpu_speed */
-                                   "m68k_speed", "cpu_clock_multiplier" };
+                                   /* redundant: cpu_speed / jit_power do it */
+                                   "m68k_speed", "cpu_clock_multiplier", "jit" };
 static const char *developer[] = { "addr32", "stram_cache", "stram_direct",
-                                   "network_debug", "jit" };
+                                   "network_debug" };
 
 int se_retired(const char *key)
 {
@@ -336,7 +336,6 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "network_netmask",SE_TAB_NETWORK, SE_K_TEXT,   "255.255.255.0" },
     { "network_debug",  SE_TAB_NETWORK, SE_K_SWITCH, "enabled" },
     /* Tuning - live tunables and developer knobs */
-    { "jit",            SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "stram_cache",    SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "stram_direct",   SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "addr32",         SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
@@ -497,7 +496,6 @@ const char *se_machine_min_cpu(const char *machine)
  * to 1, compfpu to -1 (on), comp_constjump / compnf to -1 = off.
  */
 static const struct { const char *key; const char *off; int on; } absent_on[] = {
-    { "jit",            "disabled", 1 },
     { "lmc",            "0",        1 },
     { "drm_dirtyband",  "0",        1 },
     { "comp_constjump", "0",        0 },   /* off unless given (jit_glue) */
@@ -652,12 +650,10 @@ int se_index_exact(const char *key, const char *val)
 
 /* The line a switch gets written with when a build has none: what the
  * emulator does with no line, spelled so the parser reads it back the
- * same. NULL: not a switch, or not written - `jit`, because jit_power
- * also sets the JIT and whichever line comes last wins, so an appended
- * `jit enabled` would undo a `jit_power 0`. */
+ * same. NULL: not a switch. */
 const char *se_default_word(const char *key, const char *machine)
 {
-    if (se_kind(key) != SE_K_SWITCH || !strcasecmp(key, "jit"))
+    if (se_kind(key) != SE_K_SWITCH || se_retired(key))
         return NULL;
     int on = se_absent_on(key);
     if (!strcasecmp(key, "dma_sound")) {        /* on for STE / Falcon */
