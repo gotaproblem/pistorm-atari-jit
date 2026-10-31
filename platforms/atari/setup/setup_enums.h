@@ -47,6 +47,13 @@ int         se_developer(const char *key);
  * when it is added. */
 const char *se_known(int i);
 const char *se_known_default(const char *key);
+/* keys written with their default on save when a section lacks them,
+ * walked i = 0, 1, ... until NULL */
+const char *se_always(int i, const char **dflt);
+/* 1 = the emulator has this switch ON when its line is absent */
+int         se_absent_on(const char *key);
+/* a list index by exact spelling, no aliases ("" = the not-set choice) */
+int         se_index_exact(const char *key, const char *val);
 
 /* The catalogue: every key the emulator accepts, on the tab that holds
  * the code that reads it. The editor lists ALL of them, ticked when the

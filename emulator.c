@@ -49,9 +49,7 @@ extern "C"
 #endif
 
   extern void jit_mem_init(void);
-  extern void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
-                                       int m68k_speed, int m68k_speed_set,
-                                       int jit_cache, int jit_cache_set);
+  extern void jit_cpu_set_perf_options(int jit_cache, int jit_cache_set);
   extern void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit);
   extern void jit_cpu_set_compatible(int on);
   extern void jit_cpu_set_speed(int khz);
@@ -2615,15 +2613,21 @@ int main (int argc, char *argv[])
    * the cfg says so: `machine ste` (or megaste) is the one switch for
    * everything STE - DMA sound, STE shifter personality, _MCH cookie.
    * A dma_sound line on its own enables NOTHING (loud notice below, so
-   * an old config cannot fail silently). */
+   * an old config cannot fail silently). On machine ste / falcon DMA
+   * sound is on with no line, and `dma_sound disabled` turns it off -
+   * the setup page offers the row on those two machines only. */
   bool want_dmasnd = false;
   {
     extern int emulator_config_machine_kind(void);
-    want_dmasnd = (emulator_config_machine_kind() == 1 ||
-                   emulator_config_machine_kind() == 3);  /* STE, Falcon */
-    if (config->dma_sound && !want_dmasnd)
+    bool ste_class = (emulator_config_machine_kind() == 1 ||
+                      emulator_config_machine_kind() == 3);  /* STE, Falcon */
+    /* on with no line; `dma_sound disabled` turns it off on these two */
+    want_dmasnd = ste_class && (!config->dma_sound_set || config->dma_sound);
+    if (config->dma_sound && !ste_class)
       printf ("[CFG] dma_sound line IGNORED - STE hardware needs "
               "`machine ste` (default machine is a plain ST)\n");
+    else if (ste_class && !want_dmasnd)
+      PS_INFO ("[CFG] machine STE-class: DMA sound OFF (dma_sound disabled)\n");
     else if (want_dmasnd)
       PS_INFO ("[CFG] machine STE-class: DMA sound ON\n");
   }
@@ -2639,7 +2643,7 @@ int main (int argc, char *argv[])
           fprintf(stderr, "[INIT] DMA Sound failed to start\n");
         }
       } else {
-        PS_INFO ("[INIT] DMA Sound disabled (machine is not STE-class)\n");
+        PS_INFO ("[INIT] DMA Sound disabled\n");
       }
       if (config->ym2149) {
         if (ym2149_init () == 0)
@@ -2837,11 +2841,7 @@ int main (int argc, char *argv[])
    * register) and before the CPU thread starts, because TOS programs
    * memcfg in its first hundred instructions. */
   pistorm_stram_phys_init ();
-  jit_cpu_set_perf_options(config->cpu_clock_multiplier,
-                           config->cpu_clock_multiplier_set ? 1 : 0,
-                           config->m68k_speed,
-                           config->m68k_speed_set ? 1 : 0,
-                           config->jit_cache,
+  jit_cpu_set_perf_options(config->jit_cache,
                            config->jit_cache_set ? 1 : 0);
   jit_cpu_init (cpu_type,
                 config->fpu ? 1 : 0,

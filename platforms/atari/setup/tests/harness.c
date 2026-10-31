@@ -585,7 +585,8 @@ static void run_enums(void)
 
     CHECK(se_index("machine", "ste") == 1, "machine ste not found");
     CHECK(se_index("shifter", "ST") == 0, "shifter should ignore case");
-    CHECK(se_index("blitter", "real") == 2, "blitter real not found");
+    CHECK(se_index("blitter", "real") == 3, "blitter real not found");
+    CHECK(se_index_exact("blitter", "") == 0, "blitter has no not-set choice");
     CHECK(se_index("monitor", "auto") == 0, "monitor auto not found");
     CHECK(se_index("vga", "ET4000AX FVDI") == 0, "the vga pair was not found");
     CHECK(se_index("jit_cache", "16384") == 3, "jit_cache 16384 not found");
@@ -671,7 +672,6 @@ static void run_relevance(void)
     /* the ST's own video shape means nothing under fVDI on the ET4000 */
     CHECK(se_env("monitor") == SE_GEM, "monitor should be GEM-only");
     CHECK(se_env("shifter") == SE_GEM, "shifter should be GEM-only");
-    CHECK(se_env("m68k_speed") == SE_GEM, "m68k_speed should be GEM-only");
     /* the card serves a GEM build too (ET4000 through NVDI, as Steve's
      * [gem] block has it); only the ST Box is APJ-OS's own */
     CHECK(se_env("vga") == SE_BOTH, "vga serves gem (NVDI) as well as apj-os");
@@ -691,7 +691,26 @@ static void run_relevance(void)
     CHECK(se_kind("lmc") == SE_K_SWITCH, "lmc is a switch");
     CHECK(se_kind("audio_frames") == SE_K_LIST && se_index("audio_frames", "2048") == 2, "audio_frames ladder");
     CHECK(se_off_value("lmc") && !strcmp(se_off_value("lmc"), "0"), "lmc off is 0");
-    CHECK(se_off_value("blitter") && !strcmp(se_off_value("blitter"), "disabled"), "blitter off word");
+    CHECK(!se_absent_on("blitter"), "no blitter line must follow the machine, not mean on");
+    CHECK(se_known_default("blitter") && !*se_known_default("blitter"), "blitter default is not-set");
+    CHECK(se_absent_on("comp_constjump") && se_absent_on("compnf"), "comp_* are on with no line");
+    CHECK(!se_absent_on("ide") && !se_absent_on("acsi"), "ide/acsi are off with no line");
+    CHECK(se_absent_on("dma_sound") && se_off_value("dma_sound") &&
+          !strcmp(se_off_value("dma_sound"), "disabled"), "dma_sound on by default where it applies");
+    CHECK(se_machine_rule("dma_sound", "st") && se_machine_rule("dma_sound", "megast") &&
+          !se_machine_rule("dma_sound", "ste") && !se_machine_rule("dma_sound", "falcon"),
+          "dma_sound must be STE/Falcon only");
+    CHECK(se_machine_rule("shifter", "st") && !se_machine_rule("shifter", "ste") &&
+          se_machine_rule("shifter", "falcon"), "shifter must be STE only");
+    { const char *d = NULL; int seen = 0;
+      for (int i = 0; se_always(i, &d); i++) {
+          const char *k = se_always(i, NULL);
+          if (!strcmp(k, "stram_cache") || !strcmp(k, "stram_direct"))
+              { CHECK(!strcmp(d, "disabled"), "%s default %s", k, d); seen++; }
+          if (!strcmp(k, "mouse_thresh")) { CHECK(!strcmp(d, "0"), "mouse_thresh %s", d); seen++; }
+          if (!strcmp(k, "mouse_scale"))  { CHECK(!strcmp(d, "1"), "mouse_scale %s", d); seen++; }
+      }
+      CHECK(seen == 4, "the always-written keys are not all there (%d)", seen); }
     CHECK(se_off_value("fpu") == NULL, "fpu absent is off");
     /* developer switches stay in the build when unticked, or their row
      * (shown only while the line exists) would disappear for good */
@@ -831,8 +850,13 @@ static void run_jit_rules(void)
     CHECK(sp_jit_rule(&c, "gem", "cpu_speed") != NULL, "no jit_power = JIT on, cpu_speed offered");
 
     /* the old knobs are no longer offered */
-    CHECK(se_developer("m68k_speed") && se_developer("cpu_clock_multiplier"),
+    CHECK(se_retired("m68k_speed") && se_retired("cpu_clock_multiplier"),
           "m68k_speed / cpu_clock_multiplier still offered");
+    CHECK(sc_load_text(&c, "[gem]\njit_power 0\n") == 0, "parse");
+    CHECK(sp_jit_rule(&c, "gem", "comp_constjump") != NULL &&
+          sp_jit_rule(&c, "gem", "compnf") != NULL, "comp_* offered with the JIT off");
+    CHECK(sc_load_text(&c, "[gem]\njit_power 3\n") == 0, "parse");
+    CHECK(sp_jit_rule(&c, "gem", "comp_constjump") == NULL, "comp_constjump refused with the JIT on");
     CHECK(se_count("cpu_speed") == 2, "cpu_speed has %d choices", se_count("cpu_speed"));
 }
 

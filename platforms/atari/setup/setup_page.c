@@ -585,8 +585,10 @@ static void apply_machine(struct state *st)
 #define DID(...) snprintf(did + strlen(did), sizeof did - strlen(did), __VA_ARGS__)
     for (int i = 0; se_machine_wants(m, i, &key, &val); i++) {
         const char *v = sc_get(&st->cfg, st->sec, key);
+        /* no line: absent-on switches are on, and a missing blitter line
+         * follows the machine - on for every machine that wants it */
         int on = v ? (se_kind(key) == SE_K_LIST ? !list_off(key, v) : sp_row_on(key, v))
-                   : se_off_value(key) != NULL;   /* absent-on (blitter) */
+                   : (se_absent_on(key) || !strcasecmp(key, "blitter"));
         if (on)
             continue;
         if (sc_set(&st->cfg, st->sec, key, val) == 0)
@@ -823,6 +825,10 @@ const char *sp_jit_rule(const struct sc_cfg *c, const char *sec, const char *key
         return "the JIT is off (jit_power 0)";
     if (!strcasecmp(key, "cpu_speed") && !jit_is_off(c, sec))
         return "needs the JIT off (jit_power 0)";
+    /* JIT compiler options: nothing compiles with the JIT off */
+    if ((!strcasecmp(key, "comp_constjump") || !strcasecmp(key, "compnf") ||
+         !strcasecmp(key, "compfpu")) && jit_is_off(c, sec))
+        return "needs the JIT on (jit_power > 0)";
     return NULL;
 }
 
@@ -901,6 +907,23 @@ void sp_shifter_follow(struct sc_cfg *c, const char *sec, const char *key,
     }
 }
 
+/* Before a save: every build gets the lines the file always carries
+ * (stram_cache, stram_direct, mouse_thresh, mouse_scale), with their
+ * default, where it has none. */
+static void fill_always(struct sc_cfg *c)
+{
+    char secs[MAX_BUILDS + 1][SC_SEC_LEN];
+    int ns = sc_sections(c, secs, MAX_BUILDS + 1);
+    for (int s = 0; s < ns; s++) {
+        if (!strcasecmp(secs[s], "psctrl"))
+            continue;
+        const char *d;
+        for (int i = 0; se_always(i, &d); i++)
+            if (!sc_get(c, secs[s], se_always(i, NULL)))
+                sc_set(c, secs[s], se_always(i, NULL), d);
+    }
+}
+
 static void build_rows(struct state *st)
 {
     const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
@@ -916,8 +939,9 @@ static void build_rows(struct state *st)
         if (se_retired(k))
             continue;
         /* developer knobs (addr32, jit ...) stay hidden unless the build
-         * already carries them */
-        if (se_developer(k) && !sc_get(&st->cfg, st->sec, k))
+         * already carries them - or have a default every build shows
+         * (stram_cache, stram_direct) */
+        if (se_developer(k) && !sc_get(&st->cfg, st->sec, k) && !se_known_default(k))
             continue;
         struct row *r = &st->row[st->nrow++];
         r->kind = ROW_KEY;
@@ -925,13 +949,15 @@ static void build_rows(struct state *st)
         r->ord = 0;
         const char *v = sc_get(&st->cfg, st->sec, k);
         /* a switch is the box itself: ticked = in the build AND on */
-        r->ticked = v && (se_kind(k) == SE_K_SWITCH ? sp_row_on(k, v) :
-                          se_kind(k) == SE_K_LIST   ? !list_off(k, v) : 1);
+        r->ticked = v ? (se_kind(k) == SE_K_SWITCH ? sp_row_on(k, v) :
+                         se_kind(k) == SE_K_LIST   ? !list_off(k, v) : 1)
+                      : se_absent_on(k);       /* no line, still on */
         r->blocked = parent_off(st, k);
         r->why = se_env_rule(k, st->sec);
         if (!r->why) r->why = se_cpu_rule(k, cpu);
         if (!r->why) r->why = se_machine_rule(k, machine);
-        if (!r->why && !r->ticked) r->why = sp_jit_rule(&st->cfg, st->sec, k);
+        if (!r->why && (!r->ticked || !strncasecmp(k, "comp", 4)))
+            r->why = sp_jit_rule(&st->cfg, st->sec, k);
     }
     st->row[st->nrow].kind = ROW_SAVE; st->row[st->nrow++].text[0] = '\0';
     st->row[st->nrow].kind = ROW_BOOT; st->row[st->nrow++].text[0] = '\0';
@@ -957,6 +983,16 @@ static const char *row_value(const struct state *st, const struct row *r,
         return v;
     if (v && !(se_kind(k) == SE_K_LIST && list_off(k, v)))
         return sp_row_value(k, v, buf, n);
+    /* no line: what the emulator does then, where that is known */
+    const char *kd = v ? NULL : se_known_default(k);
+    if (kd) {
+        if (se_kind(k) == SE_K_LIST) {
+            int i = se_index_exact(k, kd);
+            if (i >= 0)
+                return se_label(k, i);
+        } else if (se_kind(k) == SE_K_INT)
+            return kd;
+    }
     switch (se_kind(k)) {
     case SE_K_LIST: {
         const char *d = se_tick_value(k);
@@ -1247,7 +1283,10 @@ static void edit_row(struct state *st)
     const char *k = r->text;
     const char *v = sc_get_n(&st->cfg, st->sec, k, r->ord);
     if (se_count(k)) {
-        int at = se_index(k, v ? v : se_tick_value(k));
+        /* no line: start the chooser on what no line means, if known */
+        const char *kd = se_known_default(k);
+        int at = v ? se_index(k, v)
+                   : (kd ? se_index_exact(k, kd) : se_index(k, se_tick_value(k)));
         st->choice = at < 0 ? 0 : at;
         if (choice_is_off(k, st->choice))
             st->choice = se_index(k, se_tick_value(k));
@@ -1709,6 +1748,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     sc_set(&st.cfg, "psctrl", "date", date_mdy ? "mdy" : "dmy");
                 } else if (e.ch == 's' || e.ch == 'S') {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
+                    fill_always(&st.cfg);
                     if (sc_save(&st.cfg, NULL) == 0) {
                         snprintf(st.msg, sizeof st.msg, "saved");
                         st.warned = 0;
@@ -1787,6 +1827,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
             case SI_ENTER:
                 if (st.row[st.sel].kind == ROW_SAVE) {
                     sc_set(&st.cfg, "psctrl", "boot", st.boot);
+                    fill_always(&st.cfg);
                     if (sc_save(&st.cfg, NULL) == 0) {
                         snprintf(st.msg, sizeof st.msg, "saved");
                         st.warned = 0;
@@ -1819,8 +1860,10 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
 
 boot:
     sc_set(&st.cfg, "psctrl", "boot", st.boot);
-    if (st.cfg.dirty)
+    if (st.cfg.dirty) {
+        fill_always(&st.cfg);
         sc_save(&st.cfg, NULL);
+    }
     snprintf(chosen, chosen_len, "%s", st.boot);
     return SP_BOOT;
 }

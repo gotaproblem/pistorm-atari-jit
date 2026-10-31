@@ -119,9 +119,7 @@ extern "C"
     extern volatile uint32_t g_buserr_addr;
 
     /* entry points emulator.c declares */
-    void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
-                                  int m68k_speed, int m68k_speed_set,
-                                  int jit_cache, int jit_cache_set);
+    void jit_cpu_set_perf_options(int jit_cache, int jit_cache_set);
     void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, int enable_addr32, int enable_jit);
     void jit_cpu_reset(void);
     void jit_cpu_execute(void);
@@ -131,10 +129,6 @@ extern "C"
 extern void alloc_cache(void);              // compemu_arm.h
 extern bool check_prefs_changed_comp(bool); // compemu_prefs.cpp
 
-static int perf_cpu_clock_multiplier;
-static int perf_cpu_clock_multiplier_set;
-static int perf_m68k_speed;
-static int perf_m68k_speed_set;
 static int perf_jit_cache;
 static int perf_jit_cache_set;
 
@@ -176,14 +170,8 @@ extern "C" void jit_cpu_set_speed(int khz)
     cfg_cpu_speed_khz = khz > 0 ? khz : 0;
 }
 
-extern "C" void jit_cpu_set_perf_options(int cpu_clock_multiplier, int cpu_clock_multiplier_set,
-                                         int m68k_speed, int m68k_speed_set,
-                                         int jit_cache, int jit_cache_set)
+extern "C" void jit_cpu_set_perf_options(int jit_cache, int jit_cache_set)
 {
-    perf_cpu_clock_multiplier = cpu_clock_multiplier;
-    perf_cpu_clock_multiplier_set = cpu_clock_multiplier_set;
-    perf_m68k_speed = m68k_speed;
-    perf_m68k_speed_set = m68k_speed_set;
     perf_jit_cache = jit_cache;
     perf_jit_cache_set = jit_cache_set;
 }
@@ -196,8 +184,11 @@ extern "C" void jit_cpu_init(int cpu_level, int enable_fpu, int enable_ttram, in
     bool disable_jit = !enable_jit || pistorm_jit_disabled_env();
     const bool disable_fpu = !enable_fpu;
     const int jit_cache = (perf_jit_cache_set && perf_jit_cache > 0) ? perf_jit_cache : 8192;
-    int cpu_clock_multiplier = perf_cpu_clock_multiplier_set ? perf_cpu_clock_multiplier : 0;
-    int m68k_speed = perf_m68k_speed_set ? perf_m68k_speed : -1;
+    /* UAE's speed knobs: max speed, default cycle unit. cpu_speed (the
+     * governor) is the only cfg control now - m68k_speed and
+     * cpu_clock_multiplier are retired keys. */
+    int cpu_clock_multiplier = 0;
+    int m68k_speed = -1;
 
 
     /* cpu_level 0..5 -> 68000/010/020/030/040/060. 68000 is a valid Atari

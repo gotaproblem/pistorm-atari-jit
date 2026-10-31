@@ -55,8 +55,6 @@ typedef enum {
   CONFITEM_HDMI_ONLY,
   CONFITEM_PSVIDEL,
   CONFITEM_FALCON_DSP,
-  CONFITEM_CPU_CLOCK_MULTIPLIER,
-  CONFITEM_M68K_SPEED,
   CONFITEM_JIT_CACHE,
   CONFITEM_NETWORK,
   CONFITEM_NETWORK_BACKEND,
@@ -126,8 +124,6 @@ static const config_switch_def config_switches[] = {
   { "psvidel", CONFITEM_PSVIDEL },
   { "falcon_dsp", CONFITEM_FALCON_DSP },
   { "cpu_speed", CONFITEM_CPU_SPEED },
-  { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
-  { "m68k_speed", CONFITEM_M68K_SPEED },
   { "jit_cache", CONFITEM_JIT_CACHE },
   { "network", CONFITEM_NETWORK },
   { "network_backend", CONFITEM_NETWORK_BACKEND },
@@ -1175,6 +1171,7 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_DMA_SOUND:
         cfg->dma_sound = get_bool_default_true(parse_line + str_pos);
+        cfg->dma_sound_set = true;
         printf ("[CFG] DMA Sound %s\n", cfg->dma_sound ? "enabled" : "disabled");
         break;
 
@@ -1384,22 +1381,6 @@ struct emulator_config *load_config_file_section(char *filename,
         }
         break;
 
-      /* The two UAE knobs cpu_speed replaces. Still honoured so an old
-       * .cfg keeps doing what it did; the setup page and PSCTRL no longer
-       * offer them. */
-      case CONFITEM_CPU_CLOCK_MULTIPLIER:
-        cfg->cpu_clock_multiplier = (int)get_int(parse_line + str_pos);
-        cfg->cpu_clock_multiplier_set = true;
-        printf ("[CFG] cpu_clock_multiplier %d (old key - cpu_speed replaces it)\n",
-                cfg->cpu_clock_multiplier);
-        break;
-
-      case CONFITEM_M68K_SPEED:
-        cfg->m68k_speed = get_signed_int(parse_line + str_pos);
-        cfg->m68k_speed_set = true;
-        printf ("[CFG] m68k_speed %d (old key - cpu_speed replaces it)\n", cfg->m68k_speed);
-        break;
-
       case CONFITEM_JIT_CACHE:
         cfg->jit_cache = get_size_kb(parse_line + str_pos);
         cfg->jit_cache_set = true;
@@ -1587,7 +1568,10 @@ struct emulator_config *load_config_file_section(char *filename,
           break;
         if (!strcasecmp(cur_cmd, "vga_render") ||
             !strcasecmp(cur_cmd, "loopcycles") ||
-            !strcasecmp(cur_cmd, "rtc")) {
+            !strcasecmp(cur_cmd, "rtc") ||
+            /* the two UAE speed knobs cpu_speed replaced */
+            !strcasecmp(cur_cmd, "m68k_speed") ||
+            !strcasecmp(cur_cmd, "cpu_clock_multiplier")) {
           /* Retired: parsed into the config and never read by anything
            * (the last two were marked deprecated years ago). Ignored
            * quietly so an old .cfg still loads. */
