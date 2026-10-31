@@ -27,7 +27,6 @@ typedef enum {
   CONFITEM_CPU_COMPATIBLE,
   CONFITEM_MMU,
   CONFITEM_MONITOR,
-  CONFITEM_JIT,
   CONFITEM_FPU,
   CONFITEM_GRAPHICS_CARD,
   CONFITEM_FPS,
@@ -55,8 +54,6 @@ typedef enum {
   CONFITEM_HDMI_ONLY,
   CONFITEM_PSVIDEL,
   CONFITEM_FALCON_DSP,
-  CONFITEM_CPU_CLOCK_MULTIPLIER,
-  CONFITEM_M68K_SPEED,
   CONFITEM_JIT_CACHE,
   CONFITEM_NETWORK,
   CONFITEM_NETWORK_BACKEND,
@@ -98,7 +95,6 @@ static const config_switch_def config_switches[] = {
   { "cpu_compatible", CONFITEM_CPU_COMPATIBLE },
   { "mmu", CONFITEM_MMU },
   { "monitor", CONFITEM_MONITOR },
-  { "jit", CONFITEM_JIT },
   { "fpu", CONFITEM_FPU },
   { "vga", CONFITEM_GRAPHICS_CARD },
   { "fps", CONFITEM_FPS },
@@ -126,8 +122,6 @@ static const config_switch_def config_switches[] = {
   { "psvidel", CONFITEM_PSVIDEL },
   { "falcon_dsp", CONFITEM_FALCON_DSP },
   { "cpu_speed", CONFITEM_CPU_SPEED },
-  { "cpu_clock_multiplier", CONFITEM_CPU_CLOCK_MULTIPLIER },
-  { "m68k_speed", CONFITEM_M68K_SPEED },
   { "jit_cache", CONFITEM_JIT_CACHE },
   { "network", CONFITEM_NETWORK },
   { "network_backend", CONFITEM_NETWORK_BACKEND },
@@ -436,31 +430,6 @@ unsigned int get_int(char *str) {
   }
 
   return (unsigned int)ret_int;
-}
-
-static int get_signed_int(char *str)
-{
-  while (*str == ' ' || *str == '\t')
-    str++;
-
-  if (*str == '\0')
-    return 0;
-
-  char value[32];
-  memset(value, 0, sizeof(value));
-  size_t n = 0;
-  while (str[n] && str[n] != ' ' && str[n] != '\t' && n + 1 < sizeof(value)) {
-    value[n] = (char)tolower((unsigned char)str[n]);
-    n++;
-  }
-
-  if (strcmp(value, "max") == 0 ||
-      strcmp(value, "fast") == 0 ||
-      strcmp(value, "fastest") == 0 ||
-      strcmp(value, "turbo") == 0)
-    return -1;
-
-  return (int)strtol(str, NULL, 0);
 }
 
 static int get_size_kb(char *str)
@@ -866,11 +835,6 @@ struct emulator_config *load_config_file_section(char *filename,
         cfg->cpu_type = get_m68k_cpu_type(parse_line + str_pos) - 1;
         break;
 
-      case CONFITEM_JIT:
-        cfg->jit = get_bool_default_true(parse_line + str_pos);
-        printf ("[CFG] JIT %s\n", cfg->jit ? "enabled" : "disabled");
-        break;
-
       case CONFITEM_MONITOR:
         {
           /* Forces the MFP GPIP7 monitor-detect bit the guest reads, so
@@ -1175,6 +1139,7 @@ struct emulator_config *load_config_file_section(char *filename,
 
       case CONFITEM_DMA_SOUND:
         cfg->dma_sound = get_bool_default_true(parse_line + str_pos);
+        cfg->dma_sound_set = true;
         printf ("[CFG] DMA Sound %s\n", cfg->dma_sound ? "enabled" : "disabled");
         break;
 
@@ -1384,22 +1349,6 @@ struct emulator_config *load_config_file_section(char *filename,
         }
         break;
 
-      /* The two UAE knobs cpu_speed replaces. Still honoured so an old
-       * .cfg keeps doing what it did; the setup page and PSCTRL no longer
-       * offer them. */
-      case CONFITEM_CPU_CLOCK_MULTIPLIER:
-        cfg->cpu_clock_multiplier = (int)get_int(parse_line + str_pos);
-        cfg->cpu_clock_multiplier_set = true;
-        printf ("[CFG] cpu_clock_multiplier %d (old key - cpu_speed replaces it)\n",
-                cfg->cpu_clock_multiplier);
-        break;
-
-      case CONFITEM_M68K_SPEED:
-        cfg->m68k_speed = get_signed_int(parse_line + str_pos);
-        cfg->m68k_speed_set = true;
-        printf ("[CFG] m68k_speed %d (old key - cpu_speed replaces it)\n", cfg->m68k_speed);
-        break;
-
       case CONFITEM_JIT_CACHE:
         cfg->jit_cache = get_size_kb(parse_line + str_pos);
         cfg->jit_cache_set = true;
@@ -1593,6 +1542,21 @@ struct emulator_config *load_config_file_section(char *filename,
            * quietly so an old .cfg still loads. */
           printf ("[CFG] %s is retired and does nothing - ignored\n", cur_cmd);
           break;
+        }
+        {
+          /* Redundant: another key does the job now. Ignored, loudly, so
+           * the line can be taken out of the file. */
+          static const struct { const char *key, *by; } redundant[] = {
+            { "jit",                  "jit_power (0 = off, 1-6 = on)" },
+            { "m68k_speed",           "cpu_speed" },
+            { "cpu_clock_multiplier", "cpu_speed" },
+          };
+          for (unsigned r = 0; r < sizeof redundant / sizeof redundant[0]; r++)
+            if (!strcasecmp(cur_cmd, redundant[r].key)) {
+              printf ("[CFG] *** `%s` on line %d is redundant - replaced by %s - "
+                      "ignored, remove it ***\n", cur_cmd, cur_line, redundant[r].by);
+              goto skip_line;
+            }
         }
         printf ("[CFG] Unknown config item %s on line %d.\n", cur_cmd, cur_line);
         break;

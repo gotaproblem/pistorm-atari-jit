@@ -38,6 +38,9 @@ const char *sp_value_from_edit(const char *key, const char *typed, char *buf,
  * `did` says what it changed ("" = nothing). Exposed for the harness. */
 struct sc_cfg;
 const char *sp_jit_rule(const struct sc_cfg *c, const char *sec, const char *key);
+/* Before a save: give every build a line for each switch it is missing,
+ * set to its no-line default, and the mouse_thresh / mouse_scale lines */
+void sp_fill_defaults(struct sc_cfg *c);
 void        sp_jit_follow(struct sc_cfg *c, const char *sec, const char *key,
                           char *did, unsigned long n);
 /* after `machine` or `shifter` changed: shifter st on st/megast, ste on ste */

@@ -107,6 +107,7 @@ struct emulator_config {
   HDD_s hdd [8];
   FDD_s fdd;
   bool dma_sound;
+  bool dma_sound_set;   /* a dma_sound line: off only by `dma_sound disabled` */
   bool ym2149;
   bool kbd_usb;        /* "kbd usb": inject USB/Bluetooth input into IKBD */
   bool kbd_grab;       /* grab evdev devices away from the Pi console     */
@@ -129,10 +130,6 @@ struct emulator_config {
   bool hdmi_only;     /* nobody watches the ST's own video output */
   int  cpu_speed_khz;     /* cpu_speed: governed 68000 speed in kHz, 0 = unthrottled.
                             Interpreter only (jit_power 0) */
-  bool cpu_clock_multiplier_set;
-  int cpu_clock_multiplier;
-  bool m68k_speed_set;
-  int m68k_speed;
   bool jit_cache_set;
   int jit_cache;
   bool network_enabled;

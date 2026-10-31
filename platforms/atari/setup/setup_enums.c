@@ -16,9 +16,12 @@ static const char *cpu[]     = { "68000", "68010", "68020", "68030",
 static const char *machine[] = { "st", "ste", "megast", "falcon" };
 /* CONFITEM_SHIFTER: strncasecmp(arg, "ste") decides, so two values */
 static const char *shifter[] = { "st", "ste" };
-/* CONFITEM_BLITTER: "real" = pass-through, else a boolean */
-static const char *blitter[] = { "disabled", "enabled", "real" };
-static const char *blitter_l[]={ "off", "emulated", "real - the board's own chip" };
+/* CONFITEM_BLITTER: "real" = pass-through, else a boolean. No line =
+ * follows the machine (config_file.c blitter_machine_default): off on a
+ * plain ST, emulated on an STE, Mega ST or Falcon. "" = remove the key. */
+static const char *blitter[] = { "", "disabled", "enabled", "real" };
+static const char *blitter_l[]={ "not set - follows the machine",
+                                 "off", "emulated", "real - the board's own chip" };
 /* CONFITEM_MONITOR: forces the GPIP7 monitor-detect bit */
 static const char *monitor[] = { "auto", "mono", "colour" };
 /* the `vga` line is "<card> <driver>". Only the ET4000 has an
@@ -140,17 +143,36 @@ static const struct table tables[] = {
  * these shows its default until it is set, and setting it writes the key.
  */
 static const struct { const char *key, *dflt; } known[] = {
-    { "network",     "disabled" },
-    { "jit_power",   "3"        },
-    { "jit_cache",   "16384"    },
-    { "stram_size",  ""         },   /* "" = not set = flat 4 MB */
-    { "blitter",     "enabled"  },
-    { "dma_sound",   "disabled" },
-    { "acsi",        "disabled" },
-    { "monitor",     "auto"     },
-    { "shifter",     "st"       },
-    { "stbox_tos",   ""         },
+    { "network",      "disabled" },
+    { "jit_power",    "3"        },
+    { "jit_cache",    "8192"     },   /* jit_glue.cpp: 8192 KB with no line */
+    { "stram_size",   ""         },   /* "" = not set = flat 4 MB */
+    { "blitter",      ""         },   /* "" = not set = follows the machine */
+    { "acsi",         "disabled" },
+    { "monitor",      "auto"     },
+    { "shifter",      "st"       },
+    { "stbox_tos",    ""         },
+    { "stram_cache",  "disabled" },
+    { "stram_direct", "disabled" },
+    { "mouse_thresh", "0"        },
+    { "mouse_scale",  "1"        },
 };
+
+/* Typed numbers every build carries in the file, written with their
+ * default on save when a section has no line for them. Every switch is
+ * written the same way - se_default_word(). */
+static const struct { const char *key, *dflt; } always[] = {
+    { "mouse_thresh", "0"        },
+    { "mouse_scale",  "1"        },
+};
+
+const char *se_always(int i, const char **dflt)
+{
+    if (i < 0 || i >= (int)(sizeof always / sizeof always[0]))
+        return NULL;
+    if (dflt) *dflt = always[i].dflt;
+    return always[i].key;
+}
 
 const char *se_known(int i)
 {
@@ -179,8 +201,6 @@ static const struct { const char *key; int env; } env_of[] = {
     /* slow the machine down to ST speed - for ST software, not a desktop */
     { "cpu_compatible", SE_GEM },
     { "cpu_speed",      SE_GEM },
-    { "m68k_speed",     SE_GEM },
-    { "cpu_clock_multiplier", SE_GEM },
     /* vga is NOT here: a GEM build drives the ET4000 through NVDI.
      * native_hdmi is NOT here: it is the ST-screen mirror on HDMI
      * (config_file.c: "the native_hdmi ST-screen mirror"), which a GEM
@@ -197,10 +217,11 @@ static const struct { const char *key; int env; } env_of[] = {
 /* Retired: parsed and read by nothing (the parser ignores them with a
  * note). Never a row, so a leftover line cannot pass for a setting.
  * Developer: real, but tuning/debug knobs - hidden unless Tab. */
-static const char *retired[]   = { "vga_render", "loopcycles", "rtc", "fps" };
+static const char *retired[]   = { "vga_render", "loopcycles", "rtc", "fps",
+                                   /* redundant: cpu_speed / jit_power do it */
+                                   "m68k_speed", "cpu_clock_multiplier", "jit" };
 static const char *developer[] = { "addr32", "stram_cache", "stram_direct",
-                                   "network_debug", "jit",
-                                   "m68k_speed", "cpu_clock_multiplier" };
+                                   "network_debug" };
 
 int se_retired(const char *key)
 {
@@ -315,11 +336,6 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "network_netmask",SE_TAB_NETWORK, SE_K_TEXT,   "255.255.255.0" },
     { "network_debug",  SE_TAB_NETWORK, SE_K_SWITCH, "enabled" },
     /* Tuning - live tunables and developer knobs */
-    { "jit",            SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
-    /* replaced by cpu_speed: developer keys, so a build that still has
-     * one shows it (and can drop it) but none is offered new */
-    { "m68k_speed",     SE_TAB_TUNING,  SE_K_INT,    "-1"      },
-    { "cpu_clock_multiplier", SE_TAB_TUNING, SE_K_INT, "0"     },
     { "stram_cache",    SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "stram_direct",   SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
     { "addr32",         SE_TAB_TUNING,  SE_K_SWITCH, "enabled" },
@@ -413,6 +429,12 @@ static const struct { const char *key; const char *machines; const char *why; } 
     { "acsi",           " st ste megast ", "no ACSI on a Falcon" },
     { "cpu_compatible", " st ste megast ", "not on a Falcon (68030)" },
     { "falcon_stram",   " falcon ",        "Falcon only" },
+    /* the emulator turns DMA sound on for these two only (emulator.c
+     * want_dmasnd); a dma_sound line elsewhere does nothing */
+    { "dma_sound",      " ste falcon ",    "STE/Falcon only" },
+    /* emulator_config_shifter_ste(): the STE video personality exists
+     * on machine ste only - on a Falcon the video is PSVIDEL's */
+    { "shifter",        " ste ",           "STE only" },
 };
 
 static const char *machine_word(const char *machine)
@@ -437,6 +459,10 @@ const char *se_machine_rule(const char *key, const char *machine)
  * `blitter disabled` back on. A `real` blitter line counts as on and is
  * left alone. */
 static const struct { const char *machine, *key, *value; } mwants[] = {
+    /* DMA sound is the STE/Falcon default: a `dma_sound disabled` left
+     * from another machine is switched back on */
+    { "ste",    "dma_sound",  "enabled" },
+    { "falcon", "dma_sound",  "enabled" },
     { "ste",    "blitter",    "enabled" },
     { "megast", "blitter",    "enabled" },
     { "falcon", "blitter",    "enabled" },
@@ -465,22 +491,35 @@ const char *se_machine_min_cpu(const char *machine)
 
 /*
  * Switches the emulator has ON when the line is absent, and the word
- * that turns them off. config_file.c starts from all-zero except jit and
- * blitter; the PSCTRL tunables (psctrl_tunables.c) default lmc and
- * drm_dirtyband to 1 and comp_* to -1 (= the JIT's own default, on).
+ * that turns them off. config_file.c starts from all-zero except jit;
+ * the PSCTRL tunables (psctrl_tunables.c) default lmc and drm_dirtyband
+ * to 1, compfpu to -1 (on), comp_constjump / compnf to -1 = off.
  */
-static const struct { const char *key; const char *off; } absent_on[] = {
-    { "jit",            "disabled" },
-    { "blitter",        "disabled" },
-    { "lmc",            "0" },
-    { "drm_dirtyband",  "0" },
-    { "comp_constjump", "0" },
-    { "compnf",         "0" },
-    { "compfpu",        "0" },
-    /* not an absent-on default: written out so the image lines below it
-     * stay in the file, ignored, until the switch comes back */
-    { "acsi",           "disabled" },
+static const struct { const char *key; const char *off; int on; } absent_on[] = {
+    { "lmc",            "0",        1 },
+    { "drm_dirtyband",  "0",        1 },
+    { "comp_constjump", "0",        0 },   /* off unless given (jit_glue) */
+    { "compnf",         "0",        0 },
+    { "compfpu",        "0",        1 },
+    /* on with no line where it applies at all (machine ste / falcon -
+     * se_machine_rule greys it elsewhere); `dma_sound disabled` turns
+     * it off there (emulator.c want_dmasnd) */
+    { "dma_sound",      "disabled", 1 },
+    /* not absent-on (blitter is not either: no line = follows the
+     * machine, the "" choice). Written out on untick so the image lines
+     * below stay in the file, ignored, until the switch comes back -
+     * and so the file says "ide disabled" rather than nothing */
+    { "acsi",           "disabled", 0 },
+    { "ide",            "disabled", 0 },
 };
+
+int se_absent_on(const char *key)
+{
+    for (unsigned i = 0; i < sizeof absent_on / sizeof absent_on[0]; i++)
+        if (!strcasecmp(key, absent_on[i].key))
+            return absent_on[i].on;
+    return 0;
+}
 
 const char *se_off_value(const char *key)
 {
@@ -511,8 +550,6 @@ static const struct { const char *key; long lo, hi; } irange[] = {
     { "stbox_slice_cyc",  8, 4096 },
     { "blit_timed_ns",    0, 2000 },
     { "ipl_confirm_ns",   0, 1000000 },
-    { "m68k_speed",      -1, 20 },
-    { "cpu_clock_multiplier", 0, 8 },
     { "blit_trace",       0, 1000000 },
     { "network_irq",      1, 7 },
 };
@@ -578,6 +615,14 @@ int se_index(const char *key, const char *val)
     const struct table *t = find(key);
     if (!t || !val)
         return -1;
+    /* a bare key line (`blitter` alone) is what the parser makes of it,
+     * not the "" = not-set choice */
+    if (!*val)
+        for (unsigned a = 0; a < sizeof aliases / sizeof aliases[0]; a++)
+            if (!strcasecmp(key, aliases[a].key) && !*aliases[a].word)
+                for (int i = 0; i < t->n; i++)
+                    if (!strcasecmp(aliases[a].choice, t->list[i]))
+                        return i;
     for (int i = 0; i < t->n; i++)
         if (!strcasecmp(val, t->list[i]))
             return i;
@@ -589,4 +634,38 @@ int se_index(const char *key, const char *val)
                 if (!strcasecmp(aliases[a].choice, t->list[i]))
                     return i;
     return -1;
+}
+
+/* the choice spelled exactly so - no aliases ("" is the not-set choice) */
+int se_index_exact(const char *key, const char *val)
+{
+    const struct table *t = find(key);
+    if (!t || !val)
+        return -1;
+    for (int i = 0; i < t->n; i++)
+        if (!strcasecmp(val, t->list[i]))
+            return i;
+    return -1;
+}
+
+/* The line a switch gets written with when a build has none: what the
+ * emulator does with no line, spelled so the parser reads it back the
+ * same. NULL: not a switch. */
+const char *se_default_word(const char *key, const char *machine)
+{
+    if (se_kind(key) != SE_K_SWITCH || se_retired(key))
+        return NULL;
+    int on = se_absent_on(key);
+    if (!strcasecmp(key, "dma_sound")) {        /* on for STE / Falcon */
+        const char *m = machine_word(machine);
+        on = !strcasecmp(m, "ste") || !strcasecmp(m, "falcon");
+    }
+    const char *t = se_tick_value(key);
+    if (on)
+        return t;
+    if (!strcmp(t, "1"))
+        return "0";
+    if (!strcasecmp(key, "usb"))                /* CONFITEM_USB: "gamepad off" */
+        return "gamepad off";
+    return "disabled";                          /* kbd: not "usb ..." = off */
 }

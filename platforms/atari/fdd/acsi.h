@@ -66,6 +66,9 @@ bool acsi_irq_active(void);
  * target or returns to FDC-selected commands. */
 void acsi_release(void);
 
+/* the DMA chip's FIFO is emptied by a direction toggle ($FF8606 bit 8) */
+void acsi_dma_fifo_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

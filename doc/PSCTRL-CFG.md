@@ -104,7 +104,7 @@ image picker lists.
 |---|---|---|
 | `cpu` | `68000` `68010` `68020` `68030` `68040` `68060` | the CPU the guest sees. 68000/010 are 24-bit and cannot have TT-RAM or the JIT; 68030 is the Falcon/TT baseline; 68040 is the fastest with the JIT. No key: a 68000 |
 | `fpu` | boolean | an FPU, where the CPU can have one (68020 and up) |
-| `jit` | boolean, default on | the JIT compiler. Off means the interpreter: several times slower, but exact |
+| `jit` | - | redundant: `jit_power` does it (0 = the interpreter, 1-6 = the JIT). Ignored with a console line saying so |
 | `jit_cache` | size, default 8192 (KB) | the translation cache. 16384 for big applications (APJ-OS ships with it). Means nothing with the JIT off: the setup page removes it when `jit_power` is unticked or set to 0 |
 | `mmu` | boolean | full MMU emulation, model from the `cpu` line (68030/040/060). Needed by guests that program real translation tables: Basilisk II, MagiCMac, MiNT memory protection. Interpreter only - forces the JIT off, expect half interpreter speed. A 68000/010/020 has no MMU and the key is ignored with a warning. Env: `PISTORM_MMU=1/0` overrides, `PISTORM_MMU_DEBUG=1` traces |
 | `cpu_compatible` | boolean | the prefetch-accurate 68000 core, whose bus-error frames carry the exact faulting PC and access address. For software that virtualises hardware through bus-error traps (Spectre GCR's Mac world-switch). Only honoured with `cpu 68000` and the JIT off. The setup page sets `jit_power 0` (dropping `jit_cache`) and `cpu_speed 8mhz` when it is ticked, and drops it again if the JIT is turned back on. Env: `PISTORM_CPU_COMPAT=1` |
@@ -113,10 +113,10 @@ image picker lists.
 | `addr32` | boolean | a 32-bit address bus without TT-RAM. Rarely needed on its own |
 | `stram_size` | `512K` `1M` `2M` `2560` `4M` | the ST-RAM the guest sees. When set, the emulator probes the board's real DRAM and configures the largest real ST setup fitting both - `4M` on a 1 MB board gives 1 MB (a 4 MB model on a small board puts the screen outside physical DRAM and scrambles the native display), `1M` on a 4 MB board deliberately presents a 1 MB machine. No key: the flat 4 MB model with no probing. MiNT gets its TT-RAM either way |
 | `falcon_stram` | `14M` | `machine falcon` only: a 14 MB Falcon. `$400000`-`$DFFFFF` becomes ST-RAM backed by Pi memory (Mxalloc mode 0 finds it). Falcon TOS 4.0x sizes it from `$FF8006` and puts its screen at the top, so the display must be PSVIDEL/fVDI on HDMI - the real Shifter, and real FDC/ACSI DMA on the board, only reach the first 4 MB. Ignored with `vga` (the ET4000 windows are at `$A00000`-`$DFFFFF`) or `stram_size`. EmuTOS (ST builds) still sizes 4 MB. For programs built for 14 MB Falcons (BadMood 2.01 `base030.14m`) |
-| `stram_cache` | boolean | keep a copy of ST-RAM in the Pi and satisfy the CPU's reads from it, writing through to the board only what the real hardware must see (low memory, the screen). Much faster. Off unless given |
-| `stram_direct` | boolean | let the JIT read and write the ST-RAM copy inline. Faster again. Experimental: stupid fast for some software, breaks some |
+| `stram_cache` | boolean | keep a copy of ST-RAM in the Pi and satisfy the CPU's reads from it, writing through to the board only what the real hardware must see (low memory, the screen). Much faster. Off unless given; the setup page writes `stram_cache disabled` into every build that has no line |
+| `stram_direct` | boolean | let the JIT read and write the ST-RAM copy inline. Faster again. Experimental: stupid fast for some software, breaks some. Off unless given; the setup page writes `stram_direct disabled` into every build that has no line |
 | `cpu_speed` | `8mhz` `16mhz` | run the interpreter at a real 68000 clock - for games and demos timed to the CPU. There is no 32mhz: a Pi 4's interpreter tops out near 20 MHz (measured with the governor asking for 32), so no key is already about as fast as it gets. JIT off only (`jit_power 0`): with the JIT on it is ignored with a warning. No key: as fast as the Pi goes. If the interpreter cannot keep up the emulator says so once (`[GOV] reaching N kHz of the M kHz target`). The setup page adds `cpu_speed 8mhz` when `cpu_compatible` is ticked. `PISTORM_GOV_KHZ=n` overrides the rate |
-| `cpu_clock_multiplier`, `m68k_speed` | - | the UAE knobs `cpu_speed` replaces. Still read, so an older file keeps working, but no longer offered by the setup page or PSCTRL |
+| `cpu_clock_multiplier`, `m68k_speed` | - | redundant: the UAE knobs `cpu_speed` replaced. Ignored with a console line saying so, never a row |
 
 ## Video
 
@@ -140,7 +140,7 @@ All HDMI sound shares one audio device; any one of these brings it up.
 | key | values | |
 |---|---|---|
 | `ym2149` | boolean | the PSG on HDMI: shadows the register writes the real chip still gets, so chip music, key clicks and effects play on HDMI too. Any machine |
-| `dma_sound` | boolean | the STE DMA sound on HDMI. STE machines. Tuned for MOD and MP3 playback; system sounds may lag |
+| `dma_sound` | boolean | the STE DMA sound on HDMI. `machine ste` and `falcon` only: on there with no line, `dma_sound disabled` turns it off. Ignored on any other machine. Tuned for MOD and MP3 playback; system sounds may lag |
 | `falcon_dsp` | boolean | the Falcon's DSP56001, host port, SSI, sound matrix, 16-bit sound DMA and CODEC, sound on HDMI. Armed by the same `PSVIDEL.PRG`. See `platforms/atari/falcon/README.md`. Env: `PISTORM_DSP_TURBO`, `PISTORM_FALCON_VBLSYNC`, `PISTORM_FALCON_STATS` |
 
 ## Input
