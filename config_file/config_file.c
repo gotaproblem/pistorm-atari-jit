@@ -313,6 +313,12 @@ bool emulator_config_native_hdmi_enabled(void)
   return current_config ? current_config->native_hdmi : true;
 }
 
+bool emulator_config_native_hdmi_exact(void)
+{
+  return emulator_config_native_hdmi_enabled() &&
+         !(current_config && current_config->native_hdmi_snapshot);
+}
+
 /* hdmi_only: the HDMI mirror is the only display anyone looks at, so the
  * real Shifter's picture does not matter - pistorm_natmem.cpp then sends
  * no screen writes and no shadow-frame-buffer copies over the bus. */
@@ -1303,9 +1309,23 @@ struct emulator_config *load_config_file_section(char *filename,
         break;
 
       case CONFITEM_NATIVE_HDMI:
-        cfg->native_hdmi = get_bool_default_true(parse_line + str_pos);
-        printf ("[CFG] Native HDMI %s\n", cfg->native_hdmi ? "enabled" : "disabled");
+      {
+        /* native_hdmi true|exact  - beam-exact mirror (borders, overscan,
+         *                           raster splits, race-the-beam drawing)
+         * native_hdmi snapshot    - the old once-a-VBL copy
+         * native_hdmi false       - off */
+        const char *arg = parse_line + str_pos;
+        while (*arg == ' ' || *arg == '\t')
+          arg++;
+        cfg->native_hdmi_snapshot = (strncasecmp(arg, "snap", 4) == 0);
+        if (cfg->native_hdmi_snapshot || strncasecmp(arg, "exact", 5) == 0)
+          cfg->native_hdmi = true;
+        else
+          cfg->native_hdmi = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] Native HDMI %s\n", !cfg->native_hdmi ? "disabled" :
+                cfg->native_hdmi_snapshot ? "enabled (VBL snapshot)" : "enabled (beam-exact)");
         break;
+      }
 
       case CONFITEM_HDMI_ONLY:
         cfg->hdmi_only = get_bool_default_true(parse_line + str_pos);

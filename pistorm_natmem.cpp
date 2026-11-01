@@ -304,6 +304,7 @@ extern rtg_s rtg;
 extern volatile uint16_t st_palette[16];
 extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 #include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
+#include "platforms/atari/video/shifter_mirror.h"   /* exact HDMI mirror */
 
 #define STRAM_LOW_WRITE_THROUGH_SIZE 0x000005B4u
 #define STRAM_LOW_CONTROL_BANK_SIZE 0x00010000u
@@ -2644,6 +2645,35 @@ static void io_bput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); m68k_write_m
  * around each new writing pc goes to stderr once. */
 extern "C" int pistorm_tl_enabled(void);
 extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
+/* Exact HDMI mirror calibration (shifter_mirror.c, via the governor):
+ * the real video counter and the tick its low byte was read at. The mid
+ * byte is read again after: if it moved, the low byte wrapped between the
+ * reads and the value is torn - the caller tries again on its next poll. */
+extern "C" int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
+{
+    const uint8_t save_fc = fc;
+    fc = 0x5;
+    const uae_u32 hi  = ps_read_8(0x00FF8205u);
+    const uae_u32 mid = ps_read_8(0x00FF8207u);
+    const uint64_t t0 = shm_ticks();
+    const uae_u32 lo  = ps_read_8(0x00FF8209u);
+    const uint64_t t1 = shm_ticks();
+    const uae_u32 mid2 = ps_read_8(0x00FF8207u);
+    fc = save_fc;
+    g_buserr = 0;
+    if (mid2 != mid)
+        return 0;
+    uint32_t c = (hi << 16) | (mid << 8) | lo;
+    /* the real Shifter may be fetching from the screen shadow (STRAM
+     * SHADOW above): give the counter in the guest's own addresses */
+    if (stram_shadow_on() && g_shadow_src &&
+        c - g_shadow_base < STRAM_SHADOW_SIZE)
+        c = c - g_shadow_base + g_shadow_src;
+    *cnt = c;
+    *t = t0 + (t1 - t0) / 2u;
+    return 1;
+}
+
 static void tl_video_write(uaecptr a, uae_u32 v, int size)
 {
     uae_u32 val;
@@ -4117,6 +4147,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
             st_video_snoop32(a, (uint32_t)v);
             psvidel_video_snoop(a, (uint32_t)v, 4);
             hw_bus_lput(a, v);
+            shm_io_write(a, (uint32_t)v, 4);   /* stamped as it landed */
             stram_shadow_video_after(a, 4);
             break;
         case HW_PAGE_FDD_DMA:
@@ -4223,6 +4254,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
             if (__builtin_expect(beam_timed_reg(a), 0))
                 pistorm_gov_sync();
             hw_bus_wput(a, v);
+            shm_io_write(a, (uint32_t)v, 2);   /* stamped as it landed */
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 2);
             stram_shadow_video_after(a, 2);
@@ -4333,6 +4365,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
             if (__builtin_expect(beam_timed_reg(a), 0))
                 pistorm_gov_sync();
             hw_bus_bput(a, v);
+            shm_io_write(a, (uint32_t)v, 1);   /* stamped as it landed */
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 1);
             stram_shadow_video_after(a, 1);
@@ -4532,10 +4565,27 @@ static uae_u32 sr_lget(uaecptr a){ fc_data(); a &= 0x00FFFFFF; uae_u32 v=ps_read
 static uae_u32 sr_wget(uaecptr a){ fc_data(); a &= 0x00FFFFFF; uae_u32 v=ps_read_16(a); pistorm_buserr(a,0,true,sz_long); return v; }
 static uae_u32 sr_bget(uaecptr a){ fc_data(); a &= 0x00FFFFFF; uae_u32 v=ps_read_8(a); pistorm_buserr(a,0,true,sz_long); return v;}
 */
+/* Exact HDMI mirror: a write into the screen being shown is logged with
+ * the value it replaces (shifter_mirror.c), before the store. One range
+ * test per write when the mirror is off (all lengths 0). */
+static inline void shm_ram_w(uaecptr a, int sz, uae_u32 v)
+{
+    if (__builtin_expect(shm_ram_hit(a) | (sz == 4 && shm_ram_hit(a + 2)), 0)) {
+        if (sz == 4) {
+            shm_log_ram(a, 2, do_get_mem_word((uae_u16 *)sr_ptr(a)), v >> 16);
+            shm_log_ram(a + 2, 2, do_get_mem_word((uae_u16 *)sr_ptr(a + 2)), v & 0xFFFFu);
+        } else if (sz == 2)
+            shm_log_ram(a, 2, do_get_mem_word((uae_u16 *)sr_ptr(a)), v & 0xFFFFu);
+        else
+            shm_log_ram(a, 1, *sr_ptr(a), v & 0xFFu);
+    }
+}
+
 static void sr_lput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
     g_buserr = 0;
+    shm_ram_w(a, 4, v);
     if (__builtin_expect(g_stram_fold_hook, 0)) {
         do_put_mem_word((uae_u16 *)sr_ptr(a),     (uae_u16)(v >> 16));
         do_put_mem_word((uae_u16 *)sr_ptr(a + 2), (uae_u16)v);
@@ -4553,6 +4603,7 @@ static void sr_wput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
     g_buserr = 0;
+    shm_ram_w(a, 2, v);
     do_put_mem_word((uae_u16 *)sr_ptr(a), (uae_u16)v);
     stram_snoop_lowram(a, 2);
     if (stram_needs_bus_write(a, 2)) {
@@ -4566,6 +4617,7 @@ static void sr_bput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
     g_buserr = 0;
+    shm_ram_w(a, 1, v);
     *sr_ptr(a) = (uae_u8)v;
     stram_snoop_lowram(a, 1);
     if (stram_needs_bus_write(a, 1)) {
@@ -4608,6 +4660,8 @@ extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
     a &= 0x00FFFFFEu;
     if (a >= g_stram_top)
         return;                       /* the 24-bit blitter only writes ST-RAM */
+    if (__builtin_expect(shm_ram_hit(a), 0))
+        shm_log_ram(a, 2, do_get_mem_word((uae_u16 *)(natmem_offset + a)), v);
     do_put_mem_word((uae_u16 *)(natmem_offset + a), v);
     stram_snoop_lowram(a, 2);
     if (stram_needs_bus_write(a, 2))

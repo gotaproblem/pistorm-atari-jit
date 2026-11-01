@@ -54,6 +54,7 @@ int drmpres_set_source(uint32_t w, uint32_t h);
  * before each drmpres_set_source(); it is read at every flip. */
 #define DRMPRES_SRC_OTHER 0
 #define DRMPRES_SRC_FVDI  1
+#define DRMPRES_SRC_ST    2   /* exact ST mirror: shown as drmpres_set_shape() */
 void drmpres_set_source_kind(int kind);
 
 /* How an fVDI screen is scaled onto HDMI - the live PSCTRL / .cfg tunable
@@ -65,6 +66,12 @@ void drmpres_set_source_kind(int kind);
 #define PST_FVDI_SCALE_STRETCH   2   /* fill the display, ignore aspect */
 #define PST_FVDI_SCALE_FIT_SHARP 3   /* fill keeping aspect, nearest-neighbour */
 extern volatile int pst_fvdi_scale;
+
+/* DRMPRES_SRC_ST: the source is w x h buffer pixels but is one picture of
+ * shape_w x shape_h square pixels (the exact ST mirror draws on a half-cycle
+ * grid, 832 wide for a 416-pixel-wide picture). Scaling is decided on the
+ * shape. */
+void drmpres_set_shape(uint32_t shape_w, uint32_t shape_h);
 
 uint8_t *drmpres_backbuffer(void);   /* current render target (native size) */
 uint32_t drmpres_src_pitch(void);    /* bytes per scanline of the source     */

@@ -5074,12 +5074,15 @@ static void pistorm_bad_opcode_dump(int nr)
 
 extern "C" int pistorm_tl_enabled(void);       /* emulator.c */
 extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
+#include "platforms/atari/video/shifter_mirror.h"
 
 void REGPARAM2 Exception(int nr)
 {
 	/* level-4 autovector taken: emulator.c ipl_task, VBL PRE-EMPTED */
-	if (nr == 28)
+	if (nr == 28) {
 		pistorm_vbl_taken++;
+		shm_cpu_vbl_taken();       /* exact HDMI mirror: screen latched */
+	}
 	/* PISTORM_IPL_TIMELINE (emulator.c): every interrupt taken, with the
 	 * vector the IACK produced and the SR mask it was taken at */
 	if (nr >= 24 && nr <= 31 && pistorm_tl_enabled())

@@ -55,6 +55,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/avrecord.c \
          platforms/atari/video/vidplane.c \
          platforms/atari/video/vidplay.c \
+         platforms/atari/video/shifter_mirror.c \
          platforms/atari/kbd_usb.c \
          platforms/atari/joy_usb.c \
          platforms/atari/web/psweb_client.c \

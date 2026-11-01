@@ -405,6 +405,7 @@ static inline int64_t gov_now_ns(void)
 extern int pistorm_irq_deliverable(void);
 extern int pistorm_handler_running(void);
 #include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
+#include "platforms/atari/video/shifter_mirror.h"   /* exact HDMI mirror */
 
 /* Wait until CLOCK_MONOTONIC reaches `until` (ns): sleep most of it, spin
  * the last GOV_SPIN_NS. Returns the time on leaving.
@@ -494,6 +495,13 @@ static void pistorm_governor(int sync)
 	}
 	if (!sync && currcycle < gov_next)
 		return;
+
+	/* Exact HDMI mirror: once a frame, mid-display, read the real video
+	 * counter so the mirror knows the beam to the cycle (shifter_mirror.c).
+	 * Never inside an interrupt handler - a raster handler gets no extra
+	 * bus time from us. One test of a flag when the mirror is off. */
+	if (__builtin_expect(shm_on, 0) && !pistorm_handler_running())
+		shm_cal_poll();
 
 	int64_t now = gov_now_ns();
 
