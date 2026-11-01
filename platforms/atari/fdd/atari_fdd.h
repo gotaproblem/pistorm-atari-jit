@@ -232,6 +232,11 @@ void     fdd_set_write_protect(int drive, bool wp);
  * may be NULL. */
 int      fdd_query(int drive, char *path, int pathlen, int *wp, int *busy);
 
+/* 1 when the WD1772 is emulated (the cfg has an `fdd` line), 0 when the
+ * DMA port only passes through to a real drive / Gotek - then a host-side
+ * insert would land in a drive nothing reads. */
+int      fdd_emulated(void);
+
 /* Arm the write-protect toggle TOS reads as a media change. Call after a
  * host-side insert or eject (the guest's own eject already sets it). */
 void     fdd_pulse_media(int drive);

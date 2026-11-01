@@ -497,6 +497,13 @@ static void apply_ipl(void)   { psctrl_tunables_ipl_recalc(); }
 
 extern "C" int  fdd_query(int drive, char *path, int pathlen, int *wp, int *busy);
 extern "C" void fdd_pulse_media(int drive);
+extern "C" int  fdd_emulated(void);
+
+/* What a floppy field reads when the drive is a real one (no `fdd` line:
+ * passthrough to the ST's own drive / Gotek). PSFDD.ACC and PSCTRL show it
+ * as-is; inserts, ejects and swaps are refused rather than "succeeding"
+ * into a drive nothing reads. */
+#define FDD_NOT_EMULATED "(real drive - not emulated)"
 
 static char g_fddir[PATH_MAX] = "";
 
@@ -922,6 +929,8 @@ static const char *item_str(const struct ps_item *it)
   if (!strcmp(it->name, "floppy_a") || !strcmp(it->name, "floppy_b")) {
     int drive = it->name[7] == 'b';
 
+    if (!fdd_emulated())
+      return FDD_NOT_EMULATED;
     buf[0] = '\0';
     if (fdd_query(drive, buf, (int)sizeof(buf), &wp, &busy) <= 0)
       return "(empty)";
@@ -967,6 +976,8 @@ static int item_setstr(const struct ps_item *it, const char *s)
     char path[PATH_MAX];
     int wp = 0, busy = 0;
 
+    if (!fdd_emulated())
+      return PS_R_REJECT;
     fdd_query(drive, NULL, 0, &wp, &busy);
     if (busy)
       return PS_R_BUSY;
@@ -1011,6 +1022,8 @@ static int do_action(const struct ps_item *it, int arg)
     int drive = it->name[13] == 'b';
     int wp = 0, busy = 0;
 
+    if (!fdd_emulated())
+      return PS_R_REJECT;
     fdd_query(drive, NULL, 0, &wp, &busy);
     if (busy)
       return PS_R_BUSY;
@@ -1023,6 +1036,8 @@ static int do_action(const struct ps_item *it, int arg)
     char a[PATH_MAX], b[PATH_MAX];
     int wpa = 0, wpb = 0, busy = 0, ha, hb;
 
+    if (!fdd_emulated())
+      return PS_R_REJECT;
     fdd_query(0, NULL, 0, &wpa, &busy);
     if (busy)
       return PS_R_BUSY;
