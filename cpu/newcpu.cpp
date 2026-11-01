@@ -5467,8 +5467,11 @@ extern "C" int pistorm_hbl_handler_is_rte(void)
 	return 0;
 }
 
+#include "platforms/atari/raster_trace.h"
 static void do_interrupt (int nr)
 {
+	rt_irq(nr);                                 /* PISTORM_RASTER_TRACE */
+
 	extern uae_u16 pistorm_iack_vector;
 	extern void intlev_ack(uint8_t nr);
 	extern volatile uint8_t g_irq;
