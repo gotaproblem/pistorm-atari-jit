@@ -127,6 +127,8 @@ struct emulator_config {
   uint32_t stram_size;   /* PHYSICAL ST-RAM bytes (0 = flat 4MB model) */
   uint32_t falcon_stram; /* Falcon ST-RAM bytes, 14MB = Pi-backed above 4MB (0 = 4MB) */
   bool native_hdmi;
+  bool native_hdmi_snapshot; /* native_hdmi snapshot: the old once-a-VBL copy
+                              * instead of the beam-exact mirror (shifter_mirror.c) */
   bool hdmi_only;     /* nobody watches the ST's own video output */
   int  cpu_speed_khz;     /* cpu_speed: governed 68000 speed in kHz, 0 = unthrottled.
                             Interpreter only (jit_power 0) */
@@ -180,6 +182,7 @@ int  emulator_config_blitter_mode(void);  /* 0=off 1=real 2=emulated */
 bool emulator_config_stram_cache_enabled(void);
 bool emulator_config_stram_direct_enabled(void);
 bool emulator_config_native_hdmi_enabled(void);
+bool emulator_config_native_hdmi_exact(void);
 bool emulator_config_hdmi_only(void);
 bool emulator_config_psvidel_enabled(void);
 bool emulator_config_falcon_dsp_enabled(void);

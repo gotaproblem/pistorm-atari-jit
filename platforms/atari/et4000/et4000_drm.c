@@ -124,6 +124,14 @@ void drmpres_set_source_kind(int kind)
     g_src_kind = kind;
 }
 
+static uint32_t g_shape_w, g_shape_h;
+
+void drmpres_set_shape(uint32_t shape_w, uint32_t shape_h)
+{
+    g_shape_w = shape_w;
+    g_shape_h = shape_h;
+}
+
 static void compute_dst(void)
 {
     static int said = 0;
@@ -146,6 +154,13 @@ static void compute_dst(void)
         }
     }
     g_filt_want = 0;
+    /* exact ST mirror: scale the picture's shape, not the buffer (the plane
+     * then maps 832 half-cycle columns onto 3 x 416 output pixels: every
+     * low-res pixel the same width, nearest-neighbour) */
+    if (g_src_kind == DRMPRES_SRC_ST && g_shape_w && g_shape_h) {
+        sw = (int)g_shape_w;
+        sh = (int)g_shape_h;
+    }
     if (mw <= 0 || mh <= 0 || sw <= 0 || sh <= 0) {
         g_dst_x = g_dst_y = 0; g_dst_w = mw; g_dst_h = mh;
         return;

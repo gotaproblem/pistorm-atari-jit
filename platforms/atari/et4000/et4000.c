@@ -39,6 +39,7 @@
 #include "../video/vidplay.h"
 #include "../stbox/stbox.h"      /* ST Box overlay: screendump/recorder blend */
 #include "../psvidel/psvidel.h"
+#include "../video/shifter_mirror.h"   /* beam-exact ST mirror */
 #include "../../../config_file/config_file.h"
 
 #include <stdio.h>
@@ -2637,7 +2638,7 @@ static inline uint64_t pal_tick_hz(void)
 /* CPU thread, every $FF8240-$FF825E word the guest writes */
 void st_palette_log(unsigned idx, uint16_t val)
 {
-    if (idx > 15)
+    if (idx > 15 || shm_on)           /* the exact mirror keeps its own log */
         return;
     uint32_t w = g_pev_w;
     if (w - __atomic_load_n(&g_pev_r, __ATOMIC_ACQUIRE) >= PAL_RING) {
@@ -2863,6 +2864,14 @@ void et4000_native_vbl_snapshot(void)
     extern bool emulator_config_shifter_ste(void);
 
     __atomic_add_fetch(&g_vbl_seq, 1u, __ATOMIC_RELEASE);  /* render pacing */
+
+    /* Beam-exact mirror (cfg native_hdmi true): one timestamp here, the
+     * rest on the render thread - no palette timeline, no screen copy on
+     * this core. */
+    if (shm_on) {
+        shm_vbl_sighting();
+        return;
+    }
 
     /* always drain the palette log, even when the mirror is off */
     const pal_tl_t *tl_prev = NULL;
@@ -3252,6 +3261,8 @@ static bool blit_psvidel(ET4000State *s, bool *updated)
  * Render to chosen frame rate
  * Need to read Atari env variables to decide this
  */
+static const char *g_last_source = "none";   /* what last drew the screen */
+
 void *render_frame(void *vptr)
 {
     extern rtg_s rtg;
@@ -3338,6 +3349,35 @@ void *render_frame(void *vptr)
             }
         }
 
+        /* Beam-exact mirror: run HDMI at the ST's own frame rate (50 Hz
+         * PAL, 60 Hz NTSC), so every Atari frame is shown exactly once -
+         * a 50 Hz game on a 60 Hz panel repeats every fifth frame and
+         * smooth scrolling judders. Decided on the measured VBL rate held
+         * for 2 s, never on a sync register write (overscan code flips
+         * $FF820A many times a frame). Put back when another source takes
+         * the screen. PISTORM_SHM_MODESET=0 leaves the refresh alone. */
+        if (shm_on && g_drm_mode && !follow_guest_hz)
+        {
+            static int cand, held, applied, modeset = -1;
+            if (modeset < 0) {
+                const char *e = getenv("PISTORM_SHM_MODESET");
+                modeset = !(e && *e == '0');
+            }
+            int hz = strcmp(g_last_source, "st") == 0 ? shm_locked_hz() : 0;
+            if (hz == 71)
+                hz = 0;                        /* mono: no 71 Hz HDMI mode */
+            if (hz != cand) { cand = hz; held = 0; }
+            else if (held < 1000) held++;
+            if (modeset && held == 100 && cand != applied) {
+                if (cand) {
+                    if (drmpres_match_refresh((double)cand) > 0)
+                        printf("[DISPLAY] HDMI refresh follows the ST: %d Hz\n", cand);
+                } else
+                    drmpres_restore_refresh();
+                applied = cand;
+            }
+        }
+
         gettimeofday(&start, NULL);
 
         _VSYNC = 0;
@@ -3411,12 +3451,39 @@ void *render_frame(void *vptr)
                      rtg.vram_base + 32000u <= 0xE00000u)  /* one ST screen; TOS 4.04 at
                                                          * 14MB puts it at $DF8200 */
             {
-                g_sdl_tex_has_frame = 0;
-                g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
-                g_src_force_full = 0;   /* this path always draws it all */
+                /* Beam-exact mirror (shifter_mirror.c): the frame just
+                 * shown, rebuilt line by line with borders. 0 = nothing
+                 * new yet (the screen keeps the last one); -1 = no frame
+                 * lock yet, draw the old way meanwhile. */
+                int shr = -1;
+                {
+                    static int shm_tried;
+                    if (!shm_tried && rtg.natmem && emulator_config_native_hdmi_exact()) {
+                        extern bool emulator_config_shifter_ste(void);
+                        shm_tried = 1;
+                        shm_init(rtg.natmem, emulator_config_shifter_ste() ? 1 : 0);
+                    }
+                }
+                if (shm_on) {
+                    uint32_t fw, fh, shw, shh;
+                    shr = shm_render(g_logical + ET4K_ROW_PAD, ET4K_STAGE_PITCH,
+                                     &fw, &fh, &shw, &shh);
+                    if (shr == 1) {
+                        g_logical_kind = DRMPRES_SRC_ST;
+                        drmpres_set_shape(shw, shh);
+                        sdl_set_logical(g_et4000, fw, fh, shw, shh);
+                        g_logical_kind = DRMPRES_SRC_OTHER;
+                    }
+                }
+                if (shr != 0) {
+                    g_sdl_tex_has_frame = 0;
+                    g_fvdi_up_partial = 0;  /* non-fvdi source: full upload */
+                    g_src_force_full = 0;   /* this path always draws it all */
+                    rendered = true;
+                }
                 /* the frame as it stood at the last real VBL (see ST
                  * NATIVE SNAPSHOT); the live read only until the first */
-                if (!blit_st_native_snapshot(g_et4000))
+                if (shr < 0 && !blit_st_native_snapshot(g_et4000))
                 blit_st_native(g_et4000,
                                st_native_frame_source(rtg.vram_base, rtg.natmem + rtg.vram_base),
                                rtg.hw_rez);  /* the Shifter's ACTUAL mode ($FF8260
@@ -3426,7 +3493,6 @@ void *render_frame(void *vptr)
                                               * mono boot then rendered as colour
                                               * garbage. See rtg_s in et4000.h. */
                 render_source = "st";
-                rendered = true;
                 source_active = true;
             }
 
@@ -3547,6 +3613,8 @@ void *render_frame(void *vptr)
            // usleep((useconds_t)FRAME_RATE);
         }
 #endif
+        if (strcmp(render_source, "none") != 0)
+            g_last_source = render_source;
         /* frame counter - currently unused */
         frames++;
         pistorm_vga_bank_profile_poll();
