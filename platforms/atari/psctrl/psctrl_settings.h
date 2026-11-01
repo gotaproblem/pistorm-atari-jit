@@ -41,6 +41,13 @@ enum psctrl_set_subop {
   PSCTRL_SAVE     = 7,   /* p0 which (0 = .cfg)     -> 0 ok, -1 failed    */
   PSCTRL_SETSTR   = 8,   /* p0 idx, p1 ptr          -> PS_R_*             */
   PSCTRL_ACTION   = 9,   /* p0 idx, p1 arg          -> PS_R_* or a value  */
+  /* PSCTRL_LIST which = PS_LIST_DIR (1): a host folder for PSFDD, with
+   * the REAL (long) names TOS cannot show.
+   *   i = -1, p2 = path  rescan: GEMDOS (Z:\) or host (/home/...) folder
+   *                      -> count, or -1 if it cannot be read. Folders come
+   *                      first, with a trailing '/', then .st/.msa/.img
+   *   i = -2, p2 buf, p3 len  -> the folder's host path (for the insert)
+   *   i >= 0, p2 buf, p3 len  -> entry i                                  */
   PSCTRL_LIST     = 10,  /* p0 which, p1 i, p2 buf, p3 len -> len; i<0 =
                           * rescan and return the count                   */
   PSCTRL_SETAPI   = 11,  /*                         -> settings API version */
