@@ -23,6 +23,7 @@
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -217,6 +218,20 @@ static off_t xlate_block(struct ide_taskfile *t)
   lba += (d->header_present) ? 2 : 0;
 
   return lba * 512;   /* return byte offset so d->offset is always in bytes */
+}
+
+/* Is any of `count` sectors from byte `offset` past the end of the image?
+ * lseek() past the end of a file succeeds, so without this a read there
+ * offered DRQ and failed only when the data was fetched (status $58, then
+ * a generic error), and a write there quietly made the image file bigger.
+ * A real drive refuses at once: ERR, error ID-not-found, no DRQ.
+ * (tools/regress ide_range, 1 Nov 2026 - the Pi read $58, Hatari $41). */
+static int beyond_end(struct ide_drive *d, off_t offset, int count)
+{
+  struct stat st;
+  if (offset < 0 || fstat(d->fd, &st) != 0)
+    return 1;
+  return offset + (off_t)count * 512 > st.st_size;
 }
 
 /* Indicate the drive is ready. Real idle drives report DRDY|DSC (0x50);
@@ -421,7 +436,8 @@ static void cmd_readsectors_complete(struct ide_taskfile *tf)
   /* 0 = 256 sectors */
   d->length = tf->count ? tf->count : 256;
   /* fprintf(stderr, "READ %d SECTORS @ %ld\n", d->length, d->offset); */
-  if (d->offset == -1 ||  lseek(d->fd, d->offset, SEEK_SET) == -1) {
+  if (d->offset == -1 || beyond_end(d, d->offset, d->length) ||
+      lseek(d->fd, d->offset, SEEK_SET) == -1) {
     tf->status |= ST_ERR;
     tf->status &= ~ST_DSC;
     tf->error |= ERR_IDNF;
@@ -444,7 +460,8 @@ static void cmd_verifysectors_complete(struct ide_taskfile *tf)
   d->offset = xlate_block(tf);
   /* 0 = 256 sectors */
   d->length = tf->count ? tf->count : 256;
-  if (d->offset == -1 || lseek(d->fd, d->offset + (d->length - 1) * 512, SEEK_SET) == -1) {
+  if (d->offset == -1 || beyond_end(d, d->offset, d->length) ||
+      lseek(d->fd, d->offset + (d->length - 1) * 512, SEEK_SET) == -1) {
     tf->status &= ~ST_DSC;
     tf->status |= ST_ERR;
     tf->error |= ERR_IDNF;
@@ -475,9 +492,9 @@ static void cmd_seek_complete(struct ide_taskfile *tf)
 
   d->offset = xlate_block(tf);
 
-  if (d->offset == -1 || lseek(d->fd, d->offset, SEEK_SET) == -1) 
+  if (d->offset == -1 || beyond_end(d, d->offset, 1) ||
+      lseek(d->fd, d->offset, SEEK_SET) == -1)
   {
-    printf ( "%s offset failure %d\n", __func__, d->offset );
     tf->status &= ~ST_DSC;
     tf->status |= ST_ERR;
     tf->error |= ERR_IDNF;
@@ -524,9 +541,10 @@ static void cmd_writesectors_complete(struct ide_taskfile *tf)
   d->length = tf->count ? tf->count : 256;
 /*  fprintf(stderr, "WRITE %d SECTORS @ %ld\n", d->length, d->offset); */
 
-  if (d->offset == -1 ||  lseek(d->fd, d->offset, SEEK_SET) == -1) 
+  if (d->offset == -1 || beyond_end(d, d->offset, d->length) ||
+      lseek(d->fd, d->offset, SEEK_SET) == -1)
   {
-    printf ( "%s offset failure %d\n", __func__, d->offset );
+    tf->status &= ~ST_DRQ;            /* refused: no data phase */
     tf->status |= ST_ERR;
     tf->error |= ERR_IDNF;
     tf->status &= ~ST_DSC;
