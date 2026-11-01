@@ -5468,6 +5468,7 @@ extern "C" int pistorm_hbl_handler_is_rte(void)
 }
 
 #include "platforms/atari/raster_trace.h"
+void pistorm_handler_enter(void);
 static void do_interrupt (int nr)
 {
 	rt_irq(nr);                                 /* PISTORM_RASTER_TRACE */
@@ -5790,8 +5791,10 @@ static void do_interrupt (int nr)
 			noack_candidate_vec = 0;
 		}
 	}
-	if (interrupt_taken)
+	if (interrupt_taken) {
 		Exception (exception_nr);
+		pistorm_handler_enter();            /* governor: no pauses in here */
+	}
 #else
 	if (pistorm_iack_vector == 0xFFFF)
 		Exception (nr + 24);
@@ -6070,6 +6073,66 @@ static struct {
 	uint32_t alltime_max_us;
 	uint64_t win_start_us;
 } irqlat;
+
+/* ---- the governor's view of interrupt handlers ------------------------
+ *
+ * A raster or sample handler has to do its bus write within a few us of
+ * the interrupt (Shadow of the Beast II's sky: before the next line's
+ * picture starts, ~24 us). The governor pauses every 250 cycles to hold
+ * 8 MHz, and a pause landing between the interrupt and that write moved
+ * the colour change into the picture - measured 31 Oct 2026, raster
+ * trace: 10-15 us normally, 20-90 us whenever a pause fell inside.
+ *
+ * So the governor does not pause while a handler runs. "Running" needs
+ * no RTE hook in the generated cores: when the interrupt is taken, the
+ * supervisor stack pointer after the frame is pushed is remembered; the
+ * handler is still running while the CPU is in supervisor mode with the
+ * stack at or below that point (RTE pops the frame and ends it, as does
+ * a switch to user mode). Nested interrupts keep the outermost. A cap
+ * (PISTORM_GOV_HANDLER cycles, default 2000 = 250 us; 0 = off) puts a
+ * handler that never returns - or a game that never leaves supervisor
+ * mode with its stack moved - back under pacing. The time a handler runs
+ * ahead is paid back at the next pause outside it. */
+static uae_u32 hnd_sp0;
+static evt_t   hnd_cyc0;
+static int     hnd_on;
+static evt_t   hnd_cap = -1;
+
+static evt_t pistorm_handler_cap(void)
+{
+	if (hnd_cap < 0) {
+		const char *e = getenv("PISTORM_GOV_HANDLER");
+		long c = e ? atol(e) : 2000;
+		if (c < 0 || c > 1000000)
+			c = 2000;
+		hnd_cap = (evt_t)c * (CYCLE_UNIT / 2);
+		if (c != 2000)
+			fprintf(stderr, "[GOV] no pauses for the first %ld cycles of an "
+			        "interrupt handler%s\n", c, c ? "" : " - off");
+	}
+	return hnd_cap;
+}
+
+int pistorm_handler_running(void)
+{
+	if (!hnd_on)
+		return 0;
+	if (!regs.s || m68k_areg(regs, 7) > hnd_sp0 ||
+	    get_cycles() - hnd_cyc0 > pistorm_handler_cap()) {
+		hnd_on = 0;
+		return 0;
+	}
+	return 1;
+}
+
+void pistorm_handler_enter(void)
+{
+	if (pistorm_handler_cap() == 0 || pistorm_handler_running())
+		return;                             /* off, or nested: keep the outer */
+	hnd_sp0  = m68k_areg(regs, 7);
+	hnd_cyc0 = get_cycles();
+	hnd_on   = 1;
+}
 
 /* events.cpp's governor: is an interrupt waiting that the CPU would take
  * now? Same test as intlev() below. */
