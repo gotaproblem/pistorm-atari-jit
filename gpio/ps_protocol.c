@@ -242,6 +242,46 @@ static void ps_others_release (void)
   atomic_flag_clear_explicit (&ps_txn_lock, memory_order_release);
 }
 
+/* PISTORM_RASTER_TRACE: while raster_trace.c holds a Timer B window open
+ * (interrupt taken -> its colour write), the CPU thread's bus accesses are
+ * timed here: how many, how long in all, the longest, how long it waited
+ * for another thread to give the bus back, and the longest stretch with no
+ * bus access at all (the CPU thread computing - or not running). One flag
+ * load per access when the window is shut. */
+volatile int ps_rt_win;
+uint64_t ps_rt_bus_n, ps_rt_bus_ticks, ps_rt_bus_max, ps_rt_yield_ticks,
+         ps_rt_gap_max, ps_rt_last_end;
+static uint64_t ps_rt_t0;
+
+static void __attribute__ ((noinline, cold, unused)) ps_rt_begin (void)
+{
+  uint64_t t = ps_ticks ();
+  if (t - ps_rt_last_end > ps_rt_gap_max)
+    ps_rt_gap_max = t - ps_rt_last_end;
+  ps_rt_t0 = t;
+}
+
+static void __attribute__ ((noinline, cold, unused)) ps_rt_end (void)
+{
+  uint64_t t = ps_ticks (), d = t - ps_rt_t0;
+  ps_rt_bus_n++;
+  ps_rt_bus_ticks += d;
+  if (d > ps_rt_bus_max)
+    ps_rt_bus_max = d;
+  ps_rt_last_end = t;
+}
+
+static void __attribute__ ((noinline, cold, unused)) ps_rt_yield (void)
+{
+  uint64_t t = ps_ticks ();
+  ps_cpu_yield_bus ();
+  t = ps_ticks () - t;
+  ps_rt_yield_ticks += t;
+  ps_rt_t0 += t;                    /* the access itself starts now */
+}
+
+uint64_t ps_rt_now (void) { return ps_ticks (); }
+
 #ifdef PS_NOLOCK
 static inline void ps_lock_bus(void) { ps_bus_active = 1; }
 static inline void ps_unlock_bus(void) { ps_bus_active = 0; }
@@ -249,10 +289,16 @@ static inline void ps_unlock_bus(void) { ps_bus_active = 0; }
 static inline void ps_lock_bus(void)
 {
   if (__builtin_expect (ps_tls_cpu, 1)) {
+    if (__builtin_expect (ps_rt_win, 0))
+      ps_rt_begin ();
     ps_cpu_seq = ++ps_cpu_seq_local;            /* odd */
     asm volatile ("" ::: "memory");
-    if (__builtin_expect (ps_bus_req, 0))
-      ps_cpu_yield_bus ();
+    if (__builtin_expect (ps_bus_req, 0)) {
+      if (__builtin_expect (ps_rt_win, 0))
+        ps_rt_yield ();
+      else
+        ps_cpu_yield_bus ();
+    }
     return;
   }
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
@@ -265,6 +311,8 @@ static inline void ps_unlock_bus(void)
   if (__builtin_expect (ps_tls_cpu, 1)) {
     asm volatile ("" ::: "memory");
     ps_cpu_seq = ++ps_cpu_seq_local;            /* even */
+    if (__builtin_expect (ps_rt_win, 0))
+      ps_rt_end ();
     return;
   }
   ps_others_release ();

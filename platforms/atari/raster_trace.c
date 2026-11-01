@@ -40,6 +40,14 @@
 
 uint8_t ps_read_8(uint32_t address);          /* gpio/ps_protocol.c */
 
+/* Timer B window counters, kept by the CPU thread's bus lock path
+ * (gpio/ps_protocol.c) while ps_rt_win is set; arch-timer ticks */
+extern volatile int ps_rt_win;
+extern uint64_t ps_rt_bus_n, ps_rt_bus_ticks, ps_rt_bus_max, ps_rt_yield_ticks,
+                ps_rt_gap_max, ps_rt_last_end;
+uint64_t ps_rt_now(void);
+uint64_t pistorm_guest_clocks(void);          /* cpu/events.cpp */
+
 #define RT_MAX (1u << 21)                     /* events, 16 bytes each: 32 MB */
 
 typedef struct {
@@ -57,6 +65,7 @@ static rt_ev_t *rt_last_irq;               /* gets its vector after the IACK */
 static uint64_t rt_irq6_t;                  /* when the last level-6 was taken */
 static uint64_t rt_win_ticks;               /* 100 us in arch-timer ticks      */
 static volatile uint64_t rt_n;            /* events ever logged */
+static uint64_t rt_w_t0, rt_w_clk0, rt_w_gov;  /* the open Timer B window */
 static const char *rt_path;
 
 static inline uint64_t rt_ticks(void)
@@ -112,6 +121,68 @@ static inline rt_ev_t *rt_slot(void)
     return &rt_buf[n & (RT_MAX - 1u)];
 }
 
+/* four adjacent slots (the W record), so no other thread's event lands
+ * inside it */
+static inline rt_ev_t *rt_slot4(void)
+{
+    uint64_t n = __atomic_fetch_add(&rt_n, 4u, __ATOMIC_RELAXED);
+
+    if (((n + 3u) & (RT_MAX - 1u)) < (n & (RT_MAX - 1u)))
+        return NULL;                          /* would wrap: drop this one */
+    return &rt_buf[n & (RT_MAX - 1u)];
+}
+
+static uint32_t rt_ns(uint64_t ticks)
+{
+    uint64_t ns = ticks * 1000000000ull / rt_hz();
+    return ns > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)ns;
+}
+
+static uint16_t rt_ns16(uint64_t ticks)
+{
+    uint32_t ns = rt_ns(ticks);
+    return ns > 0xFFFFu ? 0xFFFFu : (uint16_t)ns;
+}
+
+/* Timer B taken: from here to its colour write, time the CPU thread */
+static void rt_win_open(uint64_t t)
+{
+    ps_rt_bus_n = ps_rt_bus_ticks = ps_rt_bus_max = 0;
+    ps_rt_yield_ticks = ps_rt_gap_max = 0;
+    ps_rt_last_end = t;
+    rt_w_t0 = t;
+    rt_w_gov = 0;
+    rt_w_clk0 = pistorm_guest_clocks();
+    __atomic_store_n(&ps_rt_win, 1, __ATOMIC_RELAXED);
+}
+
+/* the colour write: one W record of four slots -
+ *   W  total_ns  guest_clocks  bus_n  bus_ns  bus_max_ns  yield_ns  gap_max_ns  gov_ns */
+static void rt_win_close(void)
+{
+    uint64_t now = ps_rt_now();
+    uint64_t clk = pistorm_guest_clocks() - rt_w_clk0;
+    rt_ev_t *e;
+
+    __atomic_store_n(&ps_rt_win, 0, __ATOMIC_RELAXED);
+    if (now - ps_rt_last_end > ps_rt_gap_max)
+        ps_rt_gap_max = now - ps_rt_last_end;
+    if (!(e = rt_slot4()))
+        return;
+    e[0].t = now; e[0].kind = 'W'; e[0].a = 0;
+    e[0].v = (uint16_t)(clk > 0xFFFFu ? 0xFFFFu : clk);
+    e[0].c = rt_ns(now - rt_w_t0);
+    e[1].t = now; e[1].kind = 'w'; e[1].a = 1;
+    e[1].v = (uint16_t)(ps_rt_bus_n > 0xFFFFu ? 0xFFFFu : ps_rt_bus_n);
+    e[1].c = rt_ns(ps_rt_bus_ticks);
+    e[2].t = now; e[2].kind = 'w'; e[2].a = 2;
+    e[2].v = rt_ns16(ps_rt_bus_max);
+    e[2].c = rt_ns(ps_rt_yield_ticks);
+    e[3].t = now; e[3].kind = 'w'; e[3].a = 3;
+    e[3].v = rt_ns16(ps_rt_gap_max);
+    e[3].c = rt_w_gov > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)rt_w_gov;
+}
+
 static uint32_t rt_vcount(void)
 {
     return ((uint32_t)ps_read_8(0x00FF8205u) << 16) |
@@ -121,7 +192,11 @@ static uint32_t rt_vcount(void)
 
 void rt_palette_slow(unsigned idx, uint16_t val)
 {
-    rt_ev_t *e = rt_slot();
+    rt_ev_t *e;
+
+    if (ps_rt_win)
+        rt_win_close();
+    e = rt_slot();
 
     if (!e)
         return;
@@ -158,8 +233,10 @@ void rt_irq_vector_slow(unsigned vec)
 {
     if (rt_last_irq) {
         rt_last_irq->c = vec & 0xFFFFu;
-        if ((vec & 0xFFu) == 0x48u)        /* Timer B: watch the governor */
+        if ((vec & 0xFFu) == 0x48u) {      /* Timer B: watch the governor */
             rt_irq6_t = rt_last_irq->t;
+            rt_win_open(ps_rt_now());       /* and time it to the colour write */
+        }
         rt_last_irq = NULL;
     }
 }
@@ -195,6 +272,8 @@ void rt_gov_slow(int64_t ns, int skipped)
 
     if (!rt_win_ticks)
         rt_win_ticks = rt_hz() / 10000u;
+    if (ps_rt_win && !skipped && ns > 0)
+        rt_w_gov += (uint64_t)ns;
     if (now - rt_irq6_t > rt_win_ticks)
         return;
     if (!(e = rt_slot()))
@@ -258,11 +337,26 @@ void rt_dump(void)
                "#   M FAxx value video_counter  (guest write to an MFP register)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
                "#   G wait|skip ns              (governor pause; skip = not taken,\n"
-               "#                               an interrupt handler was running)\n");
+               "#                               an interrupt handler was running)\n"
+               "#   W total_ns guest_clocks bus_n bus_ns bus_max_ns yield_ns gap_max_ns gov_ns\n"
+               "#                               (Timer B taken -> this colour write, CPU thread:\n"
+               "#                               bus accesses, waits for the bus, longest\n"
+               "#                               stretch without one, governor pauses)\n");
     for (uint64_t i = first; i < total; i++) {
         const rt_ev_t *e = &rt_buf[i & (RT_MAX - 1u)];
         double us = (double)(e->t - t0) * 1e6 / (double)hz;
 
+        if (e->kind == 'W' && i + 3 < total) {
+            const rt_ev_t *b = &rt_buf[(i + 1) & (RT_MAX - 1u)];
+            const rt_ev_t *m = &rt_buf[(i + 2) & (RT_MAX - 1u)];
+            const rt_ev_t *g = &rt_buf[(i + 3) & (RT_MAX - 1u)];
+            fprintf(f, "%.1f W %u %u %u %u %u %u %u %u\n", us, e->c, e->v,
+                    b->v, b->c, m->v, m->c, g->v, g->c);
+            i += 3;
+            continue;
+        }
+        if (e->kind == 'w')
+            continue;
         if (e->kind == 'P' && e->c == 0xFFFFFFFFu)
             fprintf(f, "%.1f P %u %03X -\n", us, e->a, e->v & 0xFFFu);
         else if (e->kind == 'P')
