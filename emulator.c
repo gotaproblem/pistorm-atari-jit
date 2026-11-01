@@ -867,6 +867,22 @@ static void *ipl_task(void *)
   uint32_t latched_ipl2 = 0, latched_ipl4 = 0, latched_ipl6 = 0;
   uint8_t ipl_cand = 0;                 /* synchronizer candidate level  */
   uint64_t ipl_cand_tick = 0;           /* arch-timer stamp of candidate */
+  /* sampling period, see the wait at the end of the pass */
+  uint64_t ipl_pass_ns = 15000;
+  {
+    const char *e = getenv("PISTORM_IPL_PASS_NS");
+    if (e && *e)
+    {
+      long v = atol(e);
+      if (v >= 250 && v <= 100000)
+      {
+        ipl_pass_ns = (uint64_t)v;
+        fprintf(stderr, "[MAIN] IPL sampled every %ld ns (PISTORM_IPL_PASS_NS; default 15000)\n", v);
+      }
+      else
+        fprintf(stderr, "[MAIN] PISTORM_IPL_PASS_NS=%s ignored (250..100000)\n", e);
+    }
+  }
   const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
   const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
   uint8_t trc_last = 0;                 /* last level put in the trace */
@@ -1603,8 +1619,16 @@ static void *ipl_task(void *)
      * IPL pulses are short enough that scheduler sleep jitter can miss them,
      * especially under MiNT/ET4000 load. Keep this as a short busy wait on the
      * dedicated IPL core; the CPU side still owns the actual acknowledge/frame.
+     *
+     * The wait IS the sampling period: an interrupt is seen up to one
+     * period (plus the confirm) after the line rose. 15 us was measured
+     * as the cause of Shadow of the Beast II's sky-band wobble (1 Nov
+     * 2026): Timer B seen 0-25 us late, spread evenly, so the colour
+     * write landed anywhere in the first ~130 pixels of the line. Each
+     * sample stops the CPU thread's bus for the hand-off (~0.7 us), so a
+     * shorter period costs bus time: PISTORM_IPL_PASS_NS sets it.
      */
-    wait_ns (15000);
+    wait_ns (ipl_pass_ns);
 
   }
 
