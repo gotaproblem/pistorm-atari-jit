@@ -827,6 +827,11 @@ int fdd_query(int drive, char *path, int pathlen, int *wp, int *busy)
     return d->disk_inserted ? 1 : 0;
 }
 
+int fdd_emulated(void)
+{
+    return FDD_enabled ? 1 : 0;
+}
+
 /* Arm the write-protect flicker described in fdc_read_addr. Call after
  * any host-side insert or eject. */
 void fdd_pulse_media(int drive)
