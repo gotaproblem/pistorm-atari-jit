@@ -542,7 +542,7 @@ static void pistorm_governor(int sync)
 		 * the catch-up cap there spans the handler too. */
 		if (ahead_ns > 0)
 			rt_gov(ahead_ns, 1);
-		gov_next = currcycle + (evt_t)GOV_STEP * unit;
+		gov_next = currcycle + gov_step * unit;
 		return;
 	} else if (ahead_ns > 0) {
 		/* ahead of real time: wait for it (at most GOV_WAIT_MAX per check) */
