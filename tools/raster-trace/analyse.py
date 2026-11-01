@@ -202,13 +202,31 @@ def timing(path, frames, bases):
     # 3. the line ended (IPL 6 seen) -> colour written, for Timer B
     tb_seen, tb_seen_seen, end2col = None, None, []
     gw = gs = 0
+    # 4. W records (0037): what the CPU thread did between the two
+    wrec, bands = None, []
+    nested = 0
     for t, p in ev:
         k = p[1]
         if k == 'L':
             seen = t if p[2] == '6' else None
+        elif k == 'W':
+            wrec = (t, [int(x) for x in p[2:10]])
+        elif k == 'I' and tb is not None:
+            nested += 1                    # taken inside a Timer B window
+            if p[2] == '6':
+                is_tb = len(p) > 3 and p[3] == '48'
+                tb_seen_seen = seen if is_tb else None
+                if seen is not None:
+                    deliv.append(t - seen)
+                    seen = None
+                tb = t if is_tb else None
+                tb_i = t
         elif k == 'I' and p[2] == '6':
             is_tb = len(p) > 3 and p[3] == '48'
             tb_seen_seen = seen if is_tb else None
+            tb_l = seen
+            tb_i = t
+            wrec = None
             if seen is not None:
                 deliv.append(t - seen)
                 seen = None
@@ -226,6 +244,9 @@ def timing(path, frames, bases):
             tb_lat.append(t - tb)
             if tb_seen_seen is not None:
                 end2col.append(t - tb_seen_seen)
+                if wrec is not None:
+                    bands.append((t - tb_seen_seen, tb - tb_seen_seen, wrec[1]))
+            wrec = None
             if p[4] != '-':
                 vc = int(p[4], 16)
                 inside = [b for b in bases if 0 <= vc - b < LINE * LINES]
@@ -254,9 +275,62 @@ def timing(path, frames, bases):
         h = collections.Counter(min(9, x // 16) for x in tb_x)
         print("  where along the line the colour changed (0% = left edge of the picture):\n    "
               + ' '.join(f"{i * 10}%:{100 * h[i] / len(tb_x):.0f}%" for i in range(10)))
+    if bands:
+        breakdown(bands)
     print(f"  governor pauses within 100 us of a Timer B interrupt: {gw} taken, {gs} skipped "
           f"(handler running); between a Timer B interrupt and its colour write: "
           f"{waits_in} taken, {skips_in} skipped")
+
+
+def band_parts(b):
+    """One Timer B write's delay split into its parts, us. b = (line ended
+    -> colour written, line ended -> taken, W record fields)."""
+    l2p, l2i, w = b
+    tot, clk, bn, bns, bmax, yld, gap, gov = w
+    return {'IPL seen -> taken': l2i,
+            'taken -> handler (IACK, frame)': max(0.0, l2p - l2i - tot / 1000),
+            'bus accesses': bns / 1000,
+            'waiting for the bus (other thread)': yld / 1000,
+            'governor pauses': gov / 1000,
+            'between bus accesses (CPU thread)': max(0.0, (tot - bns - yld - gov) / 1000),
+            }
+
+
+def band_blame(b, med):
+    """the part of b most over its on-time median"""
+    pb = band_parts(b)
+    return max(pb, key=lambda n: pb[n] - med[n])
+
+
+def breakdown(bands):
+    """Where the time went for each Timer B colour write (W records):
+    on-time bands against the late ones (over 24 us after the line ended:
+    into the picture). Times in us."""
+    parts = band_parts
+    late = [b for b in bands if b[0] > 24]
+    ok = [b for b in bands if b[0] <= 24]
+    print(f"\n  where the time goes, line ended -> colour written ({len(bands)} Timer B "
+          f"writes, {len(late)} late = over 24 us)")
+    names = list(parts(bands[0]).keys())
+    print(f"    {'':38s} {'on time: median':>16s} {'95%':>6s}   {'late: median':>13s} {'95%':>6s}")
+    for n in names:
+        a = [parts(b)[n] for b in ok]
+        z = [parts(b)[n] for b in late]
+        print(f"    {n:38s} {q(a,.5) if a else 0:16.1f} {q(a,.95) if a else 0:6.1f}   "
+              f"{q(z,.5) if z else 0:13.1f} {q(z,.95) if z else 0:6.1f}")
+    for n, ix, div in (('guest 68000 clocks run', 1, 1), ('bus accesses (count)', 2, 1),
+                       ('longest bus access, us', 4, 1000),
+                       ('longest stretch without one, us', 6, 1000)):
+        a = [b[2][ix] / div for b in ok]
+        z = [b[2][ix] / div for b in late]
+        print(f"    {n:38s} {q(a,.5) if a else 0:16.1f} {q(a,.95) if a else 0:6.1f}   "
+              f"{q(z,.5) if z else 0:13.1f} {q(z,.95) if z else 0:6.1f}")
+    if late and ok:
+        med = {n: q([parts(b)[n] for b in ok], .5) for n in names}
+        blame = collections.Counter(band_blame(b, med) for b in late)
+        print("    late writes, the part most over its on-time median:")
+        for n, c in blame.most_common():
+            print(f"      {n:38s} {c:6d}  ({100 * c / len(late):.0f}%)")
 
 
 if __name__ == '__main__':

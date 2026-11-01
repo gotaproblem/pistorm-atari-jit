@@ -804,3 +804,10 @@ void clear_events(void)
 		eventtab2[i].active = 0;
 	}
 }
+
+/* raster_trace.c (PISTORM_RASTER_TRACE): guest 68000 clocks so far, to
+ * set the work done in a Timer B window against the time it took */
+extern "C" uint64_t pistorm_guest_clocks(void)
+{
+	return (uint64_t)get_cycles() / (CYCLE_UNIT / 2);
+}
