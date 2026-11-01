@@ -10,8 +10,10 @@
 |   tmr_b          Timer B delay mode 2457600/64/96   = 400 Hz
 |   tmr_d          Timer D delay mode 2457600/4/56    = 10971 Hz (sample rate)
 |   tmr_a_fast     Timer A 51.2 kHz: metric only (fraction delivered)
-|   tmr_b_event    Timer B event count, 1 per line: the same count every
-|                  frame (Hatari: 200 under TOS 1.04, 199 under 2.06)
+|   tmr_b_event    Timer B event count, 1 per line: 200 per frame, every
+|                  frame, with TOS's Timer C and ACIA handlers masked (they
+|                  run at IPL 6 and can merge two lines' requests - a real
+|                  ST under TOS 2.06 loses one a frame that way)
 |                  + metrics: where in the line the handler read the video
 |                  counter (0 = still in the border, as on a real ST)
 |   irq_stop       stop #$2300 woken by VBL/Timer C, stop #$2100 by HBL
@@ -321,9 +323,14 @@ tbe_h:
         move.b  VCNTM,d0
         lsl.w   #8,d0
         move.b  VCNTL,d0
+        move.w  d0,tbe_lcnt             | the frame's last one so far
         move.w  tbe_line,d1
         addq.w  #1,d1
         move.w  d1,tbe_line
+        cmp.w   #1,d1
+        bne.s   2f
+        move.w  d0,tbe_fcnt             | the frame's first
+2:
         mulu    #160,d1
         add.w   tbe_base,d1
         sub.w   d1,d0                   | bytes past the line's end
@@ -354,7 +361,88 @@ tbe_vbl:
 2:      cmp.w   tbe_max,d0
         bls.s   3f
         move.w  d0,tbe_max
-3:      rts
+3:
+| Which screen lines the frame's first and last interrupt came on: the
+| counter / 160 from the screen base (line k = the end of display line k).
+| Kept per kind of frame - 199 lines, 200 lines, anything else - so a
+| frame that gains or loses one shows WHERE: at the top or the bottom.
+        lea     tbe_cat,a0
+        cmp.w   #199,d0
+        beq.s   4f
+        lea     10(a0),a0
+        cmp.w   #200,d0
+        beq.s   4f
+        lea     10(a0),a0
+4:      addq.w  #1,(a0)
+        tst.w   d0
+        beq.s   7f                      | no interrupt at all this frame
+        move.w  tbe_fcnt,d0
+        bsr.s   cnt2line
+        cmp.w   2(a0),d0
+        bhs.s   5f
+        move.w  d0,2(a0)
+5:      cmp.w   4(a0),d0
+        bls.s   6f
+        move.w  d0,4(a0)
+6:      move.w  tbe_lcnt,d0
+        bsr.s   cnt2line
+        cmp.w   6(a0),d0
+        bhs.s   8f
+        move.w  d0,6(a0)
+8:      cmp.w   8(a0),d0
+        bls.s   7f
+        move.w  d0,8(a0)
+7:      rts
+
+| cnt2line: d0 = video counter low 16 bits -> d0 = line number
+cnt2line:
+        sub.w   tbe_base,d0
+        and.l   #0xFFFF,d0
+        divu    #160,d0
+        and.l   #0xFFFF,d0
+        rts
+
+| tbe_report: an @I line per kind of frame that occurred
+tbe_report:
+        lea     tbe_cat,a2
+        lea     tbe_catname(pc),a3
+        moveq   #2,d3
+1:      tst.w   (a2)
+        beq     2f
+        PS      "@I tmr_b_event "
+        move.l  a3,a0
+        bsr     pr_str
+        PS      " frames="
+        moveq   #0,d0
+        move.w  (a2),d0
+        bsr     pr_dec
+        PS      " first-line="
+        moveq   #0,d0
+        move.w  2(a2),d0
+        bsr     pr_dec
+        PS      ".."
+        moveq   #0,d0
+        move.w  4(a2),d0
+        bsr     pr_dec
+        PS      " last-line="
+        moveq   #0,d0
+        move.w  6(a2),d0
+        bsr     pr_dec
+        PS      ".."
+        moveq   #0,d0
+        move.w  8(a2),d0
+        bsr     pr_dec
+        bsr     pr_flush
+2:      lea     10(a2),a2
+3:      tst.b   (a3)+                   | next name
+        bne.s   3b
+        dbra    d3,1b
+        rts
+tbe_catname:
+        .asciz  "199-line"
+        .asciz  "200-line"
+        .asciz  "other"
+        .even
 
 t_tb_event:
         moveq   #0,d0
@@ -373,17 +461,34 @@ t_tb_event:
         clr.w   tbe_maxoff
         clr.l   tbe_inpic
         clr.l   tbe_total
+        lea     tbe_cat,a0              | per kind: n, first min/max, last min/max
+        moveq   #2,d0
+1:      clr.w   (a0)+
+        move.w  #0xFFFF,(a0)+
+        clr.w   (a0)+
+        move.w  #0xFFFF,(a0)+
+        clr.w   (a0)+
+        dbra    d0,1b
         clr.b   TBCR
         move.b  #1,TBDR
         move.l  #tbe_h,V_TB
         bset    #0,IERA
         bset    #0,IMRA
         move.l  #tbe_vbl,vbl_extra
+        move.b  IMRB,d7                 | TOS's own level-6 handlers out:
+        and.b   #0x9F,IMRB              | Timer C (B5) and the ACIA (B6). A
+                                        | 200 Hz tick handler that runs longer
+                                        | than a line at IPL 6 merges two Timer
+                                        | B requests on a real ST too (Hatari,
+                                        | TOS 2.06: line 1..200, 199 interrupts)
         move.b  #8,TBCR                 | event count mode
-        move.w  #0x2300,sr              | VBL (4) and MFP (6) in
-        move.l  #400,d0
-        bsr     wait_ticks
+        move.w  #0x2300,sr              | VBL (4) and Timer B (6) in
+        move.l  vblcnt,d0               | 100 frames, counted by VBL - the
+        add.l   #100,d0                 | 200 Hz tick is masked
+1:      cmp.l   vblcnt,d0
+        bhi.s   1b
         move.w  #0x2700,sr
+        move.b  d7,IMRB                 | the held Timer C/ACIA come in now
         clr.l   vbl_extra
         bsr     stop_timers
         move.w  #0x2300,sr
@@ -403,18 +508,12 @@ t_tb_event:
         moveq   #0,d0
         move.w  tbe_maxoff,d0
         METRIC  tb_max_bytes_into_line
+        bsr     tbe_report
 
-        moveq   #0,d3                   | pass: the same count in every
-        move.w  tbe_min,d0              | frame, and 199 or 200 - Hatari
-        cmp.w   tbe_max,d0              | (cycle-exact ST): 200 under TOS
-        bne.s   2f                      | 1.04, 199 under TOS 2.06, every
-        cmp.w   #199,d0                 | frame (cause not identified; the
-        blo.s   2f                      | exact figure is the tb_lines_*
-        cmp.w   #200,d0                 | metrics, compared run to run)
-        bhi.s   2f
-        moveq   #1,d3
-2:      tst.l   d3
-        CHECK   ne, tmr_b_event
+        cmp.w   #200,tbe_min            | 200 every frame: with nothing else
+        bne.s   2f                      | at level 6, each display line's
+        cmp.w   #200,tbe_max            | interrupt must reach the CPU
+2:      CHECK   eq, tmr_b_event
         PS      "lines/frame min="
         moveq   #0,d0
         move.w  tbe_min,d0
@@ -427,7 +526,7 @@ t_tb_event:
         moveq   #0,d0
         move.w  tbe_frames,d0
         bsr     pr_dec
-        PS      " expect=199/200, same every frame"
+        PS      " expect=200"
         bra     pr_flush
 
 | udiv32: d0 = d0 / d1 (unsigned 32/32, d1 nonzero), slow and simple
@@ -576,6 +675,9 @@ tbe_frames_skip: .space 2
 tbe_min:        .space 2
 tbe_max:        .space 2
 tbe_maxoff:     .space 2
+tbe_fcnt:       .space 2
+tbe_lcnt:       .space 2
+tbe_cat:        .space 30
 tbe_inpic:      .space 4
 tbe_total:      .space 4
         .text
