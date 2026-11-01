@@ -124,6 +124,34 @@ int atarifd;
 char *atari_image_file[IDE_MAX_HARDFILES];
 bool IDE_enabled;
 
+/* see IDE.h: 0 off, 1 armed for the next RESET, 2 hidden for this boot */
+static volatile int ide_hide_state = 0;
+volatile int IDE_boot_hidden = 0;
+
+void ide_hide_next_boot ( void )
+{
+  if ( !IDE_enabled )
+    return;
+  ide_hide_state = 1;
+  printf ( "[IDE] next boot from floppy: IDE hidden from the next reset\n" );
+}
+
+void ide_boot_hide_on_reset ( void )
+{
+  if ( ide_hide_state == 1 )
+  {
+    ide_hide_state = 2;
+    IDE_boot_hidden = 1;
+    printf ( "[IDE] hidden for this boot (floppy boot)\n" );
+  }
+  else if ( ide_hide_state == 2 )
+  {
+    ide_hide_state = 0;
+    IDE_boot_hidden = 0;
+    printf ( "[IDE] back after the floppy boot\n" );
+  }
+}
+
 struct ide_controller *get_ide ( int index ) 
 {
   return atariIDE [index];
@@ -138,7 +166,7 @@ struct ide_controller *get_ide ( int index )
  * the line again. */
 uint8_t IDE_intrq_pending ( void )
 {
-  if ( !IDE_enabled )
+  if ( !IDE_enabled || IDE_boot_hidden )
     return 0;
   for ( int p = 0; p < 4; p++ )
   {

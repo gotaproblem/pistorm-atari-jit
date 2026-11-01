@@ -2934,6 +2934,8 @@ void cpu_pulse_reset(void)
    * PISTORM_RESET_DEBUG=1 also dumps the registers. */
   pistorm_reset_state_dump();     /* newcpu.cpp - see note above */
 
+  ide_boot_hide_on_reset();  /* one-shot floppy boot: arm -> hide -> back */
+
   ps_pulse_reset();
   mfp_hub_reset();   /* stale virtual pending/in-service dies with the reset */
   if (DMA_Sound_enabled)
@@ -3369,7 +3371,7 @@ extern "C"
     if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size), 1))
       return natmem_offset[address];
 
-    if (IDE_enabled)
+    if (IDE_enabled && !IDE_boot_hidden)
     {
       uint32_t add = address & 0x00FFFFFF;
       if (add >= IDEBASEADDR && add < IDETOPADDR)
@@ -3510,7 +3512,7 @@ extern "C"
     if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 2), 1))
       return __builtin_bswap16(*(uint16_t *)&natmem_offset[address]);
 
-    if (IDE_enabled)
+    if (IDE_enabled && !IDE_boot_hidden)
     {
       uint32_t add = address & 0x00FFFFFF;
       if (add >= IDEBASEADDR && add < IDETOPADDR)
@@ -3632,7 +3634,7 @@ extern "C"
     if (__builtin_expect(tt_ram_available && (address >= 0x01000000 && address < 0x01000000u + tt_ram_size - 4), 1))
       return __builtin_bswap32(*(uint32_t *)&natmem_offset[address]);
 
-    if (IDE_enabled)
+    if (IDE_enabled && !IDE_boot_hidden)
     {
       uint32_t add = address & 0x00FFFFFF;
       if (add >= IDEBASEADDR && add < IDETOPADDR)
@@ -3735,7 +3737,7 @@ extern "C"
       return;
     }
 
-    if (IDE_enabled)
+    if (IDE_enabled && !IDE_boot_hidden)
     {
       uint32_t add = address & 0x00FFFFFF;
       if (add >= IDEBASEADDR && add < IDETOPADDR)
@@ -3879,7 +3881,7 @@ extern "C"
       return;
     }
 
-    if (IDE_enabled)
+    if (IDE_enabled && !IDE_boot_hidden)
     {
       uint32_t add = address & 0x00FFFFFF;
       if (add >= IDEBASEADDR && add < IDETOPADDR)
@@ -4008,7 +4010,7 @@ extern "C"
       return;
     }
 
-    if (IDE_enabled)
+    if (IDE_enabled && !IDE_boot_hidden)
     {
       uint32_t add = address & 0x00FFFFFF;
       if (add >= IDEBASEADDR && add < IDETOPADDR)

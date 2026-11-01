@@ -31,6 +31,16 @@ uint32_t readIDEL(unsigned int address);
 
 struct ide_controller *get_ide(int index);
 
+/* One-shot floppy boot (PSFDD "Reboot from A:"). TOS boots the IDE drive
+ * before the floppy, so a game disk in A: never gets to run while IDE is
+ * there. ide_hide_next_boot() arms it; the next RESET instruction (the warm
+ * boot) hides the emulated IDE - its registers go to the real bus and bus
+ * error, exactly as on an ST with no IDE fitted - and the RESET after that
+ * brings it back. A relaunch of the emulator starts with it off. */
+extern volatile int IDE_boot_hidden;
+void ide_hide_next_boot(void);
+void ide_boot_hide_on_reset(void);
+
 #ifdef __cplusplus
 }
 #endif
