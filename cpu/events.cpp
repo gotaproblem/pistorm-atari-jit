@@ -385,8 +385,11 @@ static inline int64_t gov_now_ns(void)
 	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-/* newcpu.cpp: an interrupt is waiting that the CPU would take now */
+/* newcpu.cpp: an interrupt is waiting that the CPU would take now; an
+ * interrupt handler is running (no pauses inside one - see newcpu.cpp) */
 extern int pistorm_irq_deliverable(void);
+extern int pistorm_handler_running(void);
+#include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
 
 /* Wait until CLOCK_MONOTONIC reaches `until` (ns): sleep most of it, spin
  * the last GOV_SPIN_NS. Returns the time on leaving.
@@ -497,8 +500,18 @@ static void pistorm_governor(void)
 	int64_t virt_ns  = (int64_t)((currcycle - gov_cyc0) / unit) * 1000000LL / gov_khz;
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 
+	if (pistorm_handler_running()) {
+		/* inside an interrupt handler: no pause - it is paid back at the
+		 * next check outside. step_ns/step_cyc stay where they are, so
+		 * the catch-up cap there spans the handler too. */
+		if (ahead_ns > 0)
+			rt_gov(ahead_ns, 1);
+		gov_next = currcycle + (evt_t)GOV_STEP * unit;
+		return;
+	}
 	if (ahead_ns > 0) {
 		/* ahead of real time: wait for it (at most GOV_WAIT_MAX per check) */
+		rt_gov(ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX, 0);
 		now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
 	} else {
 		if (ahead_ns < -GOV_FORGIVE_NS) {
@@ -510,8 +523,10 @@ static void pistorm_governor(void)
 		if (gov_catchup_x) {
 			int64_t min_ns = (int64_t)((currcycle - step_cyc) / unit) * 1000000LL
 			                 / (gov_khz * gov_catchup_x);
-			if (now - step_ns < min_ns)
+			if (now - step_ns < min_ns) {
+				rt_gov(step_ns + min_ns - now, 0);
 				now = gov_wait_until(now, step_ns + min_ns);
+			}
 		}
 	}
 	step_ns  = now;

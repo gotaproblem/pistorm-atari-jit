@@ -1386,6 +1386,7 @@ static void *ipl_task(void *)
       if (ipl == 2)      pistorm_ipl_ep2++;
       else if (ipl == 4) pistorm_ipl_ep4++;
       else if (ipl == 6) pistorm_ipl_ep6++;
+      rt_ipl(ipl);                 /* PISTORM_RASTER_TRACE: off = one load */
       if (pst_dbg_ipl_stats)
       {
         /* shape of level 4: gap since the last entry, length of the last

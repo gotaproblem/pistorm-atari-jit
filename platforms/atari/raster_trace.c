@@ -46,7 +46,7 @@ typedef struct {
 volatile int rt_on;
 static rt_ev_t *rt_buf;
 static rt_ev_t *rt_last_irq;               /* gets its vector after the IACK */
-static uint32_t rt_n;
+static volatile uint32_t rt_n;
 static int rt_full_said;
 static const char *rt_path;
 
@@ -87,9 +87,15 @@ __attribute__((constructor)) static void rt_init(void)
                     "(written when the emulator stops)\n", rt_path);
 }
 
+/* Several threads log: the CPU thread (palette, interrupts, MFP writes,
+ * governor waits) and ipl_task (IPL levels it sees). Slots are claimed
+ * atomically; a reader only runs after the emulator has stopped. */
 static inline rt_ev_t *rt_slot(void)
 {
-    if (rt_n >= RT_MAX) {
+    uint32_t n = __atomic_fetch_add(&rt_n, 1u, __ATOMIC_RELAXED);
+
+    if (n >= RT_MAX) {
+        rt_n = RT_MAX;
         if (!rt_full_said) {
             rt_full_said = 1;
             fprintf(stderr, "[RASTER] buffer full - recording stopped; stop the "
@@ -97,7 +103,7 @@ static inline rt_ev_t *rt_slot(void)
         }
         return NULL;
     }
-    return &rt_buf[rt_n++];
+    return &rt_buf[n];
 }
 
 static uint32_t rt_vcount(void)
@@ -150,6 +156,35 @@ void rt_irq_vector_slow(unsigned vec)
     }
 }
 
+/* ipl_task: the IPL level it now sees on the bus (before any confirm) */
+void rt_ipl_slow(int level)
+{
+    rt_ev_t *e = rt_slot();
+
+    if (!e)
+        return;
+    e->t = rt_ticks();
+    e->kind = 'L';
+    e->a = (uint8_t)level;
+    e->v = 0;
+    e->c = 0;
+}
+
+/* the governor: a pause of ns, and whether it was skipped because an
+ * interrupt handler was running (skipped = 1, ns = what it would have been) */
+void rt_gov_slow(int64_t ns, int skipped)
+{
+    rt_ev_t *e = rt_slot();
+
+    if (!e)
+        return;
+    e->t = rt_ticks();
+    e->kind = 'G';
+    e->a = (uint8_t)skipped;
+    e->v = 0;
+    e->c = ns < 0 ? 0u : ns > 0xFFFFFFFFLL ? 0xFFFFFFFFu : (uint32_t)ns;
+}
+
 /* MFP registers worth seeing for a Timer B raster chain */
 static int rt_mfp_reg(uint32_t a)
 {
@@ -198,13 +233,20 @@ void rt_dump(void)
                "#   P idx value video_counter   (palette write, real counter after it)\n"
                "#   I level vector              (interrupt taken, vector from the IACK)\n"
                "#   I 4 screen_base TBCR TBDR   (VBL: base, Timer B control and count)\n"
-               "#   M FAxx value video_counter  (guest write to an MFP register)\n");
+               "#   M FAxx value video_counter  (guest write to an MFP register)\n"
+               "#   L level                     (ipl_task saw the IPL lines change)\n"
+               "#   G wait|skip ns              (governor pause; skip = not taken,\n"
+               "#                               an interrupt handler was running)\n");
     for (uint32_t i = 0; i < rt_n; i++) {
         const rt_ev_t *e = &rt_buf[i];
         double us = (double)(e->t - t0) * 1e6 / (double)hz;
 
         if (e->kind == 'P')
             fprintf(f, "%.1f P %u %03X %06X\n", us, e->a, e->v & 0xFFFu, e->c);
+        else if (e->kind == 'L')
+            fprintf(f, "%.1f L %u\n", us, e->a);
+        else if (e->kind == 'G')
+            fprintf(f, "%.1f G %s %u\n", us, e->a ? "skip" : "wait", e->c);
         else if (e->kind == 'M')
             fprintf(f, "%.1f M FA%02X %02X %06X\n", us, e->a, e->v & 0xFFu, e->c);
         else if (e->a == 4)

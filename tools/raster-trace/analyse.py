@@ -47,6 +47,7 @@ def load(path):
             cur['w'].append((t, int(p[2]), int(p[3], 16), int(p[4], 16)))
         elif p[1] == 'M':
             cur['m'].append((t, p[2], int(p[3], 16), int(p[4], 16)))
+        # 'L' (IPL seen) and 'G' (governor) are read by timing()
     return frames
 
 
@@ -159,12 +160,70 @@ def main(path):
         for s, c in story.most_common(3):
             print(f"   {c:5d}x  " + (' '.join(f"{r}={v:02X}@{l}" for r, v, l in s) or "(none)"))
 
+    timing(path, frames, bases)
+
     white = collections.Counter(int(f['t'] / 1e6) for f in frames
                                 for w in f['w'] if (w[2] & 0x777) == 0x777)
     if white:
         print("\nwhite (777) writes per second (s:count): " +
               ' '.join(f"{s}:{c}" for s, c in sorted(white.items())))
     return 0
+
+
+def timing(path, frames, bases):
+    """Delivery and handler timing, from the raw events (IPL seen by
+    ipl_task 'L', interrupt taken 'I', palette 'P', governor 'G')."""
+    ev = []
+    for ln in open(path):
+        if ln.startswith('#') or not ln.strip():
+            continue
+        p = ln.split()
+        ev.append((float(p[0]), p))
+    if not any(p[1] in ('L', 'G') for _, p in ev):
+        return
+    # 1. IPL 6 seen -> level 6 taken
+    seen, deliv = None, []
+    # 2. Timer B taken -> next palette write; governor waits inside it
+    tb, tb_lat, tb_x, waits_in, skips_in = None, [], [], 0, 0
+    gw = gs = 0
+    for t, p in ev:
+        k = p[1]
+        if k == 'L':
+            seen = t if p[2] == '6' else None
+        elif k == 'I' and p[2] == '6':
+            if seen is not None:
+                deliv.append(t - seen)
+                seen = None
+            tb = t if len(p) > 3 and p[3] == '48' else None
+        elif k == 'G':
+            if p[2] == 'wait':
+                gw += 1
+                if tb is not None:
+                    waits_in += 1
+            else:
+                gs += 1
+                if tb is not None:
+                    skips_in += 1
+        elif k == 'P' and tb is not None:
+            tb_lat.append(t - tb)
+            vc = int(p[4], 16)
+            inside = [b for b in bases if 0 <= vc - b < LINE * LINES]
+            if inside:
+                tb_x.append((vc - max(inside)) % LINE)
+            tb = None
+    print("\ntiming")
+    if deliv:
+        print(f"  IPL 6 seen by ipl_task -> CPU takes it, us: median {q(deliv,.5):.1f} "
+              f"95% {q(deliv,.95):.1f} 99% {q(deliv,.99):.1f} max {max(deliv):.1f} ({len(deliv)})")
+    if tb_lat:
+        print(f"  Timer B taken -> colour written, us: median {q(tb_lat,.5):.1f} "
+              f"95% {q(tb_lat,.95):.1f} 99% {q(tb_lat,.99):.1f} max {max(tb_lat):.1f}")
+    if tb_x:
+        h = collections.Counter(min(9, x // 16) for x in tb_x)
+        print("  where along the line the colour changed (0% = left edge of the picture):\n    "
+              + ' '.join(f"{i * 10}%:{100 * h[i] / len(tb_x):.0f}%" for i in range(10)))
+    print(f"  governor pauses: {gw} taken, {gs} skipped inside a handler; between a "
+          f"Timer B interrupt and its colour write: {waits_in} taken, {skips_in} skipped")
 
 
 if __name__ == '__main__':
