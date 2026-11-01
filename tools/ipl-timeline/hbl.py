@@ -64,6 +64,9 @@ def parse(fn):
                     ev.append((t, "C", int(p[2]), c, n, float(p[4]), raw))
                 elif k == "B":
                     ev.append((t, "B", int(p[2]), p[3], raw))
+                elif k == "M":
+                    a, b = (int(x) for x in p[2].split("->"))
+                    ev.append((t, "M", a, b, int(p[3], 16), raw))
                 elif k == "X":
                     ev.append((t, "X", int(p[2]), p[3].upper(), int(p[5], 16), raw))
             except (ValueError, IndexError):
@@ -180,6 +183,10 @@ def hbl_run(ev, run):
     examples = defaultdict(list)
     low, rise2x, latch2x, ok_lat = [], [], [], []
     st_len, st_end, st_c, st_lat, st_pc = [], Counter(), 0, [], Counter()
+    st_iack = Counter()
+    iack_all = Counter(ev[i][3] for i in run)
+    oi_sub = Counter()
+    have_m = any(e[1] == "M" for e in ev[:200000])
     for j, k in enumerate(ks):
         i0, i1 = run[j], run[j + 1]
         seg = ev[i0 + 1:i1]
@@ -228,10 +235,13 @@ def hbl_run(ev, run):
             if lat is not None:
                 st_lat.append(lat)
             st_pc[ev[i0][4]] += 1
+            st_iack[ev[i0][3]] += 1
         else:
             cat, others = classify(g, k, lambda x: x[2] == 26)
             for x in others:
                 other["%d/%s" % (x[2], x[3])] += 1
+            if cat == "other-irq" and have_m:
+                oi_sub[masked_hbl(ev, i0, i1)] += k - 1
         lost[cat] += k - 1
         if len(examples[cat]) < 3:
             examples[cat].append((i0, i1, k))
@@ -251,6 +261,15 @@ def hbl_run(ev, run):
         dist("normal: latch -> take", ok_lat)
         print("  stuck: pc of the HBL before: %s"
               % ", ".join("%06X:%d" % kv for kv in st_pc.most_common(6)))
+    print("  IACK result of every HBL taken (byte: count): %s"
+          % ", ".join("%s:%d" % kv for kv in iack_all.most_common()))
+    if st_iack:
+        print("  IACK result of the HBL before each stuck episode: %s"
+              % ", ".join("%s:%d" % kv for kv in st_iack.most_common()))
+    if oi_sub:
+        print("  other-irq, what level 2 did while the CPU was above IPL 2:")
+        for kv in oi_sub.most_common():
+            print("    %-46s %6d" % kv)
     if other:
         print("  other interrupts in other-irq gaps (nr/vector: count): %s"
               % ", ".join("%s:%d" % kv for kv in sorted(other.items())))
@@ -262,6 +281,34 @@ def hbl_run(ev, run):
     dist("seen back at 2 -> CPU took it", rise2x)
     dist("latched -> CPU took it", latch2x)
     show_examples(ev, examples, line)
+
+
+def masked_hbl(ev, i0, i1):
+    """other-irq gap: follow the line and the CPU mask (X raises it to the
+    level taken, M records are RTE / move to SR) from one HBL to the next"""
+    lvl, mask = 2, 2                   # at i0 the HBL is being taken
+    rose = dropped = False
+    for e in ev[i0 + 1:i1]:
+        if e[1] == "I" and e[4] == "line":
+            lvl = e[3]
+            if mask > 2:
+                if e[3] == 2:
+                    rose = True
+                elif e[2] == 2 and rose:
+                    dropped = True
+        elif e[1] == "X":
+            mask = e[2] - 24
+        elif e[1] == "M":
+            if e[3] <= 2 < mask:       # back down to where HBL is taken
+                if dropped:
+                    return "rose and dropped while masked"
+                if rose and lvl == 2:
+                    return "still at 2 when the mask came down"
+                if rose:
+                    return "rose while masked, gone at mask-down (not seen)"
+                return "did not rise while masked"
+            mask = e[3]
+    return "mask not seen coming down"
 
 
 # ------------------------------------------------------------------ Timer B
@@ -285,13 +332,18 @@ def timer_b(ev):
     line = median(d)
     lost, other, where = Counter(), Counter(), Counter()
     examples = defaultdict(list)
-    lat_ok, lat_gap = [], []
+    lat_ok, rte, rte_ok = [], [], []
     for a, b, tb in ev_frames:
         for i in tb:
             l_ = last_latch(ev, i, 6)
             if l_ is not None:
                 lat_ok.append(l_)
         if len(tb) >= 200:
+            for i0, i1 in list(zip(tb, tb[1:]))[:20]:
+                for e in ev[i0 + 1:i1]:
+                    if e[1] == "M" and e[2] == 6 and e[3] < 6:
+                        rte_ok.append(e[0] - ev[i0][0])
+                        break
             continue
         for j, (i0, i1) in enumerate(zip(tb, tb[1:])):
             k = round((ev[i1][0] - ev[i0][0]) / line)
@@ -303,6 +355,10 @@ def timer_b(ev):
                 other["%d/%s" % (x[2], x[3])] += 1
             lost[cat] += k - 1
             where[j + 1] += 1
+            for e in ev[i0 + 1:i1]:            # the handler's RTE
+                if e[1] == "M" and e[2] == 6 and e[3] < 6:
+                    rte.append(e[0] - ev[i0][0])
+                    break
             if len(examples[cat]) < 3:
                 examples[cat].append((i0, i1, k))
     print("  line %.2f us" % line)
@@ -315,6 +371,8 @@ def timer_b(ev):
                 print("    %-12s %6d  %5.1f%%" % (cat, lost[cat], 100.0 * lost[cat] / total))
         print("  gap after the n-th Timer B of the frame (n: count): %s"
               % ", ".join("%d:%d" % kv for kv in sorted(where.items())))
+        dist("gaps: Timer B taken -> its RTE", rte)
+        dist("normal (sample): Timer B taken -> RTE", rte_ok)
         if other:
             print("  other interrupts in gaps (nr/vector: count): %s"
                   % ", ".join("%s:%d" % kv for kv in sorted(other.items())))

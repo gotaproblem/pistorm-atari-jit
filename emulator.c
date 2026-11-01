@@ -259,10 +259,13 @@ volatile unsigned pistorm_ipl_trc_shown = 0;
  * nothing on core 3 ever touches a file. Off: one load of a flag.
  * PISTORM_IPL_TIMELINE=2 adds level 2 (HBL) - line changes, latches,
  * not-latched reasons, and 'C' records for a candidate level that
- * changed again before the confirm time accepted it - but only while
- * the CPU's mask is 2 or below, i.e. while HBL can actually be taken
- * (a 15.6 kHz line otherwise floods the log). For the regression
- * suite's irq_hbl check: tools/ipl-timeline/hbl.py reads it. */
+ * changed again before the confirm time accepted it - while the CPU's
+ * mask is 2 or below and for 10 ms after it last was (so a VBL/MFP
+ * handler in the middle of an HBL run is covered; a 15.6 kHz line at
+ * IPL 3 would otherwise flood the log). It also adds 'M' records, every
+ * change of the CPU's interrupt mask by RTE / move to SR. The X records
+ * carry the IACK result for every level. For the regression suite's
+ * irq_hbl check: tools/ipl-timeline/hbl.py reads it. */
 #define TL_N (1u << 20)                         /* per ring, power of 2 */
 struct tl_e { uint64_t t; uint32_t d; uint8_t k, a, b, c; };
 static struct tl_e *tl_ring[2];                 /* 0 ipl_task, 1 CPU  */
@@ -270,7 +273,10 @@ static volatile uint32_t tl_head[2];
 static int tl_on = -1;                          /* -1 = not decided   */
 static int tl_min = 4;                          /* lowest level logged */
 /* log this level? Level 2 only in mode 2, and only while HBL can be taken */
-#define TL_LVL(l) ((l) >= 4 || ((l) == 2 && tl_min == 2 && g_irq_mask <= 2))
+#define TL_LVL(l) ((l) >= 4 || ((l) == 2 && tl_min == 2 && tl_l2_ok()))
+static inline int tl_l2_ok(void);
+/* mode 2 only: the CPU thread logs its mask changes (cpu/newcpu.cpp) */
+extern "C" int pistorm_tl_hbl(void) { return tl_on == 1 && tl_min == 2; }
 static inline uint64_t tl_now(void)
 {
   uint64_t t;
@@ -310,7 +316,9 @@ static void *tl_writer(void *)
   fprintf(f, "# us  I from->to action g_irq mask      (ipl_task decision)\n"
              "# us  B level not-latched-because g_irq mask\n"
              "# us  C level cand->new age-us  (candidate changed before confirm)\n"
-             "# us  X exception-nr vector sr-mask pc  (CPU took it)\n"
+             "# us  X exception-nr iack-result sr-mask pc  (CPU took it;\n"
+             "#       iack FE = bus IACK failed, FF = none)\n"
+             "# us  M old->new interrupt mask, pc  (RTE / move to SR)\n"
              "# us  W reg=val [video counter - base = line:byte]\n");
   uint32_t pos[2] = { 0, 0 };
   uint64_t t0 = 0;
@@ -353,6 +361,9 @@ static void *tl_writer(void *)
         case 'C':
           fprintf(f, "%.1f C %u %u->%u %.2f\n", us, e.a, e.b, e.c,
                   (double)e.d * 1e6 / (double)hz);
+          break;
+        case 'M':
+          fprintf(f, "%.1f M %u->%u %06X\n", us, e.a, e.b, e.d);
           break;
         case 'X':
           fprintf(f, "%.1f X %u %02X %u %06X\n", us, e.a, e.b, e.c, e.d);
@@ -507,6 +518,19 @@ volatile uint8_t g_ipl = 0;
 uint32_t tt_ram_size = 0;
 
 volatile uint8_t g_irq_mask;
+/* PISTORM_IPL_TIMELINE=2: log level 2 while HBL can be taken, and for
+ * 10 ms after (ipl_task only) */
+static uint64_t tl_l2_last;
+static inline int tl_l2_ok(void)
+{
+  const uint64_t n = tl_now();
+  if (g_irq_mask <= 2)
+  {
+    tl_l2_last = n;
+    return 1;
+  }
+  return n - tl_l2_last < (psctrl_cntfrq ? psctrl_cntfrq : 54000000ULL) / 100;
+}
 extern volatile uint8_t g_buserr;
 #ifdef __cplusplus
 extern "C"

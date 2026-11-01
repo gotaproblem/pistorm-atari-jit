@@ -23,6 +23,14 @@ for n in range(2000):
         continue
     if kind == "unseen":
         continue
+    if kind == "other":                       # VBL handler covers the HBL
+        out.append("%.1f I 2->0 line 0 1" % (t - 40))
+        out.append("%.1f I 0->4 line 0 1" % (t - 32))
+        out.append("%.1f X 28 1C 1 00E000" % (t - 30))
+        out.append("%.1f I 4->2 line 0 4" % (t - 8))
+        out.append("%.1f I 2->0 line 0 4" % (t + 12))
+        out.append("%.1f M 4->1 00E002" % (t + 20))
+        continue
     if kind == "short":
         out.append("%.1f C 2 0->2 1.20" % (t - 30))
         continue
@@ -34,9 +42,6 @@ for n in range(2000):
         continue
     out.append("%.1f I 0->2 LATCH 0 1" % (t - 7))
     if kind == "cpu":
-        continue
-    if kind == "other":
-        out.append("%.1f X 28 1C 1 00E000" % (t - 5))
         continue
     out.append("%.1f X 26 1A 1 012345" % t)
     if n == stuck_from:
@@ -56,4 +61,5 @@ for f in range(6):
         out.append("%.1f I 0->6 LATCH 0 3" % (t - 1.5))
         out.append("%.1f X 30 48 3 00E100" % t)
         out.append("%.1f I 6->0 line 0 6" % (t + 5))
+        out.append("%.1f M 6->3 00E104" % (t + (90 if f == 2 and n == 49 else 6)))
 print("\n".join(out))

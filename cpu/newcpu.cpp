@@ -3022,6 +3022,8 @@ extern volatile uint8_t g_ipl;
 extern volatile uint8_t g_buserr;
 /* host-work marker sampled by ipl_task (emulator.c) */
 extern "C" volatile uint32_t pistorm_cpu_hostop;
+extern "C" int pistorm_tl_hbl(void);           /* emulator.c, timeline mode 2 */
+extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
 extern "C" volatile uint32_t pistorm_vbl_taken;   /* emulator.c */
 /* NOTE: the linked implementation (gpio/ps_protocol.c) takes a POINTER and
  * returns void - it waits for bus idle internally and stores the shifted
@@ -3136,6 +3138,11 @@ static void MakeFromSR_x(int t0trace)
 			set_special(SPCFLAG_BRK);
 #endif
 
+		{	/* PISTORM_IPL_TIMELINE=2 (emulator.c): mask changes */
+			if (pistorm_tl_hbl())
+				pistorm_tl_cpu('M', (uint8_t)regs.intmask, (uint8_t)newimask, 0,
+				               m68k_getpc() & 0x00FFFFFFu);
+		}
 		regs.intmask = newimask;
 		g_irq_mask = newimask;
 	}
@@ -5078,8 +5085,9 @@ void REGPARAM2 Exception(int nr)
 	if (nr >= 24 && nr <= 31 && pistorm_tl_enabled())
 	{
 		extern uae_u16 pistorm_iack_vector;
+		/* the IACK result for every level: the vector, FE failed, FF none */
 		pistorm_tl_cpu('X', (uint8_t)nr,
-		               nr == 30 ? (uint8_t)(pistorm_iack_vector & 0xFFu) : (uint8_t)nr,
+		               (uint8_t)(pistorm_iack_vector & 0xFFu),
 		               (uint8_t)regs.intmask, m68k_getpc() & 0x00FFFFFFu);
 	}
 	/* illegal instruction only: Line F (vector 11) is routine - TOS 1.x
