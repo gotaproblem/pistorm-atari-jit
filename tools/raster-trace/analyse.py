@@ -33,7 +33,7 @@ def load(path):
         p = ln.split()
         t = float(p[0])
         if p[1] == 'I' and p[2] == '4':
-            cur = {'t': t, 'base': int(p[3], 16) if len(p) > 3 else 0,
+            cur = {'t': t, 'base': int(p[3], 16) if len(p) > 3 else None,
                    'tb': (int(p[4], 16), int(p[5], 16)) if len(p) > 5 else None,
                    'w': [], 'i6': [], 'v6': [], 'm': []}
             frames.append(cur)
@@ -44,9 +44,11 @@ def load(path):
                 cur['i6'].append(t)
                 cur['v6'].append((t, int(p[3], 16) if len(p) > 3 else -1))
         elif p[1] == 'P':
-            cur['w'].append((t, int(p[2]), int(p[3], 16), int(p[4], 16)))
+            cur['w'].append((t, int(p[2]), int(p[3], 16),
+                             None if p[4] == '-' else int(p[4], 16)))
         elif p[1] == 'M':
-            cur['m'].append((t, p[2], int(p[3], 16), int(p[4], 16)))
+            cur['m'].append((t, p[2], int(p[3], 16),
+                             None if p[4] == '-' else int(p[4], 16)))
         # 'L' (IPL seen) and 'G' (governor) are read by timing()
     return frames
 
@@ -80,6 +82,18 @@ def main(path):
     for a, b in zip(frames, frames[1:]):
         b['dt'] = b['t'] - a['t']
     frames = frames[1:-1]
+    light = all(w[3] is None for f in frames for w in f['w'])
+    if light:
+        # PISTORM_RASTER_VCOUNT off: no screen positions, only timing
+        gaps = [f['dt'] for f in frames]
+        print(f"frames {len(frames)}, VBL interval us min {min(gaps):.0f} median "
+              f"{statistics.median(gaps):.0f} max {max(gaps):.0f} (50 Hz = 20032); "
+              f"no video counter in this trace (PISTORM_RASTER_VCOUNT off)")
+        vecs = collections.Counter(v for f in frames for _, v in f['v6'])
+        print("level-6 vectors (MFP: $48 Timer B, $4D Timer A, $44 Timer D, $45 "
+              "Timer C, $46 ACIA): " + ' '.join(f"${v:02X}:{c}" for v, c in vecs.most_common(8)))
+        timing(path, frames, [])
+        return 0
     bases = sorted(set(f['base'] for f in frames))
     for f in frames:
         f['b'] = pick_base(f, bases)
@@ -185,16 +199,20 @@ def timing(path, frames, bases):
     seen, deliv = None, []
     # 2. Timer B taken -> next palette write; governor waits inside it
     tb, tb_lat, tb_x, waits_in, skips_in = None, [], [], 0, 0
+    # 3. the line ended (IPL 6 seen) -> colour written, for Timer B
+    tb_seen, tb_seen_seen, end2col = None, None, []
     gw = gs = 0
     for t, p in ev:
         k = p[1]
         if k == 'L':
             seen = t if p[2] == '6' else None
         elif k == 'I' and p[2] == '6':
+            is_tb = len(p) > 3 and p[3] == '48'
+            tb_seen_seen = seen if is_tb else None
             if seen is not None:
                 deliv.append(t - seen)
                 seen = None
-            tb = t if len(p) > 3 and p[3] == '48' else None
+            tb = t if is_tb else None
         elif k == 'G':
             if p[2] == 'wait':
                 gw += 1
@@ -206,11 +224,15 @@ def timing(path, frames, bases):
                     skips_in += 1
         elif k == 'P' and tb is not None:
             tb_lat.append(t - tb)
-            vc = int(p[4], 16)
-            inside = [b for b in bases if 0 <= vc - b < LINE * LINES]
-            if inside:
-                tb_x.append((vc - max(inside)) % LINE)
+            if tb_seen_seen is not None:
+                end2col.append(t - tb_seen_seen)
+            if p[4] != '-':
+                vc = int(p[4], 16)
+                inside = [b for b in bases if 0 <= vc - b < LINE * LINES]
+                if inside:
+                    tb_x.append((vc - max(inside)) % LINE)
             tb = None
+            tb_seen_seen = None
     print("\ntiming")
     if deliv:
         print(f"  IPL 6 seen by ipl_task -> CPU takes it, us: median {q(deliv,.5):.1f} "
@@ -218,11 +240,21 @@ def timing(path, frames, bases):
     if tb_lat:
         print(f"  Timer B taken -> colour written, us: median {q(tb_lat,.5):.1f} "
               f"95% {q(tb_lat,.95):.1f} 99% {q(tb_lat,.99):.1f} max {max(tb_lat):.1f}")
+    if end2col:
+        n = len(end2col)
+        ok = sum(x <= 12 for x in end2col)
+        mid = sum(12 < x <= 24 for x in end2col)
+        late = n - ok - mid
+        print(f"  line ended (IPL 6 seen) -> colour written, us: median {q(end2col,.5):.1f} "
+              f"95% {q(end2col,.95):.1f} 99% {q(end2col,.99):.1f} max {max(end2col):.1f}\n"
+              f"    within 12 us (a real ST): {100 * ok / n:.1f}%   12-24 us (still in the "
+              f"border): {100 * mid / n:.1f}%   over 24 us (into the picture, the wobble): "
+              f"{100 * late / n:.1f}%")
     if tb_x:
         h = collections.Counter(min(9, x // 16) for x in tb_x)
         print("  where along the line the colour changed (0% = left edge of the picture):\n    "
               + ' '.join(f"{i * 10}%:{100 * h[i] / len(tb_x):.0f}%" for i in range(10)))
-    print(f"  governor pauses within 100 us of a level-6 interrupt: {gw} taken, {gs} skipped "
+    print(f"  governor pauses within 100 us of a Timer B interrupt: {gw} taken, {gs} skipped "
           f"(handler running); between a Timer B interrupt and its colour write: "
           f"{waits_in} taken, {skips_in} skipped")
 
