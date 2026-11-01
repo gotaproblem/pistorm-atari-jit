@@ -1307,6 +1307,9 @@ static int stbox_divert_real_byte(uint8_t v)
  *                              .cfg is re-read)
  *   Ctrl + Alt + Shift + Undo  abort the emulator (exit 0: back to the
  *                              console)
+ *   Ctrl + Alt + Clr/Home      eject the disk in A:
+ *   Ctrl + Alt + Insert        put the next disk of the set in A:
+ *                              ("(Disk 1 of 2)" -> "(Disk 2 of 2)")
  *
  * Undo is End or PgDn on a USB keyboard. Undo, not Help: TOS acts on
  * Alt+Help itself (hardcopy) inside its keyboard handler, Undo it leaves
@@ -1330,6 +1333,18 @@ static void hk_key(struct hk_state *h, uint8_t sc, int down, const char *src)
         case 0x36: h->rsh  = (uint8_t)down; return;   /* Right Shift */
         default:   break;
     }
+    /* floppy A: inside any game: Clr/Home ejects, Insert puts in the
+     * next disk of the set (atari_fdd.c) */
+    if (sc == 0x47 && down && h->ctrl && h->alt) {  /* Clr/Home    */
+        fdd_hotkey_eject(0);
+        fflush(stdout);
+        return;
+    }
+    if (sc == 0x52 && down && h->ctrl && h->alt) {  /* Insert      */
+        fdd_hotkey_next(0);
+        fflush(stdout);
+        return;
+    }
     if (sc == 0x61 && down && h->ctrl && h->alt) {  /* Undo        */
         int abort_it = h->lsh || h->rsh;
         printf("[KBD] Ctrl+Alt+%sUndo on the %s keyboard - %s\n",
@@ -1351,7 +1366,9 @@ int kbd_hotkeys_on(void)
         hk_trace = e && *e == '2';
         if (on)
             printf("[KBD] hotkeys: Ctrl+Alt+Undo restarts, Ctrl+Alt+Shift+Undo "
-                   "aborts the emulator (PISTORM_HOTKEYS=0 turns them off%s)\n",
+                   "aborts the emulator, Ctrl+Alt+Clr/Home ejects A:, "
+                   "Ctrl+Alt+Insert inserts the next disk "
+                   "(PISTORM_HOTKEYS=0 turns them off%s)\n",
                    hk_trace ? "; =2 tracing" : "");
     }
     return on;
