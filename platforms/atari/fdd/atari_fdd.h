@@ -226,6 +226,19 @@ void     fdd_shutdown(void);
 int      fdd_insert_disk(int drive, const char *image_path, bool write_protect);
 void     fdd_eject_disk(int drive);
 void     fdd_toggle_disk(int drive);   /* runtime eject/re-insert (F11) */
+
+/* Disk swapping from the keyboard, inside any game (kbd_usb.c hotkeys):
+ *   Ctrl+Alt+Clr/Home  fdd_hotkey_eject - eject the disk in the drive
+ *   Ctrl+Alt+Insert    fdd_hotkey_next  - insert the NEXT disk of the set:
+ *                      "(Disk 1 of 2)" -> "(Disk 2 of 2)" in the same
+ *                      folder, wrapping to disk 1; with the drive empty,
+ *                      the disk after the one last ejected */
+void     fdd_hotkey_eject(int drive);
+void     fdd_hotkey_next(int drive);
+
+/* The next disk of a set, as a full path into out. 1 found, 0 not. Pure
+ * (reads the folder only), so the host test can call it. */
+int      fdd_next_in_set(const char *path, char *out, size_t outsz);
 void     fdd_set_write_protect(int drive, bool wp);
 
 /* Report a drive: 1 disk in, 0 empty, -1 bad index. Any of path/wp/busy

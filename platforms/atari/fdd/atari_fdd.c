@@ -26,6 +26,9 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <ctype.h>
+#include <dirent.h>
+#include <strings.h>
 #include <pthread.h>
 
 /* =========================================================================
@@ -775,6 +778,180 @@ void fdd_eject_disk(int drive)
  * asks for the boot floppy to be removed before switching to Mac mode
  * and waits for the WP-sensor change; this is the only way to oblige an
  * emulated drive. Pressing again re-mounts the same image. */
+/* ---- next disk of a set ------------------------------------------------ */
+
+/* "(Disk N of M)", any case, anywhere in the name: 1 with *pos/*end set to
+ * the bracket's span, 0 if there is none */
+static int disk_tag(const char *name, int *n, int *m, size_t *pos, size_t *end)
+{
+    for (const char *p = name; *p; p++) {
+        int a, b, used = 0;
+
+        if (p[0] != '(' || strncasecmp(p + 1, "disk ", 5) != 0)
+            continue;
+        if (sscanf(p + 6, "%d of %d)%n", &a, &b, &used) == 2 && used > 0 &&
+            a >= 1 && b >= 1) {
+            *n = a; *m = b;
+            *pos = (size_t)(p - name);
+            *end = *pos + 6 + (size_t)used;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* length of the common head of two strings: what follows the disk tag
+ * starts with the dump's group - "[cr Vmax][t].st" belongs with
+ * "[cr Vmax].st", not with "[cr Elite].st" */
+static size_t common_head(const char *a, const char *b)
+{
+    size_t k = 0;
+
+    while (a[k] && a[k] == b[k])
+        k++;
+    return k;
+}
+
+int fdd_next_in_set(const char *path, char *out, size_t outsz)
+{
+    char dir[256];
+    const char *name = strrchr(path, '/');
+    int n, m;
+    size_t pos, end;
+
+    if (!name)
+        return 0;
+    snprintf(dir, sizeof dir, "%.*s", (int)(name - path), path);
+    name++;
+
+    if (disk_tag(name, &n, &m, &pos, &end)) {
+        /* TOSEC: same title before the tag, disk n+1 (wrapping), and of
+         * several dumps of that disk the one from the same group (the
+         * longest common start after the tag: [cr Elite]...), then the
+         * plainest (shortest) name, then the first by name */
+        int want = n % m + 1;
+        DIR *d = opendir(dir);
+        struct dirent *e;
+        char best[256] = "";
+        size_t best_tail = 0;
+
+        if (!d)
+            return 0;
+        while ((e = readdir(d)) != NULL) {
+            int cn, cm;
+            size_t cp, ce, tail;
+
+            if (e->d_name[0] == '.' || !disk_tag(e->d_name, &cn, &cm, &cp, &ce))
+                continue;
+            if (cn != want || cm != m || cp != pos ||
+                strncasecmp(e->d_name, name, pos) != 0)
+                continue;
+            tail = common_head(e->d_name + ce, name + end);
+            if (!best[0] || tail > best_tail ||
+                (tail == best_tail && (strlen(e->d_name) < strlen(best) ||
+                 (strlen(e->d_name) == strlen(best) && strcmp(e->d_name, best) < 0)))) {
+                snprintf(best, sizeof best, "%s", e->d_name);
+                best_tail = tail;
+            }
+        }
+        closedir(d);
+        if (!best[0] || strlen(dir) + strlen(best) + 2 > outsz)
+            return 0;
+        snprintf(out, outsz, "%s/%s", dir, best);
+        return 1;
+    }
+
+    /* otherwise the last number in the name: game1.st -> game2.st, and
+     * back to 1 when there is no next one */
+    {
+        const char *dot = strrchr(name, '.');
+        size_t stem = dot ? (size_t)(dot - name) : strlen(name);
+        size_t ds = stem, de;
+        struct stat sb;
+        char cand[512];
+        int num;
+
+        while (ds > 0 && !isdigit((unsigned char)name[ds - 1]))
+            ds--;
+        de = ds;
+        while (ds > 0 && isdigit((unsigned char)name[ds - 1]))
+            ds--;
+        if (ds == de)
+            return 0;
+        num = atoi(name + ds);
+        for (int pass = 0; pass < 2; pass++) {
+            int next = pass ? 1 : num + 1;
+
+            if (next == num)
+                break;
+            snprintf(cand, sizeof cand, "%s/%.*s%d%s", dir, (int)ds, name, next,
+                     name + de);
+            if (stat(cand, &sb) == 0 && S_ISREG(sb.st_mode) &&
+                strlen(cand) < outsz) {
+                snprintf(out, outsz, "%s", cand);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+void fdd_hotkey_eject(int drive)
+{
+    if (drive < 0 || drive >= FDD_MAX_DRIVES)
+        return;
+    if (!FDD_enabled) {
+        printf("[FDD] Ctrl+Alt+Clr/Home: floppy is not emulated (no fdd line)\n");
+        return;
+    }
+    if (!fdc.drives[drive].disk_inserted) {
+        printf("[FDD] Ctrl+Alt+Clr/Home: drive %c is already empty\n", 'A' + drive);
+        return;
+    }
+    fdd_eject_disk(drive);
+    fdd_pulse_media(drive);
+    printf("[FDD] Ctrl+Alt+Clr/Home: drive %c ejected - Ctrl+Alt+Insert puts "
+           "in the next disk\n", 'A' + drive);
+}
+
+void fdd_hotkey_next(int drive)
+{
+    fdd_drive_t *drv;
+    char cur[sizeof(fdc.drives[0].image_path)], next[512];
+    bool wp;
+
+    if (drive < 0 || drive >= FDD_MAX_DRIVES)
+        return;
+    if (!FDD_enabled) {
+        printf("[FDD] Ctrl+Alt+Insert: floppy is not emulated (no fdd line)\n");
+        return;
+    }
+    drv = &fdc.drives[drive];
+    if (!drv->image_path[0]) {
+        printf("[FDD] Ctrl+Alt+Insert: drive %c has had no disk yet\n", 'A' + drive);
+        return;
+    }
+    snprintf(cur, sizeof cur, "%s", drv->image_path);
+    wp = drv->write_protected;
+
+    if (!fdd_next_in_set(cur, next, sizeof next)) {
+        if (drv->disk_inserted) {
+            printf("[FDD] Ctrl+Alt+Insert: no next disk found for '%s'\n", cur);
+            return;
+        }
+        snprintf(next, sizeof next, "%s", cur);   /* empty: put it back */
+    }
+    if (drv->disk_inserted)
+        fdd_eject_disk(drive);
+    if (fdd_insert_disk(drive, next, wp) == 0) {
+        fdd_pulse_media(drive);
+        printf("[FDD] Ctrl+Alt+Insert: drive %c <- '%s'\n", 'A' + drive, next);
+    } else {
+        printf("[FDD] Ctrl+Alt+Insert: could not open '%s' - drive %c empty\n",
+               next, 'A' + drive);
+    }
+}
+
 void fdd_toggle_disk(int drive)
 {
     static bool last_wp[FDD_MAX_DRIVES];

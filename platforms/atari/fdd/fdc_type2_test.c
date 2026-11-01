@@ -220,6 +220,77 @@ int main(void)
 	CHECK(ram[0x70000] == 0x5A && ram[0x701FF] == 0x5A, "write: sector 4 not written");
 	CHECK(sector_is(0x70200, 20, 0, 5), "write: sector 5 was written too");
 
+	/* 7. next disk of a set - Steve's real names, plus their disk 2s */
+	{
+		char dir[] = "/tmp/fddsetXXXXXX", p[600], out[600];
+		const char *f[] = {
+			"Shadow of the Beast (1990)(Psygnosis)(Disk 1 of 2)[cr Replicants][t +2][a].st",
+			"Shadow of the Beast (1990)(Psygnosis)(Disk 1 of 2)[cr Replicants][t].st",
+			"Shadow of the Beast (1990)(Psygnosis)(Disk 2 of 2)[cr Replicants].st",
+			"Shadow of the Beast II (1991)(Psygnosis)(Disk 1 of 2)[cr Elite][t][b].st",
+			"Shadow of the Beast II (1991)(Psygnosis)(Disk 1 of 2)[cr Vmax][t].st",
+			"Shadow of the Beast II (1991)(Psygnosis)(Disk 2 of 2)[cr Vmax].st",
+			"Shadow of the Beast II (1991)(Psygnosis)(Disk 2 of 2)[cr Elite].st",
+			"Lone (1990)(X)(Disk 1 of 3).st",
+			"game1.st", "game2.st", "solo3.st" };
+		const struct { int from; const char *to; } want[] = {
+			{ 0, f[2] }, { 1, f[2] }, { 2, f[1] },  /* 2 -> 1: best tail, then name */
+			{ 3, f[6] }, { 4, f[5] }, { 5, f[4] },
+			{ 6, NULL /* f[3] or f[4]: either is disk 1 */ },
+			{ 7, "" },  { 8, f[9] }, { 9, f[8] }, { 10, "" } };
+
+		if (!mkdtemp(dir)) { CHECK(0, "set: mkdtemp"); }
+		else {
+			for (unsigned k = 0; k < sizeof f / sizeof f[0]; k++) {
+				snprintf(p, sizeof p, "%s/%s", dir, f[k]);
+				FILE *h = fopen(p, "w"); if (h) fclose(h);
+			}
+			for (unsigned k = 0; k < sizeof want / sizeof want[0]; k++) {
+				int got;
+
+				snprintf(p, sizeof p, "%s/%s", dir, f[want[k].from]);
+				got = fdd_next_in_set(p, out, sizeof out);
+				if (!want[k].to)
+					CHECK(got && strstr(out, "(Disk 1 of 2)[cr "), "set: %s -> %s",
+					      f[want[k].from], got ? out : "(none)");
+				else if (!want[k].to[0])
+					CHECK(!got, "set: %s should have no next, got %s", f[want[k].from], out);
+				else
+					CHECK(got && !strcmp(strrchr(out, '/') + 1, want[k].to),
+					      "set: %s -> %s, wanted %s", f[want[k].from],
+					      got ? strrchr(out, '/') + 1 : "(none)", want[k].to);
+			}
+
+			/* the keys: eject, then Insert puts in the disk after it */
+			snprintf(p, sizeof p, "%s/%s", dir, f[3]);
+			{	/* a real 800K image under that name */
+				FILE *src = fopen(img, "rb"), *dst = fopen(p, "wb");
+				int c;
+				while (src && dst && (c = fgetc(src)) != EOF) fputc(c, dst);
+				if (src) fclose(src);
+				if (dst) fclose(dst);
+				snprintf(out, sizeof out, "%s/%s", dir, f[6]);
+				src = fopen(p, "rb"); dst = fopen(out, "wb");
+				while (src && dst && (c = fgetc(src)) != EOF) fputc(c, dst);
+				if (src) fclose(src);
+				if (dst) fclose(dst);
+			}
+			CHECK(fdd_insert_disk(0, p, false) == 0, "keys: insert disk 1");
+			fdd_hotkey_eject(0);
+			CHECK(fdd_query(0, NULL, 0, NULL, NULL) == 0, "keys: not ejected");
+			fdd_hotkey_next(0);
+			out[0] = 0;
+			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 2 of 2)[cr Elite]"),
+			      "keys: after eject + Insert drive has '%s'", out);
+			fdd_hotkey_next(0);       /* Insert with a disk in: straight to the next */
+			out[0] = 0;
+			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 1 of 2)"),
+			      "keys: Insert again should wrap to disk 1, has '%s'", out);
+			snprintf(p, sizeof p, "rm -rf '%s'", dir);
+			if (system(p)) {}
+		}
+	}
+
 	unlink(img);
 	printf(fails ? "%d CHECK(S) FAILED\n" : "all checks passed\n", fails);
 	return fails ? 1 : 0;
