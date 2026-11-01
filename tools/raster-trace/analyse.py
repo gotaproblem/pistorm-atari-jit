@@ -222,8 +222,9 @@ def timing(path, frames, bases):
         h = collections.Counter(min(9, x // 16) for x in tb_x)
         print("  where along the line the colour changed (0% = left edge of the picture):\n    "
               + ' '.join(f"{i * 10}%:{100 * h[i] / len(tb_x):.0f}%" for i in range(10)))
-    print(f"  governor pauses: {gw} taken, {gs} skipped inside a handler; between a "
-          f"Timer B interrupt and its colour write: {waits_in} taken, {skips_in} skipped")
+    print(f"  governor pauses within 100 us of a level-6 interrupt: {gw} taken, {gs} skipped "
+          f"(handler running); between a Timer B interrupt and its colour write: "
+          f"{waits_in} taken, {skips_in} skipped")
 
 
 if __name__ == '__main__':

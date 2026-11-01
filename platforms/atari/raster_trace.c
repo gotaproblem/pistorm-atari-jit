@@ -21,8 +21,10 @@
  * Off costs one load of a zero flag at each palette write and interrupt.
  * On, each palette write costs three bus reads (~2-3 us) - small against a
  * 64 us line, and the same for every write, so the spread it measures is
- * the emulator's, not the trace's. Recording stops when the buffer is full
- * (about 60 s of a busy raster screen) and says so.
+ * the emulator's, not the trace's. The buffer is a ring holding the most
+ * recent 2M events (about 30 s of a busy raster screen with sample music):
+ * stop the emulator while the screen of interest is showing and the trace
+ * ends on it, however long the game took to get there.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -33,7 +35,7 @@
 
 uint8_t ps_read_8(uint32_t address);          /* gpio/ps_protocol.c */
 
-#define RT_MAX (1u << 20)                     /* events, 16 bytes each */
+#define RT_MAX (1u << 21)                     /* events, 16 bytes each: 32 MB */
 
 typedef struct {
     uint64_t t;                               /* arch timer ticks      */
@@ -46,8 +48,9 @@ typedef struct {
 volatile int rt_on;
 static rt_ev_t *rt_buf;
 static rt_ev_t *rt_last_irq;               /* gets its vector after the IACK */
-static volatile uint32_t rt_n;
-static int rt_full_said;
+static uint64_t rt_irq6_t;                  /* when the last level-6 was taken */
+static uint64_t rt_win_ticks;               /* 100 us in arch-timer ticks      */
+static volatile uint64_t rt_n;            /* events ever logged */
 static const char *rt_path;
 
 static inline uint64_t rt_ticks(void)
@@ -89,21 +92,12 @@ __attribute__((constructor)) static void rt_init(void)
 
 /* Several threads log: the CPU thread (palette, interrupts, MFP writes,
  * governor waits) and ipl_task (IPL levels it sees). Slots are claimed
- * atomically; a reader only runs after the emulator has stopped. */
+ * atomically from a ring; the dump runs after the emulator has stopped. */
 static inline rt_ev_t *rt_slot(void)
 {
-    uint32_t n = __atomic_fetch_add(&rt_n, 1u, __ATOMIC_RELAXED);
+    uint64_t n = __atomic_fetch_add(&rt_n, 1u, __ATOMIC_RELAXED);
 
-    if (n >= RT_MAX) {
-        rt_n = RT_MAX;
-        if (!rt_full_said) {
-            rt_full_said = 1;
-            fprintf(stderr, "[RASTER] buffer full - recording stopped; stop the "
-                            "emulator to write %s\n", rt_path);
-        }
-        return NULL;
-    }
-    return &rt_buf[n];
+    return &rt_buf[n & (RT_MAX - 1u)];
 }
 
 static uint32_t rt_vcount(void)
@@ -138,6 +132,8 @@ void rt_irq_slow(int level)
     e->v = 0;
     e->c = 0;
     rt_last_irq = level == 4 ? NULL : e;
+    if (level == 6)
+        rt_irq6_t = e->t;
     if (level == 4) {
         e->c = ((uint32_t)ps_read_8(0x00FF8201u) << 16) |
                ((uint32_t)ps_read_8(0x00FF8203u) << 8);
@@ -156,13 +152,16 @@ void rt_irq_vector_slow(unsigned vec)
     }
 }
 
-/* ipl_task: the IPL level it now sees on the bus (before any confirm) */
+/* ipl_task: it now sees IPL level 6 on the bus (before any confirm).
+ * Only entries into 6 - the analyser pairs each with the level-6
+ * interrupt the CPU then takes; the other levels would only fill the ring. */
 void rt_ipl_slow(int level)
 {
-    rt_ev_t *e = rt_slot();
+    rt_ev_t *e;
 
-    if (!e)
+    if (level != 6)
         return;
+    e = rt_slot();
     e->t = rt_ticks();
     e->kind = 'L';
     e->a = (uint8_t)level;
@@ -171,14 +170,22 @@ void rt_ipl_slow(int level)
 }
 
 /* the governor: a pause of ns, and whether it was skipped because an
- * interrupt handler was running (skipped = 1, ns = what it would have been) */
+ * interrupt handler was running (skipped = 1, ns = what it would have been).
+ * Only pauses within 100 us of a level-6 interrupt are logged: the governor
+ * checks every ~31 us, and logging them all (first try, 31 Oct 2026) filled
+ * the buffer in 30 s, before the game reached its raster screen. */
 void rt_gov_slow(int64_t ns, int skipped)
 {
-    rt_ev_t *e = rt_slot();
+    uint64_t now = rt_ticks();
+    rt_ev_t *e;
 
-    if (!e)
+    if (!rt_win_ticks)
+        rt_win_ticks = rt_hz() / 10000u;
+    if (now - rt_irq6_t > rt_win_ticks)
         return;
-    e->t = rt_ticks();
+    if (!(e = rt_slot()))
+        return;
+    e->t = now;
     e->kind = 'G';
     e->a = (uint8_t)skipped;
     e->v = 0;
@@ -228,7 +235,8 @@ void rt_dump(void)
         return;
     }
     hz = rt_hz();
-    t0 = rt_n ? rt_buf[0].t : 0;
+    uint64_t total = rt_n, first = total > RT_MAX ? total - RT_MAX : 0;
+    t0 = total ? rt_buf[first & (RT_MAX - 1u)].t : 0;
     fprintf(f, "# raster trace: t_us kind ...\n"
                "#   P idx value video_counter   (palette write, real counter after it)\n"
                "#   I level vector              (interrupt taken, vector from the IACK)\n"
@@ -237,8 +245,8 @@ void rt_dump(void)
                "#   L level                     (ipl_task saw the IPL lines change)\n"
                "#   G wait|skip ns              (governor pause; skip = not taken,\n"
                "#                               an interrupt handler was running)\n");
-    for (uint32_t i = 0; i < rt_n; i++) {
-        const rt_ev_t *e = &rt_buf[i];
+    for (uint64_t i = first; i < total; i++) {
+        const rt_ev_t *e = &rt_buf[i & (RT_MAX - 1u)];
         double us = (double)(e->t - t0) * 1e6 / (double)hz;
 
         if (e->kind == 'P')
@@ -255,5 +263,6 @@ void rt_dump(void)
             fprintf(f, "%.1f I %u %02X\n", us, e->a, e->c & 0xFFu);
     }
     fclose(f);
-    fprintf(stderr, "[RASTER] %u events written to %s\n", rt_n, rt_path);
+    fprintf(stderr, "[RASTER] last %llu of %llu events written to %s\n",
+            (unsigned long long)(total - first), (unsigned long long)total, rt_path);
 }
