@@ -95,6 +95,7 @@ extern "C" void fdd_eject_disk(int d)        { if (d >= 0 && d < 2) g_img[d][0] 
 extern "C" void fdd_set_write_protect(int d, bool wp) { if (d >= 0 && d < 2) g_wp[d] = wp; }
 extern "C" void fdd_pulse_media(int d)       { if (d >= 0 && d < 2) g_pulsed[d]++; }
 extern "C" int  fdd_emulated(void)           { return 1; }
+extern "C" void ide_hide_next_boot(void)     { }
 extern "C" int  fdd_query(int d, char *path, int n, int *wp, int *busy)
 {
   if (d < 0 || d > 1) return -1;

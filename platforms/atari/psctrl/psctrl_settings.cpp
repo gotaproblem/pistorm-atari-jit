@@ -498,6 +498,7 @@ static void apply_ipl(void)   { psctrl_tunables_ipl_recalc(); }
 extern "C" int  fdd_query(int drive, char *path, int pathlen, int *wp, int *busy);
 extern "C" void fdd_pulse_media(int drive);
 extern "C" int  fdd_emulated(void);
+extern "C" void ide_hide_next_boot(void);
 
 /* What a floppy field reads when the drive is a real one (no `fdd` line:
  * passthrough to the ST's own drive / Gotek). PSFDD.ACC and PSCTRL show it
@@ -762,6 +763,8 @@ ITEM("floppy_eject_a", "Eject A:", PS_TAB_FLOPPY, PS_K_ACTION, PS_C_LIVE,
 ITEM("floppy_eject_b", "Eject B:", PS_TAB_FLOPPY, PS_K_ACTION, PS_C_LIVE,
      PS_U_NONE, 0, 0, 0, NULL, 0, 0, NULL, jg_zero, NULL, NULL),
 ITEM("floppy_swap", "Swap A: <-> B:", PS_TAB_FLOPPY, PS_K_ACTION, PS_C_LIVE,
+     PS_U_NONE, 0, 0, 0, NULL, 0, 0, NULL, jg_zero, NULL, NULL),
+ITEM("floppy_boot", "Next boot from A:", PS_TAB_FLOPPY, PS_K_ACTION, PS_C_LIVE,
      PS_U_NONE, 0, 0, 0, NULL, 0, 0, NULL, jg_zero, NULL, NULL),
 
 /* --------------------------------------------------------- Network --- */
@@ -1029,6 +1032,16 @@ static int do_action(const struct ps_item *it, int arg)
       return PS_R_BUSY;
     fdd_eject_disk(drive);
     fdd_pulse_media(drive);
+    return PS_R_OK;
+  }
+
+  if (!strcmp(it->name, "floppy_boot")) {
+    /* Arm the one-shot: the next reset boots with the emulated IDE hidden
+     * so TOS boots the disk in A:. PSFDD warm-resets straight after; from
+     * PSCTRL it waits for the next reset of any kind. */
+    if (!fdd_emulated())
+      return PS_R_REJECT;
+    ide_hide_next_boot();
     return PS_R_OK;
   }
 

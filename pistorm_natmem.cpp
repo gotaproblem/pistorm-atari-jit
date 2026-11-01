@@ -2780,7 +2780,10 @@ static addrbank pistorm_io_bank = {
 #define IDE_REG_HI 0x00F00100u /* IDETOPADDR: 256-byte reg window */
 
 static inline uae_u32 ide_fold(uaecptr a) { return a & 0x00FFFFFFu; }
-static inline int ide_in_regs(uae_u32 a) { return a >= IDE_REG_LO && a < IDE_REG_HI; }
+extern "C" volatile int IDE_boot_hidden;   /* IDE.c: one-shot floppy boot */
+/* Hidden for a floppy boot: the window goes to the real bus like the rest
+ * of the page, which bus-errors on an ST with no IDE - what TOS expects. */
+static inline int ide_in_regs(uae_u32 a) { return a >= IDE_REG_LO && a < IDE_REG_HI && !IDE_boot_hidden; }
 
 /* Reads: emulated controller for the register window, real bus for the rest of
  * the page (matches what the dummy/m68k_read_memory path used to do). */
