@@ -2011,7 +2011,11 @@ static void fdc_write_addr(uint32_t addr, uint32_t val, int size)
     if (fdc.dma_mode & DMA_MODE_SCREG) {
         /* Writing sector count register */
         fdc.dma_sector_count = (uint16_t)v;
-        fdc.dma_addr = fdc.dma_base_addr;   /* latch address at start of transfer */
+        /* The real DMA chip has one address counter, loaded only by
+         * writes to $8609/0B/0D. This used to re-latch it from the base
+         * here - harmless while transfers never advanced it, wrong now
+         * they do: a loader that sets the base once and the count before
+         * each sector would have every sector land on the first. */
         FDD_DBG("FDC SCREG write (sector count) = %d", v);
         return;
     }
@@ -2284,6 +2288,54 @@ static void fdc_do_type1(uint8_t cmd)
  *   IRQ raised (latched - visible on second GPIP poll)
  * ========================================================================= */
 
+/*
+ * How many sectors one Type II command moves, as the WD1772 + DMA chip do it:
+ *   - without the m bit (cmd bit 4) the FDC transfers ONE sector, whatever
+ *     the DMA sector count says. The count is only how many 512-byte
+ *     blocks the DMA chip will accept; it does not make the FDC read more.
+ *   - with m the FDC carries on sector after sector; the DMA chip takes
+ *     as many as its count allows, and running off the track end is
+ *     Record Not Found.
+ * Before this, every read moved the DMA count's worth of sectors, so a
+ * loader that sets a big count and reads one sector at a time (Shadow of
+ * the Beast II: count 14) asked for sectors past the end of the track and
+ * got nothing at all.
+ * Returns the sector count to move (0 = sector not on this track) and sets
+ * *rnf when the FDC would end the command with Record Not Found. */
+static int fdc_type2_count(uint8_t cmd, const fdd_drive_t *d, int sector, int *rnf)
+{
+    int dma  = fdc.dma_sector_count ? fdc.dma_sector_count : 1;
+    int left = d->sectors_per_track - sector + 1;   /* sectors to track end */
+
+    *rnf = 0;
+    if (sector < 1 || left < 1) {
+        *rnf = 1;
+        return 0;
+    }
+    if (!(cmd & 0x10u))
+        return 1;
+    /* m: a real FDC runs on to the track end and reports RNF unless the
+     * program stops it with Force Interrupt once the DMA count is used up.
+     * Here the command completes at once, so only report RNF when the
+     * track really ended before the DMA count did. */
+    if (left < dma) {
+        *rnf = 1;
+        return left;
+    }
+    return dma;
+}
+
+/* after a Type II transfer of n sectors: the DMA address counter and the
+ * sector count move as they do on the real chip */
+static void fdc_type2_advance(uint8_t cmd, int sector, int n)
+{
+    fdc.dma_addr = (fdc.dma_addr + (uint32_t)(n * FDD_SECTOR_SIZE)) & 0x00FFFFFFu;
+    fdc.dma_sector_count = fdc.dma_sector_count > n
+                         ? (uint16_t)(fdc.dma_sector_count - n) : 0;
+    if (cmd & 0x10u)
+        fdc.sector_reg = (uint8_t)(sector + n);
+}
+
 static void fdc_do_read_sectors(void)
 {
     //fprintf(stderr, "[READ] entry: drv=%d track=%d side=%d sec=%d dma=0x%06X\n",
@@ -2311,7 +2363,7 @@ static void fdc_do_read_sectors(void)
                 // : fdc.track_reg;
     int side   = fdc.selected_side;
     int sector = fdc.sector_reg;
-    int count  = fdc.dma_sector_count ? fdc.dma_sector_count : 1;
+    int count, rnf = 0;
 
     //FDD_LOG("Read: T%d S%d Sec%d count=%d dma=0x%06X drive=%d",
      //       track, side, sector, count, fdc.dma_addr, drv);
@@ -2325,6 +2377,15 @@ static void fdc_do_read_sectors(void)
         fdc.status    |= FDC_STATUS_RECNF;
         fdc.status    &= ~FDC_STATUS_BUSY;
         fdc.dma_status = 0;     /* error */
+        fdc_raise_irq_latched();
+        return;
+    }
+
+    count = fdc_type2_count(fdc.command, &fdc.drives[drv], sector, &rnf);
+    if (count == 0) {             /* that sector is not on this track */
+        fdc.status    |= FDC_STATUS_RECNF;
+        fdc.status    &= ~FDC_STATUS_BUSY;
+        fdc.dma_status = 0;
         fdc_raise_irq_latched();
         return;
     }
@@ -2374,10 +2435,12 @@ static void fdc_do_read_sectors(void)
 
     free(buf);
 
-    //fdc.dma_addr        += (uint32_t)(count * FDD_SECTOR_SIZE);
-    //fdc.sector_reg       = (uint8_t)(sector + count);
-    fdc.dma_sector_count = 0;                              /* 0 = success */
+    /* the address counter advances as the bytes go in: loaders poll
+     * $8609/0B/0D to see how far a read has got */
+    fdc_type2_advance(fdc.command, sector, count);
     fdc.dma_status       = DMA_STATUS_OK | DMA_STATUS_SCZERO;
+    if (rnf)
+        fdc.status |= FDC_STATUS_RECNF;
     fdc.status          &= ~FDC_STATUS_BUSY;
     fdc_raise_irq_latched();
 
@@ -2407,7 +2470,7 @@ static void fdc_do_write_sectors(void)
                 // : fdc.track_reg;
     int side   = fdc.selected_side;
     int sector = fdc.sector_reg;
-    int count  = fdc.dma_sector_count ? fdc.dma_sector_count : 1;
+    int count, rnf = 0;
 
     //FDD_LOG("Write: T%d S%d Sec%d count=%d dma=0x%06X drive=%d",
      //       track, side, sector, count, fdc.dma_addr, drv);
@@ -2426,6 +2489,15 @@ static void fdc_do_write_sectors(void)
         fdc.dma_status = 0;
         fdc_raise_irq_latched();
         FDD_LOG("Drive %c: write protected", 'A' + drv);
+        return;
+    }
+
+    count = fdc_type2_count(fdc.command, &fdc.drives[drv], sector, &rnf);
+    if (count == 0) {
+        fdc.status    |= FDC_STATUS_RECNF;
+        fdc.status    &= ~FDC_STATUS_BUSY;
+        fdc.dma_status = 0;
+        fdc_raise_irq_latched();
         return;
     }
 
@@ -2451,10 +2523,10 @@ static void fdc_do_write_sectors(void)
     }
     free(buf);
 
-    //fdc.dma_addr        += (uint32_t)(count * FDD_SECTOR_SIZE);
-    //fdc.sector_reg       = (uint8_t)(sector + count);
-    fdc.dma_sector_count = 0;
+    fdc_type2_advance(fdc.command, sector, count);
     fdc.dma_status       = DMA_STATUS_OK | DMA_STATUS_SCZERO;
+    if (rnf)
+        fdc.status |= FDC_STATUS_RECNF;
     fdc.status          &= ~FDC_STATUS_BUSY;
     fdc_raise_irq_latched();
 
