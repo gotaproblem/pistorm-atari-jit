@@ -256,12 +256,21 @@ volatile unsigned pistorm_ipl_trc_shown = 0;
  *               ($FF820A) and resolution ($FF8260) registers, with the
  *               real video counter after a return to 50 Hz
  * A writer thread drains both every 100 ms and merges them by time, so
- * nothing on core 3 ever touches a file. Off: one load of a flag. */
+ * nothing on core 3 ever touches a file. Off: one load of a flag.
+ * PISTORM_IPL_TIMELINE=2 adds level 2 (HBL) - line changes, latches,
+ * not-latched reasons, and 'C' records for a candidate level that
+ * changed again before the confirm time accepted it - but only while
+ * the CPU's mask is 2 or below, i.e. while HBL can actually be taken
+ * (a 15.6 kHz line otherwise floods the log). For the regression
+ * suite's irq_hbl check: tools/ipl-timeline/hbl.py reads it. */
 #define TL_N (1u << 20)                         /* per ring, power of 2 */
 struct tl_e { uint64_t t; uint32_t d; uint8_t k, a, b, c; };
 static struct tl_e *tl_ring[2];                 /* 0 ipl_task, 1 CPU  */
 static volatile uint32_t tl_head[2];
 static int tl_on = -1;                          /* -1 = not decided   */
+static int tl_min = 4;                          /* lowest level logged */
+/* log this level? Level 2 only in mode 2, and only while HBL can be taken */
+#define TL_LVL(l) ((l) >= 4 || ((l) == 2 && tl_min == 2 && g_irq_mask <= 2))
 static inline uint64_t tl_now(void)
 {
   uint64_t t;
@@ -300,6 +309,7 @@ static void *tl_writer(void *)
   setvbuf(f, NULL, _IOFBF, 1 << 20);
   fprintf(f, "# us  I from->to action g_irq mask      (ipl_task decision)\n"
              "# us  B level not-latched-because g_irq mask\n"
+             "# us  C level cand->new age-us  (candidate changed before confirm)\n"
              "# us  X exception-nr vector sr-mask pc  (CPU took it)\n"
              "# us  W reg=val [video counter - base = line:byte]\n");
   uint32_t pos[2] = { 0, 0 };
@@ -340,6 +350,10 @@ static void *tl_writer(void *)
           fprintf(f, "%.1f B %u %s %u %u\n", us, e.a, tl_why[e.b & 3],
                   (unsigned)(e.d >> 8) & 0xFF, (unsigned)e.d & 0xFF);
           break;
+        case 'C':
+          fprintf(f, "%.1f C %u %u->%u %.2f\n", us, e.a, e.b, e.c,
+                  (double)e.d * 1e6 / (double)hz);
+          break;
         case 'X':
           fprintf(f, "%.1f X %u %02X %u %06X\n", us, e.a, e.b, e.c, e.d);
           break;
@@ -362,11 +376,13 @@ static void *tl_writer(void *)
 static void tl_init(void)
 {
   const char *e = getenv("PISTORM_IPL_TIMELINE");
-  if (!e || *e != '1')
+  if (!e || (*e != '1' && *e != '2'))
   {
     tl_on = 0;
     return;
   }
+  if (*e == '2')
+    tl_min = 2;
   tl_ring[0] = (struct tl_e *)calloc(TL_N, sizeof(struct tl_e));
   tl_ring[1] = (struct tl_e *)calloc(TL_N, sizeof(struct tl_e));
   if (!tl_ring[0] || !tl_ring[1])
@@ -384,7 +400,8 @@ static void tl_init(void)
   pthread_setname_np(tid, "pistorm: iplTL");
   pthread_detach(tid);
   tl_on = 1;
-  fprintf(stderr, "[TL] IPL timeline on\n");
+  fprintf(stderr, "[TL] IPL timeline on%s\n",
+          tl_min == 2 ? " (with level 2)" : "");
 }
 
 static const char *const ipl_trc_act[6] = {
@@ -1047,8 +1064,8 @@ static void *ipl_task(void *)
   uint8_t trc_last = 0;                 /* last level put in the trace */
 #define IPL_TRC(f, t_, a)                                              \
   do {                                                                 \
-    if (tl_on == 1 && (a) != 2 &&                                      \
-        ((f) >= 4 || (t_) >= 4))                                       \
+    if (tl_on == 1 && ((a) != 2 || tl_min == 2) &&                     \
+        (TL_LVL(f) || TL_LVL(t_)))                                     \
       tl_push(0, 'I', (f), (t_), (a),                                  \
               ((uint32_t)g_irq << 8) | g_irq_mask);                    \
     if (pst_dbg_ipl_stats && !pistorm_ipl_trc_shown) {                 \
@@ -1554,6 +1571,14 @@ static void *ipl_task(void *)
     {
       if (ipl != ipl_cand)
       {
+        if (tl_on == 1 && tl_min == 2 && ipl_cand != g_ipl &&
+            (TL_LVL(g_ipl) || TL_LVL(ipl_cand) || TL_LVL(ipl)))
+        {                               /* candidate never confirmed */
+          uint64_t nowt;
+          __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
+          tl_push(0, 'C', g_ipl, ipl_cand, ipl,
+                  (uint32_t)(nowt - ipl_cand_tick));
+        }
         ipl_cand = ipl;                 /* new candidate: stamp and wait */
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ipl_cand_tick));
         continue;
@@ -1681,7 +1706,7 @@ static void *ipl_task(void *)
 
     if (ipl != av_held)
       av_held = 0;                      /* line left the level: re-arm */
-    if (tl_on == 1 && ipl >= 4)
+    if (tl_on == 1 && TL_LVL(ipl))
     {
       static uint8_t tl_last_why, tl_last_lvl;
       const uint8_t why = ipl == av_held ? 1 : ipl <= g_irq ? 2

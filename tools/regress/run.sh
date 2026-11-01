@@ -83,8 +83,13 @@ record() {
 # stop it as soon as the guest says @END. Returns 0 when stopped after
 # @END, else the emulator's exit status (124 = the time ran out).
 run_emulator() {
-	local cfg=$1 secs=$2 log=$3 until_end=$4
-	sudo timeout -s INT "$secs" ./emulator --config "$cfg" --no-setup > "$log" 2>&1 &
+	local cfg=$1 secs=$2 log=$3 until_end=$4 envs=()
+	# REGRESS_TIMELINE=1: IPL timeline with level 2 (HBL), one per boot,
+	# read by tools/ipl-timeline/hbl.py into <boot>.hbl.txt (measurement
+	# only: the logging is a store into a ring on the ipl_task core)
+	[ "${REGRESS_TIMELINE:-0}" = 1 ] &&
+		envs=(PISTORM_IPL_TIMELINE=2 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl")
+	sudo env "${envs[@]}" timeout -s INT "$secs" ./emulator --config "$cfg" --no-setup > "$log" 2>&1 &
 	local pid=$! rc
 	if [ "$until_end" = 1 ]; then
 		while kill -0 $pid 2>/dev/null; do
@@ -101,6 +106,15 @@ run_emulator() {
 	wait $pid; rc=$?
 	sleep 2
 	return $rc
+}
+
+# REGRESS_TIMELINE=1: what hbl.py makes of boot $1's timeline
+timeline_report() {
+	[ "${REGRESS_TIMELINE:-0}" = 1 ] || return 0
+	local tl="$out/$1.tl"
+	[ -f "$tl" ] || return 0
+	python3 "$here/../ipl-timeline/hbl.py" "$tl" > "$out/$1.hbl.txt" 2>&1
+	gzip -f "$tl"
 }
 
 # ---------------------------------------------------------------- suite.txt
@@ -148,6 +162,7 @@ run_suite() {
 		echo "$name: booting (at most ${secs}s) on $commit ..."
 		run_emulator "$cfg" "$secs" "$log" 1
 		local rc=$?
+		timeline_report "$name"
 
 		# the guest's own lines, prefix stripped
 		sed -n 's/^.*\[NF_STDERR\] \(@.*\)$/\1/p' "$log" > "$d/report.txt"
@@ -251,6 +266,12 @@ failed=$(grep -c '|FAIL|' "$out/.checks")
 		printf '  %-4s %-10s %-22s %s\n' "$v" "$b" "$c" "$d"
 	done < "$out/.checks"
 	echo
+	for h in "$out"/*.hbl.txt; do
+		[ -f "$h" ] || continue
+		echo "HBL timeline, $(basename "$h" .hbl.txt)"
+		sed 's/^/  /' "$h"
+		echo
+	done
 	echo "Measurements (the previous run's in brackets)"
 	while IFS='|' read -r b m val; do
 		p=$(prev_metric "$b" "$m")

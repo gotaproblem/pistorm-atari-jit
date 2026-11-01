@@ -55,3 +55,7 @@ Every guest check is counted against MFP Timer C (the real chip's crystal), so t
 2. Run `tools/regress/build.sh`.
 3. Check it under Hatari: build a floppy with `mkimg.py st x.st --auto guest/X.PRG --auto guest/END.PRG` and boot it with `--natfeats on`.
 4. Commit the `.S` and the `.PRG` together.
+
+## Timeline capture
+
+`REGRESS_TIMELINE=1 tools/regress/run.sh core-104` also records the IPL timeline with level 2 (`PISTORM_IPL_TIMELINE=2`) for each boot, keeps it as `results/<commit>/<boot>.tl.gz`, and puts what `tools/ipl-timeline/hbl.py` finds in the summary: for every HBL that never reached the CPU during `irq_hbl`, whether a VBL/MFP interrupt was in the way, the CPU did not take a latched level 2, the line was seen but not latched, or the line's drop between two HBLs was too short for the confirm time or never seen. It is measurement only and changes no timing decision.
