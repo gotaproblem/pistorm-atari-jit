@@ -6071,6 +6071,13 @@ static struct {
 	uint64_t win_start_us;
 } irqlat;
 
+/* events.cpp's governor: is an interrupt waiting that the CPU would take
+ * now? Same test as intlev() below. */
+int pistorm_irq_deliverable(void)
+{
+	return g_irq > regs.intmask;
+}
+
 int intlev (void)
 {
 	uint8_t ipl;

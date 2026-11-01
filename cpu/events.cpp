@@ -385,21 +385,46 @@ static inline int64_t gov_now_ns(void)
 	return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* newcpu.cpp: an interrupt is waiting that the CPU would take now */
+extern int pistorm_irq_deliverable(void);
+
 /* Wait until CLOCK_MONOTONIC reaches `until` (ns): sleep most of it, spin
- * the last GOV_SPIN_NS. Returns the time on leaving. */
+ * the last GOV_SPIN_NS. Returns the time on leaving.
+ *
+ * An interrupt ends the wait at once. The guest is AHEAD of real time
+ * whenever this waits, and a real 68000 is never ahead: it takes an MFP
+ * interrupt within a few microseconds of the chip raising it. Waiting out
+ * the step first delayed it by up to a step (~31 us) - measured on
+ * Shadow of the Beast II's sky (31 Oct 2026, raster trace): the Timer B
+ * handler that must write the next frame's count within one 64 us line
+ * was taken ~29 us late in 2-4% of frames, missed the line, and the whole
+ * sky chain started 19 lines early the next frame. Taking the interrupt
+ * and paying the time back at the next step keeps the average speed and
+ * gives the handler its line back. The sleep is done in slices so a long
+ * wait notices too. */
 static int64_t gov_wait_until(int64_t now, int64_t until)
 {
-	if (until - now > GOV_SPIN_NS) {
+	static const int64_t GOV_SLICE_NS = 100000LL;  /* longest sleep between checks */
+
+	while (until - now > GOV_SPIN_NS) {
 		struct timespec dl;
 		int64_t wake = until - GOV_SPIN_NS;
+
+		if (pistorm_irq_deliverable())
+			return now;
+		if (wake - now > GOV_SLICE_NS)
+			wake = now + GOV_SLICE_NS;
 		dl.tv_sec = (time_t)(wake / 1000000000LL);
 		dl.tv_nsec = (long)(wake % 1000000000LL);
 		while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL) == EINTR)
 			;
-	}
-	do {
 		now = gov_now_ns();
-	} while (now < until);
+	}
+	while (now < until) {
+		if (pistorm_irq_deliverable())
+			break;
+		now = gov_now_ns();
+	}
 	return now;
 }
 
