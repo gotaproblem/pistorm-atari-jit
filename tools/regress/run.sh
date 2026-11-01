@@ -113,7 +113,8 @@ timeline_report() {
 	[ "${REGRESS_TIMELINE:-0}" = 1 ] || return 0
 	local tl="$out/$1.tl"
 	[ -f "$tl" ] || return 0
-	python3 "$here/../ipl-timeline/hbl.py" "$tl" > "$out/$1.hbl.txt" 2>&1
+	python3 "$here/../ipl-timeline/hbl.py" "$tl" > "$out/$1.hbl.txt" 2>&1 ||
+		rm -f "$out/$1.hbl.txt"         # no HBL test in this boot
 	gzip -f "$tl"
 }
 
