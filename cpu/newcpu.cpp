@@ -5469,9 +5469,17 @@ extern "C" int pistorm_hbl_handler_is_rte(void)
 
 #include "platforms/atari/raster_trace.h"
 void pistorm_handler_enter(void);
+void pistorm_handler_pre(void);
+void pistorm_handler_post(void);
 static void do_interrupt (int nr)
 {
 	rt_irq(nr);                                 /* PISTORM_RASTER_TRACE */
+
+	/* governor: no pauses from here - the IACK, the frame push and the
+	 * vector fetch are the handler's time too - until the handler's own
+	 * window opens (pistorm_handler_enter) or this returns without one */
+	pistorm_handler_pre();
+	struct hnd_pre_guard_t { ~hnd_pre_guard_t() { pistorm_handler_post(); } } _hnd_pre_guard;
 
 	extern uae_u16 pistorm_iack_vector;
 	extern void intlev_ack(uint8_t nr);
@@ -5793,6 +5801,7 @@ static void do_interrupt (int nr)
 	}
 	if (interrupt_taken) {
 		Exception (exception_nr);
+		pistorm_handler_post();
 		pistorm_handler_enter();            /* governor: no pauses in here */
 	}
 #else
@@ -6097,6 +6106,16 @@ static uae_u32 hnd_sp0;
 static evt_t   hnd_cyc0;
 static int     hnd_on;
 static evt_t   hnd_cap = -1;
+/* Set from the start of do_interrupt() until the handler's window is
+ * opened after the frame push (or do_interrupt returns without one). The frame push and vector fetch are bus
+ * cycles, and the governor's check can fall in them: Shadow of the Beast
+ * II, 1 Nov 2026 (0037 trace) - 2363 of 3103 late sky-band colour writes
+ * had a pause taken 4-5 us after the Timer B interrupt, inside Exception(),
+ * before pistorm_handler_enter() had marked the handler; the pauses it
+ * did skip fell at 10-12 us. (0035 blamed an older handler's window -
+ * wrong.) Bounded by the cap too, in case Exception() never returns here. */
+static int     hnd_pre;
+static evt_t   hnd_pre_cyc;
 
 static evt_t pistorm_handler_cap(void)
 {
@@ -6113,8 +6132,26 @@ static evt_t pistorm_handler_cap(void)
 	return hnd_cap;
 }
 
+void pistorm_handler_pre(void)
+{
+	if (pistorm_handler_cap() == 0)
+		return;
+	hnd_pre_cyc = get_cycles();
+	hnd_pre = 1;
+}
+
+void pistorm_handler_post(void)
+{
+	hnd_pre = 0;
+}
+
 int pistorm_handler_running(void)
 {
+	if (hnd_pre) {
+		if (get_cycles() - hnd_pre_cyc <= pistorm_handler_cap())
+			return 1;
+		hnd_pre = 0;
+	}
 	if (!hnd_on)
 		return 0;
 	if (!regs.s || m68k_areg(regs, 7) > hnd_sp0 ||
