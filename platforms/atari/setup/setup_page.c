@@ -46,7 +46,11 @@
 #define MAX_ROWS   96
 #define MAX_BUILDS 16
 #define MAX_FILES  128
-#define MAX_FNAME  64
+/* Long enough for TOSEC-style names - "Shadow of the Beast (1990)(Psygnosis)
+ * (Disk 1 of 2)[cr Replicants][t +2][a].st" is 83 - and short enough that
+ * "fdd A:" + the name still fits one cfg line (SC_LINE_LEN 256). Names this
+ * long or longer are left out of the list; they were silently dropped at 64. */
+#define MAX_FNAME  200
 
 enum screen { SCR_BUILDS = 0, SCR_EDIT };
 /* ROW_LABEL: a heading the cursor skips (acsi, fdd, hostfs groups);
@@ -1525,7 +1529,12 @@ static void draw_picker(struct ss_screen *ss, const struct state *st)
         int k = st->ptop + i;
         if (k >= n) break;
         int on = k == st->pick;
-        snprintf(line, sizeof line, "   %-72.72s", k == 0 ? "(type a name)" : st->files[k - 1]);
+        const char *fn = k == 0 ? "(type a name)" : st->files[k - 1];
+        size_t fl = strlen(fn);
+        if (fl > 72)    /* keep the end: [t +2][a] is what tells two dumps apart */
+            snprintf(line, sizeof line, "   %.34s...%s", fn, fn + fl - 35);
+        else
+            snprintf(line, sizeof line, "   %-72.72s", fn);
         ss_puts(ss, 1, ROW_LIST + 1 + i, line, on ? 0 : ink, on ? hi : 0);
     }
     if (n > rows) {
