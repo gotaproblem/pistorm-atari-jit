@@ -277,9 +277,64 @@ def timing(path, frames, bases):
               + ' '.join(f"{i * 10}%:{100 * h[i] / len(tb_x):.0f}%" for i in range(10)))
     if bands:
         breakdown(bands)
+    grid(ev)
     print(f"  governor pauses within 100 us of a Timer B interrupt: {gw} taken, {gs} skipped "
           f"(handler running); between a Timer B interrupt and its colour write: "
           f"{waits_in} taken, {skips_in} skipped")
+
+
+ST_LINE_US = 512 / 8.0107        # a PAL ST line
+
+
+def grid(ev):
+    """Timer B fires on an exact line grid: within a frame the true
+    interrupts are 63.9 us apart. The earliest 'IPL seen' of the frame
+    stands for the real interrupt; everything else is measured from that
+    grid, so a late sampler cannot hide in its own reference point.
+    On a real ST (Hatari, Shadow of the Beast II) the band colour write
+    comes ~19 us after the interrupt and the picture starts ~20.5 us
+    after it."""
+    frames, cur, seen, tb = [], None, None, None
+    for t, p in ev:
+        k = p[1]
+        if k == 'I' and p[2] == '4':
+            cur = []
+            frames.append(cur)
+            seen = None
+        elif cur is None:
+            continue
+        elif k == 'L':
+            seen = t
+        elif k == 'I' and p[2] == '6':
+            tb = (seen, t) if len(p) > 3 and p[3] == '48' else None
+            seen = None
+        elif k == 'P' and tb is not None:
+            if tb[0] is not None:
+                cur.append((tb[0], t))
+            tb = None
+    late_l, pos = [], []
+    for fr in frames:
+        if len(fr) < 8:
+            continue
+        t0 = fr[0][0]
+        rs = []
+        for l, p in fr:
+            k = round((l - t0) / ST_LINE_US)
+            rs.append((l - t0 - k * ST_LINE_US, p - t0 - k * ST_LINE_US))
+        a = min(r[0] for r in rs)
+        late_l += [r[0] - a for r in rs]
+        pos += [r[1] - a for r in rs]
+    if not pos:
+        return
+    n = len(pos)
+    inpic = [x for x in pos if x > 20.5]
+    print(f"\n  against the line grid ({n} Timer B colour writes):\n"
+          f"    IPL seen after the interrupt, us: median {q(late_l,.5):.1f} 95% {q(late_l,.95):.1f} "
+          f"max {max(late_l):.1f}  (sampler + confirm; a real CPU: 0)\n"
+          f"    colour written after the interrupt, us: median {q(pos,.5):.1f} 5% {q(pos,.05):.1f} "
+          f"95% {q(pos,.95):.1f}  (a real ST: ~19)\n"
+          f"    landed in the picture (after 20.5 us): {100 * len(inpic) / n:.1f}%, "
+          f"median {q(inpic,.5) - 20.5 if inpic else 0:.1f} us = ~{8 * (q(inpic,.5) - 20.5) if inpic else 0:.0f} px in")
 
 
 def band_parts(b):
