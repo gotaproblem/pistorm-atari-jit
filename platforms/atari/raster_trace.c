@@ -17,6 +17,11 @@
  *
  *   PISTORM_RASTER_TRACE=/home/pistorm/raster.txt   on, writes the file
  *                                                   when the emulator stops
+ *   PISTORM_RASTER_VCOUNT=1                         also read the real video
+ *       counter at each palette/MFP write and Timer B at each VBL. Those are
+ *       bus reads inside the guest's handlers: a game whose handlers nest
+ *       (Shadow of the Beast II) crashed with them on. Off by default: the
+ *       timing - IPL seen, interrupt taken, colour written - needs none.
  *
  * Off costs one load of a zero flag at each palette write and interrupt.
  * On, each palette write costs three bus reads (~2-3 us) - small against a
@@ -46,6 +51,7 @@ typedef struct {
 } rt_ev_t;
 
 volatile int rt_on;
+static int rt_vc;                           /* 1 = read the real counters (bus) */
 static rt_ev_t *rt_buf;
 static rt_ev_t *rt_last_irq;               /* gets its vector after the IACK */
 static uint64_t rt_irq6_t;                  /* when the last level-6 was taken */
@@ -85,9 +91,15 @@ __attribute__((constructor)) static void rt_init(void)
         fprintf(stderr, "[RASTER] no memory for the trace - off\n");
         return;
     }
+    {
+        const char *v = getenv("PISTORM_RASTER_VCOUNT");
+        rt_vc = v && *v == '1';
+    }
     rt_on = 1;
     fprintf(stderr, "[RASTER] tracing palette writes and interrupts -> %s "
-                    "(written when the emulator stops)\n", rt_path);
+                    "(written when the emulator stops)%s\n", rt_path,
+            rt_vc ? "; reading the video counter at each write (bus reads)"
+                  : "; no bus reads");
 }
 
 /* Several threads log: the CPU thread (palette, interrupts, MFP writes,
@@ -117,7 +129,7 @@ void rt_palette_slow(unsigned idx, uint16_t val)
     e->kind = 'P';
     e->a = (uint8_t)idx;
     e->v = val;
-    e->c = rt_vcount();
+    e->c = rt_vc ? rt_vcount() : 0xFFFFFFFFu;
 }
 
 void rt_irq_slow(int level)
@@ -132,9 +144,7 @@ void rt_irq_slow(int level)
     e->v = 0;
     e->c = 0;
     rt_last_irq = level == 4 ? NULL : e;
-    if (level == 6)
-        rt_irq6_t = e->t;
-    if (level == 4) {
+    if (level == 4 && rt_vc) {
         e->c = ((uint32_t)ps_read_8(0x00FF8201u) << 16) |
                ((uint32_t)ps_read_8(0x00FF8203u) << 8);
         e->v = (uint16_t)(((uint16_t)ps_read_8(0x00FFFA1Bu) << 8) |
@@ -148,6 +158,8 @@ void rt_irq_vector_slow(unsigned vec)
 {
     if (rt_last_irq) {
         rt_last_irq->c = vec & 0xFFFFu;
+        if ((vec & 0xFFu) == 0x48u)        /* Timer B: watch the governor */
+            rt_irq6_t = rt_last_irq->t;
         rt_last_irq = NULL;
     }
 }
@@ -171,9 +183,11 @@ void rt_ipl_slow(int level)
 
 /* the governor: a pause of ns, and whether it was skipped because an
  * interrupt handler was running (skipped = 1, ns = what it would have been).
- * Only pauses within 100 us of a level-6 interrupt are logged: the governor
+ * Only pauses within 100 us of a Timer B interrupt are logged: the governor
  * checks every ~31 us, and logging them all (first try, 31 Oct 2026) filled
- * the buffer in 30 s, before the game reached its raster screen. */
+ * the buffer in 30 s, before the game reached its raster screen; within
+ * 100 us of every level-6 interrupt is still all of them with an 11 kHz
+ * sample timer running. */
 void rt_gov_slow(int64_t ns, int skipped)
 {
     uint64_t now = rt_ticks();
@@ -218,7 +232,7 @@ void rt_mfp_slow(uint32_t addr, uint32_t val, int word)
     e->kind = 'M';
     e->a = (uint8_t)(a & 0xFFu);
     e->v = (uint16_t)(val & 0xFFu);
-    e->c = rt_vcount();
+    e->c = rt_vc ? rt_vcount() : 0xFFFFFFFFu;
 }
 
 void rt_dump(void)
@@ -249,14 +263,20 @@ void rt_dump(void)
         const rt_ev_t *e = &rt_buf[i & (RT_MAX - 1u)];
         double us = (double)(e->t - t0) * 1e6 / (double)hz;
 
-        if (e->kind == 'P')
+        if (e->kind == 'P' && e->c == 0xFFFFFFFFu)
+            fprintf(f, "%.1f P %u %03X -\n", us, e->a, e->v & 0xFFFu);
+        else if (e->kind == 'P')
             fprintf(f, "%.1f P %u %03X %06X\n", us, e->a, e->v & 0xFFFu, e->c);
+        else if (e->kind == 'M' && e->c == 0xFFFFFFFFu)
+            fprintf(f, "%.1f M FA%02X %02X -\n", us, e->a, e->v & 0xFFu);
         else if (e->kind == 'L')
             fprintf(f, "%.1f L %u\n", us, e->a);
         else if (e->kind == 'G')
             fprintf(f, "%.1f G %s %u\n", us, e->a ? "skip" : "wait", e->c);
         else if (e->kind == 'M')
             fprintf(f, "%.1f M FA%02X %02X %06X\n", us, e->a, e->v & 0xFFu, e->c);
+        else if (e->a == 4 && !rt_vc)
+            fprintf(f, "%.1f I 4\n", us);
         else if (e->a == 4)
             fprintf(f, "%.1f I 4 %06X %02X %02X\n", us, e->c, e->v >> 8, e->v & 0xFFu);
         else
