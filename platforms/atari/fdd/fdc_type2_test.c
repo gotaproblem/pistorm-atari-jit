@@ -291,6 +291,32 @@ int main(void)
 		}
 	}
 
+	/* 8. no BPB: the geometry is the one the size is exactly */
+	{
+		const struct { int t, s, n; } g[] = {
+			{ 80, 2, 10 }, { 80, 2, 9 }, { 80, 1, 9 }, { 80, 2, 11 },
+			{ 81, 2, 10 }, { 82, 2, 10 }, { 80, 2, 18 } };
+		char raw[] = "/tmp/fdc2rawXXXXXX";
+
+		for (unsigned k = 0; k < sizeof g / sizeof g[0]; k++) {
+			int rfd = mkstemp(raw);
+			long sz = (long) g[k].t * g[k].s * g[k].n * 512;
+			int nt = 0, ns = 0, spt = 0;
+
+			memset(sec, 0xE5, 512);                    /* no BPB anywhere */
+			for (long o = 0; o < sz; o += 512)
+				if (write(rfd, sec, 512) != 512) return 2;
+			close(rfd);
+			CHECK(fdd_insert_disk(1, raw, false) == 0, "raw insert");
+			fdd_geometry(1, &nt, &ns, &spt);
+			CHECK(nt == g[k].t && ns == g[k].s && spt == g[k].n,
+			      "raw %ld bytes: %d x %d x %d, wanted %d x %d x %d", sz,
+			      nt, ns, spt, g[k].t, g[k].s, g[k].n);
+			unlink(raw);
+			strcpy(raw, "/tmp/fdc2rawXXXXXX");
+		}
+	}
+
 	unlink(img);
 	printf(fails ? "%d CHECK(S) FAILED\n" : "all checks passed\n", fails);
 	return fails ? 1 : 0;

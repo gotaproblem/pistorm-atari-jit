@@ -239,6 +239,9 @@ void     fdd_hotkey_next(int drive);
 /* The next disk of a set, as a full path into out. 1 found, 0 not. Pure
  * (reads the folder only), so the host test can call it. */
 int      fdd_next_in_set(const char *path, char *out, size_t outsz);
+
+/* the geometry a drive's image was mounted with (host test) */
+void     fdd_geometry(int drive, int *tracks, int *sides, int *spt);
 void     fdd_set_write_protect(int drive, bool wp);
 
 /* Report a drive: 1 disk in, 0 empty, -1 bad index. Any of path/wp/busy
