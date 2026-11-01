@@ -722,8 +722,36 @@ int fdd_insert_disk(int drive, const char *image_path, bool write_protect)
     }
 
     if (!bpb_ok) {
-        /* Fallback: detect from file size */
-        if (drv->image_size <= FDD_IMAGE_SIZE_SS) {
+        /* No usable BPB - a game's data disk, say. Find the geometry the
+         * file size is EXACTLY: game disks are 9, 10 or 11 sectors per
+         * track (18-21 for HD) on 80-86 tracks. The old ladder below only
+         * knew 360K / 720K / 1.44M, so an 800K disk (80 x 10 x 2) was read
+         * as 18 sectors per track and the game got sectors from the wrong
+         * places, then off the end of the file. */
+        static const int spts[]  = { 9, 10, 11, 18, 19, 20, 21 };
+        static const int trks[]  = { 80, 81, 82, 83, 84, 85, 86, 40, 41, 42 };
+        uint32_t secs = drv->image_size / FDD_SECTOR_SIZE;
+        bool found = false;
+
+        if (drv->image_size % FDD_SECTOR_SIZE == 0) {
+            /* tracks outermost: 360K is 80 x 1 x 9, not 40 x 2 x 9 -
+             * the two lay the tracks out differently in the file */
+            for (unsigned t = 0; t < sizeof trks / sizeof trks[0] && !found; t++)
+                for (int si = 2; si >= 1 && !found; si--)
+                    for (unsigned k = 0; k < sizeof spts / sizeof spts[0]; k++)
+                        if ((uint32_t)(trks[t] * si * spts[k]) == secs) {
+                            drv->num_sides         = si;
+                            drv->num_tracks        = trks[t];
+                            drv->sectors_per_track = spts[k];
+                            drv->type = spts[k] > 11 ? FDD_TYPE_HD : FDD_TYPE_DD;
+                            drv->reserved_sectors  = 1;
+                            found = true;
+                            break;
+                        }
+        }
+        if (found)
+            ;
+        else if (drv->image_size <= FDD_IMAGE_SIZE_SS) {
             drv->type              = FDD_TYPE_DD;
             drv->sectors_per_track = FDD_DD_SECTORS;
             drv->num_sides         = 1;
@@ -894,6 +922,15 @@ int fdd_next_in_set(const char *path, char *out, size_t outsz)
         }
     }
     return 0;
+}
+
+void fdd_geometry(int drive, int *tracks, int *sides, int *spt)
+{
+    if (drive < 0 || drive >= FDD_MAX_DRIVES)
+        return;
+    *tracks = fdc.drives[drive].num_tracks;
+    *sides  = fdc.drives[drive].num_sides;
+    *spt    = fdc.drives[drive].sectors_per_track;
 }
 
 void fdd_hotkey_eject(int drive)
