@@ -472,6 +472,7 @@ extern "C" void mfp_note_write(uint32_t addr, uint32_t value, bool word)
 
 extern "C" void mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word)
 {
+  rt_mfp(addr, value, word);             /* PISTORM_RASTER_TRACE */
   mfp_note_write(addr, value, word);
 }
 
