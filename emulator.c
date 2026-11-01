@@ -73,6 +73,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #endif
 #include "platforms/atari/et4000/et4000.h"
 #include "platforms/atari/IDE.h"
+#include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
 #include "platforms/atari/idedriver.h"
 #include "platforms/atari/fdd/atari_fdd.h"
 #include "platforms/atari/fdd/acsi.h"
@@ -1961,6 +1962,7 @@ static void orderly_teardown(void)
 
   usleep(20000);                /* let the CPU thread leave its loop */
   pistorm_exit_state_dump();    /* PISTORM_CPU_DIAG=1: where the CPU was */
+  rt_dump();                    /* PISTORM_RASTER_TRACE: write the file   */
 
   /* JIT statistics (PROFILE_UNTRANSLATED_INSNS: top-50 interpreted opcodes) */
   compiler_dump_stats();
@@ -3279,6 +3281,7 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
   else if (a >= 0x00FF8240 && a < 0x00FF8260) {
     st_palette[(a - 0x00FF8240) >> 1] = value;
     st_palette_log((a - 0x00FF8240) >> 1, value);
+    rt_palette((a - 0x00FF8240) >> 1, value);
   }
 }
 
@@ -3301,9 +3304,11 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
     unsigned i = (a - 0x00FF8240) >> 1;
     st_palette[i] = (uint16_t)(value >> 16);
     st_palette_log(i, (uint16_t)(value >> 16));
+    rt_palette(i, (uint16_t)(value >> 16));
     if (i + 1 < 16) {
       st_palette[i + 1] = (uint16_t)value;
       st_palette_log(i + 1, (uint16_t)value);
+      rt_palette(i + 1, (uint16_t)value);
     }
   }
 }

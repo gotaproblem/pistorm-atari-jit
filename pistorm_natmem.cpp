@@ -303,6 +303,7 @@ uae_u8 *natmem_offset = NULL; // the one array; x27 in JIT
 extern rtg_s rtg;
 extern volatile uint16_t st_palette[16];
 extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
+#include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
 
 #define STRAM_LOW_WRITE_THROUGH_SIZE 0x000005B4u
 #define STRAM_LOW_CONTROL_BANK_SIZE 0x00010000u
@@ -1503,6 +1504,7 @@ static inline void st_video_snoop16(uint32_t address, uint16_t value)
     else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
         st_palette[(a - 0x00FF8240u) >> 1] = value;
         st_palette_log((a - 0x00FF8240u) >> 1, value);
+        rt_palette((a - 0x00FF8240u) >> 1, value);
     }
 }
 
@@ -1525,9 +1527,11 @@ static inline void st_video_snoop32(uint32_t address, uint32_t value)
         unsigned i = (a - 0x00FF8240u) >> 1;
         st_palette[i] = (uint16_t)(value >> 16);
         st_palette_log(i, (uint16_t)(value >> 16));
+        rt_palette(i, (uint16_t)(value >> 16));
         if (i + 1 < 16) {
             st_palette[i + 1] = (uint16_t)value;
             st_palette_log(i + 1, (uint16_t)value);
+            rt_palette(i + 1, (uint16_t)value);
         } else
             /* $FF825E: palette 15 in the high word, the low word lands on
              * $FF8260 - the resolution register. This used to be dropped,
