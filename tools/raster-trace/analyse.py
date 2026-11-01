@@ -283,7 +283,10 @@ def timing(path, frames, bases):
           f"{waits_in} taken, {skips_in} skipped")
 
 
-ST_LINE_US = 512 / 8.0107        # a PAL ST line
+# a PAL ST line: 512 clocks of 32.084988 MHz / 4 = 8.021247 MHz (Hatari's
+# figure). 8.0107 (first version, 0039) is 0.13% off - over 160 lines that
+# is 14 us, which showed up as interrupts "seen late" growing down the frame.
+ST_LINE_US = 512 / 8.021247
 
 
 def grid(ev):
