@@ -155,6 +155,7 @@ volatile unsigned pistorm_ipl_hbl_skipped = 0;
  * pre-empted VBLs re-latched inside the refractory - see VBL PRE-EMPTED. */
 extern "C" { volatile uint32_t pistorm_vbl_taken = 0; }
 volatile unsigned pistorm_ipl_vbl_rearm = 0;
+volatile unsigned pistorm_ipl_hbl_rearm = 0;   /* av_held 2 expired, see ipl_task */
 
 /* LOOP HEALTH. The ep and del counters say what we did with the line;
  * these say whether we were LOOKING at all. ipl_task should come round
@@ -856,10 +857,12 @@ static void *ipl_stats_task(void *)
       static uint32_t pv;
       static unsigned pr;
       uint32_t nv = pistorm_vbl_taken;
-      unsigned nr = pistorm_ipl_vbl_rearm;
-      fprintf(stderr, "[ipl]   vbl: taken=%u/s pre-empted+re-latched=%u/s\n",
-              (unsigned)(nv - pv), nr - pr);
-      pv = nv; pr = nr;
+      static unsigned ph;
+      unsigned nr = pistorm_ipl_vbl_rearm, nh = pistorm_ipl_hbl_rearm;
+      fprintf(stderr, "[ipl]   vbl: taken=%u/s pre-empted+re-latched=%u/s"
+              "  hbl: held level re-armed=%u/s\n",
+              (unsigned)(nv - pv), nr - pr, nh - ph);
+      pv = nv; pr = nr; ph = nh;
     }
     {
       static unsigned pp, pb, pt;
@@ -1082,6 +1085,28 @@ static void *ipl_task(void *)
       else
         fprintf(stderr, "[MAIN] PISTORM_IPL_PASS_NS=%s ignored (250..100000)\n", e);
     }
+  }
+  /* av_held for level 2 expires after one line - see "HBL HELD" below */
+  uint64_t av2_rearm_ticks, av2_tick = 0;
+  {
+    uint64_t ns = 64000;
+    const char *e = getenv("PISTORM_HBL_REARM_NS");
+    if (e && *e)
+    {
+      long v = atol(e);
+      if (v == 0 || (v >= 20000 && v <= 1000000))
+        ns = (uint64_t)v;
+      else
+        fprintf(stderr, "[MAIN] PISTORM_HBL_REARM_NS=%s ignored (0, or 20000..1000000)\n", e);
+    }
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    if (!f)
+      f = 54000000ULL;                  /* Pi 4 arch-timer fallback */
+    av2_rearm_ticks = ns * f / 1000000000ULL;
+    if (ns != 64000)
+      fprintf(stderr, "[MAIN] HBL held-level re-arm %s (PISTORM_HBL_REARM_NS=%llu; default 64000)\n",
+              ns ? "on" : "off", (unsigned long long)ns);
   }
   const char *ipl_raw_env = getenv("PISTORM_IPL_RAW");
   const int ipl_raw = (ipl_raw_env && *ipl_raw_env == '1');
@@ -1730,6 +1755,30 @@ static void *ipl_task(void *)
 
     if (ipl != av_held)
       av_held = 0;                      /* line left the level: re-arm */
+    else if (av_held == 2 && av2_rearm_ticks)
+    {
+      /* HBL HELD. Level 2 still asserted one line after it was latched:
+       * re-arm. The GLUE holds HBL until an IACK clears it, and the IACK
+       * of each HBL taken normally does (the line is seen low at the first
+       * sample after the take - PISTORM_IPL_TIMELINE=2, Nov 2026). Now and
+       * then one does not, and the line then reads 2 without a break; av_held
+       * refused it until a VBL or Timer C moved the line (2->4/6->2) - up
+       * to 5 ms, 71 lines, of no HBL: 60-92% of all the HBLs the
+       * regression suite's irq_hbl check lost (3-12%). The one HBL
+       * delivered after the move cleared it every time. A 68000 takes a
+       * still-asserted level again at its RTE; re-arming one line later
+       * delivers it no sooner than the next line's HBL would come, so the
+       * rate can never exceed one per line. VBL (level 4, whose IACK
+       * does not clear it - see above) is untouched.
+       * PISTORM_HBL_REARM_NS=0 restores the old behaviour. */
+      uint64_t nowt;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(nowt));
+      if (nowt - av2_tick >= av2_rearm_ticks)
+      {
+        av_held = 0;
+        pistorm_ipl_hbl_rearm++;
+      }
+    }
     if (tl_on == 1 && TL_LVL(ipl))
     {
       static uint8_t tl_last_why, tl_last_lvl;
@@ -1757,6 +1806,7 @@ static void *ipl_task(void *)
         if (pistorm_hbl_handler_is_rte())
         {
           av_held = 2;
+          __asm__ volatile("mrs %0, cntvct_el0" : "=r"(av2_tick));
           pistorm_ipl_hbl_skipped++;
           IPL_TRC(g_ipl, ipl, 2);
           continue;
@@ -1783,6 +1833,8 @@ static void *ipl_task(void *)
         vbl_preempt = 1;                /* overwriting an untaken VBL */
       if (ipl == 2 || ipl == 4)
         av_held = ipl;                  /* one latch per assertion */
+      if (ipl == 2)
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(av2_tick));
 #ifdef ATARI_LAT_DIAG
       /* Latency instrumentation: stamp the moment a level becomes pending;
        * intlev() measures the latch->delivery delta. */
