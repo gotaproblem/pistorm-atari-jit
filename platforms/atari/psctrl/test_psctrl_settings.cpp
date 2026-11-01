@@ -31,6 +31,7 @@
 #include "config_file/config_file.h"
 
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -560,6 +561,48 @@ int main(void)
       remove(bak);
     }
     remove(g_cfgpath);
+  }
+
+  /* PS_LIST_DIR: real long names, folders first, images only */
+  {
+    char dir[] = "/tmp/pslistXXXXXX";
+    const char *mk[] = {
+      "Shadow of the Beast (1990)(Psygnosis)(Disk 1 of 2)[cr Replicants][t +2][a].st",
+      "b.MSA", "c.img", "notes.txt", ".hidden.st" };
+    char path[600], buf[256];
+    long n, k;
+
+    if (!mkdtemp(dir)) { fail("list: mkdtemp"); }
+    else {
+      for (k = 0; k < 5; k++) {
+        snprintf(path, sizeof path, "%s/%s", dir, mk[k]);
+        FILE *f = fopen(path, "w"); if (f) fclose(f);
+      }
+      snprintf(path, sizeof path, "%s/games", dir);
+      mkdir(path, 0755);
+
+      memset(g_guest, 0, sizeof g_guest);
+      memcpy(g_guest + 100, dir, strlen(dir) + 1);
+      n = (long)(int32_t)psctrl_settings_call(PSCTRL_LIST, 1, (uint32_t)-1, 100, 0);
+      if (n != 4)
+        fail("list: %ld entries, wanted 4 (games/ + 3 images)", n);
+      const char *want[] = { "games/", "b.MSA", "c.img", mk[0] };
+      for (k = 0; k < 4 && k < n; k++) {
+        psctrl_settings_call(PSCTRL_LIST, 1, (uint32_t)k, 1000, 256);
+        memcpy(buf, g_guest + 1000, 256); buf[255] = 0;
+        if (strcmp(buf, want[k]))
+          fail("list: entry %ld is '%s', wanted '%s'", k, buf, want[k]);
+      }
+      psctrl_settings_call(PSCTRL_LIST, 1, (uint32_t)-2, 1000, 256);
+      if (strcmp((char *)g_guest + 1000, dir))
+        fail("list: folder '%s', wanted '%s'", (char *)g_guest + 1000, dir);
+      /* a short buffer is cut and still terminated */
+      psctrl_settings_call(PSCTRL_LIST, 1, 3, 2000, 8);
+      if (strlen((char *)g_guest + 2000) != 7)
+        fail("list: short buffer not cut to 7");
+      snprintf(path, sizeof path, "rm -rf '%s'", dir);
+      if (system(path)) {}
+    }
   }
 
   printf(fails ? "%d CHECK(S) FAILED\n" : "all checks passed\n", fails);

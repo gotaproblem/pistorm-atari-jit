@@ -42,6 +42,9 @@
 #include <dirent.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <algorithm>
+#include <string>
+#include <vector>
 
 extern "C" {
 #include "platforms/atari/fdd/atari_fdd.h"
@@ -1010,6 +1013,94 @@ static int item_setstr(const struct ps_item *it, const char *s)
 }
 
 /* ------------------------------------------------------------------ */
+/* PS_LIST_DIR - a host folder for PSFDD's picker                      */
+/* ------------------------------------------------------------------ */
+//
+// TOS can only show 8.3 names, so six dumps of one game all come out as
+// SHADOW~1..~6. This hands the guest the real names of one folder at a
+// time; the guest inserts by host path (item_setstr takes any path with a
+// '/' as-is). One folder is held at a time - there is one picker.
+
+static std::string g_ldir;
+static std::vector<std::string> g_lent;
+
+static bool list_is_image(const char *n)
+{
+  const char *dot = strrchr(n, '.');
+
+  return dot && (!strcasecmp(dot, ".st") || !strcasecmp(dot, ".msa") ||
+                 !strcasecmp(dot, ".img"));
+}
+
+static uint32_t list_dir(int32_t i, uint32_t p2, uint32_t p3)
+{
+  if (i == -1) {
+    char in[PATH_MAX], host[PATH_MAX];
+    std::vector<std::string> dirs, files;
+    DIR *d;
+    struct dirent *e;
+
+    if (!p2)
+      return (uint32_t)-1;
+    psctrl_guest_read(p2, in, (uint32_t)sizeof(in));
+    if (in[0] == '/')
+      snprintf(host, sizeof host, "%s", in);
+    else if (!emulator_gemdos_to_host(in, host, sizeof host))
+      return (uint32_t)-1;
+    {
+      size_t n = strlen(host);
+      while (n > 1 && host[n - 1] == '/')
+        host[--n] = '\0';
+    }
+    d = opendir(host);
+    if (!d)
+      return (uint32_t)-1;
+    while ((e = readdir(d)) != NULL) {
+      struct stat sb;
+      std::string full;
+
+      if (e->d_name[0] == '.')
+        continue;
+      full = std::string(host) + "/" + e->d_name;
+      if (stat(full.c_str(), &sb) != 0)
+        continue;
+      if (S_ISDIR(sb.st_mode))
+        dirs.push_back(std::string(e->d_name) + "/");
+      else if (S_ISREG(sb.st_mode) && list_is_image(e->d_name))
+        files.push_back(e->d_name);
+    }
+    closedir(d);
+    auto ci = [](const std::string &a, const std::string &b) {
+      return strcasecmp(a.c_str(), b.c_str()) < 0;
+    };
+    std::sort(dirs.begin(), dirs.end(), ci);
+    std::sort(files.begin(), files.end(), ci);
+    g_ldir = host;
+    g_lent.swap(dirs);
+    g_lent.insert(g_lent.end(), files.begin(), files.end());
+    return (uint32_t)g_lent.size();
+  }
+
+  if (!p2 || !p3)
+    return (uint32_t)-1;
+
+  const std::string *s;
+  if (i == -2)
+    s = &g_ldir;
+  else if (i >= 0 && (size_t)i < g_lent.size())
+    s = &g_lent[(size_t)i];
+  else
+    return (uint32_t)-1;
+
+  uint32_t n = (uint32_t)s->size() + 1;
+  if (n > p3)
+    n = p3;
+  psctrl_guest_write(p2, s->c_str(), n - 1);
+  psctrl_guest_write(p2 + n - 1, "", 1);
+  return n - 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* actions                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -1255,6 +1346,8 @@ uint32_t psctrl_settings_call(uint32_t subop, uint32_t p0, uint32_t p1,
     }
 
     case PSCTRL_LIST:
+      if (p0 == 1)
+        return list_dir((int32_t)p1, p2, p3);
       /* No host-served list for any field. An empty list sends the
        * accessory to the native GEM file selector - ROM/box-TOS open on
        * the share at S:\apj-os\stbox\roms, floppies at Z:\ - instead of
