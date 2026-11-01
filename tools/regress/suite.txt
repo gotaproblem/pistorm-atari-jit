@@ -1,0 +1,27 @@
+# Regression suite - one boot per line, run by tools/regress/run.sh.
+#
+#   name | rom | programs | drives | cfg lines | seconds | what it covers
+#
+# Each boot is a fresh 720K floppy (tools/regress/mkimg.py) with the named
+# guest programs in A:\AUTO (tools/regress/guest/<NAME>.PRG), run in order,
+# and END.PRG last. The programs report through NF_STDERR; a boot passes
+# when END.PRG is reached and every @T line says PASS.
+#
+#   rom      a file in [psctrl] rom_path
+#   drives   - | ide | acsi | ide+acsi : fresh 8 MB pattern images
+#            (mkimg.py hd) as IDE master and/or ACSI ID 0
+#   cfg      extra config lines, ';' separated, added after the base:
+#              cpu 68000 / cpu_compatible enabled / cpu_speed 8mhz /
+#              jit_power 0 / ym2149 / fdd A:<the floppy>
+#            (the games setup: 68000, JIT off, compatible core, 8 MHz)
+#   seconds  the most a boot may take; it stops as soon as END reports
+#
+# Interrupt/timer checks are counted against the real MFP's Timer C, so
+# the expected figures are a real ST's whatever the emulated CPU speed.
+# Reference: every program passes in Hatari 2.4 (cycle-exact ST/STE).
+
+core-104 | tos104uk.rom | IRQ ACIA YM FDD | -        | -                         | 300 | VBL/HBL/MFP timers/Timer B event/stop/ISR, IKBD via ACIA, YM, floppy - TOS 1.04
+core-206 | tos206uk.rom | IRQ ACIA YM FDD | -        | -                         | 300 | the same under TOS 2.06 (the games section's TOS)
+core-16  | tos206uk.rom | IRQ ACIA        | -        | cpu_speed 16mhz           | 200 | interrupts and timers with the CPU at 16 MHz
+drives   | tos104uk.rom | IDE ACSI FDD    | ide+acsi | -                         | 300 | emulated IDE and ACSI on the pattern images, then the floppy on the shared DMA chip
+ste      | tos206uk.rom | DMASND IRQ      | -        | machine ste; native_hdmi enabled | 240 | STE DMA sound frame timing/counter/stop, interrupts on an STE

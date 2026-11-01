@@ -1,2 +1,5 @@
 results/
 history.txt
+metrics.txt
+build/
+guest/*.PRG.text
