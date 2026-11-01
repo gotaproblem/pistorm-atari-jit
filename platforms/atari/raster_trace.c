@@ -6,7 +6,12 @@
  * real Shifter's video address counter ($FF8205/07/09) read straight after
  * it - so the log says which screen line the colour actually changed on.
  * Every interrupt the CPU takes is logged too (level 4 = VBL, 6 = MFP:
- * Timer B lives there), and at each VBL the screen base ($FF8201/03).
+ * Timer B lives there), and at each VBL the screen base ($FF8201/03) and
+ * the real MFP's Timer B control and current count ($FFFA1B/$FFFA21 -
+ * reading the data register returns the running counter). Guest writes
+ * to Timer B's registers and to the MFP interrupt registers are logged
+ * with the video counter too, so a raster chain that starts on the wrong
+ * line shows where its count came from.
  * Bands that jump show up as the same write landing on different lines
  * from frame to frame; tools/raster-trace/analyse.py prints that.
  *
@@ -32,14 +37,15 @@ uint8_t ps_read_8(uint32_t address);          /* gpio/ps_protocol.c */
 
 typedef struct {
     uint64_t t;                               /* arch timer ticks      */
-    uint8_t  kind;                            /* 'P' palette, 'I' irq  */
-    uint8_t  a;                               /* P: index  I: level    */
-    uint16_t v;                               /* P: value              */
-    uint32_t c;                               /* P: video counter, I(4): screen base */
+    uint8_t  kind;                            /* 'P' palette, 'I' irq, 'M' MFP write */
+    uint8_t  a;                               /* P: index  I: level  M: reg ($FFFAxx) */
+    uint16_t v;                               /* P/M: value  I(4): TBCR<<8 | TBDR count */
+    uint32_t c;                               /* P/M: video counter, I(4): screen base */
 } rt_ev_t;
 
 volatile int rt_on;
 static rt_ev_t *rt_buf;
+static rt_ev_t *rt_last_irq;               /* gets its vector after the IACK */
 static uint32_t rt_n;
 static int rt_full_said;
 static const char *rt_path;
@@ -124,10 +130,53 @@ void rt_irq_slow(int level)
     e->kind = 'I';
     e->a = (uint8_t)level;
     e->v = 0;
-    e->c = level == 4
-         ? (((uint32_t)ps_read_8(0x00FF8201u) << 16) |
-            ((uint32_t)ps_read_8(0x00FF8203u) << 8))
-         : 0;
+    e->c = 0;
+    rt_last_irq = level == 4 ? NULL : e;
+    if (level == 4) {
+        e->c = ((uint32_t)ps_read_8(0x00FF8201u) << 16) |
+               ((uint32_t)ps_read_8(0x00FF8203u) << 8);
+        e->v = (uint16_t)(((uint16_t)ps_read_8(0x00FFFA1Bu) << 8) |
+                          ps_read_8(0x00FFFA21u));
+    }
+}
+
+/* the vector the IACK returned, for the interrupt just logged (MFP:
+ * $40 + channel - Timer B is $48, Timer A $4D, Timer C $45) */
+void rt_irq_vector_slow(unsigned vec)
+{
+    if (rt_last_irq) {
+        rt_last_irq->c = vec & 0xFFFFu;
+        rt_last_irq = NULL;
+    }
+}
+
+/* MFP registers worth seeing for a Timer B raster chain */
+static int rt_mfp_reg(uint32_t a)
+{
+    switch (a) {
+    case 0x00FFFA07u: case 0x00FFFA0Bu: case 0x00FFFA0Fu: case 0x00FFFA13u:
+                                          /* IERA IPRA ISRA IMRA (bit 0 = Timer B) */
+    case 0x00FFFA17u:                     /* VR (end-of-interrupt mode)        */
+    case 0x00FFFA1Bu: case 0x00FFFA21u:   /* TBCR TBDR                          */
+        return 1;
+    }
+    return 0;
+}
+
+void rt_mfp_slow(uint32_t addr, uint32_t val, int word)
+{
+    uint32_t a = addr & 0x00FFFFFFu;
+    rt_ev_t *e;
+
+    if (word)
+        a |= 1u;                          /* the MFP sits on the odd byte */
+    if (!rt_mfp_reg(a) || !(e = rt_slot()))
+        return;
+    e->t = rt_ticks();
+    e->kind = 'M';
+    e->a = (uint8_t)(a & 0xFFu);
+    e->v = (uint16_t)(val & 0xFFu);
+    e->c = rt_vcount();
 }
 
 void rt_dump(void)
@@ -147,17 +196,21 @@ void rt_dump(void)
     t0 = rt_n ? rt_buf[0].t : 0;
     fprintf(f, "# raster trace: t_us kind ...\n"
                "#   P idx value video_counter   (palette write, real counter after it)\n"
-               "#   I level [screen_base]       (interrupt taken; base at level 4)\n");
+               "#   I level vector              (interrupt taken, vector from the IACK)\n"
+               "#   I 4 screen_base TBCR TBDR   (VBL: base, Timer B control and count)\n"
+               "#   M FAxx value video_counter  (guest write to an MFP register)\n");
     for (uint32_t i = 0; i < rt_n; i++) {
         const rt_ev_t *e = &rt_buf[i];
         double us = (double)(e->t - t0) * 1e6 / (double)hz;
 
         if (e->kind == 'P')
             fprintf(f, "%.1f P %u %03X %06X\n", us, e->a, e->v & 0xFFFu, e->c);
+        else if (e->kind == 'M')
+            fprintf(f, "%.1f M FA%02X %02X %06X\n", us, e->a, e->v & 0xFFu, e->c);
         else if (e->a == 4)
-            fprintf(f, "%.1f I 4 %06X\n", us, e->c);
+            fprintf(f, "%.1f I 4 %06X %02X %02X\n", us, e->c, e->v >> 8, e->v & 0xFFu);
         else
-            fprintf(f, "%.1f I %u\n", us, e->a);
+            fprintf(f, "%.1f I %u %02X\n", us, e->a, e->c & 0xFFu);
     }
     fclose(f);
     fprintf(stderr, "[RASTER] %u events written to %s\n", rt_n, rt_path);

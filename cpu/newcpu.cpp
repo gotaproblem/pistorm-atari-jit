@@ -5534,6 +5534,7 @@ static void do_interrupt (int nr)
 	/* Match the old Musashi contract: once a level has been latched, acknowledge
 	 * it on the real bus and build the CPU exception frame. */
 	intlev_ack (nr);
+	rt_irq_vector(pistorm_iack_vector);         /* PISTORM_RASTER_TRACE */
 
 	/* HBL suppression: under MiNT the level-2 autovector (HBL) fires at
 	 * video line rate (~15.7kHz) into a do-nothing RTE handler - each one
