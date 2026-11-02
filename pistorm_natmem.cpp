@@ -2648,20 +2648,26 @@ extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint3
 /* Exact HDMI mirror calibration (shifter_mirror.c, via the governor):
  * the real video counter and the tick its low byte was read at. The mid
  * byte is read again after: if it moved, the low byte wrapped between the
- * reads and the value is torn - the caller tries again on its next poll. */
+ * reads and the value is torn - the caller tries again on its next poll.
+ *
+ * QUIET reads (gpio/ps_protocol.c): supervisor data fc passed in, and a
+ * bus error comes back in berr only. This runs from the governor, i.e. in
+ * the middle of whatever the guest is doing, and must leave the CPU
+ * thread's `fc` and sticky g_buserr exactly as it found them. The first
+ * version used ps_read_8 and cleared g_buserr afterwards - wiping any
+ * latch that was pending at that moment - and IDE stopped working with
+ * calibration on (2 Nov 2026: PISTORM_SHM_CAL=0 fixed it). */
+extern "C" uint8_t ps_read_8_quiet(uint32_t addr, uint8_t fc_value, uint8_t *berr_out);
 extern "C" int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
 {
-    const uint8_t save_fc = fc;
-    fc = 0x5;
-    const uae_u32 hi  = ps_read_8(0x00FF8205u);
-    const uae_u32 mid = ps_read_8(0x00FF8207u);
+    uint8_t e1 = 0, e2 = 0, e3 = 0, e4 = 0;
+    const uae_u32 hi  = ps_read_8_quiet(0x00FF8205u, 5, &e1);
+    const uae_u32 mid = ps_read_8_quiet(0x00FF8207u, 5, &e2);
     const uint64_t t0 = shm_ticks();
-    const uae_u32 lo  = ps_read_8(0x00FF8209u);
+    const uae_u32 lo  = ps_read_8_quiet(0x00FF8209u, 5, &e3);
     const uint64_t t1 = shm_ticks();
-    const uae_u32 mid2 = ps_read_8(0x00FF8207u);
-    fc = save_fc;
-    g_buserr = 0;
-    if (mid2 != mid)
+    const uae_u32 mid2 = ps_read_8_quiet(0x00FF8207u, 5, &e4);
+    if (e1 | e2 | e3 | e4 || mid2 != mid)
         return 0;
     uint32_t c = (hi << 16) | (mid << 8) | lo;
     /* the real Shifter may be fetching from the screen shadow (STRAM
