@@ -918,6 +918,10 @@ static void cal_process(double O, double tc, double P)
     }
 }
 
+/* 71 Hz mono: 640x400, centred on a 960x540 canvas (16:9: x2 = 1920x1080)
+ * whose margins are the picture's background colour, not black. */
+#define MONO_W 960
+#define MONO_H 540
 static void render_mono(uint32_t *dst, uint32_t pitch, const vstate_t *s)
 {
     uint32_t base = ((uint32_t)s->reg[0x01] << 16) | ((uint32_t)s->reg[0x03] << 8) |
@@ -925,14 +929,129 @@ static void render_mono(uint32_t *dst, uint32_t pitch, const vstate_t *s)
     const uint32_t top = pistorm_stram_top();
     const uint32_t fg = (s->pal[0] & 1u) ? 0xFF000000u : 0xFFFFFFFFu;
     const uint32_t bg = fg ^ 0x00FFFFFFu;
-    for (int y = 0; y < 400; y++) {
+    const int ox = (MONO_W - 640) / 2, oy = (MONO_H - 400) / 2;
+    for (int y = 0; y < MONO_H; y++) {
         uint32_t *o = dst + (size_t)y * pitch;
-        const uint32_t a = base + (uint32_t)y * (80u + (g_ste ? 2u * s->reg[0x0F] : 0u));
-        if (a + 80u > top) { for (int x = 0; x < 640; x++) o[x] = bg; continue; }
+        const int sy = y - oy;
+        const uint32_t a = base + (uint32_t)sy * (80u + (g_ste ? 2u * s->reg[0x0F] : 0u));
+        if (sy < 0 || sy >= 400 || a + 80u > top) {
+            for (int x = 0; x < MONO_W; x++) o[x] = bg;
+            continue;
+        }
         const uint8_t *r = g_natmem + a;
+        for (int x = 0; x < ox; x++) o[x] = bg;
         for (int x = 0; x < 640; x++)
-            o[x] = ((r[x >> 3] >> (7 - (x & 7))) & 1u) ? fg : bg;
+            o[ox + x] = ((r[x >> 3] >> (7 - (x & 7))) & 1u) ? fg : bg;
+        for (int x = ox + 640; x < MONO_W; x++) o[x] = bg;
     }
+}
+
+static void mono_out(uint32_t *w, uint32_t *h, uint32_t *sw, uint32_t *sh)
+{
+    *w = MONO_W; *h = MONO_H; *sw = MONO_W; *sh = MONO_H;
+}
+
+/* copy the frame's screen memory [lo, hi) (+8 for a partial last group) */
+static void snap_copy(uint32_t lo, uint32_t *hi)
+{
+    if (*hi - lo > BUFMAX)
+        *hi = lo + BUFMAX;
+    if (*hi > lo) {
+        uint32_t n = *hi - lo;
+        if (*hi + 8u <= pistorm_stram_top())
+            n += 8u;
+        memcpy(snapbuf, g_natmem + lo, n);
+    }
+}
+
+/* pass 3: draw lines ln[0..nln) from state *p0, applying ring events
+ * [i0, ie) at their beam positions */
+static void draw_frame(uint32_t *dst, uint32_t pitch, const vstate_t *p0,
+                       uint32_t i0, uint32_t ie, double O, double tc, int cls,
+                       uint32_t lo, uint32_t hi)
+{
+    const int top = cls == 50 ? cfg_top50 : cfg_top60;
+    const int hw = 2 * cfg_w;
+    static uint8_t idx[2 * 512 + 64];
+    vstate_t p = *p0;
+    uint32_t pal32[16];
+    for (int i = 0; i < 16; i++)
+        pal32[i] = st_rgb(p.pal[i]);
+    uint32_t j = i0;
+    for (int y = 0; y < ROWS; y++) {
+        uint32_t *o = dst + (size_t)y * pitch;
+        for (int x = 0; x < hw; x++)
+            o[x] = 0xFF000000u;
+    }
+    for (int L = 0; L < nln; L++) {
+        const line_t *l = &ln[L];
+        const uint32_t jend = (L + 1 < nln) ? ln[L + 1].ev0 : ie;
+        const int y = L - top;
+        const int drawn = y >= 0 && y < ROWS && l->vis && !l->blank;
+        uint32_t *o = drawn ? dst + (size_t)y * pitch : NULL;
+        if (drawn) {
+            memset(idx, 0, (size_t)hw);
+            if (l->de && l->addr >= lo && l->addr + l->bytes + l->extra <= hi)
+                decode_line(l, snapbuf + (l->addr - lo), idx, hw);
+        }
+        int hx = 0;
+        for (; j != jend; j++) {
+            const shm_ev_t *e = EV(j);
+            if (SHM_KIND(e->a) == SHM_K_PAL && drawn) {
+                const double c = q4(((double)e->t - O - l->s) / tc);
+                int ex = (int)lround(2.0 * (c - cfg_paldx - cfg_x0));
+                if (ex > hw) ex = hw;
+                for (; hx < ex; hx++)
+                    o[hx] = pal32[idx[hx]];
+                pal32[e->a & 15u] = st_rgb(e->n);
+            } else if (SHM_KIND(e->a) == SHM_K_PAL)
+                pal32[e->a & 15u] = st_rgb(e->n);
+            vs_apply(&p, e);
+        }
+        if (drawn)
+            for (; hx < hw; hx++)
+                o[hx] = pal32[idx[hx]];
+    }
+}
+
+static void colour_out(uint32_t *w, uint32_t *h, uint32_t *sw, uint32_t *sh)
+{
+    *w = (uint32_t)(2 * cfg_w);
+    *h = ROWS;
+    /* the shape the presenter scales: square pixels after the pixel aspect */
+    *sw = (uint32_t)((cfg_w * cfg_par_n + cfg_par_d / 2) / cfg_par_d);
+    *sh = ROWS;
+}
+
+/* No VBL lock yet - the first frames after a reset, or code that runs with
+ * the VBL masked - so no beam timing: draw the screen as the registers and
+ * memory stand, as a plain frame with its borders in colour 0. Without
+ * this the first second of every boot came out in the old borderless
+ * mirror, in black bars. At most 50 times a second. */
+static int render_static(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
+                         uint32_t *sw, uint32_t *sh)
+{
+    static uint64_t last;
+    const uint64_t now = shm_ticks();
+    if (last && now - last < tick_hz() / 50u)
+        return 0;
+    last = now;
+    vstate_t live;
+    memcpy(live.pal, cpu_pal, sizeof live.pal);
+    memcpy(live.reg, cpu_reg, sizeof live.reg);
+    const int f = vs_freq(&live);
+    if (f == 71) {
+        render_mono(dst, pitch, &live);
+        mono_out(w, h, sw, sh);
+        return 1;
+    }
+    vstate_t g = live;
+    uint32_t lo, hi;
+    glue_frame(&g, 0, 0, 0.0, 1.0, f, &lo, &hi);   /* no events */
+    snap_copy(lo, &hi);
+    draw_frame(dst, pitch, &live, 0, 0, 0.0, 1.0, f, lo, hi);
+    colour_out(w, h, sw, sh);
+    return 1;
 }
 
 int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
@@ -953,8 +1072,10 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
         for (; sr != sw_; sr++)
             lock_sighting(sight[sr % SIGHT_N]);
     }
-    if (!L_have || !L_cls)
-        return -1;
+    /* no lock, or one that disagrees with the registers (the first
+     * sightings after a reset can read as 71 Hz on a colour screen) */
+    if (!L_have || !L_cls || ((L_cls == 71) != ((cpu_reg[0x60] & 2u) != 0)))
+        return render_static(dst, pitch, w, h, sw, sh);
     if (cfg_dbg)
         stats_print();
 
@@ -1000,7 +1121,7 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
 
     if (L_cls == 71) {
         render_mono(dst, pitch, &rs);
-        *w = 640; *h = 400; *sw = 640; *sh = 400;
+        mono_out(w, h, sw, sh);
         st.render_ticks += shm_ticks() - r0;
         return 1;
     }
@@ -1036,15 +1157,7 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
     }
 
     /* pass 2: screen memory as each word was fetched */
-    if (hi - lo > BUFMAX)
-        hi = lo + BUFMAX;
-    if (hi > lo) {
-        /* +8: a partial last group (overscan lines) decodes a few bytes on */
-        uint32_t n = hi - lo;
-        if (hi + 8u <= pistorm_stram_top())
-            n += 8u;
-        memcpy(snapbuf, g_natmem + lo, n);
-    }
+    snap_copy(lo, &hi);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     const uint32_t iu = __atomic_load_n(&ring_w, __ATOMIC_ACQUIRE);
     if (iu - i0 >= SHM_RING) {
@@ -1075,54 +1188,8 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
     }
 
     /* pass 3: draw */
-    const int top = L_cls == 50 ? cfg_top50 : cfg_top60;
-    const int hw = 2 * cfg_w;
-    static uint8_t idx[2 * 512 + 64];
-    vstate_t p = rs;
-    uint32_t pal32[16];
-    for (int i = 0; i < 16; i++)
-        pal32[i] = st_rgb(p.pal[i]);
-    uint32_t j = i0;
-    for (int y = 0; y < ROWS; y++) {
-        uint32_t *o = dst + (size_t)y * pitch;
-        for (int x = 0; x < hw; x++)
-            o[x] = 0xFF000000u;
-    }
-    for (int L = 0; L < nln; L++) {
-        const line_t *l = &ln[L];
-        const uint32_t jend = (L + 1 < nln) ? ln[L + 1].ev0 : ie;
-        const int y = L - top;
-        const int drawn = y >= 0 && y < ROWS && l->vis && !l->blank;
-        uint32_t *o = drawn ? dst + (size_t)y * pitch : NULL;
-        if (drawn) {
-            memset(idx, 0, (size_t)hw);
-            if (l->de && l->addr >= lo && l->addr + l->bytes + l->extra <= hi)
-                decode_line(l, snapbuf + (l->addr - lo), idx, hw);
-        }
-        int hx = 0;
-        for (; j != jend; j++) {
-            const shm_ev_t *e = EV(j);
-            if (SHM_KIND(e->a) == SHM_K_PAL && drawn) {
-                const double c = q4(((double)e->t - O - l->s) / tc);
-                int ex = (int)lround(2.0 * (c - cfg_paldx - cfg_x0));
-                if (ex > hw) ex = hw;
-                for (; hx < ex; hx++)
-                    o[hx] = pal32[idx[hx]];
-                pal32[e->a & 15u] = st_rgb(e->n);
-            } else if (SHM_KIND(e->a) == SHM_K_PAL)
-                pal32[e->a & 15u] = st_rgb(e->n);
-            vs_apply(&p, e);
-        }
-        if (drawn)
-            for (; hx < hw; hx++)
-                o[hx] = pal32[idx[hx]];
-    }
-
-    *w = (uint32_t)hw;
-    *h = ROWS;
-    /* the shape the presenter scales: square pixels after the pixel aspect */
-    *sw = (uint32_t)((cfg_w * cfg_par_n + cfg_par_d / 2) / cfg_par_d);
-    *sh = ROWS;
+    draw_frame(dst, pitch, &rs, i0, ie, O, tc, L_cls, lo, hi);
+    colour_out(w, h, sw, sh);
     st.render_ticks += shm_ticks() - r0;
     return 1;
 }
