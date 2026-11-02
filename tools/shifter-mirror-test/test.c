@@ -142,6 +142,19 @@ int main(void)
     io16(0xFF8240, 0x001);
     io16(0xFF8242, 0x777);
 
+    /* before any VBL is seen: a plain frame from the registers, borders in
+     * colour 0 (the boot screen) */
+    {
+        uint32_t w0, h0, sw0, sh0;
+        fake_t = (uint64_t)(T0 - P / 2);
+        int r = shm_render(out, 1024, &w0, &h0, &sw0, &sh0);
+        printf("before the lock: render %d (%ux%u)\n", r, w0, h0);
+        expect("pre-lock frame drawn", (uint32_t)r, 1);
+        expect("pre-lock top border colour 0", px(5, 100), BLUE);
+        expect("pre-lock line 0 px 5 colour 1", dpx(0, 5), WHITE);
+        memset(out, 0, sizeof out);
+    }
+
     unsigned seed = 314187;
     uint32_t w, h, sw, sh;
     int nframes = getenv("SHM_TEST_FRAMES") ? atoi(getenv("SHM_TEST_FRAMES")) : 70;

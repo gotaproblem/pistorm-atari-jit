@@ -129,7 +129,9 @@ int sh_open(void)
         map_ = NULL;
         goto fail;
     }
-    memset(map_, 0, size);
+    /* the whole panel in paper: the border, as the Shifter shows it */
+    for (uint64_t i = 0; i + 4 <= size; i += 4)
+        *(uint32_t *)(map_ + i) = palette[0];
 
     saved = drmModeGetCrtc(fd, crtc_id);
     if (drmModeSetCrtc(fd, crtc_id, fb_id, 0, 0, &conn_id, 1, &mode) < 0)
@@ -148,39 +150,56 @@ void sh_present(const struct ss_screen *ss)
     if (!sh_active())
         return;
 
-    int sw = ss->width, sh_ = ss->height;
-    int n = (int)mode.hdisplay / sw;
-    if ((int)mode.vdisplay / sh_ < n)
-        n = (int)mode.vdisplay / sh_;
-    if (n < 1)
-        n = 1;
-    int dw = sw * n, dh = sh_ * n;
-    int ox = ((int)mode.hdisplay - dw) / 2, oy = ((int)mode.vdisplay - dh) / 2;
+    /* Framed like the ST's own monitor, not a picture in a black frame:
+     * the border is the page's colour 0 (paper) out to every edge, as the
+     * Shifter shows it. Colour (640x200): the display area 5/6 of the
+     * panel wide and half that high - the same framing as the exact game
+     * mirror (shifter_mirror.c: 320 low-res pixels at 5x4 = 1600x800 on
+     * 1080p), nearest-neighbour. Mono (640x400): a whole multiple,
+     * centred, on paper. */
+    const int sw = ss->width, sh_ = ss->height;
+    const int mw = (int)mode.hdisplay, mh = (int)mode.vdisplay;
+    int dw, dh;
+    if (ss->planes == 2) {
+        dw = mw * 5 / 6;
+        dh = dw / 2;
+        if (dh > mh) { dh = mh; dw = dh * 2; }
+    } else {
+        int n = mw / sw;
+        if (mh / sh_ < n)
+            n = mh / sh_;
+        if (n < 1)
+            n = 1;
+        dw = sw * n;
+        dh = sh_ * n;
+    }
+    const int ox = (mw - dw) / 2, oy = (mh - dh) / 2;
 
-    for (int y = 0; y < sh_; y++) {
-        uint32_t row[640];
-        for (int x = 0; x < sw; x++) {
-            int c;
-            if (ss->planes == 1)
-                c = ((ss->shadow[y * 80 + (x >> 3)] >> (7 - (x & 7))) & 1) ? 3 : 0;
-            else {
-                int g = x >> 4, bit = 15 - (x & 15);
-                c = 0;
-                for (int p = 0; p < 2; p++) {
-                    const uint8_t *b = &ss->shadow[y * 160 + g * 4 + p * 2];
-                    uint16_t w = (uint16_t)((b[0] << 8) | b[1]);
-                    c |= ((w >> bit) & 1) << p;
+    uint32_t row[640];
+    int last_sy = -1;
+    for (int y = 0; y < dh; y++) {
+        const int sy = (int)((int64_t)y * sh_ / dh);
+        if (sy != last_sy) {
+            for (int x = 0; x < sw; x++) {
+                int c;
+                if (ss->planes == 1)
+                    c = ((ss->shadow[sy * 80 + (x >> 3)] >> (7 - (x & 7))) & 1) ? 3 : 0;
+                else {
+                    int g = x >> 4, bit = 15 - (x & 15);
+                    c = 0;
+                    for (int p = 0; p < 2; p++) {
+                        const uint8_t *bb = &ss->shadow[sy * 160 + g * 4 + p * 2];
+                        uint16_t w = (uint16_t)((bb[0] << 8) | bb[1]);
+                        c |= ((w >> bit) & 1) << p;
+                    }
                 }
+                row[x] = palette[c];
             }
-            row[x] = palette[c];
+            last_sy = sy;
         }
-        for (int r = 0; r < n; r++) {
-            uint32_t *dst = (uint32_t *)(map_ + (size_t)(oy + y * n + r) * pitch)
-                            + ox;
-            for (int x = 0; x < sw; x++)
-                for (int k = 0; k < n; k++)
-                    dst[x * n + k] = row[x];
-        }
+        uint32_t *d = (uint32_t *)(map_ + (size_t)(oy + y) * pitch) + ox;
+        for (int x = 0; x < dw; x++)
+            d[x] = row[(int64_t)x * sw / dw];
     }
 }
 
