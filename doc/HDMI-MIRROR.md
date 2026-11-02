@@ -10,7 +10,7 @@ mirror, which copied the screen once per VBL, is still available as
 
 | | snapshot (old) | exact (new) |
 |---|---|---|
-| picture area | 320x200 / 640x200 / 640x400 | the frame with borders in colour 0: 270 lines x 416 low-res pixels (Hatari's 276-line framing less 3 border rows top and bottom, so 1080p gets an exact x4: 1664x1080) |
+| picture area | 320x200 / 640x200 / 640x400 | the frame with borders in colour 0: 270 lines x 480 low-res pixels - 16:9, so 1080p gets an exact x4 that fills the panel (1920x1080), border colour edge to edge like the ST's own monitor |
 | top / bottom border removal | not shown | shown (vertical DE from the 60/50 Hz switch on lines 33 / 262) |
 | left / right border, +2/-2, stop-middle, full right | not shown | shown; each line gets its own length and start |
 | palette splits (Timer B, HBL, Spectrum 512) | per line, placed by timestamp, +/- 1-3 lines | at the pixel, to the 4-cycle bus slot |
@@ -85,7 +85,7 @@ Environment (tuning and diagnosis):
 | `PISTORM_SHM_DEBUG=1` | | one `[SHM]` summary line every 5 s; `=2` adds a line per counter read |
 | `PISTORM_SHM_MODESET=0` | | leave the HDMI refresh alone |
 | `PISTORM_SHM_CAL=0` | | no video counter reads |
-| `PISTORM_SHM_X0` / `_W` | 8 / 416 | horizontal window, in cycles |
+| `PISTORM_SHM_X0` / `_W` | -24 / 480 | horizontal window, in cycles (480x270 is 16:9: x4 fills 1920x1080 with border colour; 8 / 416 = Hatari's window) |
 | `PISTORM_SHM_ROWS` | 270 | rows shown (276 = Hatari's full framing, x3 on 1080p) |
 | `PISTORM_SHM_TOP50` / `_TOP60` | 37 / 8 | first frame line shown (34 / 5 with 276 rows) |
 | `PISTORM_SHM_PALDX` | 28 | palette-to-pixel delay, cycles |

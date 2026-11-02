@@ -54,8 +54,9 @@
  *   PISTORM_SHM_DEBUG=1      one summary line every 5 s (timing lock,
  *                            calibration error, events, border tricks seen,
  *                            render cost). =2 adds a line per calibration.
- *   PISTORM_SHM_X0=8         first cycle shown at the left edge
- *   PISTORM_SHM_W=416        cycles shown (canvas width in low-res pixels)
+ *   PISTORM_SHM_X0=-24       first cycle shown at the left edge (negative:
+ *                            border colour before the line starts)
+ *   PISTORM_SHM_W=480        cycles shown (canvas width in low-res pixels)
  *   PISTORM_SHM_TOP50=34     first frame line shown at 50 Hz (276 rows)
  *   PISTORM_SHM_TOP60=5      first frame line shown at 60 Hz
  *   PISTORM_SHM_PALDX=28     a palette write at cycle c colours pixels from
@@ -314,10 +315,16 @@ int shm_init(const uint8_t *natmem, int ste)
         return -1;
     g_natmem  = natmem;
     g_ste     = ste;
-    cfg_x0    = env_int("PISTORM_SHM_X0", 8);
-    cfg_w     = env_int("PISTORM_SHM_W", 416);
-    if (cfg_w < 320 || cfg_w > 512) cfg_w = 416;
-    if (cfg_x0 < 0 || cfg_x0 + cfg_w > 512) cfg_x0 = 8;
+    /* 480 x 270 = 16:9, and x4 = 1920x1080 exactly: the picture covers the
+     * whole panel, as the ST's own monitor fills its tube with the border
+     * colour, instead of leaving black bars beside a 416-wide picture.
+     * The window -24..456 is centred on the display (56..376); the cycles
+     * before 0 are just more border - colour 0 as it is at that moment,
+     * the same as the rest of the line's border. */
+    cfg_x0    = env_int("PISTORM_SHM_X0", -24);
+    cfg_w     = env_int("PISTORM_SHM_W", 480);
+    if (cfg_w < 320 || cfg_w > 512) cfg_w = 480;
+    if (cfg_x0 < -64 || cfg_x0 + cfg_w > 520) cfg_x0 = -24;
     /* 270 rows, not Hatari's 276: 270 x 4 = 1080 exactly, so on a 1080p
      * panel the picture is scaled x4 (1664x1080, full height, every pixel
      * the same size) instead of x3 (1248x828, the small picture of the
