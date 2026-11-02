@@ -166,7 +166,7 @@ All HDMI sound shares one audio device; any one of these brings it up.
 
 | key | values | |
 |---|---|---|
-| `ide` | boolean | the IDE interface for the `hdd` images |
+| `ide` | boolean | the emulated IDE interface for the `hdd` images, at `$F00000`. Disabled (or no line): `$F00000` goes to the real bus, so a real IDE interface fitted to the ST works there instead |
 | `ide_byteorder` | (retired) | ignored: the IDE byte order is decided per image when it is attached - see doc/DISK-BYTEORDER.md. Per-image overrides: `hdd_order` / `acsi_order <slot> auto|native|swapped|bootswap` |
 | `hdd` | `image` or `N:image` | an IDE hard disk image, up to 8. `N:` (0-7) pins the slot; a bare name takes the next free one. The first should be the bootable image. The page writes the pinned form so removing a drive never shifts the others |
 | `acsi` | `enabled` / `disabled`, then `image` or `N:image` lines | emulated ACSI targets on the native DMA port, for AHDI/ICD/PP drivers and Spectre's Mac partitions; they work beside real ACSI devices, whose IDs pass through. `N:` (0-7) pins the ID, `N image` too. `.img` is a raw Atari ACSI disk; `.hfs` is a bare Macintosh HFS volume the emulator wraps in an AHDI root, so Spectre mounts it and Basilisk II opens the same file. See `ACSI-DESIGN.md` |
