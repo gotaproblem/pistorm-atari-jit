@@ -5894,8 +5894,21 @@ extern "C" void jit_mem_init(void)
 
     map_region(0x00FF0000u, 0x10000, &pistorm_hw_bank); // Atari HW page, FPU probe, NOVA aliases
     map_region(0xFFFF0000u, 0x10000, &pistorm_hw_bank); // 32-bit alias
-    map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
-    map_region(0xFFF00000u, 0x00100, &pistorm_ide_bank); // IDE 32-bit alias (the hot one)
+    /* The emulated IDE controller owns $F00000 only when the cfg says
+     * `ide enabled`. With `ide disabled` (or no ide line) the page stays
+     * on the dummy bank, which goes to the real bus - so a real IDE
+     * interface fitted to the ST answers there, as it would with the
+     * 68000 in its socket. Before, the window was always emulated and a
+     * real interface never saw a cycle. */
+    {
+        const struct emulator_config *ec = emulator_config_current();
+        if (ec && ec->ide) {
+            map_region(0x00F00000u, 0x00100, &pistorm_ide_bank); // IDE 24-bit base
+            map_region(0xFFF00000u, 0x00100, &pistorm_ide_bank); // IDE 32-bit alias (the hot one)
+        } else
+            printf("[IDE] ide disabled: $F00000 goes to the real bus "
+                   "(a real IDE interface answers there)\n");
+    }
 
     //map_region(0x00FF0000u, 0x10000, &pistorm_fdd_bank);  // 24-bit HW I/O alias
    // map_region(0xFFFF0000u, 0x10000, &pistorm_fdd_bank);  // 32-bit alias (the hot one)
