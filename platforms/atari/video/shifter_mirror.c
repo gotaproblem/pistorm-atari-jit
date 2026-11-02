@@ -63,9 +63,10 @@
  *                            spec512 alignment)
  *   PISTORM_SHM_CALK=0       cycles between the counter read stamp and the
  *                            counter value (bus read latency)
- *   PISTORM_SHM_VBLOFS=0     uncalibrated only: cycles from the VBL to the
- *                            frame origin. The debug line prints the value
- *                            calibration measures.
+ *   PISTORM_SHM_VBLOFS=-86   uncalibrated only: cycles from the VBL
+ *                            envelope to the frame origin (measured on a
+ *                            Pi 4; the debug line prints what calibration
+ *                            measures).
  *   PISTORM_SHM_CAL=0        no video counter reads
  */
 #include <stdint.h>
@@ -320,7 +321,9 @@ int shm_init(const uint8_t *natmem, int ste)
     cfg_top60 = env_int("PISTORM_SHM_TOP60", 5);
     cfg_paldx = env_int("PISTORM_SHM_PALDX", 28);
     cfg_calk  = env_int("PISTORM_SHM_CALK", 0);
-    cfg_vblofs = env_int("PISTORM_SHM_VBLOFS", 0);
+    /* -86: measured on a Pi 4 + plain ST, 2 Nov 2026 - the calibrated
+     * origin sat 78..98 cycles before the VBL envelope, run after run */
+    cfg_vblofs = env_int("PISTORM_SHM_VBLOFS", -86);
     cfg_dbg   = env_int("PISTORM_SHM_DEBUG", 0);
     cfg_cal   = env_int("PISTORM_SHM_CAL", 1);
 

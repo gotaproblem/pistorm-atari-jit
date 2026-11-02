@@ -59,7 +59,7 @@ mirror, which copied the screen once per VBL, is still available as
   decided on that view.
 - Without the governor (JIT on, the APJ-OS desktop), there is no counter
   read. The origin then comes from the VBL envelope plus the offset the last
-  calibration measured (`PISTORM_SHM_VBLOFS` before any calibration). That
+  calibration measured (`PISTORM_SHM_VBLOFS`, default -86 as measured on a Pi 4, before any calibration). That
   is good to a few microseconds, which is plenty for a desktop.
 - Floppy/ACSI DMA into the visible screen is not logged. Nor are writes
   through the unhooked `stram_direct` window, but those do not reach the
@@ -89,7 +89,7 @@ Environment (tuning and diagnosis):
 | `PISTORM_SHM_TOP50` / `_TOP60` | 34 / 5 | first frame line shown |
 | `PISTORM_SHM_PALDX` | 28 | palette-to-pixel delay, cycles |
 | `PISTORM_SHM_CALK` | 0 | counter read latency, cycles |
-| `PISTORM_SHM_VBLOFS` | 0 | frame origin minus VBL, cycles (uncalibrated only) |
+| `PISTORM_SHM_VBLOFS` | -86 | frame origin minus VBL, cycles (uncalibrated only; -86 measured on a Pi 4) |
 
 ### Reading the `[SHM]` line
 
