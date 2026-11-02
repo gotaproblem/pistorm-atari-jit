@@ -296,9 +296,10 @@ static int env_int(const char *n, int def)
     return (e && *e) ? atoi(e) : def;
 }
 
-static int    cfg_x0, cfg_w, cfg_top50, cfg_top60, cfg_paldx, cfg_dbg, cfg_cal;
+static int    cfg_x0, cfg_w, cfg_top50, cfg_top60, cfg_paldx, cfg_dbg, cfg_cal, cfg_rows;
 static double cfg_calk, cfg_vblofs;
-#define ROWS 276
+#define ROWS_MAX 276
+#define ROWS cfg_rows
 #define MAXL 520                       /* 501 mono lines + slack */
 #define BUFMAX (256u * 1024u)
 
@@ -317,8 +318,15 @@ int shm_init(const uint8_t *natmem, int ste)
     cfg_w     = env_int("PISTORM_SHM_W", 416);
     if (cfg_w < 320 || cfg_w > 512) cfg_w = 416;
     if (cfg_x0 < 0 || cfg_x0 + cfg_w > 512) cfg_x0 = 8;
-    cfg_top50 = env_int("PISTORM_SHM_TOP50", 34);
-    cfg_top60 = env_int("PISTORM_SHM_TOP60", 5);
+    /* 270 rows, not Hatari's 276: 270 x 4 = 1080 exactly, so on a 1080p
+     * panel the picture is scaled x4 (1664x1080, full height, every pixel
+     * the same size) instead of x3 (1248x828, the small picture of the
+     * first hardware test). The 6 rows lost are 3 at the top and 3 at the
+     * bottom of the border. PISTORM_SHM_ROWS=276 restores the full frame. */
+    cfg_rows  = env_int("PISTORM_SHM_ROWS", 270);
+    if (cfg_rows < 200 || cfg_rows > ROWS_MAX) cfg_rows = 270;
+    cfg_top50 = env_int("PISTORM_SHM_TOP50", 34 + (ROWS_MAX - cfg_rows) / 2);
+    cfg_top60 = env_int("PISTORM_SHM_TOP60", 5 + (ROWS_MAX - cfg_rows) / 2);
     cfg_paldx = env_int("PISTORM_SHM_PALDX", 28);
     cfg_calk  = env_int("PISTORM_SHM_CALK", 0);
     /* -86: measured on a Pi 4 + plain ST, 2 Nov 2026 - the calibrated
