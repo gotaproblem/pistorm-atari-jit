@@ -125,6 +125,7 @@ int main(void)
     st_palette[0] = 0x001;
     st_palette[1] = 0x777;
     setenv("PISTORM_SHM_DEBUG", "0", 0);
+    setenv("PISTORM_SHM_ROWS", "276", 0);   /* the checks use the full frame */
     if (shm_init(mem, 0) != 0) {
         printf("init failed\n");
         return 1;

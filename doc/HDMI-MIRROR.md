@@ -10,7 +10,7 @@ mirror, which copied the screen once per VBL, is still available as
 
 | | snapshot (old) | exact (new) |
 |---|---|---|
-| picture area | 320x200 / 640x200 / 640x400 | the whole frame: borders in colour 0, 276 lines x 416 low-res pixels (Hatari's framing) |
+| picture area | 320x200 / 640x200 / 640x400 | the frame with borders in colour 0: 270 lines x 416 low-res pixels (Hatari's 276-line framing less 3 border rows top and bottom, so 1080p gets an exact x4: 1664x1080) |
 | top / bottom border removal | not shown | shown (vertical DE from the 60/50 Hz switch on lines 33 / 262) |
 | left / right border, +2/-2, stop-middle, full right | not shown | shown; each line gets its own length and start |
 | palette splits (Timer B, HBL, Spectrum 512) | per line, placed by timestamp, +/- 1-3 lines | at the pixel, to the 4-cycle bus slot |
@@ -86,7 +86,8 @@ Environment (tuning and diagnosis):
 | `PISTORM_SHM_MODESET=0` | | leave the HDMI refresh alone |
 | `PISTORM_SHM_CAL=0` | | no video counter reads |
 | `PISTORM_SHM_X0` / `_W` | 8 / 416 | horizontal window, in cycles |
-| `PISTORM_SHM_TOP50` / `_TOP60` | 34 / 5 | first frame line shown |
+| `PISTORM_SHM_ROWS` | 270 | rows shown (276 = Hatari's full framing, x3 on 1080p) |
+| `PISTORM_SHM_TOP50` / `_TOP60` | 37 / 8 | first frame line shown (34 / 5 with 276 rows) |
 | `PISTORM_SHM_PALDX` | 28 | palette-to-pixel delay, cycles |
 | `PISTORM_SHM_CALK` | 0 | counter read latency, cycles |
 | `PISTORM_SHM_VBLOFS` | -86 | frame origin minus VBL, cycles (uncalibrated only; -86 measured on a Pi 4) |
