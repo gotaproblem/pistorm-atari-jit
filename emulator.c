@@ -486,6 +486,7 @@ extern "C"
 #endif
 
   extern void *render_frame(void *);
+  extern void st_palette_seed_from_chip(void);   /* pistorm_natmem.cpp */
   extern void pistorm_cpu_irqwatch_dump(uint32_t raw6, uint32_t latched6, uint32_t raw4, uint32_t latched4);
   extern void jit_request_cpu_exit(void);
 
@@ -3186,6 +3187,10 @@ int main (int argc, char *argv[])
    * ps_gpip7_seed(). This also prints what the wire says, which is the
    * first thing to look at when a game runs 44% fast. */
   ps_gpip7_seed ();
+  /* Likewise the mirror's palette: start from what the chip holds, not
+   * from 000s - a guest that only sets some entries (the field-service
+   * cartridge) relies on the rest being whatever was there. */
+  st_palette_seed_from_chip ();
 
   /* Probe the board's real DRAM banks and take $FF8001 off the guest.
    * After jit_mem_init (so stram_alias_init has had its go at the
@@ -3570,6 +3575,14 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     rtg.hw_rez = value;              /* hardware truth for the renderer */
     pistorm_rez_sync_trace(a, (uint8_t)value);  /* legacy path was invisible */
     vid_dbg_w(a, value);
+  }
+  else if (a >= 0x00FF8240 && a < 0x00FF8260) {
+    /* a byte of a palette entry (see pistorm_natmem.cpp) */
+    unsigned i = (a - 0x00FF8240) >> 1;
+    uint16_t w = st_palette[i];
+    w = (a & 1) ? (uint16_t)((w & 0xFF00u) | value)
+                : (uint16_t)((w & 0x00FFu) | ((uint16_t)value << 8));
+    st_palette[i] = w;
   }
 }
 

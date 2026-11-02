@@ -1397,6 +1397,21 @@ static inline void st_video_snoop8(uint32_t address, uint8_t value)
     else if (a == 0x00FF820Au) {
         st_rez_sync_trace(a, value);
     }
+    else if (a >= 0x00FF8240u && a < 0x00FF8260u) {
+        /* a byte of a palette entry: even address = the high byte (red),
+         * odd = the low byte (green, blue). Used to be dropped, so a
+         * move.b into the palette reached the real chip and not the
+         * palette shadow (Atari field-service cart: menu text in colour 1
+         * drawn as 000 - black on blue - while the ST monitor showed it).
+         * The beam-exact mirror logs byte writes itself (shm_io_write);
+         * the shadow still serves guest palette reads and the old mirror. */
+        unsigned i = (a - 0x00FF8240u) >> 1;
+        uint16_t w = st_palette[i];
+        w = (a & 1) ? (uint16_t)((w & 0xFF00u) | value)
+                    : (uint16_t)((w & 0x00FFu) | ((uint16_t)value << 8));
+        st_palette[i] = w;
+        st_palette_log(i, w);
+    }
 }
 
 /* GLUE mode changes are rare (a handful per boot) and are exactly what
@@ -5991,4 +6006,37 @@ extern "C" void pistorm_seed_reset_vector(void)
 {
     if (natmem_offset)
         memcpy(natmem_offset + 0, natmem_offset + pistorm_rom_start, 8);
+}
+
+/* Seed the palette shadow from the real chip, once, before the CPU thread
+ * starts. The shadow only ever learnt what the guest wrote; anything never
+ * written stayed 000. The Atari field-service cartridge sets colours 0 and
+ * 3 and draws its menu in 1 and 2, trusting whatever the chip held (on a
+ * real ST too) - the ST monitor showed the menu, HDMI showed black on
+ * blue. The beam-exact mirror (shifter_mirror.c) starts its own register
+ * state from this shadow too. A plain ST shifter reads back bit 3 of each
+ * nibble undefined, so mask to 777 unless the shifter is an STE one. */
+extern "C" void st_palette_seed_from_chip(void)
+{
+    extern bool emulator_config_shifter_ste(void);
+    const uint16_t mask = emulator_config_shifter_ste() ? 0x0FFFu : 0x0777u;
+    uint8_t old_fc = fc;
+    fc = 0x5;
+    g_buserr = 0;
+    uint16_t v[16];
+    for (int i = 0; i < 16; i++)
+        v[i] = ps_read_16(0x00FF8240u + 2u * (uint32_t)i) & mask;
+    int berr = g_buserr;
+    fc = old_fc;
+    g_buserr = 0;
+    if (berr) {
+        fprintf(stderr, "[PAL] seed: bus error reading the palette - shadow left as is\n");
+        return;
+    }
+    for (int i = 0; i < 16; i++)
+        st_palette[i] = v[i];
+    PS_INFO("[PAL] shadow seeded from the chip:");
+    for (int i = 0; i < 16; i++)
+        PS_INFO(" %03X", v[i]);
+    PS_INFO("\n");
 }
