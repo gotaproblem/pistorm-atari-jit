@@ -85,13 +85,13 @@ static void fill_screen(void)
 }
 
 /* ---- checks ----------------------------------------------------------- */
-static uint32_t out[276 * 832];
+static uint32_t out[276 * 1024];
 static int fails, checks;
 
 static uint32_t px(int row, double cyc)   /* canvas pixel at a low-res cycle */
 {
     int hx = (int)(2 * (cyc - 8));
-    return out[row * 832 + hx] & 0xFFFFFFu;
+    return out[row * 1024 + hx] & 0xFFFFFFu;
 }
 
 #define WHITE 0xFFFFFFu
@@ -126,6 +126,8 @@ int main(void)
     st_palette[1] = 0x777;
     setenv("PISTORM_SHM_DEBUG", "0", 0);
     setenv("PISTORM_SHM_ROWS", "276", 0);   /* the checks use the full frame */
+    setenv("PISTORM_SHM_X0", "8", 0);       /* ... and Hatari's 416-wide window */
+    setenv("PISTORM_SHM_W", "416", 0);
     if (shm_init(mem, 0) != 0) {
         printf("init failed\n");
         return 1;
@@ -199,7 +201,7 @@ int main(void)
         shm_vbl_sighting();
         /* the render loop wakes some time after */
         fake_t += 20000u + (uint64_t)((seed >> 4) % 500000u);
-        int r = shm_render(out, 832, &w, &h, &sw, &sh);
+        int r = shm_render(out, 1024, &w, &h, &sw, &sh);
         if (k < 40)
             continue;
         if (r != 1) {
