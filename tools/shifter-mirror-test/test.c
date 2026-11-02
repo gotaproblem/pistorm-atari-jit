@@ -128,6 +128,7 @@ int main(void)
     setenv("PISTORM_SHM_ROWS", "276", 0);   /* the checks use the full frame */
     setenv("PISTORM_SHM_X0", "8", 0);       /* ... and Hatari's 416-wide window */
     setenv("PISTORM_SHM_W", "416", 0);
+    setenv("PISTORM_SHM_PAR", "1/1", 0);
     if (shm_init(mem, 0) != 0) {
         printf("init failed\n");
         return 1;

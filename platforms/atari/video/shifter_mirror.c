@@ -54,9 +54,11 @@
  *   PISTORM_SHM_DEBUG=1      one summary line every 5 s (timing lock,
  *                            calibration error, events, border tricks seen,
  *                            render cost). =2 adds a line per calibration.
- *   PISTORM_SHM_X0=-24       first cycle shown at the left edge (negative:
+ *   PISTORM_SHM_X0=24        first cycle shown at the left edge (negative:
  *                            border colour before the line starts)
- *   PISTORM_SHM_W=480        cycles shown (canvas width in low-res pixels)
+ *   PISTORM_SHM_W=384        cycles shown (canvas width in low-res pixels)
+ *   PISTORM_SHM_PAR=5/4      pixel aspect, width/height (as the monitor
+ *                            shows it; 1/1 = square)
  *   PISTORM_SHM_TOP50=34     first frame line shown at 50 Hz (276 rows)
  *   PISTORM_SHM_TOP60=5      first frame line shown at 60 Hz
  *   PISTORM_SHM_PALDX=28     a palette write at cycle c colours pixels from
@@ -298,6 +300,7 @@ static int env_int(const char *n, int def)
 }
 
 static int    cfg_x0, cfg_w, cfg_top50, cfg_top60, cfg_paldx, cfg_dbg, cfg_cal, cfg_rows;
+static int    cfg_par_n = 1, cfg_par_d = 1;   /* low-res pixel width : height */
 static double cfg_calk, cfg_vblofs;
 #define ROWS_MAX 276
 #define ROWS cfg_rows
@@ -315,16 +318,31 @@ int shm_init(const uint8_t *natmem, int ste)
         return -1;
     g_natmem  = natmem;
     g_ste     = ste;
-    /* 480 x 270 = 16:9, and x4 = 1920x1080 exactly: the picture covers the
-     * whole panel, as the ST's own monitor fills its tube with the border
-     * colour, instead of leaving black bars beside a 416-wide picture.
-     * The window -24..456 is centred on the display (56..376); the cycles
-     * before 0 are just more border - colour 0 as it is at that moment,
-     * the same as the rest of the line's border. */
-    cfg_x0    = env_int("PISTORM_SHM_X0", -24);
-    cfg_w     = env_int("PISTORM_SHM_W", 480);
-    if (cfg_w < 320 || cfg_w > 512) cfg_w = 480;
-    if (cfg_x0 < -64 || cfg_x0 + cfg_w > 520) cfg_x0 = -24;
+    /* Framed like the ST's RGB output on a real monitor. Photos of the same
+     * desktop on the same 1080p panel (2 Nov 2026), Shifter output against
+     * HDMI: the monitor shows the 320-pixel display across 82% of the
+     * width and 71% of the height, i.e. about 384 cycles by 280 lines,
+     * with pixels about 1.28x as wide as tall. So: 384 cycles (24..408,
+     * centred on the display's 56..376) by 270 rows, pixels 5:4. That is
+     * 480x270 square pixels = 16:9: on 1080p each low-res pixel is 5x4
+     * output pixels, every one the same size, and the picture fills the
+     * panel - display area 1600x800, as on the monitor.
+     *   PISTORM_SHM_PAR=1/1 with X0=-24 W=480: square pixels, wider view
+     *   PISTORM_SHM_PAR=1/1 with X0=8 W=416 ROWS=276: Hatari's framing */
+    cfg_x0    = env_int("PISTORM_SHM_X0", 24);
+    cfg_w     = env_int("PISTORM_SHM_W", 384);
+    if (cfg_w < 320 || cfg_w > 512) cfg_w = 384;
+    if (cfg_x0 < -64 || cfg_x0 + cfg_w > 520) cfg_x0 = 24;
+    {
+        const char *e = getenv("PISTORM_SHM_PAR");
+        cfg_par_n = 5; cfg_par_d = 4;
+        if (e && *e) {
+            int n = 0, d = 0;
+            if (sscanf(e, "%d/%d", &n, &d) == 2 && n > 0 && d > 0 && n <= 4 * d && d <= 4 * n) {
+                cfg_par_n = n; cfg_par_d = d;
+            }
+        }
+    }
     /* 270 rows, not Hatari's 276: 270 x 4 = 1080 exactly, so on a 1080p
      * panel the picture is scaled x4 (1664x1080, full height, every pixel
      * the same size) instead of x3 (1248x828, the small picture of the
@@ -1102,7 +1120,8 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
 
     *w = (uint32_t)hw;
     *h = ROWS;
-    *sw = (uint32_t)cfg_w;
+    /* the shape the presenter scales: square pixels after the pixel aspect */
+    *sw = (uint32_t)((cfg_w * cfg_par_n + cfg_par_d / 2) / cfg_par_d);
     *sh = ROWS;
     st.render_ticks += shm_ticks() - r0;
     return 1;
