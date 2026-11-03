@@ -85,7 +85,7 @@ static void fill_screen(void)
 }
 
 /* ---- checks ----------------------------------------------------------- */
-static uint32_t out[276 * 1024];
+static uint32_t out[540 * 1024];      /* room for the mono canvas */
 static int fails, checks;
 
 static uint32_t px(int row, double cyc)   /* canvas pixel at a low-res cycle */
@@ -318,6 +318,39 @@ int main(void)
         printf("re-latched sightings: 60 Hz in %d of 300 frames, ends at %d Hz\n", seen60, last);
         expect("frames locked at 60 Hz with sync=50", (uint32_t)seen60, 0);
         expect("lock ends at 50 Hz", (uint32_t)last, 50);
+    }
+
+    /* Border-removal code holds $FF820A at 60 Hz for a few cycles on a
+     * line (top/bottom border, every line for the right border). The
+     * mirror must not take that transient for the frame rate, whenever
+     * it happens to look: here the register reads 60 Hz at one sighting
+     * in 7 and at the render in 1 frame in 9, and the left-border trick's
+     * 71 Hz mode is set at the render in 1 frame in 11. */
+    {
+        int unlocked = 0;
+        for (int i = 0; i < 300; i++, frame_k++) {
+            const int k = frame_k;
+            seed = seed * 1103515245u + 12345u;
+            fake_t = (uint64_t)(origin(k + 1) + VBL_OFS_CYC * NS_PER_CYC +
+                                (double)((seed >> 16) % 40000u));
+            const int at60 = (i % 7) == 3;
+            if (at60) io8(0xFF820A, 0x00);
+            shm_vbl_sighting();
+            if (at60) io8(0xFF820A, 0x02);
+            fake_t = (uint64_t)(origin(k + 1) + P * 0.9);
+            const int r60 = (i % 9) == 5, r71 = (i % 11) == 4;
+            if (r60) io8(0xFF820A, 0x00);
+            if (r71) io8(0xFF8260, 0x02);       /* left-border opening */
+            const int rr = shm_render(out, 1024, &w, &h, &sw, &sh);
+            if (r71) io8(0xFF8260, 0x00);
+            if (r60) io8(0xFF820A, 0x02);
+            if (rr != 1)
+                unlocked++;
+            if (shm_locked_hz() != 50)
+                unlocked++;
+        }
+        printf("transient 60 Hz sync: lock not 50 Hz in %d of 300 frames\n", unlocked);
+        expect("frames off 50 Hz with transient sync writes", (uint32_t)unlocked, 0);
     }
 
     printf("%d checks, %d failed\n", checks, fails);
