@@ -1092,6 +1092,42 @@ static void stram_shadow_video_after(uaecptr a, int size)
  * $FF820D is NOT answered on a plain ST: it does not exist there, and
  * answering it is the STE-detection trap described above. On an STE it
  * is a real register and the guest is entitled to read its own value. */
+/* `shifter ste`: the STE video extras - base low byte $FF820D, line width
+ * $FF820F, fine scroll $FF8265 (and the unused even bytes beside them) -
+ * read back what the guest wrote, from the snoops, not from the board.
+ * On an ST board those addresses are not STE registers at all, and the
+ * real bus answered with junk ($FE, $FF): a demo that saved them on entry
+ * and wrote them back on exit restored line width 255 and base low byte
+ * $FE into the HDMI mirror, which then drew the desktop 510 bytes a line
+ * apart, 49 lines of it, while the ST's own Shifter (which ignores both)
+ * looked fine (3 Nov 2026). On an STE board the snoops hold the same
+ * values as the chip, so answering from them changes nothing there.
+ * Whole access inside $FF820C-$FF820F or $FF8264-$FF8265 only. */
+extern bool emulator_config_shifter_ste(void);
+static int ste_video_extras_read(uaecptr a, int size, uae_u32 *out)
+{
+    a &= 0x00FFFFFFu;
+    const uaecptr e = a + (uaecptr)size - 1u;
+    if (!((a >= 0x00FF820Cu && e <= 0x00FF820Fu) ||
+          (a >= 0x00FF8264u && e <= 0x00FF8265u)))
+        return 0;
+    if (!emulator_config_shifter_ste())
+        return 0;
+    uae_u32 v = 0;
+    for (uaecptr i = a; i <= e; i++) {
+        uae_u8 b;
+        switch (i) {
+        case 0x00FF820Du: b = (uae_u8)(rtg.low & 0xFEu);    break;
+        case 0x00FF820Fu: b = rtg.linewidth;                break;
+        case 0x00FF8265u: b = (uae_u8)(rtg.hscroll & 0x0Fu); break;
+        default:          b = 0;                            break;
+        }
+        v = (v << 8) | b;
+    }
+    *out = v;
+    return 1;
+}
+
 extern "C" int pistorm_video_base_read_shim(unsigned int a, int size,
                                             unsigned int *out)
 {
@@ -3890,6 +3926,11 @@ static uae_u32 hw_lget(uaecptr a)
         return (hw_wget(a) << 16) | (hw_wget(a + 2) & 0xFFFFu);
     if (falcon_tos_owns(a))                 /* Falcon TOS: NVRAM, SCC */
         return falcon_tos_read(a, 4);
+    {
+        uae_u32 sv;
+        if (ste_video_extras_read(a, 4, &sv))
+            return sv;
+    }
 
     switch (hw_page_addr(a))
     {
@@ -3979,6 +4020,11 @@ static uae_u32 hw_wget(uaecptr a)
         return falcon_hw_read(a, 2);
     if (falcon_tos_owns(a))
         return falcon_tos_read(a, 2);
+    {
+        uae_u32 sv;
+        if (ste_video_extras_read(a, 2, &sv))
+            return sv;
+    }
 
     switch (hw_page_addr(a))
     {
@@ -4069,6 +4115,11 @@ static uae_u32 hw_bget(uaecptr a)
             return mc;
         if (pistorm_video_base_read_shim(a, 1, &mc))
             return mc;
+    }
+    {
+        uae_u32 sv;
+        if (ste_video_extras_read(a, 1, &sv))
+            return sv;
     }
 
     switch (hw_page_addr(a))
