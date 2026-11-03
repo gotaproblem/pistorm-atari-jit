@@ -451,6 +451,11 @@ module pistormsxb_devEPM240(
 	
 
 	
+	/* CPLD protocol regressions: one request per header strobe,
+	 * sticky in-cycle faults, and explicit cancellation on reset/INIT.
+	 * Development source changes: shipped SVFs have NOT been rebuilt. */
+	reg cycle_fault = 1'b0;
+
 	reg op_req								= HI;
 	reg op_rw 								= HI;
 	reg op_uds_n 							= HI;
@@ -519,7 +524,7 @@ module pistormsxb_devEPM240(
 	/* RESET */
 	/* pulse when out of reset. delay by one clock pulse is required to prevent lock after reset */
 	reg [1:0] resetfilter					= 2'b11;
-	wire oor 								= (resetfilter == 2'b01) || reset_sm; 
+	wire oor 								= !M68K_RESET_n || (resetfilter == 2'b01) || reset_sm;
 	
 	always @(negedge c8m) begin
 	
@@ -622,7 +627,7 @@ module pistormsxb_devEPM240(
 	 * both latch output enables.
 	 */
 	reg  own_q								= HI;
-	wire bus_drv							= BGACKi & (bus_mine | go | ~AS_INT | own_q);
+	wire bus_drv							= BGACKi & ~cycle_fault & (bus_mine | go | ~AS_INT | own_q);
 
 	always @(posedge c8m) begin
 		own_q								<= bus_mine | ~AS_INT;
@@ -647,6 +652,7 @@ module pistormsxb_devEPM240(
 		else
 			go								<= s2 && !as_on && PI_TXN_IN_PROGRESS &&
 											   bus_mine && BGACKi && br_clear &&
+											   M68K_DTACK_n && M68K_BERR_n &&
 											   M68K_BR_n;	/* BR pin at this edge: a cycle never
 															   starts once BR is out (go is a flop -
 															   metastability has half a clock to
@@ -772,7 +778,7 @@ module pistormsxb_devEPM240(
 		if (s5rst)
 		  s5 <= 1'd0;
 
-		else if ( s4 && (got_dtack || !M68K_BERR_n || (!M68K_VMA_nr && M68K_E)))// == E9)) )
+		else if ( s4 && (got_dtack || cycle_fault || !M68K_BERR_n || (!M68K_VMA_nr && M68K_E)))// == E9)) )
 		  s5 <= 1'b1;
 	end
 	
@@ -836,7 +842,34 @@ module pistormsxb_devEPM240(
 	/* 373 level d-type flip/flop */	
 	/* 374 edge d-type flip/flop */
 	
+	/* Status-write preparation must not overwrite the write latch of a
+	 * timed-out physical cycle before INIT has actually cancelled it. */
+	always @(*) begin
+		LTCH_D_WR_U <= PI_CMD == REG_DATA && CMDWR && !PI_TXN_IN_PROGRESS;
+		LTCH_D_WR_L <= PI_CMD == REG_DATA && CMDWR && !PI_TXN_IN_PROGRESS;
+	end
+
+	/* Capture a request once, on the host's command-write edge. A held
+	 * strobe cannot reassert busy after completion. Completion/reset/INIT
+	 * asynchronously clear this flip-flop; a strobe held across reset is
+	 * discarded and needs a fresh rising edge. Use raw CMDWR as the clock,
+	 * not a decoded command, so changing command bits while WR is already
+	 * high (status-write preparation) cannot create a new clock edge. */
+	wire txn_clear = s7 || oor;
+	always @(posedge CMDWR or posedge txn_clear) begin
+		if (txn_clear)
+			PI_TXN_IN_PROGRESS <= LO;
+		else if (PI_CMD == REG_ADDR_HI)
+			PI_TXN_IN_PROGRESS <= HI;
+	end
+
 	always begin
+		/* Remember transient BERR or illegal ownership loss until the next
+		 * cycle. Sampling only the final S5 level loses short fault pulses. */
+		if (s0 || oor)
+			cycle_fault <= 1'b0;
+		else if ((go || as_on) && (!M68K_BERR_n || !BGACKi))
+			cycle_fault <= 1'b1;
 	
 		/* read latch on to PI_D: REG_DATA + strobe while rd_ok (see above).
 		 * NOT keyed off op_rw: with the write order DATA, LO, HI the DATA
@@ -844,9 +877,6 @@ module pistormsxb_devEPM240(
 		 * transaction's value, and a write following a read would put the
 		 * read latch on PI_D against the Pi's data - corrupted writes. */
 		LTCH_D_RD_OE_n 						<= !(PI_CMD == REG_DATA && CMDWR && rd_ok);	
-		
-		LTCH_D_WR_U 						<= (PI_CMD == REG_DATA && CMDWR);
-		LTCH_D_WR_L 						<= (PI_CMD == REG_DATA && CMDWR);
 		
 		LTCH_A_0 							<= (PI_CMD == REG_ADDR_LO && CMDWR);
 		LTCH_A_8 							<= (PI_CMD == REG_ADDR_LO && CMDWR);
@@ -871,7 +901,6 @@ module pistormsxb_devEPM240(
 					op_lds_n 				<= PI_D[8] ? !a0 : LO;
 					op_fc 					<= PI_D[15:13];
 					
-					PI_TXN_IN_PROGRESS		<= HI;
 				end
 				
 				REG_STATUS: begin
@@ -954,7 +983,7 @@ module pistormsxb_devEPM240(
 `endif
 			/* rev 252: BGACK inside our own cycle = the bus was taken from
 			 * under us; the DTACK that got us here was not for this cycle */
-			PI_BERR <= M68K_BERR_n & BGACKi;
+			PI_BERR <= M68K_BERR_n & BGACKi & ~cycle_fault;
 		end
 		
 		/* latch data */
@@ -985,13 +1014,21 @@ module pistormsxb_devEPM240(
 			LTCH_D_RD_U <= LO;
 			LTCH_D_RD_L <= LO;
 `endif
-			PI_TXN_IN_PROGRESS <= LO;
 		end
 		
 		if (s7rst) begin
 		
 			LTCH_A_OE_r <= HI; /* address bus high impedance */
 			LTCH_D_WR_OE_r <= HI; /* data bus high impedance */	
+		end
+		if (cycle_fault)
+			PI_BERR <= LO;
+		/* Reset/INIT discards pending work; it is never an implicit replay.
+		 * This does not undo a write already accepted by a physical device. */
+		if (oor) begin
+			PI_BERR <= LO;
+			UDS_INT <= HI;
+			LDS_INT <= HI;
 		end
 	end
 	
