@@ -37,7 +37,7 @@ as 1.2e (reads released at S7, no fast start).
 | `PISTORM_FASTCLK=0` | no PI_CLK |
 | `PISTORM_STROBE=3` / `4` | longer WR strobe |
 | `PISTORM_CPULOCK=0` | CPU thread takes the old lock |
-| `PISTORM_HANDOFF_NS=n` | hand-off wait (default 500) |
+| `PISTORM_HANDOFF_NS=n` | IPL-sample hand-off wait (default 500); cycle hand-offs use membarrier |
 | `PISTORM_IPL_HANDOFF=0` | seqlock IPL sampling - crashed Bad Apple, test only |
 
 ## Firmware source
@@ -60,6 +60,9 @@ and tested so far (`rtl/EPM570_bitstream_dev_2_1b.svf`).
 
 - sndh44 crashes in its intro (player fine after Space); not yet checked
   against `main` + 1.1b.
-- Why seqlock IPL sampling failed is not understood (hand-off used instead).
+- Why seqlock IPL sampling failed is not proven. It has the same
+  store->load ordering hole the timed hand-off had (fixed for cycle
+  hand-offs with membarrier, 3 Nov 2026 - see BUS OWNERSHIP in
+  `gpio/ps_protocol.c`), which would explain it.
 - Single-word reads still miss the next slot ~40 % (`ataritest --busprofile`
   read16); 2.2b (`FAST_DLY`/`RD_REL` 0) would add ~24 ns of margin.

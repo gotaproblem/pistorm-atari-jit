@@ -22,6 +22,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <sys/syscall.h>
+#include <linux/membarrier.h>
 #include "ps_protocol.h"
 
 
@@ -145,31 +147,47 @@ volatile uint8_t ps_bus_active = 0;
  * half alone (atomic only / dmb only) was measured to cost the slot.
  *
  * So the CPU thread (registered with ps_bus_cpu_thread) takes NO atomic
- * and ONE dmb ish per transaction:
- *   enter: ps_cpu_seq = odd (plain store), dmb ish, then look at
- *          ps_bus_req (plain load, normally 0 and in this core's cache).
- *          Without the dmb the load can be satisfied before the store is
- *          visible, and the timing argument below does not hold: seen as
- *          ipl_task and the CPU thread on the bus together (3 Nov 2026).
+ * and NO barrier per transaction:
+ *   enter: ps_cpu_seq = odd (plain store), then look at ps_bus_req
+ *          (plain load, normally 0 and in this core's cache)
  *   exit:  ps_cpu_seq = even (plain store)
  *
  * Every OTHER thread (and the CPU thread before it registers) takes
  * ps_txn_lock among themselves as before, then, while a CPU thread is
- * registered, raises ps_bus_req and WAITS PS_HANDOFF before looking at
- * ps_cpu_seq. Why the wait is enough without a barrier on the CPU side:
- * a store becomes visible to the other cores within D (store-buffer
- * drain, tens of ns on the A72; the CPU thread is SCHED_FIFO on an
- * isolated core). PS_HANDOFF is 500 ns (PISTORM_HANDOFF_NS, min 200). The CPU thread raises seq (odd) BEFORE it loads
- * ps_bus_req, and touches no GPIO until that load says 0. So
- *   - a CPU transaction that read req == 0 did so before req was visible
- *     (< req + D); its odd seq was stored before that and is visible by
- *     req + 2D, i.e. well inside PS_HANDOFF - the requester sees
- *     it odd and waits for the even store at its end;
- *   - a CPU transaction that starts later sees req == 1, puts seq back to
- *     even (after a dmb sy - its earlier GPIO writes complete) and spins
- *     until the requester clears req (after the requester's own dmb sy).
- * The requester pays ~0.7 us per acquisition; the CPU thread pays two plain
- * stores and one load.
+ * registered, raises ps_bus_req and only then looks at ps_cpu_seq.
+ *
+ * That is Dekker's pattern, and Dekker needs a store->load barrier on
+ * BOTH sides: without one on the CPU side the A72 may satisfy its load of
+ * ps_bus_req before its odd store is visible, see req == 0, and start a
+ * cycle the requester never sees. The first version bridged that with
+ * time instead (a fixed PS_HANDOFF wait, "the store is visible within
+ * D"). D is not bounded: GEMBench with the HDMI mirror on (3 Nov 2026)
+ * caught ipl_task's ACIA rescue running a cycle inside a CPU cycle - the
+ * CPLD stuck 50 ms, INIT, the ACIA left unable to transmit. A dmb ish on
+ * the CPU side fixes it but costs every RAM read its 500 ns slot
+ * (busprofile read16 765 -> 999 ns: the read has under 75 ns of margin).
+ *
+ * So the barrier goes on the requester's side, for both of them:
+ * membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED) makes every running thread
+ * of this process execute a full barrier before it returns (an IPI to
+ * the CPU thread's core). Requester: req = 1; membarrier; read seq. Then
+ *   - a CPU load of req after its barrier sees 1: it yields (seq even,
+ *     dmb sy, spin until req clears) and touches no GPIO;
+ *   - a CPU load of req before its barrier saw 0, but its odd store was
+ *     earlier in program order, so the barrier has made it visible: the
+ *     requester sees seq odd and waits for the even store at its end.
+ * Exact, whatever the store-buffer latency. It costs the requester a
+ * syscall and the CPU thread one IPI (a few us) - so it is used only for
+ * acquisitions that RUN CYCLES (ps_lock_bus from another thread, the
+ * ACIA rescue, the power poll), which are rare.
+ *
+ * ipl_task's IPL samples (tens of thousands a second) only READ GPLEV0:
+ * they cannot disturb a CPU cycle, so they keep the timed hand-off and
+ * its rare cost is a sample read during a cycle - the same as before,
+ * and filtered as before (TXN-up samples are dropped, levels must hold).
+ *
+ * No membarrier (kernel without it): the CPU side takes the dmb ish
+ * instead - correct, and slower, and said so at start-up.
  *
  * ipl_task's IPL sample does not stop the CPU thread at all: it samples
  * GPLEV0 seqlock-style (ps_bus_trylock / ps_bus_sample_ok): seq even
@@ -188,6 +206,10 @@ static uint64_t ps_handoff_ns    = 500;
 static uint64_t ps_settle_ticks  = 9;           /* ~150 ns: the CPU's last posted GPIO writes */
 static int ps_held_req = 0;                     /* holder of ps_txn_lock raised ps_bus_req */
 static uint32_t ps_sample_seq;
+static int ps_mb_ok = 0;                        /* membarrier registered: requester-side barrier */
+static int ps_cpu_dmb = 0;                      /* no membarrier: dmb ish on the CPU side instead */
+unsigned ps_handoff_mb_n = 0;                   /* membarrier hand-offs (for the ipl stats line) */
+unsigned ps_handoff_overlap_n = 0;              /* cycle hand-offs that found TXN still up (should stay 0) */
 static int ps_ipl_handoff = 1;                  /* IPL samples via the hand-off (PISTORM_IPL_HANDOFF=0: seqlock) */                  /* ps_bus_trylock: seq seen before the sample */
 
 static inline uint64_t ps_ticks (void)
@@ -217,8 +239,23 @@ static void __attribute__ ((noinline, cold)) ps_cpu_yield_bus (void)
   } while (ps_bus_req);
 }
 
-/* Another thread's acquisition (ps_txn_lock already held) */
-static void ps_others_handoff (void)
+/* bounded (~60 ms): the CPU thread's own stuck-cycle recovery owns the
+ * case where it never drops */
+static void ps_wait_idle_raw (void)
+{
+  for (unsigned i = 0; i < 800000u && (*ioread & PI_TXN_IN_PROGRESS); i++)
+    asm volatile ("yield" ::: "memory");
+}
+
+static long ps_membarrier (int cmd)
+{
+  return syscall (__NR_membarrier, cmd, 0, 0);
+}
+
+/* Another thread's acquisition (ps_txn_lock already held). `cycles`: the
+ * holder will run bus cycles (exact hand-off, BUS OWNERSHIP); 0 for an
+ * IPL sample, which only reads GPLEV0 (timed hand-off). */
+static void ps_others_handoff (int cycles)
 {
   ps_bus_active = 1;
   ps_held_req = 0;
@@ -226,10 +263,22 @@ static void ps_others_handoff (void)
     ps_bus_req = 1;
     ps_held_req = 1;
     asm volatile ("dmb sy" ::: "memory");
-    ps_spin_ticks (ps_handoff_ticks);           /* req visible to the CPU core */
+    if (cycles && ps_mb_ok) {
+      ps_membarrier (MEMBARRIER_CMD_PRIVATE_EXPEDITED);
+      ps_handoff_mb_n++;
+    } else
+      ps_spin_ticks (ps_handoff_ticks);         /* req visible to the CPU core */
     while (ps_cpu_seq & 1)                      /* let its transaction finish  */
       asm volatile ("yield" ::: "memory");
     ps_spin_ticks (ps_settle_ticks);            /* its last posted GPIO writes */
+    /* Guard: a cycle hand-off must find the bus idle. Never seen with the
+     * exact hand-off; counted and reported if it ever is. */
+    if (cycles && (*ioread & PI_TXN_IN_PROGRESS)) {
+      if (ps_handoff_overlap_n++ < 8)
+        fprintf (stderr, "[PS] hand-off found a cycle still running (TXN up) - "
+                 "please report (%u so far)\n", ps_handoff_overlap_n);
+      ps_wait_idle_raw ();
+    }
   }
   asm volatile ("dmb sy" ::: "memory");
 }
@@ -295,13 +344,12 @@ static inline void ps_lock_bus(void)
     if (__builtin_expect (ps_rt_win, 0))
       ps_rt_begin ();
     ps_cpu_seq = ++ps_cpu_seq_local;            /* odd */
-    /* The odd store must be visible before ps_bus_req is read: the A72
-     * may otherwise satisfy the load first, see req == 0, and run a
-     * cycle the requester never saw - two threads on the bus at once
-     * (GEMBench, 3 Nov 2026: ipl_task's ACIA rescue landed inside CPU
-     * cycles, CPLD stuck 50 ms, ACIA left unable to transmit). The
-     * 500 ns PS_HANDOFF wait does not bound the store's visibility. */
-    asm volatile ("dmb ish" ::: "memory");
+    /* store->load: the requester's membarrier orders it (BUS OWNERSHIP);
+     * only a kernel without membarrier needs it here */
+    if (__builtin_expect (ps_cpu_dmb, 0))
+      asm volatile ("dmb ish" ::: "memory");
+    else
+      asm volatile ("" ::: "memory");
     if (__builtin_expect (ps_bus_req, 0)) {
       if (__builtin_expect (ps_rt_win, 0))
         ps_rt_yield ();
@@ -312,7 +360,7 @@ static inline void ps_lock_bus(void)
   }
   while (atomic_flag_test_and_set_explicit(&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
-  ps_others_handoff ();
+  ps_others_handoff (1);
 }
 
 static inline void ps_unlock_bus(void)
@@ -340,9 +388,17 @@ void ps_bus_cpu_thread (int on)
       printf ("[GPIO] CPU thread bus path: old lock (PISTORM_CPULOCK=0)\n");
       return;
     }
-    printf ("[GPIO] CPU thread bus path: lock-free (hand-off %llu ns, IPL samples %s)\n",
-            (unsigned long long)ps_handoff_ns,
-            ps_ipl_handoff ? "via hand-off" : "seqlock-checked (PISTORM_IPL_HANDOFF=0)");
+    {
+      long q = ps_membarrier (MEMBARRIER_CMD_QUERY);
+      ps_mb_ok = q >= 0 && (q & MEMBARRIER_CMD_PRIVATE_EXPEDITED) &&
+                 ps_membarrier (MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) == 0;
+      ps_cpu_dmb = !ps_mb_ok;
+    }
+    printf ("[GPIO] CPU thread bus path: lock-free (%s; IPL samples %s, %llu ns)\n",
+            ps_mb_ok ? "cycle hand-off by membarrier"
+                     : "NO membarrier in this kernel - dmb on every access, RAM reads slower",
+            ps_ipl_handoff ? "via timed hand-off" : "seqlock-checked (PISTORM_IPL_HANDOFF=0)",
+            (unsigned long long)ps_handoff_ns);
   }
   while (atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     asm volatile ("yield" ::: "memory");
@@ -411,7 +467,7 @@ int ps_bus_trylock (void)
   ps_held_req = 0;
   asm volatile ("dmb sy" ::: "memory");
   if (ps_cpu_on && ps_ipl_handoff) {          /* PISTORM_IPL_HANDOFF=1:   */
-    ps_others_handoff ();                      /* stop the CPU thread for  */
+    ps_others_handoff (0);                     /* stop the CPU thread for  */
     return 1;                                  /* every sample (sample_ok = 1) */
   }
   ps_sample_seq = ps_cpu_seq;
@@ -444,7 +500,7 @@ int ps_bus_sample_ok (void)
  * for the other threads; the CPU thread is then stopped by the timed
  * hand-off (one transaction at most). Returns 1 with the bus held
  * (caller MUST ps_bus_unlock), 0 if it could not be had in time. */
-int ps_bus_lock_within (uint64_t ticks)
+static int ps_bus_lock_within_ (uint64_t ticks, int cycles)
 {
   uint64_t t0 = ps_ticks ();
   for (;;)
@@ -452,13 +508,25 @@ int ps_bus_lock_within (uint64_t ticks)
     if (!ps_bus_active &&
         !atomic_flag_test_and_set_explicit (&ps_txn_lock, memory_order_acquire))
     {
-      ps_others_handoff ();
+      ps_others_handoff (cycles);
       return 1;
     }
     if (ps_ticks () - t0 >= ticks)
       return 0;
     asm volatile ("yield" ::: "memory");
   }
+}
+
+/* ipl_task's starved IPL sample: GPLEV0 only (timed hand-off) */
+int ps_bus_lock_within (uint64_t ticks)
+{
+  return ps_bus_lock_within_ (ticks, 0);
+}
+
+/* the same for a holder that runs bus cycles (exact hand-off) */
+static int ps_bus_lock_within_cycles (uint64_t ticks)
+{
+  return ps_bus_lock_within_ (ticks, 1);
 }
 
 void ps_bus_unlock (void)
@@ -1779,7 +1847,7 @@ int ps_acia_kbd_rescue (void)
       __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
       wait_ticks = (f ? f : 54000000ULL) / 20000u;
     }
-    if (!ps_bus_lock_within (wait_ticks))
+    if (!ps_bus_lock_within_cycles (wait_ticks))
       return 0;
   }
   {
@@ -2137,7 +2205,7 @@ int ps_power_poll ( void )
   {
     uint64_t f;
     __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (f));
-    if (!ps_bus_lock_within (f / 200))  /* ~5 ms */
+    if (!ps_bus_lock_within_cycles (f / 200))  /* ~5 ms */
       return -1;
   }
 
