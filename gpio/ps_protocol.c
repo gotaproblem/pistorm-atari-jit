@@ -138,9 +138,12 @@ volatile uint8_t ps_bus_active = 0;
  * half alone (atomic only / dmb only) was measured to cost the slot.
  *
  * So the CPU thread (registered with ps_bus_cpu_thread) takes NO atomic
- * and NO barrier per transaction:
- *   enter: ps_cpu_seq = odd (plain store), then look at ps_bus_req
- *          (plain load, normally 0 and in this core's cache)
+ * and ONE dmb ish per transaction:
+ *   enter: ps_cpu_seq = odd (plain store), dmb ish, then look at
+ *          ps_bus_req (plain load, normally 0 and in this core's cache).
+ *          Without the dmb the load can be satisfied before the store is
+ *          visible, and the timing argument below does not hold: seen as
+ *          ipl_task and the CPU thread on the bus together (3 Nov 2026).
  *   exit:  ps_cpu_seq = even (plain store)
  *
  * Every OTHER thread (and the CPU thread before it registers) takes
@@ -203,7 +206,7 @@ static void __attribute__ ((noinline, cold)) ps_cpu_yield_bus (void)
       asm volatile ("yield" ::: "memory");
     asm volatile ("dmb sy" ::: "memory");      /* the requester's have too    */
     ps_cpu_seq = ++ps_cpu_seq_local;            /* odd again                   */
-    asm volatile ("" ::: "memory");
+    asm volatile ("dmb ish" ::: "memory");      /* odd visible before req re-read */
   } while (ps_bus_req);
 }
 
@@ -285,7 +288,13 @@ static inline void ps_lock_bus(void)
     if (__builtin_expect (ps_rt_win, 0))
       ps_rt_begin ();
     ps_cpu_seq = ++ps_cpu_seq_local;            /* odd */
-    asm volatile ("" ::: "memory");
+    /* The odd store must be visible before ps_bus_req is read: the A72
+     * may otherwise satisfy the load first, see req == 0, and run a
+     * cycle the requester never saw - two threads on the bus at once
+     * (GEMBench, 3 Nov 2026: ipl_task's ACIA rescue landed inside CPU
+     * cycles, CPLD stuck 50 ms, ACIA left unable to transmit). The
+     * 500 ns PS_HANDOFF wait does not bound the store's visibility. */
+    asm volatile ("dmb ish" ::: "memory");
     if (__builtin_expect (ps_bus_req, 0)) {
       if (__builtin_expect (ps_rt_win, 0))
         ps_rt_yield ();
