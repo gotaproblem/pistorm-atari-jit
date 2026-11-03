@@ -1223,11 +1223,16 @@ static void *ipl_task(void *)
    * mask is at 6 or 7 - so a host call made with interrupts masked, or a
    * guest that keeps them masked, left the ACIA with no one to empty it.
    * Here the trigger is the confirmed LINE: level 6 held for 250 us means
-   * nothing has acknowledged it, whatever the mask. Polled at most every
-   * 60 us (a status read, plus a data read if a byte is waiting), so a
-   * guest that runs masked for good costs about one bus access in sixty
-   * microseconds, and still has most of a character time of margin. */
-  const uint64_t acia_poll_ticks   = psctrl_cntfrq / 16667u;      /* 60 us */
+   * nothing has acknowledged it, whatever the mask.
+   *
+   * ALL THREE TRIGGERS share one rate limit: a rescue at most every
+   * 250 us. Each rescue is a bus-cycle hand-off, and that is a membarrier
+   * (ps_protocol.c BUS OWNERSHIP): an IPI to the CPU thread's core. The
+   * pending-6 trigger had no limit at all - GEMBench, 3 Nov 2026: 28,888
+   * hand-offs a second, one per pass, while level-6 delivery ran late.
+   * 250 us is still safe: a byte is taken within 250 us of the trigger,
+   * and the next cannot complete for 1.28 ms. */
+  const uint64_t acia_poll_ticks   = psctrl_cntfrq / 4000u;       /* 250 us */
   uint64_t l6_since = 0;                /* confirmed line entered 6    */
   /* THIRD TRIGGER: the CPU thread inside one host call for 250 us. A
    * byte arriving while the guest is already INSIDE its keyboard
@@ -1238,8 +1243,7 @@ static void *ipl_task(void *)
    * above can see that case; this one does not look at the line. */
   uint64_t call_since = 0;              /* hostop seen non-zero since  */
   uint32_t call_op = 0;                 /* ...and which call it was    */
-  uint64_t call_polled = 0;
-  uint64_t l6_polled = 0;               /* last line-based rescue poll */
+  uint64_t acia_polled = 0;             /* last rescue, any trigger    */
   uint8_t  kick_armed = 0;              /* a latch is waiting on the CPU  */
   uint64_t kick_latch_tick = 0;         /* when g_irq was raised          */
   uint64_t kick_last_tick = 0;          /* when the exit was last asked   */
@@ -1322,8 +1326,12 @@ static void *ipl_task(void *)
       }
       else
       {
-        if (pend == 6 && kn - kick_latch_tick > acia_rescue_ticks)
+        if (pend == 6 && kn - kick_latch_tick > acia_rescue_ticks &&
+            kn - acia_polled >= acia_poll_ticks)
+        {
+          acia_polled = kn;
           (void)ps_acia_kbd_rescue();
+        }
       }
       if (kick_armed && kn - kick_last_tick >= kick_retry_ticks)
       {
@@ -1375,9 +1383,9 @@ static void *ipl_task(void *)
             pistorm_ipl_call_max_op = ho;
           }
           if (cn - call_since > acia_rescue_ticks &&
-              cn - call_polled >= acia_poll_ticks)
+              cn - acia_polled >= acia_poll_ticks)
           {
-            call_polled = cn;
+            acia_polled = cn;
             if (ps_acia_kbd_rescue())
               pistorm_ipl_rescue_incall++;
           }
@@ -1729,9 +1737,9 @@ static void *ipl_task(void *)
       if (!l6_since)
         l6_since = ln;
       else if (ln - l6_since > acia_rescue_ticks &&
-               ln - l6_polled >= acia_poll_ticks)
+               ln - acia_polled >= acia_poll_ticks)
       {
-        l6_polled = ln;
+        acia_polled = ln;
         if (ps_acia_kbd_rescue() && g_irq_mask >= 6)
           pistorm_ipl_rescue_masked++;
       }
