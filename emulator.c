@@ -506,6 +506,8 @@ extern "C"
   extern void et4000_native_vbl_snapshot(void);
   extern volatile unsigned ps_acia_kbd_rescued;
   extern volatile unsigned ps_acia_kbd_dropped;
+  extern unsigned ps_handoff_mb_n;      /* cycle hand-offs (membarrier) */
+  extern unsigned ps_handoff_overlap_n; /* ...that found TXN up: should stay 0 */
 
 #ifdef __cplusplus
 }
@@ -901,6 +903,13 @@ static void *ipl_stats_task(void *)
               (dmax * 1000000ULL / f) > 1280
                   ? "   <- LONGER THAN ONE ACIA CHARACTER (1.28ms)" : "");
       pl = nl; pk = nk; pr = nr; pd = nd; pm = nm; pc = nc;
+      {
+        static unsigned pmb;
+        unsigned nmb = ps_handoff_mb_n;
+        fprintf(stderr, "[ipl]   cycle hand-offs: %u/s (membarrier), overlaps %u total\n",
+                nmb - pmb, ps_handoff_overlap_n);
+        pmb = nmb;
+      }
       {
         uint64_t cmax = pistorm_ipl_call_max;
         uint32_t cop  = pistorm_ipl_call_max_op;
