@@ -129,6 +129,7 @@ static uint8_t  cpu_reg[0x68];
 /* VBL sightings: ipl_task -> render */
 #define SIGHT_N 64u
 static uint64_t          sight[SIGHT_N];
+static uint8_t           sight_cls[SIGHT_N];  /* GLUE rate by the registers at the sighting */
 static volatile uint32_t sight_w;
 
 /* video counter reads: CPU -> render */
@@ -287,6 +288,8 @@ void shm_vbl_sighting(void)
 {
     uint32_t w = sight_w;
     sight[w % SIGHT_N] = shm_ticks();
+    sight_cls[w % SIGHT_N] = ((cpu_reg[0x60] & 3u) == 2u) ? 71 :
+                             (cpu_reg[0x0A] & 2u) ? 50 : 60;
     __atomic_store_n(&sight_w, w + 1u, __ATOMIC_RELEASE);
 }
 
@@ -445,7 +448,22 @@ static double frame_cycles(int cls)
     return cls == 50 ? 313.0 * 512.0 : cls == 60 ? 263.0 * 508.0 : 501.0 * 224.0;
 }
 
-static void lock_sighting(uint64_t t)
+/* The registers' rate over the last 8 sightings: a class needs 6 of
+ * them, else 0 (no opinion). Border-removal code holds the sync bit at
+ * 60 Hz for a few cycles at a time; one sighting landing there must not
+ * count as a 60 Hz screen. */
+static int reg_cls_vote(int c)
+{
+    static uint8_t h[8];
+    static unsigned n;
+    h[n++ & 7u] = (uint8_t)c;
+    int v50 = 0, v60 = 0, v71 = 0;
+    for (int i = 0; i < 8; i++)
+        v50 += h[i] == 50, v60 += h[i] == 60, v71 += h[i] == 71;
+    return v50 >= 6 ? 50 : v60 >= 6 ? 60 : v71 >= 6 ? 71 : 0;
+}
+
+static void lock_sighting(uint64_t t, int sight_reg_cls)
 {
     const double hz = (double)tick_hz();
     if (L_last) {
@@ -465,11 +483,14 @@ static void lock_sighting(uint64_t t)
      * average under 18 ms (GEMBench, 3 Nov 2026: the lock and the HDMI
      * refresh went to 60 Hz on a 50 Hz screen). So the class changes only
      * when the intervals and the registers agree; otherwise the current
-     * class stands if the registers still say it, else there is no lock. */
+     * class stands if the registers still say it, else there is no lock.
+     * The registers are read at each sighting and voted over 8
+     * (reg_cls_vote), never at render time. */
     {
-        const int reg_cls = ((cpu_reg[0x60] & 3u) == 2u) ? 71 :
-                            (cpu_reg[0x0A] & 2u) ? 50 : 60;
-        if (cls != reg_cls)
+        const int reg_cls = reg_cls_vote(sight_reg_cls);
+        if (!reg_cls)
+            cls = L_cls;                       /* registers undecided: no change */
+        else if (cls != reg_cls)
             cls = (L_cls == reg_cls) ? L_cls : 0;
     }
     if (cls != L_cls) {
@@ -1084,11 +1105,14 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
             sr = sw_ - SIGHT_N;
         fresh = sr != sw_;
         for (; sr != sw_; sr++)
-            lock_sighting(sight[sr % SIGHT_N]);
+            lock_sighting(sight[sr % SIGHT_N], sight_cls[sr % SIGHT_N]);
     }
-    /* no lock, or one that disagrees with the registers (the first
-     * sightings after a reset can read as 71 Hz on a colour screen) */
-    if (!L_have || !L_cls || ((L_cls == 71) != ((cpu_reg[0x60] & 2u) != 0)))
+    /* no lock. (A lock that disagrees with the registers - the first
+     * sightings after a reset can read as 71 Hz on a colour screen - is
+     * no lock: lock_sighting votes the registers at each sighting. They
+     * are not read here: left-border code sets 71 Hz mode for a few cycles
+     * on every line it opens, and a render landing there lost the lock.) */
+    if (!L_have || !L_cls)
         return render_static(dst, pitch, w, h, sw, sh);
     if (cfg_dbg)
         stats_print();
