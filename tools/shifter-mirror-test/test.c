@@ -289,6 +289,37 @@ int main(void)
             expect("line 210 shown (was border)", px(63 + 210 - 34, 56 + 5), ((210) & 1) ? BLUE : WHITE);
         }
     }
+    /* Extra VBL sightings: a level-4 line held while the CPU is slow to
+     * take it, pre-empted and re-latched, is sighted again 2-14 ms into
+     * the frame (GEMBench, 3 Nov 2026: up to 28 short gaps a second on a
+     * 50 Hz screen, and the lock moved to 60 Hz). The frame rate must
+     * stay with the GLUE's registers. */
+    {
+        int seen60 = 0, last = 0;
+        for (int i = 0; i < 300; i++, frame_k++) {
+            const int k = frame_k;
+            seed = seed * 1103515245u + 12345u;
+            fake_t = (uint64_t)(origin(k + 1) + VBL_OFS_CYC * NS_PER_CYC +
+                                (double)((seed >> 16) % 40000u));
+            shm_vbl_sighting();
+            if (i >= 50 && i < 250) {
+                for (int e = 0; e < 2; e++) {
+                    seed = seed * 1103515245u + 12345u;
+                    fake_t += 2000000u + (uint64_t)((seed >> 12) % 6000000u);
+                    shm_vbl_sighting();
+                }
+            }
+            fake_t = (uint64_t)(origin(k + 1) + P * 0.9);
+            (void)shm_render(out, 1024, &w, &h, &sw, &sh);
+            last = shm_locked_hz();
+            if (last == 60)
+                seen60++;
+        }
+        printf("re-latched sightings: 60 Hz in %d of 300 frames, ends at %d Hz\n", seen60, last);
+        expect("frames locked at 60 Hz with sync=50", (uint32_t)seen60, 0);
+        expect("lock ends at 50 Hz", (uint32_t)last, 50);
+    }
+
     printf("%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

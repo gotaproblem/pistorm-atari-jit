@@ -458,6 +458,20 @@ static void lock_sighting(uint64_t t)
     const double us = L_ema * 1e6 / hz;
     int cls = (us > 18000 && us < 22000) ? 50 : (us > 15000 && us <= 18000) ? 60 :
               (us > 12500 && us <= 15000) ? 71 : 0;
+    /* The GLUE's frame rate is set by its registers: mono 71 Hz, else the
+     * sync bit (50 / 60). The sighting intervals only CONFIRM it. A
+     * level-4 line held while the CPU is slow to take it, pre-empted and
+     * re-latched, is sighted again mid-frame; enough of those pull the
+     * average under 18 ms (GEMBench, 3 Nov 2026: the lock and the HDMI
+     * refresh went to 60 Hz on a 50 Hz screen). So the class changes only
+     * when the intervals and the registers agree; otherwise the current
+     * class stands if the registers still say it, else there is no lock. */
+    {
+        const int reg_cls = ((cpu_reg[0x60] & 3u) == 2u) ? 71 :
+                            (cpu_reg[0x0A] & 2u) ? 50 : 60;
+        if (cls != reg_cls)
+            cls = (L_cls == reg_cls) ? L_cls : 0;
+    }
     if (cls != L_cls) {
         L_cls = cls;
         L_have = 0;
