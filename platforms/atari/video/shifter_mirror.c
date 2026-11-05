@@ -888,6 +888,31 @@ static void stats_print(void)
 }
 
 /* Calibration: a counter read inside this frame -> its true origin. */
+/* PISTORM_SHM_DEBUG=3: which buffer the mirror draws vs where the real
+ * Shifter is. FastBobs, 5 Nov 2026: every counter read rejected (cal=0,
+ * rej=all) while balls showed half drawn - is the mirror drawing a buffer
+ * the Shifter is not? Capped so a run stays readable. */
+static int dbg3_left = 600;
+static int dbg3_armed;              /* a frame with heavy screen writes seen */
+static void dbg3_reject(const char *why, uint32_t cnt, double t, double O,
+                        double tc, int L)
+{
+    if (cfg_dbg < 3 || !dbg3_armed || dbg3_left <= 0)
+        return;
+    dbg3_left--;
+    const double c = (t - O) / tc;
+    uint32_t base = 0, end = 0;
+    for (int i = 0; i < nln; i++)
+        if (ln[i].de) {
+            if (!base) base = ln[i].addr;
+            end = ln[i].addr + ln[i].bytes + ln[i].extra;
+        }
+    fprintf(stderr, "[SHM] cal REJECT %s cnt=%06X at line %d cyc %d | mirror "
+            "frame %06X..%06X line=%d\n", why, (unsigned)cnt,
+            (int)(c / 512.0), (int)fmod(c, 512.0), (unsigned)base,
+            (unsigned)end, L);
+}
+
 static void cal_process(double O, double tc, double P)
 {
     static uint32_t cal_r;
@@ -903,10 +928,10 @@ static void cal_process(double O, double tc, double P)
         if (t < O)
             continue;                        /* a frame not drawn */
         const int L = find_line_fast(c.cnt);
-        if (L < 0) { st.cal_rej++; continue; }
+        if (L < 0) { st.cal_rej++; dbg3_reject("not-in-frame", c.cnt, t, O, tc, L); continue; }
         const line_t *l = &ln[L];
         const uint32_t off = c.cnt - l->addr;
-        if (off == 0 || off >= l->bytes) { st.cal_rej++; continue; }   /* at an edge */
+        if (off == 0 || off >= l->bytes) { st.cal_rej++; dbg3_reject("edge", c.cnt, t, O, tc, L); continue; }   /* at an edge */
         /* the counter steps a word every 4 cycles: it reads `off` for the
          * 4 cycles after that word's fetch slot opens - aim at the middle */
         const double pred = fetch_tick(l, off, O, tc) + (2.0 + cfg_calk) * tc;
@@ -914,6 +939,7 @@ static void cal_process(double O, double tc, double P)
         const double errc = err / tc;
         if (fabs(errc) > 2.0 * 512.0) {                 /* > 2 lines: not trusted yet */
             st.cal_rej++;
+            dbg3_reject("far", c.cnt, t, O, tc, L);
             /* the first read, or the model has drifted away for good:
              * take the counter's word for it */
             if (!C_when || ++rej_run >= 8) {
@@ -1145,6 +1171,21 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
         iw = rs_i;
     }
     while (rs_i != iw && (double)EV(rs_i)->t < O) {
+        if (cfg_dbg >= 3 && dbg3_armed && dbg3_left > 0 &&
+            SHM_KIND(EV(rs_i)->a) == SHM_K_REG) {
+            const uint32_t r = EV(rs_i)->a & 0x7Fu;
+            if (r == 0x01 || r == 0x03 || r == 0x0D || r == 0x05 ||
+                r == 0x07 || r == 0x09) {
+                /* placed in the frame before this one (origin O - P) */
+                const double tcx = P / frame_cycles(L_cls);
+                const double c = ((double)EV(rs_i)->t - (O - P)) / tcx;
+                dbg3_left--;
+                fprintf(stderr, "[SHM] reg $FF82%02X=%02X at line %d cyc %d "
+                        "(frame before origin %+.0f cyc)\n", (unsigned)r,
+                        (unsigned)EV(rs_i)->n, (int)(c / 512.0),
+                        (int)fmod(c, 512.0), (O - (double)EV(rs_i)->t) / tcx);
+            }
+        }
         vs_apply(&rs, EV(rs_i));
         rs_i++;
     }
@@ -1201,12 +1242,14 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
     if (iu - i0 >= SHM_RING) {
         st.lapped++;                      /* cannot undo - draw it as copied */
     } else {
+        unsigned fr_ram = 0, fr_undone = 0;
         for (uint32_t i = iu; i-- != i0; ) {
             const shm_ev_t *e = EV(i);
             const uint32_t k = SHM_KIND(e->a);
             if (k != SHM_K_RAM16 && k != SHM_K_RAM8)
                 continue;
             st.ev_ram++;
+            fr_ram++;
             const uint32_t a = SHM_ADDR(e->a);
             if (a < lo || a >= hi)
                 continue;
@@ -1216,12 +1259,35 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
             if ((double)e->t <= fetch_tick(&ln[L], a - ln[L].addr, O, tc))
                 continue;                 /* landed before the fetch: shown */
             st.undone++;
+            fr_undone++;
+            if (cfg_dbg >= 3 && dbg3_armed && dbg3_left > 0 && fr_undone <= 3) {
+                /* a few undone writes per frame: where, and how late */
+                const double fc = (fetch_tick(&ln[L], a - ln[L].addr, O, tc) - O) / tc;
+                const double wc = ((double)e->t - O) / tc;
+                dbg3_left--;
+                fprintf(stderr, "[SHM] undo %06X line %d: fetched line %d cyc %d, "
+                        "written line %d cyc %d\n", (unsigned)a, L,
+                        (int)(fc / 512.0), (int)fmod(fc, 512.0),
+                        (int)(wc / 512.0), (int)fmod(wc, 512.0));
+            }
             if (k == SHM_K_RAM16) {
                 snapbuf[a - lo] = (uint8_t)(e->o >> 8);
                 if (a + 1u < hi)
                     snapbuf[a + 1u - lo] = (uint8_t)e->o;
             } else
                 snapbuf[a - lo] = (uint8_t)e->o;
+        }
+        if (cfg_dbg >= 3) {
+            if (!dbg3_armed && fr_ram > 3000) {
+                dbg3_armed = 1;
+                fprintf(stderr, "[SHM] debug 3 armed: %u screen writes in one frame\n", fr_ram);
+            }
+            if (dbg3_armed && dbg3_left > 0) {
+                dbg3_left--;
+                fprintf(stderr, "[SHM] frame %06X..%06X (%d lines) ram=%u undone=%u%s\n",
+                        (unsigned)lo, (unsigned)hi, nln, fr_ram, fr_undone,
+                        calibrated ? " cal" : "");
+            }
         }
     }
 
