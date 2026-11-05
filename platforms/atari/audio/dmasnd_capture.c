@@ -17,6 +17,8 @@
  *   re-read (that repeats audio).
  *
  * Commit = $FF8901 enable edge, or (in repeat mode) an $FF8913 end-low write.
+ * An enable-edge frame is snapshotted at once but emitted only when it
+ * ends - whole at its boundary, cut at the stop write (STOPPED EARLY).
  * Set DMASND_DEBUG 0 once happy.
  */
 
@@ -28,6 +30,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include "dmasnd.h"
@@ -96,6 +99,62 @@ static pthread_t    pump_tid;
 static atomic_int   pump_run = 0;
 static int          pump_evfd = -1;  /* commit -> pump wakeup (eventfd) */
 
+/* STOPPED EARLY - emit only what played. A frame started by the enable
+ * edge used to be copied whole into the output at once. A real STE plays
+ * it only until the guest stops it ($FF8901 play bit cleared). 20 Years
+ * Atari STE Megademo, 5 Nov 2026 (PISTORM_DMASND_DEBUG=1): every VBL
+ * "stop, start = one of two halves 504 bytes apart, play", single-shot,
+ * end fixed - frames of 2016 and 1512 bytes (80 / 60 ms at 25 kHz mono),
+ * 1027 starts and not one frame end. Real STE: ~20 ms of each. We queued
+ * all of it - 3.5x real time - the 2 s output cap overflowed, blocks were
+ * dropped, the music stuttered at the right speed.
+ *
+ * Now the enable edge still SNAPSHOTS the frame at once (the pump copies
+ * it to a staging slot - players that refill one buffer in place need the
+ * copy taken while it is fresh, see the header), but nothing reaches the
+ * output until the frame is finished: at the stop write (CPU thread) the
+ * part that played - elapsed time x rate, capped at the frame - or at its
+ * first boundary (ipl_task) the whole of it. Whoever clears pend_open
+ * first emits; the other does nothing. Frames latched at later boundaries
+ * (repeat / chaining) are captured as before. */
+static atomic_int   pend_open;          /* enable-edge frame not yet emitted */
+static atomic_uint  pend_seq;           /* bumped at each enable edge        */
+static atomic_uint  pend_s, pend_e;     /* that frame, as latched            */
+static atomic_uint  g_en_gen;           /* enable edges: pump snapshots      */
+static atomic_uint  g_ct_trunc;         /* frames emitted short (stopped)    */
+
+struct emit_job { unsigned seq; unsigned n; };
+#define EMIT_Q 16u
+static struct emit_job emit_q[EMIT_Q];
+static unsigned        emit_head, emit_tail;   /* under emit_lock */
+static atomic_flag     emit_lock = ATOMIC_FLAG_INIT;
+
+static void emit_push(unsigned seq, unsigned n)   /* CPU thread / ipl_task */
+{
+    while (atomic_flag_test_and_set_explicit(&emit_lock, memory_order_acquire))
+        ;
+    if (emit_head - emit_tail < EMIT_Q) {
+        emit_q[emit_head % EMIT_Q].seq = seq;
+        emit_q[emit_head % EMIT_Q].n   = n;
+        emit_head++;
+    }
+    atomic_flag_clear_explicit(&emit_lock, memory_order_release);
+}
+
+static int emit_pop(struct emit_job *j)           /* pump thread */
+{
+    int got = 0;
+    while (atomic_flag_test_and_set_explicit(&emit_lock, memory_order_acquire))
+        ;
+    if (emit_tail != emit_head) {
+        *j = emit_q[emit_tail % EMIT_Q];
+        emit_tail++;
+        got = 1;
+    }
+    atomic_flag_clear_explicit(&emit_lock, memory_order_release);
+    return got;
+}
+
 static uint32_t start_addr(void)
 { return (((uint32_t)reg[0x03]<<16)|((uint32_t)reg[0x05]<<8)|reg[0x07]) & ADDR_MASK; }
 static uint32_t end_addr(void)
@@ -122,6 +181,39 @@ static uint64_t now_ns(void)
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
+/* Finish the open enable-edge frame: queue `played` bytes of it (capped at
+ * its length) for the pump. Caller signals the pump. Returns 1 if it was
+ * open. CPU thread (stop write) or ipl_task (first boundary). */
+static int pend_finish(uint64_t played_all, uint64_t now)
+{
+    if (!atomic_exchange(&pend_open, 0))
+        return 0;
+    uint32_t s = atomic_load(&pend_s), e = atomic_load(&pend_e);
+    uint32_t len = e > s ? e - s : 0, n = len;
+    if (!played_all) {
+        uint32_t bps = atomic_load(&g_act_bps);
+        uint64_t t0 = atomic_load(&g_ft0);
+        uint64_t got = now > t0 ? (now - t0) * bps / 1000000000ull : 0;
+        if (got < len) {
+            n = (uint32_t)got;
+            if (!(reg[0x21] & 0x80))
+                n &= ~1u;                       /* stereo: whole L/R pairs */
+            atomic_fetch_add(&g_ct_trunc, 1);
+        }
+    }
+    emit_push(atomic_load(&pend_seq), n);
+    return 1;
+}
+
+static void pump_wake(void)
+{
+    if (pump_evfd >= 0) {
+        uint64_t one = 1;
+        ssize_t r = write(pump_evfd, &one, sizeof one);
+        (void)r;
+    }
+}
+
 static atomic_int  g_g7_app;         /* guest vector $13C points into ST RAM */
 /* virtual MFP pending/in-service state moved to mfp_hub.c (the shadow
  * here set in-service at IACK but never CHECKED it before re-raising -
@@ -191,12 +283,14 @@ static void dmasnd_commit(const char *why, int is_enable)
      * is copied when it becomes ACTIVE at the boundary (frames_advance),
      * after the guest's mixer has had the full frame time to fill it. */
     if (is_enable) {
-        atomic_fetch_add(&g_gen, 1);
-        if (pump_evfd >= 0) {
-            uint64_t one = 1;
-            ssize_t r = write(pump_evfd, &one, sizeof one);
-            (void)r;                     /* EAGAIN = already signalled: fine */
-        }
+        /* snapshot now, emit when it ends (see STOPPED EARLY) */
+        pend_finish(1, 0);               /* a previous one still open: whole */
+        atomic_store(&pend_s, atomic_load(&g_act_s));
+        atomic_store(&pend_e, atomic_load(&g_act_e));
+        atomic_fetch_add(&pend_seq, 1);
+        atomic_store(&pend_open, 1);
+        atomic_fetch_add_explicit(&g_en_gen, 1, memory_order_release);
+        pump_wake();                     /* EAGAIN = already signalled: fine */
     }
 }
 
@@ -237,6 +331,9 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
                 dmasnd_commit(off == 0x00 ? "ctrl0-enable" : "ctrl1-enable", 1);
         } else if (was_enabled) {
             atomic_store(&g_enabled, 0);
+            /* stopped: the open frame played only until now */
+            if (pend_finish(atomic_load(&g_parked), now_ns()))
+                pump_wake();
         }
     } else if (off == 0x13 && atomic_load(&g_enabled)) {
         dmasnd_commit(atomic_load(&g_repeat) ? "repeat-end" : "end-low", 0);
@@ -546,6 +643,9 @@ static void frames_advance(void)
         bps = frame_bps();
         if (s == ps && e == pe)              /* guest didn't restage:  */
             atomic_fetch_add(&g_ct_rep, 1);  /* replay of same frame   */
+        /* the frame that just ENDED, if it was the enable-edge one: it
+         * played whole - queue it ahead of the one latched below */
+        pend_finish(1, 0);
         atomic_store(&g_act_s, s);
         atomic_store(&g_act_e, e);
         atomic_store(&g_act_bps, bps);
@@ -649,6 +749,7 @@ static void *pump_thread(void *arg)
 {
     (void)arg;
     unsigned last_gen  = atomic_load(&g_gen);
+    unsigned last_en_gen = atomic_load(&g_en_gen);
     uint8_t  last_mode = 0xFF;
     uint64_t sum_t0    = now_ns();     /* =2 summary: 1 Hz reporter state */
     unsigned sum_gen   = last_gen;
@@ -657,6 +758,7 @@ static void *pump_thread(void *arg)
     unsigned sum_ra    = atomic_load(&g_ct_rd_cnt);
     unsigned sum_sg    = atomic_load(&g_ct_stage);
     unsigned sum_rp    = atomic_load(&g_ct_rep);
+    unsigned sum_tr    = atomic_load(&g_ct_trunc);
     unsigned sum_i2    = pistorm_ipl_lat2;
     unsigned sum_i4    = pistorm_ipl_lat4;
     unsigned sum_i6    = pistorm_ipl_lat6;
@@ -674,6 +776,7 @@ static void *pump_thread(void *arg)
                 unsigned ra  = atomic_load(&g_ct_rd_cnt);
                 unsigned sg  = atomic_load(&g_ct_stage);
                 unsigned rp  = atomic_load(&g_ct_rep);
+                unsigned tr  = atomic_load(&g_ct_trunc);
                 unsigned i2  = pistorm_ipl_lat2;
                 unsigned i4  = pistorm_ipl_lat4;
                 unsigned i6  = pistorm_ipl_lat6;
@@ -683,7 +786,7 @@ static void *pump_thread(void *arg)
                 uint32_t bps = atomic_load(&g_act_bps);
                 uint8_t  m   = reg[0x21];
                 fprintf(stderr, "[dmasnd] SUM t=%llu.%03llus ev/s=%u "
-                        "g7=%u rdc=%u rda=%u stg=%u rep=%u "
+                        "g7=%u rdc=%u rda=%u stg=%u rep=%u short=%u "
                         "i2=%u i4=%u i6=%u gp=%02X%s "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
                         "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
@@ -691,6 +794,7 @@ static void *pump_thread(void *arg)
                         (unsigned long long)((t / 1000000ull) % 1000ull),
                         gen - sum_gen, g7 - sum_g7,
                         rc - sum_rc, ra - sum_ra, sg - sum_sg, rp - sum_rp,
+                        tr - sum_tr,
                         i2 - sum_i2, i4 - sum_i4, i6 - sum_i6,
                         gp, (gp & 0x80u) ? "" : "<MONO!",
                         s, e, (e > s) ? e - s : 0, bps,
@@ -705,13 +809,66 @@ static void *pump_thread(void *arg)
                 sum_ra  = ra;
                 sum_sg  = sg;
                 sum_rp  = rp;
+                sum_tr  = tr;
                 sum_i2  = i2;
                 sum_i4  = i4;
                 sum_i6  = i6;
                 sum_t0  = t;
             }
         }
+        /* gen first: a boundary pushes its emit job BEFORE bumping gen,
+         * so seeing the new gen guarantees the job is in the queue */
         unsigned gen = atomic_load_explicit(&g_gen, memory_order_acquire);
+
+        /* STOPPED EARLY: snapshot each enable-edge frame into a staging
+         * slot at once, emit the played part when a job says how much */
+        {
+            static uint8_t *slot_buf[2];
+            static uint32_t slot_cap[2], slot_len[2];
+            static unsigned slot_seq[2];
+            unsigned eg = atomic_load_explicit(&g_en_gen, memory_order_acquire);
+            if (eg != last_en_gen) {
+                last_en_gen = eg;
+                unsigned seq = atomic_load(&pend_seq);
+                uint32_t s = atomic_load(&pend_s), e = atomic_load(&pend_e);
+                unsigned k = seq & 1u;
+                slot_seq[k] = seq;
+                slot_len[k] = 0;
+                if (natmem_offset && e > s && (e - s) <= MAX_FRAME &&
+                    e <= ST_RAM_SIZE) {
+                    if (slot_cap[k] < e - s) {
+                        uint8_t *nb = (uint8_t *)realloc(slot_buf[k], e - s);
+                        if (nb) { slot_buf[k] = nb; slot_cap[k] = e - s; }
+                    }
+                    if (slot_cap[k] >= e - s) {
+                        memcpy(slot_buf[k], &natmem_offset[s], e - s);
+                        slot_len[k] = e - s;
+                    }
+                    uint8_t m = reg[0x21];
+                    if (m != last_mode) {
+                        dmasnd_set_mode(ste_rates[m & 3], (m & 0x80) ? 0 : 1);
+                        last_mode = m;
+                    }
+                } else if (dmasnd_dbg()) {
+                    fprintf(stderr, "[dmasnd] REJECT s=0x%06X e=0x%06X len=%d "
+                            "(enable)\n", s, e, (int)e - (int)s);
+                }
+            }
+            struct emit_job j;
+            while (emit_pop(&j)) {
+                unsigned k = j.seq & 1u;
+                if (slot_seq[k] != j.seq || !slot_len[k])
+                    continue;                   /* snapshot missed/rejected */
+                unsigned n = j.n < slot_len[k] ? j.n : slot_len[k];
+                if (n)
+                    dmasnd_write_bytes(slot_buf[k], n);
+                if (dmasnd_dbg())
+                    fprintf(stderr, "[dmasnd] emit seq=%u %u of %u bytes\n",
+                            j.seq, n, slot_len[k]);
+                slot_len[k] = 0;
+            }
+        }
+
         if (gen != last_gen) {
             /* Frame became ACTIVE: copy it now. Captures are triggered at
                enable and at each frame BOUNDARY (frames_advance), matching
@@ -879,6 +1036,7 @@ void dmasnd_capture_reset(void)
     atomic_store(&g_parked, 1);          /* frame clock idle            */
     atomic_store(&g_act_s, 0);
     atomic_store(&g_act_e, 0);
+    atomic_store(&pend_open, 0);         /* nothing left to emit         */
     mfp_hub_reset();                     /* no stale virtual interrupts */
     dmasnd_output_reset();
 }
