@@ -111,15 +111,21 @@ static int          pump_evfd = -1;  /* commit -> pump wakeup (eventfd) */
  *
  * Now the enable edge still SNAPSHOTS the frame at once (the pump copies
  * it to a staging slot - players that refill one buffer in place need the
- * copy taken while it is fresh, see the header), but nothing reaches the
- * output until the frame is finished: at the stop write (CPU thread) the
- * part that played - elapsed time x rate, capped at the frame - or at its
- * first boundary (ipl_task) the whole of it. Whoever clears pend_open
- * first emits; the other does nothing. Frames latched at later boundaries
- * (repeat / chaining) are captured as before. */
+ * copy taken while it is fresh, see the header), and the pump hands it to
+ * the output AS IT PLAYS (elapsed time x rate, every 5 ms), so no more
+ * than has played is ever queued. At the stop write (CPU thread) the
+ * frame is closed at what had played by then; at its first boundary
+ * (ipl_task) at its whole length. Whoever clears pend_open first closes
+ * it. Frames latched at later boundaries (repeat / chaining) are captured
+ * whole as before. First version (same day) held the whole frame back
+ * until it ended: FastBobs' single 14 s repeat frame was then silent for
+ * 14 s and its second pass was dropped at the 2 s output cap. */
 static atomic_int   pend_open;          /* enable-edge frame not yet emitted */
 static atomic_uint  pend_seq;           /* bumped at each enable edge        */
 static atomic_uint  pend_s, pend_e;     /* that frame, as latched            */
+static atomic_ullong pend_t0;           /* ... when it started, ns          */
+static atomic_uint  pend_bps;           /* ... and its rate                  */
+static atomic_int   pend_live;          /* pump: a snapshot is being emitted */
 static atomic_uint  g_en_gen;           /* enable edges: pump snapshots      */
 static atomic_uint  g_ct_trunc;         /* frames emitted short (stopped)    */
 
@@ -287,6 +293,8 @@ static void dmasnd_commit(const char *why, int is_enable)
         pend_finish(1, 0);               /* a previous one still open: whole */
         atomic_store(&pend_s, atomic_load(&g_act_s));
         atomic_store(&pend_e, atomic_load(&g_act_e));
+        atomic_store(&pend_t0, atomic_load(&g_ft0));
+        atomic_store(&pend_bps, atomic_load(&g_act_bps));
         atomic_fetch_add(&pend_seq, 1);
         atomic_store(&pend_open, 1);
         atomic_fetch_add_explicit(&g_en_gen, 1, memory_order_release);
@@ -824,8 +832,10 @@ static void *pump_thread(void *arg)
          * slot at once, emit the played part when a job says how much */
         {
             static uint8_t *slot_buf[2];
-            static uint32_t slot_cap[2], slot_len[2];
+            static uint32_t slot_cap[2], slot_len[2], slot_done[2], slot_bps[2];
+            static uint64_t slot_t0[2];
             static unsigned slot_seq[2];
+            static int      live = -1;          /* slot being played, or -1 */
             unsigned eg = atomic_load_explicit(&g_en_gen, memory_order_acquire);
             if (eg != last_en_gen) {
                 last_en_gen = eg;
@@ -834,6 +844,9 @@ static void *pump_thread(void *arg)
                 unsigned k = seq & 1u;
                 slot_seq[k] = seq;
                 slot_len[k] = 0;
+                slot_done[k] = 0;
+                slot_t0[k] = atomic_load(&pend_t0);
+                slot_bps[k] = atomic_load(&pend_bps);
                 if (natmem_offset && e > s && (e - s) <= MAX_FRAME &&
                     e <= ST_RAM_SIZE) {
                     if (slot_cap[k] < e - s) {
@@ -843,6 +856,7 @@ static void *pump_thread(void *arg)
                     if (slot_cap[k] >= e - s) {
                         memcpy(slot_buf[k], &natmem_offset[s], e - s);
                         slot_len[k] = e - s;
+                        live = (int)k;
                     }
                     uint8_t m = reg[0x21];
                     if (m != last_mode) {
@@ -860,13 +874,32 @@ static void *pump_thread(void *arg)
                 if (slot_seq[k] != j.seq || !slot_len[k])
                     continue;                   /* snapshot missed/rejected */
                 unsigned n = j.n < slot_len[k] ? j.n : slot_len[k];
-                if (n)
-                    dmasnd_write_bytes(slot_buf[k], n);
+                if (n > slot_done[k])
+                    dmasnd_write_bytes(slot_buf[k] + slot_done[k], n - slot_done[k]);
                 if (dmasnd_dbg())
                     fprintf(stderr, "[dmasnd] emit seq=%u %u of %u bytes\n",
                             j.seq, n, slot_len[k]);
                 slot_len[k] = 0;
+                if (live == (int)k)
+                    live = -1;
             }
+            /* still playing: hand over what has played so far, so a long
+             * frame (FastBobs: one 14 s repeat frame) is heard from its
+             * start, not after it - and never more than has played */
+            if (live >= 0 && slot_len[live]) {
+                const unsigned k = (unsigned)live;
+                uint64_t now = now_ns();
+                uint64_t got = now > slot_t0[k]
+                    ? (now - slot_t0[k]) * slot_bps[k] / 1000000000ull : 0;
+                uint32_t n = got < slot_len[k] ? (uint32_t)got : slot_len[k];
+                if (!(reg[0x21] & 0x80))
+                    n &= ~1u;
+                if (n > slot_done[k]) {
+                    dmasnd_write_bytes(slot_buf[k] + slot_done[k], n - slot_done[k]);
+                    slot_done[k] = n;
+                }
+            }
+            atomic_store(&pend_live, live >= 0);
         }
 
         if (gen != last_gen) {
@@ -933,7 +966,9 @@ static void *pump_thread(void *arg)
          * Without an eventfd (creation failed) fall back to the old poll. */
         if (pump_evfd >= 0) {
             struct pollfd pf = { .fd = pump_evfd, .events = POLLIN, .revents = 0 };
-            if (poll(&pf, 1, 100) > 0 && (pf.revents & POLLIN)) {
+            /* 5 ms while a frame is fed as it plays, else 100 ms */
+            if (poll(&pf, 1, atomic_load(&pend_live) ? 5 : 100) > 0 &&
+                (pf.revents & POLLIN)) {
                 uint64_t n;
                 ssize_t r = read(pump_evfd, &n, sizeof n);   /* clear counter */
                 (void)r;
