@@ -53,7 +53,7 @@ void     dmasnd_ext_close(void);
 unsigned dmasnd_ext_drops(void);
 
 /* ---- capture (dmasnd_capture.c) ---- */
-int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF8925?      */
+int      dmasnd_owns(uint32_t addr);               /* addr in $FF8900..$FF893F?      */
 /* MFP snoop/arbitration/IACK/read-shims: mfp_hub.h (channels 13 + 15). */
 uint8_t  dmasnd_gpip_shim(uint8_t real);           /* GPIP7 ^= virtual XSINT level   */
 uint8_t  dmasnd_reg_read8 (uint32_t addr);         /* register readback (reads must  */
