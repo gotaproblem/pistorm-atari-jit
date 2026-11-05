@@ -856,6 +856,7 @@ static int find_line_fast(uint32_t a)
 
 static double  last_origin;
 
+static uint64_t cal_alt;                 /* reads placed via the other buffer */
 static void stats_print(void)
 {
     const double hz = (double)tick_hz();
@@ -867,13 +868,13 @@ static void stats_print(void)
     const double c2us = 1.0 / 8.021247;          /* cycles -> us */
     fprintf(stderr,
             "[SHM] %dHz P=%.1fus frames=%llu cal=%llu/%u err=%.1f..%.1f avg %.2f cyc rej=%llu "
-            "vblofs=%.0fcyc(%s) ev/f=%.0f ram/f=%.0f undone/f=%.1f lapped=%llu render=%.0fus | "
+            "alt=%llu vblofs=%.0fcyc(%s) ev/f=%.0f ram/f=%.0f undone/f=%.1f lapped=%llu render=%.0fus | "
             "lines/f left=%.1f +2=%.1f right=%.1f -2=%.1f mid=%.1f full=%.1f node=%.1f top_off=%llu bot_off=%llu\n",
             L_cls, L_P * 1e6 / hz, (unsigned long long)st.frames,
             (unsigned long long)st.cal_n, (unsigned)cal_tries,
             st.cal_n ? st.cal_err_min : 0.0, st.cal_n ? st.cal_err_max : 0.0,
             st.cal_n ? st.cal_err_sum / (double)st.cal_n : 0.0,
-            (unsigned long long)st.cal_rej,
+            (unsigned long long)st.cal_rej, (unsigned long long)cal_alt,
             C_vblofs_n ? C_vblofs / (L_P / frame_cycles(L_cls)) : cfg_vblofs,
             C_vblofs_n ? "measured" : "cfg",
             (double)st.ev / fr, (double)st.ev_ram / fr, (double)st.undone / fr,
@@ -892,6 +893,11 @@ static void stats_print(void)
  * Shifter is. FastBobs, 5 Nov 2026: every counter read rejected (cal=0,
  * rej=all) while balls showed half drawn - is the mirror drawing a buffer
  * the Shifter is not? Capped so a run stays readable. */
+/* The base the PREVIOUS rendered frame was drawn from (first display line).
+ * A counter read that falls in no line of this frame is tried against it -
+ * see OTHER BUFFER in cal_process. */
+static uint32_t prev_real_base, cur_real_base;
+
 static int dbg3_left = 600;
 static int dbg3_armed;              /* a frame with heavy screen writes seen */
 static void dbg3_reject(const char *why, uint32_t cnt, double t, double O,
@@ -927,10 +933,42 @@ static void cal_process(double O, double tc, double P)
             break;                           /* a later frame's: keep it */
         if (t < O)
             continue;                        /* a frame not drawn */
-        const int L = find_line_fast(c.cnt);
+        /* WHERE THE BEAM IS, from the counter. The board's Shifter is an
+         * ST's: from the base the reload took ($FF8201/03 only) its counter
+         * advances by the bytes each line really fetches - no STE line
+         * width, no fine-scroll prefetch, no base low byte. With `shifter
+         * ste` our lines are laid out the STE way, so the read is walked
+         * line by line in ST terms and then placed in our layout. FastBobs
+         * (5 Nov 2026, PISTORM_SHM_DEBUG=3) runs with an STE line width of
+         * 48 words: read in our layout, its counter put the beam 15-35
+         * lines from where it was. Its real base is also tried against the
+         * PREVIOUS frame's (OTHER BUFFER): there every read sat in the
+         * other of its two buffers, was rejected "not in frame", and with
+         * no read accepted nothing could pull the frame origin back -
+         * half-drawn balls for as long as it ran. A read placed through
+         * the other buffer is a large error, taken by the >2-line path. */
+        uint32_t cnt = 0;
+        int L = -1;
+        for (int b = 0; b < 2 && L < 0; b++) {
+            const uint32_t rb = b ? prev_real_base : cur_real_base;
+            if (!rb || (b && rb == cur_real_base) || c.cnt < rb)
+                continue;
+            uint32_t acc = rb;
+            for (int i = 0; i < ndl; i++) {
+                const line_t *dli = &ln[dl[i]];
+                if (c.cnt < acc + dli->bytes) {
+                    L = dl[i];
+                    cnt = dli->addr + (c.cnt - acc);
+                    if (b)
+                        cal_alt++;
+                    break;
+                }
+                acc += dli->bytes;
+            }
+        }
         if (L < 0) { st.cal_rej++; dbg3_reject("not-in-frame", c.cnt, t, O, tc, L); continue; }
         const line_t *l = &ln[L];
-        const uint32_t off = c.cnt - l->addr;
+        const uint32_t off = cnt - l->addr;
         if (off == 0 || off >= l->bytes) { st.cal_rej++; dbg3_reject("edge", c.cnt, t, O, tc, L); continue; }   /* at an edge */
         /* the counter steps a word every 4 cycles: it reads `off` for the
          * 4 cycles after that word's fetch slot opens - aim at the middle */
@@ -1170,7 +1208,29 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
         rs_reset_from_cpu();
         iw = rs_i;
     }
+    /* COUNTER RELOAD. The Shifter does not take the base at the frame's
+     * origin: the GLUE copies $FF8201/03 into the video counter at line
+     * 310 (50 Hz) / 260 (60 Hz), cycle 56 (Hatari video.c,
+     * RESTART_VIDEO_COUNTER_*) - a base written after that shows a frame
+     * later. FastBobs writes its base at ~line 312 every frame; taken at
+     * the origin it showed the buffer still being drawn. The frame is
+     * drawn from the base as it stood at the reload; rs keeps the true
+     * register state. */
+    uint8_t rl_reg[3] = { rs.reg[0x01], rs.reg[0x03], rs.reg[0x0D] };
+    double R = O;
+    if (L_cls == 50 || L_cls == 60) {
+        const double tcr = P / frame_cycles(L_cls);
+        const int total = L_cls == 50 ? 313 : 263, restart = L_cls == 50 ? 310 : 260;
+        const double lc = L_cls == 50 ? 512.0 : 508.0;
+        R = O - ((double)(total - restart) * lc - 56.0) * tcr;
+    }
     while (rs_i != iw && (double)EV(rs_i)->t < O) {
+        if (SHM_KIND(EV(rs_i)->a) == SHM_K_REG && (double)EV(rs_i)->t < R) {
+            const uint32_t r = EV(rs_i)->a & 0x7Fu;
+            if (r == 0x01) rl_reg[0] = (uint8_t)EV(rs_i)->n;
+            else if (r == 0x03) rl_reg[1] = (uint8_t)EV(rs_i)->n;
+            else if (r == 0x0D) rl_reg[2] = (uint8_t)EV(rs_i)->n;
+        }
         if (cfg_dbg >= 3 && dbg3_armed && dbg3_left > 0 &&
             SHM_KIND(EV(rs_i)->a) == SHM_K_REG) {
             const uint32_t r = EV(rs_i)->a & 0x7Fu;
@@ -1207,6 +1267,9 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
 
     /* pass 1: geometry */
     vstate_t g = rs;
+    g.reg[0x01] = rl_reg[0];             /* the base as the counter reload took it */
+    g.reg[0x03] = rl_reg[1];
+    g.reg[0x0D] = rl_reg[2];
     uint32_t lo, hi;
     glue_frame(&g, i0, ie, O, tc, L_cls, &lo, &hi);
     ndl = 0;
@@ -1217,8 +1280,10 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
                 dl_sorted = 0;
             dl[ndl++] = L;
         }
+    prev_real_base = cur_real_base;
+    cur_real_base = ((uint32_t)rl_reg[0] << 16) | ((uint32_t)rl_reg[1] << 8);
     if (hi > lo) {
-        uint32_t fb = hi - (((uint32_t)rs.reg[0x01] << 16) | ((uint32_t)rs.reg[0x03] << 8)) + 512u;
+        uint32_t fb = hi - (((uint32_t)rl_reg[0] << 16) | ((uint32_t)rl_reg[1] << 8)) + 512u;
         if (fb >= 32000u && fb < 0x40000u)
             g_frame_bytes = fb;
     }
