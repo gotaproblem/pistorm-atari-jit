@@ -36,6 +36,7 @@ static double T0 = 1e9;                   /* origin of frame 0 */
 static int VBL_OFS_CYC = 64;              /* the VBL comes 64 cycles after origin */
 static int frame_k;
 static int bytes_of_line[313];            /* truth for the counter model */
+static uint32_t real_base = 0x078000u;    /* what the GLUE reloaded for frame_k */
 
 static double origin(int k) { return T0 + k * P; }
 static void at(int k, int L, double c) { fake_t = (uint64_t)llround(origin(k) + (L * LINE + c) * NS_PER_CYC); }
@@ -46,7 +47,7 @@ int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
     double cyc = ((double)fake_t - origin(frame_k)) / NS_PER_CYC;
     int L = (int)(cyc / LINE);
     double c = cyc - L * LINE;
-    uint32_t a = BASE;
+    uint32_t a = real_base;
     for (int i = 63; i < L && i < 263; i++)
         a += (uint32_t)bytes_of_line[i];
     if (L >= 63 && L < 263 && c >= 56) {
@@ -129,7 +130,8 @@ int main(void)
     setenv("PISTORM_SHM_X0", "8", 0);       /* ... and Hatari's 416-wide window */
     setenv("PISTORM_SHM_W", "416", 0);
     setenv("PISTORM_SHM_PAR", "1/1", 0);
-    if (shm_init(mem, 0) != 0) {
+    const int ste = getenv("SHM_TEST_STE") && atoi(getenv("SHM_TEST_STE"));
+    if (shm_init(mem, ste) != 0) {
         printf("init failed\n");
         return 1;
     }
@@ -351,6 +353,80 @@ int main(void)
         }
         printf("transient 60 Hz sync: lock not 50 Hz in %d of 300 frames\n", unlocked);
         expect("frames off 50 Hz with transient sync writes", (uint32_t)unlocked, 0);
+    }
+
+    /* DOUBLE BUFFERING (FastBobs, 5 Nov 2026). The GLUE reloads the video
+     * counter from $FF8201/03 at line 310 cycle 56: a base written at line
+     * 312 shows two frames on, one written at line 300 the next frame.
+     * Then the VBL sightings slip 34 lines late for good (the case the
+     * field log showed: the frame origin was 34 lines late, the base write
+     * landed on the wrong side of the reload, every counter read sat in
+     * the other buffer and was rejected) - the counter reads must pull
+     * the origin back and the mirror must show the buffer the Shifter
+     * shows. Buffer A = BASE (stripes), buffer B all colour 0. */
+    {
+        const uint32_t B = 0x0A0000u;
+        memset(mem + B, 0, 32000);
+        uint32_t written = BASE, pend_base = BASE;
+        /* SHM_TEST_STE=1: an STE line width of 48 words (FastBobs). The
+         * board is an ST: its counter still steps 160 bytes a line - the
+         * model in pistorm_shm_read_counter above. */
+        if (ste) {
+            at(frame_k, 0, 0);
+            io8(0xFF820F, 48);
+            /* the checks above use ST colour values ($7 -> FF); an STE
+             * scales 4 bits ($7 -> EE): in this run only this one counts */
+            printf("(STE run: the pixel checks above use ST colours - not counted)\n");
+            fails = checks = 0;
+        }
+        int wrong = 0, wrong_late = 0, n = 0;
+        for (int i = 0; i < 400; i++, frame_k++) {
+            const int k = frame_k;
+            /* the reload at line 310 of the frame before took `written`
+             * as it stood then: pend_* is a write after that line */
+            real_base = pend_base;             /* latched at line 310 before */
+            at(k, 0, VBL_OFS_CYC + 200);
+            shm_cpu_vbl_taken();
+            const uint32_t shown = real_base;   /* what frame k shows */
+            /* counter read mid-display: the frame's real base */
+            seed = seed * 1103515245u + 12345u;
+            at(k, 140, 200 + (double)((seed >> 16) % 1000u) / 100.0);
+            shm_cal_poll();
+            /* flip each frame at line 312 (after the reload) - except a
+             * few at line 300 early on, which must show next frame */
+            const uint32_t nb = (written == BASE) ? B : BASE;
+            const int line = (i >= 20 && i < 24) ? 300 : 312;
+            at(k, line, 100);
+            io8(0xFF8201, (uint8_t)(nb >> 16));
+            io8(0xFF8203, (uint8_t)(nb >> 8));
+            /* the reload at line 310 of this frame takes what is written
+             * by then */
+            pend_base = line < 310 ? nb : written;
+            written = nb;
+            /* the sighting: from i == 100 on, 34 lines late every frame */
+            seed = seed * 1103515245u + 12345u;
+            double lag = (double)((seed >> 16) % 20000u);
+            if (i >= 100)
+                lag += 34.0 * LINE * NS_PER_CYC;
+            fake_t = (uint64_t)(origin(k + 1) + VBL_OFS_CYC * NS_PER_CYC + lag);
+            shm_vbl_sighting();
+            fake_t += 20000u + (uint64_t)((seed >> 4) % 500000u);
+            if (shm_render(out, 1024, &w, &h, &sw, &sh) != 1)
+                continue;
+            if (i < 10)
+                continue;
+            n++;
+            /* line 0 px 5: A shows colour 1 (stripes), B colour 0 */
+            const int bright = (dpx(0, 5) & 0x808080u) != 0;
+            if (bright != (shown == BASE)) {
+                wrong++;
+                if (i >= 200)
+                    wrong_late++;
+            }
+        }
+        printf("double buffering: wrong buffer in %d of %d frames, %d after the "
+               "sightings had slipped 100 frames\n", wrong, n, wrong_late);
+        expect("wrong buffer once settled (frames 200-399)", (uint32_t)wrong_late, 0);
     }
 
     printf("%d checks, %d failed\n", checks, fails);
