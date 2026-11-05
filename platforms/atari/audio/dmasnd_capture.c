@@ -364,10 +364,21 @@ static uint32_t cur_counter(void)
     return (s + (uint32_t)off) & ~1u;
 }
 
+/* The STE's sound chip DECODES $FF8900-$FF893F: the gaps and $FF8926-3F
+ * hold no register but answer the bus - no bus error (Hatari
+ * ioMemTabSTE.c: "No bus errors here" for every gap up to $FF893F). We
+ * must claim the whole block: what we do not claim goes out on the real
+ * plain-ST bus, where nothing answers and the GLUE bus-errors. 20 Years
+ * Atari STE Megademo, 5 Nov 2026: clr.w $34(a1) with a1=$FF8900 (the
+ * Falcon external-clock divider, written blind on any machine) -> EmuTOS
+ * "Panic: Bus Error addr=00ff8934". Writes above SND_TOP are dropped
+ * (dmasnd_snoop8), reads return $FF (dmasnd_reg_read8 default). */
+#define SND_DECODE_TOP 0x00FF893Fu
+
 int dmasnd_owns(uint32_t addr)
 {
     uint32_t a = addr & 0x00FFFFFFu;
-    return a >= SND_BASE && a <= SND_TOP;
+    return a >= SND_BASE && a <= SND_DECODE_TOP;
 }
 
 uint8_t dmasnd_reg_read8(uint32_t addr)
