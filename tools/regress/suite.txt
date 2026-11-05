@@ -21,7 +21,7 @@
 # Reference: every program passes in Hatari 2.4 (cycle-exact ST/STE).
 
 core-104 | tos104uk.rom | IRQ ACIA YM FDD | -        | -                         | 300 | VBL/HBL/MFP timers/Timer B event/stop/ISR, IKBD via ACIA, YM, floppy - TOS 1.04
-core-206 | tos206uk.rom | IRQ ACIA YM FDD | -        | -                         | 300 | the same under TOS 2.06 (the games section's TOS)
-core-16  | tos206uk.rom | IRQ ACIA        | -        | cpu_speed 16mhz           | 200 | interrupts and timers with the CPU at 16 MHz
+core-206 | tos206uk.rom | IRQ ACIA YM FDD CPU | -    | -                         | 300 | the same under TOS 2.06 (the games section's TOS), and the governed CPU speed
+core-16  | tos206uk.rom | IRQ ACIA CPU16  | -        | cpu_speed 16mhz           | 200 | interrupts, timers and the governed CPU speed at 16 MHz
 drives   | tos104uk.rom | IDE ACSI FDD    | ide+acsi | -                         | 300 | emulated IDE and ACSI on the pattern images, then the floppy on the shared DMA chip
-ste      | tos206uk.rom | DMASND IRQ      | -        | machine ste; native_hdmi enabled | 240 | STE DMA sound frame timing/counter/stop, interrupts on an STE
+ste      | tos206uk.rom | DMASND IRQ CPU  | -        | machine ste; native_hdmi enabled | 240 | STE DMA sound frame timing/counter/stop, interrupts and CPU speed on an STE

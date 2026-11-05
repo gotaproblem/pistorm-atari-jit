@@ -33,10 +33,21 @@ Exit status: 0 all passed, 1 something failed, 2 setup problem.
 | IDE | Emulated IDE, driven directly: IDENTIFY capacity, reads checked sector by sector, INTRQ per sector and gone after the last, write + read-back, past-the-end refusal. |
 | ACSI | Emulated ACSI through the DMA chip (the EmuTOS sequence): TEST UNIT READY, INQUIRY (LUN 1 = `$7F`), reads checked, DMA address counter after a transfer, write + read-back, past-the-end status. |
 | DMASND | STE DMA sound: frame-end events at the right rate, frame counter movement, stop. |
+| CPU / CPU16 | The governed 68000's speed, 1 s of a register loop against Timer C: within 2% of 8000 / 16000 kHz (`cpu_speed 8mhz` / `16mhz`). Measures, without a verdict, 1 s of long writes into the screen (`scr_kbs`, real-bus bound) and of MFP GPIP reads (`io_kreads`). The loop uses only instructions whose cycle counts are multiples of 4, so a real ST, which stretches the others to the next bus slot, and the governor, which counts the Motorola tables, agree on it. Hatari 2.4 cycle-exact: ST 7949 kHz, STE at 16 MHz 15971 kHz. |
 
 The `drives` boot runs IDE and ACSI on fresh 8 MB pattern images, then the floppy test again on the shared DMA chip.
 
-`tests.txt` keeps the older boots from your own disk images. A boot there passes if it runs its time with no panic, crash or early exit.
+`tests.txt` keeps the boots from your own disk images. A boot there passes if it runs its time with no panic, crash or early exit, and every check in its checks column holds. Those checks read the emulator's own reports, which the runner turns on for these boots:
+
+| Check | Holds when |
+|---|---|
+| `vbl=50` | every `[ipl] vbl: taken=` second after the first 15 is 49-51 |
+| `gov>=K` | every `[GOV]` 5 s window after the first two reached K kHz |
+| `noov` | no `[dmasnd] STE stream overflow` (sound never queued faster than real time) |
+| `snd` | after 10 s of DMA sound, no second with the output queue empty while a frame plays |
+| `shmcal` | the HDMI mirror's last three `[SHM]` summaries each accepted a video counter read (cal=0 was FastBobs's mirror drawing the wrong buffer) |
+
+Each check also leaves a measurement (`vbl_min`/`vbl_max`, `gov_min_khz`, `snd_overflows`, `snd_starved_s`, `shm_cal_zero`) for the run-to-run comparison.
 
 Every guest check is counted against MFP Timer C (the real chip's crystal), so the expected figures are a real ST's, whatever the emulated CPU speed. All programs pass in Hatari 2.4 (cycle-exact ST/STE) on TOS 1.04 and 2.06. The one difference between TOS versions there: Timer B event mode counts 199 lines per frame under 2.06 and 200 under 1.04, every frame.
 

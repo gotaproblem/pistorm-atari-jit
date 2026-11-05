@@ -83,12 +83,12 @@ record() {
 # stop it as soon as the guest says @END. Returns 0 when stopped after
 # @END, else the emulator's exit status (124 = the time ran out).
 run_emulator() {
-	local cfg=$1 secs=$2 log=$3 until_end=$4 envs=()
+	local cfg=$1 secs=$2 log=$3 until_end=$4 envs=("${RUN_ENVS[@]}")
 	# REGRESS_TIMELINE=1: IPL timeline with level 2 (HBL), one per boot,
 	# read by tools/ipl-timeline/hbl.py into <boot>.hbl.txt (measurement
 	# only: the logging is a store into a ring on the ipl_task core)
 	[ "${REGRESS_TIMELINE:-0}" = 1 ] &&
-		envs=(PISTORM_IPL_TIMELINE=2 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl")
+		envs+=(PISTORM_IPL_TIMELINE=2 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl")
 	sudo env "${envs[@]}" timeout -s INT "$secs" ./emulator --config "$cfg" --no-setup > "$log" 2>&1 &
 	local pid=$! rc
 	if [ "$until_end" = 1 ]; then
@@ -193,14 +193,84 @@ run_suite() {
 	done < <(grep -v '^[[:space:]]*#' "$here/suite.txt" | grep '|')
 }
 
+# ---------------------------------------------------------------- host checks
+# tests.txt's checks column: what the emulator's own reports must show
+# while a real program runs. Each check is one @T line; each also leaves a
+# measurement. The reports come from RUN_ENVS (run_tests):
+#   vbl=N     every [ipl] "vbl: taken=" second after the first 15 is N +-1
+#             (PISTORM_IPL_STATS) - Bad Apple ran 12% fast on doubled VBLs
+#   gov>=K    every [GOV] 5 s window after the first two reached K kHz
+#             (PISTORM_GOV_REPORT) - MOD players and games slow down first
+#   noov      no "[dmasnd] STE stream overflow": the capture never queued
+#             more than real time (20 Years / FastBobs, 5 Nov 2026)
+#   snd       no [dmasnd] SUM second, after the first 10 of play, with the
+#             output queue empty while a frame plays (PISTORM_DMASND_DEBUG=2)
+#   shmcal    the HDMI mirror's last three [SHM] summaries each accepted a
+#             video counter read (PISTORM_SHM_DEBUG=1) - FastBobs: cal=0
+#             was the mirror drawing the wrong buffer, half-drawn balls
+metric() {            # boot name value: one measurement, this run and history
+	echo "$1|$2|$3" >> "$out/.metrics"
+	printf '%s  %s  %s  %s  %s\n' "$stamp" "$commit" "$1" "$2" "$3" >> "$here/metrics.txt"
+}
+host_checks() {
+	local name=$1 log=$2 checks=$3 c v n
+	for c in $checks; do
+		case "$c" in
+		vbl=*)
+			v=${c#vbl=}
+			read -r n lo hi <<<"$(sed -n 's/^\[ipl\]   vbl: taken=\([0-9]*\)\/s.*/\1/p' "$log" |
+				awk -v w="$v" 'NR > 15 { n++; if (!m || $1 < lo) lo = $1; if ($1 > hi) hi = $1; m = 1
+				                         if ($1 < w - 1 || $1 > w + 1) bad++ }
+				               END { print (n ? bad + 0 : -1), lo + 0, hi + 0 }')"
+			metric "$name" vbl_min "$lo"; metric "$name" vbl_max "$hi"
+			if [ "$n" = -1 ]; then record "$name" "vbl_$v" FAIL "no [ipl] vbl lines (PISTORM_IPL_STATS)"
+			elif [ "$n" = 0 ]; then record "$name" "vbl_$v" PASS "taken $lo..$hi/s"
+			else record "$name" "vbl_$v" FAIL "$n seconds off $v: taken $lo..$hi/s"; fi ;;
+		gov\>=*)
+			v=${c#gov>=}
+			read -r n lo <<<"$(sed -n 's/^\[GOV\] reaching \([0-9]*\) kHz.*/\1/p' "$log" |
+				awk -v w="$v" 'NR > 2 { n++; if (!lo || $1 < lo) lo = $1; if ($1 < w) bad++ }
+				               END { print (n ? bad + 0 : -1), lo + 0 }')"
+			metric "$name" gov_min_khz "$lo"
+			if [ "$n" = -1 ]; then record "$name" gov FAIL "no [GOV] windows (governor off? PISTORM_GOV_REPORT)"
+			elif [ "$n" = 0 ]; then record "$name" gov PASS "lowest 5 s window $lo kHz (>= $v)"
+			else record "$name" gov FAIL "$n windows under $v kHz, lowest $lo"; fi ;;
+		noov)
+			n=$(grep -c '\[dmasnd\] STE stream overflow' "$log")
+			metric "$name" snd_overflows "$n"
+			if [ "$n" = 0 ]; then record "$name" noov PASS "no output overflow"
+			else record "$name" noov FAIL "$(grep -m1 '\[dmasnd\] STE stream overflow' "$log" | cut -c1-140)"; fi ;;
+		snd)
+			read -r n tot <<<"$(grep '^\[dmasnd\] SUM' "$log" |
+				awk '/ en=1 parked=0 / { p++; if (p > 10) { t++; if ($0 ~ / ring=0$/) bad++ } }
+				     END { print bad + 0, t + 0 }')"
+			metric "$name" snd_starved_s "$n"
+			if [ "$tot" = 0 ]; then record "$name" snd FAIL "no DMA sound played (PISTORM_DMASND_DEBUG=2 SUM lines)"
+			elif [ "$n" = 0 ]; then record "$name" snd PASS "$tot s of play, output never ran dry"
+			else record "$name" snd FAIL "output ran dry in $n of $tot s of play"; fi ;;
+		shmcal)
+			n=$(grep '^\[SHM\] [0-9]*Hz P=' "$log" | tail -3 | sed -n 's/.* cal=\([0-9]*\)\/.*/\1/p' |
+				awk '{ k++; if ($1 == 0) z++ } END { print (k == 3 ? z + 0 : -1) }')
+			metric "$name" shm_cal_zero "$n"
+			if [ "$n" = -1 ]; then record "$name" shmcal FAIL "under 3 [SHM] summaries (native_hdmi off? PISTORM_SHM_DEBUG)"
+			elif [ "$n" = 0 ]; then record "$name" shmcal PASS "counter reads accepted to the end"
+			else record "$name" shmcal FAIL "$n of the last 3 summaries took no counter read (mirror on the wrong buffer?)"; fi ;;
+		*)	record "$name" "$c" FAIL "unknown check in tests.txt" ;;
+		esac
+	done
+}
+
 # ---------------------------------------------------------------- tests.txt
 # Boots from your own images: name | cfg section | hdd image (- = the
-# section's own drives) | seconds | what. Pass = it ran the whole time with
-# no panic, crash or early exit.
+# section's own drives) | seconds | checks | what. Pass = it ran the whole
+# time with no panic, crash or early exit, and every check (host_checks
+# above; - = none) held.
 run_tests() {
-	local name section image secs what
-	while IFS='|' read -r name section image secs what; do
+	local name section image secs checks what
+	local RUN_ENVS=(PISTORM_IPL_STATS=1 PISTORM_GOV_REPORT=1 PISTORM_SHM_DEBUG=1 PISTORM_DMASND_DEBUG=2)
+	while IFS='|' read -r name section image secs checks what; do
 		name=$(echo $name); section=$(echo $section); image=$(echo $image); secs=$(echo $secs)
+		checks=$(echo $checks); [ "$checks" = "-" ] && checks=""
 		want "$name" || continue
 		if [ "$image" != "-" ] && [ ! -f "$image" ]; then
 			echo "$name: SKIP - $image not found"
@@ -224,6 +294,7 @@ run_tests() {
 		else
 			record "$name" run FAIL "$why"
 		fi
+		[ -n "$checks" ] && host_checks "$name" "$log" "$checks"
 	done < <(grep -v '^[[:space:]]*#' "$here/tests.txt" | grep '|')
 }
 
