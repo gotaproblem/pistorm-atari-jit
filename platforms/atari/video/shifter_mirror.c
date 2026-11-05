@@ -1278,9 +1278,15 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
                 snapbuf[a - lo] = (uint8_t)e->o;
         }
         if (cfg_dbg >= 3) {
-            if (!dbg3_armed && fr_ram > 3000) {
+            /* armed by SUSTAINED heavy drawing - 50 frames in a row over
+             * 3000 writes. One frame was not enough: the boot screen clear
+             * tripped it and the 600 lines were gone before the program
+             * under test started (FastBobs, 5 Nov). */
+            static int heavy_run;
+            heavy_run = fr_ram > 3000 ? heavy_run + 1 : 0;
+            if (!dbg3_armed && heavy_run >= 50) {
                 dbg3_armed = 1;
-                fprintf(stderr, "[SHM] debug 3 armed: %u screen writes in one frame\n", fr_ram);
+                fprintf(stderr, "[SHM] debug 3 armed: 50 frames over 3000 screen writes\n");
             }
             if (dbg3_armed && dbg3_left > 0) {
                 dbg3_left--;
