@@ -87,8 +87,13 @@ run_emulator() {
 	# REGRESS_TIMELINE=1: IPL timeline with level 2 (HBL), one per boot,
 	# read by tools/ipl-timeline/hbl.py into <boot>.hbl.txt (measurement
 	# only: the logging is a store into a ring on the ipl_task core)
-	[ "${REGRESS_TIMELINE:-0}" = 1 ] &&
-		envs+=(PISTORM_IPL_TIMELINE=2 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl")
+	# REGRESS_TIMELINE=4: levels 4 and 6 only (PISTORM_IPL_TIMELINE=1) -
+	# every VBL/MFP line change and take, for programs whose HBLs would
+	# flood a level-2 log (Bad Apple)
+	case "${REGRESS_TIMELINE:-0}" in
+	1)	envs+=(PISTORM_IPL_TIMELINE=2 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl") ;;
+	4)	envs+=(PISTORM_IPL_TIMELINE=1 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl") ;;
+	esac
 	# stdin from /dev/null: the boot loops read their lists on stdin, and
 	# anything the emulator read would eat the remaining tests (6 Nov: only
 	# fastbobs of three ran)
@@ -113,9 +118,9 @@ run_emulator() {
 
 # REGRESS_TIMELINE=1: what hbl.py makes of boot $1's timeline
 timeline_report() {
-	[ "${REGRESS_TIMELINE:-0}" = 1 ] || return 0
 	local tl="$out/$1.tl"
 	[ -f "$tl" ] || return 0
+	[ "${REGRESS_TIMELINE:-0}" = 1 ] || { gzip -f "$tl"; return 0; }
 	python3 "$here/../ipl-timeline/hbl.py" "$tl" > "$out/$1.hbl.txt" 2>&1 ||
 		rm -f "$out/$1.hbl.txt"         # no HBL test in this boot
 	gzip -f "$tl"
@@ -220,31 +225,31 @@ host_checks() {
 	for c in $checks; do
 		case "$c" in
 		vbl=*)
-			# Every guest VBL must match a real one: the guest's VBLs taken
-			# against the board's level-4 episodes (ep4), summed over the run
-			# after the first 15 s. Summed, not per second: the stats thread
-			# reads ep4 and taken at two moments, so a stalled log write
-			# between them moves VBLs between neighbouring seconds (57 then
-			# 50 against 50 then 57 - FastBobs, 6 Nov) but never changes the
-			# totals. Doubled or lost VBLs do. The board's own rate must
-			# average w +-1 per second.
+			# The guest's VBLs taken, averaged over the run after the first
+			# 15 s, must be w +-0.5 a second. Averaged, not per second: the
+			# stats thread's "second" is 1 s of sleep plus its own printing,
+			# and a stalled log write stretches one (57 then 50 - FastBobs,
+			# 6 Nov) but moves the average by under 0.1. Doubled or lost
+			# VBLs move it by whole VBLs a second. (Not against ep4: that
+			# counts entries into IPL level 4, and an MFP interrupt over a
+			# pending VBL re-enters it - Bad Apple 55/s.)
 			v=${c#vbl=}
-			read -r n st se lo hi <<<"$(awk -v w="$v" '
-				/^\[ipl\] ep2=/ { split($3, a, "="); e = a[2]; next }
+			read -r n st lo hi <<<"$(awk '
 				/^\[ipl\]   vbl: taken=/ {
 					sub(/.*taken=/, ""); t = $0 + 0
-					if (++k > 15) { n++; st += t; se += e
+					if (++k > 15) { n++; st += t
 						if (!m || t < lo) lo = t; if (t > hi) hi = t; m = 1 } }
-				END { print (n ? n : -1), st + 0, se + 0, lo + 0, hi + 0 }' "$log")"
+				END { print (n ? n : -1), st + 0, lo + 0, hi + 0 }' "$log")"
 			metric "$name" vbl_min "$lo"; metric "$name" vbl_max "$hi"
-			metric "$name" vbl_vs_board "$((st - se))"
 			if [ "$n" = -1 ]; then record "$name" "vbl_$v" FAIL "no [ipl] vbl lines (PISTORM_IPL_STATS)"
-			elif [ $((st - se)) -gt 2 ] || [ $((st - se)) -lt -2 ]; then
-				record "$name" "vbl_$v" FAIL "guest took $st VBLs, the board made $se, in $n s"
-			elif [ $((se)) -lt $(((v - 1) * n)) ] || [ $((se)) -gt $(((v + 1) * n)) ]; then
-				record "$name" "vbl_$v" FAIL "board VBL rate $se in $n s, not $v/s"
 			else
-				record "$name" "vbl_$v" PASS "$st VBLs in $n s, all the board's (per-second $lo..$hi)"
+				local avg; avg=$(awk -v s="$st" -v n="$n" 'BEGIN { printf "%.2f", s / n }')
+				metric "$name" vbl_avg "$avg"
+				if awk -v a="$avg" -v w="$v" 'BEGIN { exit !(a >= w - 0.5 && a <= w + 0.5) }'; then
+					record "$name" "vbl_$v" PASS "$avg/s average over $n s (per-second $lo..$hi)"
+				else
+					record "$name" "vbl_$v" FAIL "$avg/s average over $n s, not $v (per-second $lo..$hi)"
+				fi
 			fi ;;
 		gov\>=*)
 			v=${c#gov>=}
@@ -395,6 +400,7 @@ run_tests() {
 			record "$name" run FAIL "$why"
 		fi
 		[ -n "$checks" ] && host_checks "$name" "$log" "$checks"
+		timeline_report "$name"
 	done < <(grep -v '^[[:space:]]*#' "$here/tests.txt" | grep '|')
 }
 
