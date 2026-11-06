@@ -49,7 +49,7 @@ The `drives` boot runs IDE and ACSI on fresh 8 MB pattern images, then the flopp
 
 Each check also leaves a measurement (`vbl_min`/`vbl_max`, `gov_min_khz`, `snd_overflows`, `snd_starved_s`, `shm_cal_zero`) for the run-to-run comparison.
 
-A tests.txt boot can also start a program off a hard disk image on its own (the `start` column). The runner then builds the boot floppy A:, which EmuTOS boots from, and puts the image on ACSI ID 0 as C: in place of the section's hard disks. The `extra cfg` column adds cfg lines after the section, for example the governed 68000 (`jit_power 0; cpu_compatible enabled; cpu_speed 8mhz`).
+A tests.txt boot can also start a program off a hard disk image on its own (the `start` column). The runner then builds the boot floppy A:, which EmuTOS boots from, and puts the image on ACSI ID 0 as C: in place of the section's hard disks. The `extra cfg` column adds cfg lines to the section; a key given there replaces the section's own line for it.
 
 | Directive | Floppy gets |
 |---|---|
@@ -57,7 +57,7 @@ A tests.txt boot can also start a program off a hard disk image on its own (the 
 | `desk PATH` | `A:\EMUDESK.INF` with `#Z 01 PATH@`: the EmuTOS desktop autostarts PATH. For GEM programs, which need the AES. |
 | `acc NAME ARG` | `guest/NAME.PRG` as `A:\NAME.ACC`, with ARG in `A:\NAME.INF`. `MPSEND` waits for Paula to start, then sends it `MP_START` with module ARG. Paula 2.6 and its `MP.PRG` crash on a 68000 when given a command line (a `free()` of a string literal), so the module is passed by message. |
 
-`fastbobs`, `badapple` and `modplay` run from `dkimages/regression.img` this way. All three start and run in Hatari 2.4 (EmuTOS 1.3, STE) from the floppies the runner builds.
+`fastbobs`, `badapple` and `modplay` run from `dkimages/regression.img` this way, on the `[regression]` section of psctrl.cfg: a machine kept for these tests only (STE, EmuTOS 1.3, the governed 8 MHz 68000, native_hdmi, DMA sound, blitter), so the sections you change day to day never move the results. `psctrl-regression.cfg` here is that section; append it to `../configs/psctrl.cfg` once. All three start and run in Hatari 2.4 (EmuTOS 1.3, STE) from the floppies the runner builds.
 
 Every guest check is counted against MFP Timer C (the real chip's crystal), so the expected figures are a real ST's, whatever the emulated CPU speed. All programs pass in Hatari 2.4 (cycle-exact ST/STE) on TOS 1.04 and 2.06. The one difference between TOS versions there: Timer B event mode counts 199 lines per frame under 2.06 and 200 under 1.04, every frame.
 

@@ -311,7 +311,12 @@ run_tests() {
 			echo "$name: SKIP - $image not found"
 			continue
 		fi
-		grep -q "^\[$section\]" "$cfg_src" || { echo "$name: SKIP - no [$section] in $cfg_src"; continue; }
+		if ! grep -q "^\[$section\]" "$cfg_src"; then
+			echo "$name: SKIP - no [$section] in $cfg_src"
+			[ "$section" = regression ] &&
+				echo "  append tools/regress/psctrl-regression.cfg to $cfg_src"
+			continue
+		fi
 		# absolute: a relative image would be taken from disk_path
 		[ "$image" = "-" ] || image=$(realpath "$image")
 		local cfg="$out/$name.cfg" log="$out/$name.log" fl=""
