@@ -262,14 +262,49 @@ host_checks() {
 
 # ---------------------------------------------------------------- tests.txt
 # Boots from your own images: name | cfg section | hdd image (- = the
-# section's own drives) | seconds | checks | what. Pass = it ran the whole
-# time with no panic, crash or early exit, and every check (host_checks
-# above; - = none) held.
+# section's own drives) | start | extra cfg | seconds | checks | what.
+# Pass = it ran the whole time with no panic, crash or early exit, and
+# every check (host_checks above; - = none) held.
+#
+# start (- = the image boots on its own) builds the boot's floppy, A:,
+# from `;`-separated directives - EmuTOS boots from it, the programs live
+# on the hard disk image:
+#   auto PATH [ARGS]  LAUNCH.PRG in A:\AUTO starts PATH with ARGS, in
+#                     PATH's folder (TOS programs: FastBobs, Bad Apple)
+#   desk PATH         the desktop autostarts PATH (EMUDESK.INF #Z) - GEM
+#                     programs, which need the AES (Paula)
+#   acc NAME ARG      guest/NAME.PRG goes on A: as NAME.ACC with ARG in
+#                     A:\NAME.INF (MPSEND: make Paula play module ARG)
+make_start_floppy() {
+	local fl=$1 start=$2 d args=() dir
+	dir=$(dirname "$fl")
+	rm -f "$dir"/RUN.INF "$dir"/EMUDESK.INF "$dir"/*.INF
+	local IFS=';'
+	for d in $start; do
+		d=$(echo "$d" | sed 's/^ *//; s/ *$//')
+		local op=${d%% *} rest=${d#* }
+		case "$op" in
+		auto)	local p=${rest%% *} a=""
+			[ "$p" != "$rest" ] && a=${rest#* }
+			printf '%s\r\n%s\r\n' "$p" "$a" > "$dir/RUN.INF"
+			args+=(--auto "$here/guest/LAUNCH.PRG" --file "RUN.INF=$dir/RUN.INF") ;;
+		desk)	printf '#E 1A 01\r\n#Z 01 %s@\r\n' "$rest" > "$dir/EMUDESK.INF"
+			args+=(--file "EMUDESK.INF=$dir/EMUDESK.INF") ;;
+		acc)	local n=${rest%% *} a=${rest#* }
+			printf '%s\r\n' "$a" > "$dir/$n.INF"
+			args+=(--file "$n.ACC=$here/guest/$n.PRG" --file "$n.INF=$dir/$n.INF") ;;
+		*)	echo "unknown start directive: $d"; return 1 ;;
+		esac
+	done
+	python3 "$here/mkimg.py" st "$fl" "${args[@]}"
+}
+
 run_tests() {
-	local name section image secs checks what
+	local name section image start extra secs checks what
 	local RUN_ENVS=(PISTORM_IPL_STATS=1 PISTORM_GOV_REPORT=1 PISTORM_SHM_DEBUG=1 PISTORM_DMASND_DEBUG=2)
-	while IFS='|' read -r name section image secs checks what; do
+	while IFS='|' read -r name section image start extra secs checks what; do
 		name=$(echo $name); section=$(echo $section); image=$(echo $image); secs=$(echo $secs)
+		start=$(echo "$start" | sed 's/^ *//; s/ *$//'); extra=$(echo "$extra" | sed 's/^ *//; s/ *$//')
 		checks=$(echo $checks); [ "$checks" = "-" ] && checks=""
 		want "$name" || continue
 		if [ "$image" != "-" ] && [ ! -f "$image" ]; then
@@ -277,12 +312,35 @@ run_tests() {
 			continue
 		fi
 		grep -q "^\[$section\]" "$cfg_src" || { echo "$name: SKIP - no [$section] in $cfg_src"; continue; }
-		local cfg="$out/$name.cfg" log="$out/$name.log"
+		# absolute: a relative image would be taken from disk_path
+		[ "$image" = "-" ] || image=$(realpath "$image")
+		local cfg="$out/$name.cfg" log="$out/$name.log" fl=""
+		if [ "$start" != "-" ]; then
+			mkdir -p "$out/$name.d"
+			fl="$out/$name.d/boot.st"
+			make_start_floppy "$fl" "$start" > /dev/null ||
+				{ record "$name" setup FAIL "start floppy: $start"; continue; }
+		fi
+		# With a start floppy the image goes on ACSI ID 0 - C: for EmuTOS
+		# (ACSI drives come before IDE), as validated in Hatari - and the
+		# section's own hdd/acsi images and its fdd lines are dropped, so
+		# C: is the image whatever the section mounts. A real ACSI device
+		# on another ID stays on the bus (per-ID passthrough) and lands
+		# after C:. Without one the image replaces the section's hdd lines.
 		psctrl_paths > "$cfg"
-		awk -v s="[$section]" -v keep="$image" '
+		awk -v s="[$section]" -v keep="$image" -v fl="$fl" '
 			/^\[/ { on = ($0 == s); next }
-			on && (keep == "-" || $1 != "hdd") { print }' "$cfg_src" >> "$cfg"
-		[ "$image" = "-" ] || echo "hdd $image" >> "$cfg"
+			!on { next }
+			keep != "-" && $1 == "hdd" { next }
+			fl != "" && ($1 == "fdd" || (keep != "-" && ($1 ~ /^(acsi|acsi_order|hdd_order)$/))) { next }
+			{ print }' "$cfg_src" >> "$cfg"
+		if [ -n "$fl" ]; then
+			echo "fdd A:$fl" >> "$cfg"
+			[ "$image" = "-" ] || printf 'acsi enabled\nacsi 0:%s\n' "$image" >> "$cfg"
+		else
+			[ "$image" = "-" ] || echo "hdd $image" >> "$cfg"
+		fi
+		[ "$extra" = "-" ] || echo "$extra" | tr ';' '\n' | sed 's/^ *//' >> "$cfg"
 
 		echo "$name: running ${secs}s on $commit ..."
 		run_emulator "$cfg" "$secs" "$log" 0
