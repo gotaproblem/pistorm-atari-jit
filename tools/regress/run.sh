@@ -224,31 +224,35 @@ host_checks() {
 	local name=$1 log=$2 checks=$3 c v n
 	for c in $checks; do
 		case "$c" in
-		vbl=*)
-			# The guest's VBLs taken, averaged over the run after the first
-			# 15 s, must be w +-0.5 a second. Averaged, not per second: the
-			# stats thread's "second" is 1 s of sleep plus its own printing,
-			# and a stalled log write stretches one (57 then 50 - FastBobs,
-			# 6 Nov) but moves the average by under 0.1. Doubled or lost
-			# VBLs move it by whole VBLs a second. (Not against ep4: that
-			# counts entries into IPL level 4, and an MFP interrupt over a
-			# pending VBL re-enters it - Bad Apple 55/s.)
-			v=${c#vbl=}
-			read -r n st lo hi <<<"$(awk '
-				/^\[ipl\]   vbl: taken=/ {
-					sub(/.*taken=/, ""); t = $0 + 0
-					if (++k > 15) { n++; st += t
+		vbl)
+			# One guest VBL for every real one: each stats second's VBLs
+			# taken against the Shifter's own rate that second (the snooped
+			# sync, `guest=50.0Hz`/60/71), summed over the run after the
+			# first 15 s, must agree to 0.5 a second. Summed: the stats
+			# thread's "second" is 1 s of sleep plus its own printing, and a
+			# stalled log write stretches one (57 at 50 Hz - FastBobs, 6 Nov)
+			# but moves the sum by under 0.2 a second. Lost or doubled VBLs
+			# move it by whole VBLs a second (Bad Apple, 60 Hz, 6 Nov: 54.6).
+			# The rate comes from the sync register, so a program that
+			# switches 50/60 Hz is judged against what it chose.
+			read -r n st sh lo hi <<<"$(awk '
+				/^\[ipl\]   vbl: taken=/ { sub(/.*taken=/, ""); t = $0 + 0; have = 1; next }
+				/^\[ipl\]   shifter:/ && have {
+					have = 0
+					if (!match($0, /guest=[0-9.]+/)) next
+					h = substr($0, RSTART + 6, RLENGTH - 6) + 0
+					if (++k > 15) { n++; st += t; sh += h
 						if (!m || t < lo) lo = t; if (t > hi) hi = t; m = 1 } }
-				END { print (n ? n : -1), st + 0, lo + 0, hi + 0 }' "$log")"
+				END { print (n ? n : -1), st + 0, sh + 0, lo + 0, hi + 0 }' "$log")"
 			metric "$name" vbl_min "$lo"; metric "$name" vbl_max "$hi"
-			if [ "$n" = -1 ]; then record "$name" "vbl_$v" FAIL "no [ipl] vbl lines (PISTORM_IPL_STATS)"
+			if [ "$n" = -1 ]; then record "$name" vbl FAIL "no [ipl] vbl/shifter lines (PISTORM_IPL_STATS)"
 			else
-				local avg; avg=$(awk -v s="$st" -v n="$n" 'BEGIN { printf "%.2f", s / n }')
-				metric "$name" vbl_avg "$avg"
-				if awk -v a="$avg" -v w="$v" 'BEGIN { exit !(a >= w - 0.5 && a <= w + 0.5) }'; then
-					record "$name" "vbl_$v" PASS "$avg/s average over $n s (per-second $lo..$hi)"
+				local dif; dif=$(awk -v t="$st" -v h="$sh" -v n="$n" 'BEGIN { printf "%.2f", (t - h) / n }')
+				metric "$name" vbl_per_s_vs_sync "$dif"
+				if awk -v d="$dif" 'BEGIN { exit !(d >= -0.5 && d <= 0.5) }'; then
+					record "$name" vbl PASS "$st VBLs taken for $sh at the sync rate in $n s ($dif/s; per-second $lo..$hi)"
 				else
-					record "$name" "vbl_$v" FAIL "$avg/s average over $n s, not $v (per-second $lo..$hi)"
+					record "$name" vbl FAIL "$st VBLs taken for $sh at the sync rate in $n s ($dif/s; per-second $lo..$hi)"
 				fi
 			fi ;;
 		gov\>=*)

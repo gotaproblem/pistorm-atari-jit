@@ -41,13 +41,13 @@ The `drives` boot runs IDE and ACSI on fresh 8 MB pattern images, then the flopp
 
 | Check | Holds when |
 |---|---|
-| `vbl=50` | the guest's VBLs taken (`vbl: taken=`), averaged over the run after the first 15 s, are 49.5-50.5 a second (averaged because one stats "second" can stretch when a log write stalls) |
+| `vbl` | after the first 15 s, the guest took one VBL for every real one: each stats second's `vbl: taken=` against the Shifter's rate that second (`guest=50.0Hz`, from the sync register, so 50/60 Hz switches count), summed, agree to 0.5 a second |
 | `gov>=K` | every `[GOV]` 5 s window after the first two reached K kHz |
 | `noov` | no `[dmasnd] STE stream overflow` (sound never queued faster than real time) |
 | `snd` | after 10 s of DMA sound, no second with the output queue empty while a frame plays |
 | `shmcal` | the HDMI mirror's last three `[SHM]` summaries each accepted a video counter read (cal=0 was FastBobs's mirror drawing the wrong buffer) |
 
-Each check also leaves a measurement (`vbl_min`/`vbl_max`, `gov_min_khz`, `snd_overflows`, `snd_starved_s`, `shm_cal_zero`) for the run-to-run comparison.
+Each check also leaves a measurement (`vbl_min`/`vbl_max`/`vbl_per_s_vs_sync`, `gov_min_khz`, `snd_overflows`, `snd_starved_s`, `shm_cal_zero`) for the run-to-run comparison.
 
 A tests.txt boot can also start a program off a hard disk image on its own (the `start` column). The runner builds the boot files twice, as a small hard disk on ACSI ID 0 (C:) and as a floppy in A:, and puts the image on ACSI ID 1 (D:) in place of the section's drives. Both copies are needed because EmuTOS boots from C: on a cold start whenever a hard disk exists, keeps the old `_bootdev` (A: after Hatari's fast boot) on a warm one, and runs only the boot drive's AUTO folder, `EMUDESK.INF` and accessories. The `extra cfg` column adds cfg lines to the section; a key given there replaces the section's own line for it.
 

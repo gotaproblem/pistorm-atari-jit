@@ -22,7 +22,7 @@
 # A test PASSES when the guest runs the whole time with no EmuTOS "Panic:"
 # and the emulator neither crashes nor exits, and every check in the checks
 # column holds (- = none):
-#   vbl=50  gov>=7900  noov  snd  shmcal      - see host_checks in run.sh.
+#   vbl  gov>=7900  noov  snd  shmcal      - see host_checks in run.sh.
 # Tests run with PISTORM_IPL_STATS=1 PISTORM_GOV_REPORT=1
 # PISTORM_SHM_DEBUG=1 PISTORM_DMASND_DEBUG=2 for those reports (one line a
 # second or less each). gov needs the 68000 governed (JIT off, cpu_speed
@@ -36,6 +36,6 @@ ide-acsi | games | -                                | - | - | 60 | -  | TOS 2.06
 # the [regression] section of psctrl.cfg - a machine kept for these tests
 # only (STE, EmuTOS 1.3, governed 8 MHz 68000, native_hdmi, DMA sound,
 # blitter); tools/regress/psctrl-regression.cfg is the copy to paste in:
-fastbobs | regression | ../dkimages/regression.img | auto D:\FASTBOBS.PRG | - | 120 | vbl=50 gov>=3700 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211). gov: the blitter holds the bus, so ~4100 kHz is normal (6 Nov: 4085-4143 steady, 3886 just after the start)
-badapple | regression | ../dkimages/regression.img | auto D:\COLOR.50K\BADAPPLE.TOS | - | 270 | vbl=50 noov snd | color.50k Bad Apple: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
+fastbobs | regression | ../dkimages/regression.img | auto D:\FASTBOBS.PRG | - | 120 | vbl gov>=3700 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211). gov: the blitter holds the bus, so ~4100 kHz is normal (6 Nov: 4085-4143 steady, 3886 just after the start)
+badapple | regression | ../dkimages/regression.img | auto D:\COLOR.50K\BADAPPLE.TOS | - | 270 | vbl noov snd | color.50k Bad Apple: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
 modplay  | regression | ../dkimages/regression.img | desk D:\PAULA26\PAULA.APP; acc MPSEND D:\PAULA26\MOD\AXEL_F.MOD | - | 120 | gov>=7840 noov snd | Paula 2.6 plays AXEL_F.MOD (MPSEND.ACC sends it MP_START) on the governed 68000: played slow when the governor wrote off debt (26 Oct 2026)
