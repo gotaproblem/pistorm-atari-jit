@@ -3,7 +3,7 @@
 | Paula 2.6 takes a module on its command line or from its own MP.PRG -
 | both free() a string literal (MP.C: pcmd="\0" ... free(pcmd)) and die
 | with an address error on a 68000 (Hatari, 6 Nov 2026). This accessory
-| sends the MP_START message MP.PRG would: it reads A:\MPSEND.INF (one
+| sends the MP_START message MP.PRG would: it reads \MPSEND.INF on the boot drive (one
 | line, the module's full path), waits for an application named
 | "PAULA   " (started by the desktop's autorun) and sends MP_START with
 | that path. Then it sleeps in evnt_mesag like any accessory.
@@ -22,7 +22,7 @@ _start:
         move.l  #aes_ai,(a0)+
         move.l  #aes_ao,(a0)+
 
-        | ---- the module's path from A:\MPSEND.INF
+        | ---- the module's path from \MPSEND.INF on the boot drive
         clr.w   -(sp)
         pea     inf_name(pc)
         move.w  #0x3D,-(sp)             | Fopen
@@ -122,7 +122,7 @@ aes:
         trap    #2
         rts
 
-inf_name:   .asciz  "A:\\MPSEND.INF"
+inf_name:   .asciz  "\\MPSEND.INF"
 paula_name: .asciz  "PAULA   "
         .even
 
