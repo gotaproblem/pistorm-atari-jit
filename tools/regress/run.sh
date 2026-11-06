@@ -266,15 +266,19 @@ host_checks() {
 # Pass = it ran the whole time with no panic, crash or early exit, and
 # every check (host_checks above; - = none) held.
 #
-# start (- = the image boots on its own) builds the boot's floppy, A:,
-# from `;`-separated directives - EmuTOS boots from it, the programs live
-# on the hard disk image:
-#   auto PATH [ARGS]  LAUNCH.PRG in A:\AUTO starts PATH with ARGS, in
+# start (- = the image boots on its own) builds the boot files from
+# `;`-separated directives, twice: a hard disk on ACSI ID 0 (C:) and a
+# floppy in A:. EmuTOS takes A: or C: as the boot drive depending on the
+# RAM it finds (a first boot picks C: when a hard disk exists, a warm one
+# keeps the old _bootdev - bios.c), and only the boot drive's AUTO
+# folder, EMUDESK.INF and accessories run, so both carry them. The test
+# image goes on ACSI ID 1 = D:, where the programs live:
+#   auto PATH [ARGS]  LAUNCH.PRG in C:\AUTO starts PATH with ARGS, in
 #                     PATH's folder (TOS programs: FastBobs, Bad Apple)
 #   desk PATH         the desktop autostarts PATH (EMUDESK.INF #Z) - GEM
 #                     programs, which need the AES (Paula)
-#   acc NAME ARG      guest/NAME.PRG goes on A: as NAME.ACC with ARG in
-#                     A:\NAME.INF (MPSEND: make Paula play module ARG)
+#   acc NAME ARG      guest/NAME.PRG goes on C: as NAME.ACC with ARG in
+#                     C:\NAME.INF (MPSEND: make Paula play module ARG)
 make_start_floppy() {
 	local fl=$1 start=$2 d args=() dir
 	dir=$(dirname "$fl")
@@ -296,7 +300,8 @@ make_start_floppy() {
 		*)	echo "unknown start directive: $d"; return 1 ;;
 		esac
 	done
-	python3 "$here/mkimg.py" st "$fl" "${args[@]}"
+	python3 "$here/mkimg.py" hdboot "$fl" "${args[@]}" &&
+	python3 "$here/mkimg.py" st "${fl%.img}.st" "${args[@]}"
 }
 
 run_tests() {
@@ -322,16 +327,16 @@ run_tests() {
 		local cfg="$out/$name.cfg" log="$out/$name.log" fl=""
 		if [ "$start" != "-" ]; then
 			mkdir -p "$out/$name.d"
-			fl="$out/$name.d/boot.st"
+			fl="$out/$name.d/boot.img"
 			make_start_floppy "$fl" "$start" > /dev/null ||
-				{ record "$name" setup FAIL "start floppy: $start"; continue; }
+				{ record "$name" setup FAIL "boot disk: $start"; continue; }
 		fi
-		# With a start floppy the image goes on ACSI ID 0 - C: for EmuTOS
-		# (ACSI drives come before IDE), as validated in Hatari - and the
-		# section's own hdd/acsi images and its fdd lines are dropped, so
-		# C: is the image whatever the section mounts. A real ACSI device
+		# With a start, the boot disk goes on ACSI ID 0 (C:) and in A:, the
+		# image on ID 1 (D:) - ACSI drives come before IDE - and the
+		# section's own hdd/acsi images and fdd lines are dropped. A real ACSI device
 		# on another ID stays on the bus (per-ID passthrough) and lands
-		# after C:. Without one the image replaces the section's hdd lines.
+		# after D:. Without a start the image replaces the section's hdd
+		# lines.
 		psctrl_paths > "$cfg"
 		# a key set in extra replaces the section's line(s) for it
 		local xkeys=""
@@ -341,11 +346,11 @@ run_tests() {
 			!on { next }
 			NF && index(xk, " " $1 " ") { next }
 			keep != "-" && $1 == "hdd" { next }
-			fl != "" && ($1 == "fdd" || (keep != "-" && ($1 ~ /^(acsi|acsi_order|hdd_order)$/))) { next }
+			fl != "" && $1 ~ /^(fdd|acsi|acsi_order)$/ { next }
 			{ print }' "$cfg_src" >> "$cfg"
 		if [ -n "$fl" ]; then
-			echo "fdd A:$fl" >> "$cfg"
-			[ "$image" = "-" ] || printf 'acsi enabled\nacsi 0:%s\n' "$image" >> "$cfg"
+			printf 'fdd A:%s\nacsi enabled\nacsi 0:%s\n' "${fl%.img}.st" "$fl" >> "$cfg"
+			[ "$image" = "-" ] || echo "acsi 1:$image" >> "$cfg"
 		else
 			[ "$image" = "-" ] || echo "hdd $image" >> "$cfg"
 		fi
@@ -359,7 +364,7 @@ run_tests() {
 		# an auto start must be seen to launch (else the boot sat at the desktop)
 		case "$start" in auto*|*\;\ auto*|*\;auto*)
 			if [ -z "$why" ] && ! grep -q '\[NF_STDERR\] @I launch' "$log"; then
-				why="LAUNCH.PRG never ran (no @I launch line - floppy AUTO not run, or no NatFeats)"
+				why="LAUNCH.PRG never ran (no @I launch line - the boot drive's AUTO not run, or no NatFeats)"
 			elif [ -z "$why" ] && grep -q '\[NF_STDERR\] @T launch FAIL' "$log"; then
 				why="$(grep -m1 '\[NF_STDERR\] @T launch FAIL' "$log" | cut -c1-120)"
 			fi ;;

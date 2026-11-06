@@ -11,6 +11,13 @@
                   same formula, so a wrong sector, a short read or a
                   swapped byte all show
 
+  mkimg.py hdboot OUT.img [same options as st]
+      The same FAT12 file system as one FAT12 partition (type $01) behind
+      an MBR, for ACSI ID 0 (C:). EmuTOS boots from C: on a cold start
+      whenever a hard disk exists (bios.c: DEFAULT_BOOTDEV) and only runs
+      the boot drive's AUTO folder, EMUDESK.INF and accessories, so run.sh
+      puts the same files on C: and in A:. The MBR is not executable.
+
   mkimg.py hd  OUT.img SECTORS
       Raw hard-disk image for the IDE and ACSI tests. Sector 0 is an MBR
       (55AA + one DOS partition entry) so the emulator's byte-order
@@ -107,7 +114,7 @@ class Fat12:
             self.img[o:o + len(fat)] = fat
         return bytes(self.img)
 
-def make_st(out, args):
+def make_st(out, args, hd=False):
     auto, root, fs = [], [], Fat12()
     i = 0
     while i < len(args):
@@ -126,7 +133,16 @@ def make_st(out, args):
             root.append((name.upper(), 0, fs.alloc(data), len(data)))
         else:
             sys.exit('unknown option ' + opt)
-    open(out, 'wb').write(fs.finish(root, auto if auto else None))
+    fsimg = fs.finish(root, auto if auto else None)
+    if hd:
+        mbr = bytearray(512)
+        struct.pack_into('<BBBBBBBBII', mbr, 0x1BE, 0x00, 0, 2, 0, 0x01, 0, 0, 0,
+                         1, NSECT)
+        mbr[510:512] = b'\x55\xAA'
+        if sum(struct.unpack('>256H', bytes(mbr))) & 0xFFFF == 0x1234:
+            mbr[2] = 1
+        fsimg = bytes(mbr) + fsimg
+    open(out, 'wb').write(fsimg)
 
 # ---------------------------------------------------------------- hard disk
 def hd_sector(n):
@@ -151,6 +167,8 @@ if __name__ == '__main__':
     kind, out = sys.argv[1], sys.argv[2]
     if kind == 'st':
         make_st(out, sys.argv[3:])
+    elif kind == 'hdboot':
+        make_st(out, sys.argv[3:], hd=True)
     elif kind == 'hd':
         make_hd(out, int(sys.argv[3]))
     else:

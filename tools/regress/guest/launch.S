@@ -1,10 +1,11 @@
 | launch.S - LAUNCH.PRG: start the real program a tests.txt boot is about.
 |
 | One hard-disk image holds the programs (FastBobs, Bad Apple, Paula...);
-| each boot gets its own floppy (run.sh, mkimg.py) whose root has RUN.INF:
-|   line 1   the program, full path        C:\PAULA26\PAULA.APP
+| each boot gets its own boot disk, C: (run.sh, mkimg.py hdboot), whose root
+| has RUN.INF:
+|   line 1   the program, full path        D:\FASTBOBS.PRG
 |   line 2   its command line (may be empty)  MOD\AXEL_F.MOD
-| LAUNCH sits in the floppy's AUTO folder. It makes the program's folder
+| LAUNCH sits in C:\AUTO. It makes the program's folder
 | current (drive and path - Bad Apple opens BA.DAT, Paula its MOD, by
 | relative names) and Pexecs it. Programs under test run until the boot's
 | time is up; if one returns, LAUNCH says so (@T launch FAIL).
@@ -15,7 +16,7 @@ progname: .asciz "LAUNCH"
         .even
 
 main:
-        | ---- read A:\RUN.INF
+        | ---- read \RUN.INF from the boot drive (the current drive in AUTO)
         clr.w   -(sp)
         pea     inf_name(pc)
         move.w  #0x3D,-(sp)             | Fopen
@@ -99,7 +100,7 @@ main:
 
 no_inf:
         TFAIL   "launch"
-        PS      "no A:\\RUN.INF"
+        PS      "no \\RUN.INF on the boot drive"
         bsr     pr_flush
         rts
 
@@ -141,7 +142,7 @@ run_it:
         bsr     pr_flush
         rts
 
-inf_name: .asciz "A:\\RUN.INF"
+inf_name: .asciz "\\RUN.INF"
 root:   .asciz  "\\"
 no_env: .byte   0, 0
         .even
