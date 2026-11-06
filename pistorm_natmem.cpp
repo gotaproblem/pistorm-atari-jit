@@ -4754,6 +4754,62 @@ extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
     pistorm_smc(a, 2);
 }
 
+/* ---- DMA (floppy/ACSI) into ST-RAM: the CPU's write rules ---------------
+ * A DMA transfer lands in the natmem mirror (the copy the CPU reads) and
+ * reaches the real bus only where a CPU write would - low RAM and the
+ * screen window (stram_needs_bus_write), through the screen shadow - with
+ * the HDMI mirror told of every screen word it overwrites.
+ *
+ * It used to go out byte by byte with ps_write_8 to every address under
+ * 4MB, on the CPU thread, before the command finished. Bad Apple, 6 Nov
+ * 2026: EmuTOS's last CDB byte (move.l d0,$FF8604 at $E01C40) then took
+ * ~55 ms 484 times in 230 s, no interrupt was taken meanwhile, and three
+ * 60 Hz VBLs each time collapsed into one - the clip ran at 54.6 VBLs a
+ * second, slow, mirror on or off. The buffer it streams into is outside
+ * the screen, so those bytes never needed the bus: the CPU reads its own
+ * copy, and nothing else on a plain ST reads that RAM. */
+extern "C" void pistorm_dma_write_stram(uint32_t a, const uint8_t *src, uint32_t n)
+{
+    a &= 0x00FFFFFFu;
+    if (a >= g_stram_top)
+        return;
+    if (n > g_stram_top - a)
+        n = g_stram_top - a;
+    const uint8_t old_fc = fc;
+    int fc_set = 0;
+    uint32_t i = 0;
+    while (i < n) {
+        const uint32_t ad = a + i;
+        if (!(ad & 1u) && i + 1u < n) {                  /* a whole word */
+            const uae_u16 v = (uae_u16)((src[i] << 8) | src[i + 1]);
+            if (__builtin_expect(shm_ram_hit(ad), 0))
+                shm_log_ram(ad, 2, do_get_mem_word((uae_u16 *)(natmem_offset + ad)), v);
+            do_put_mem_word((uae_u16 *)(natmem_offset + ad), v);
+            if (stram_needs_bus_write(ad, 2)) {
+                if (!fc_set) { fc = 5; fc_set = 1; }
+                g_buserr = 0;
+                ps_write_16(stram_bus_addr(ad), v);
+            }
+            i += 2;
+        } else {                                         /* odd edge */
+            const uae_u8 v = src[i];
+            if (__builtin_expect(shm_ram_hit(ad), 0))
+                shm_log_ram(ad, 1, natmem_offset[ad], v);
+            natmem_offset[ad] = v;
+            if (stram_needs_bus_write(ad, 1)) {
+                if (!fc_set) { fc = 5; fc_set = 1; }
+                g_buserr = 0;
+                ps_write_8(stram_bus_addr(ad), v);
+            }
+            i += 1;
+        }
+    }
+    if (fc_set) { g_buserr = 0; fc = old_fc; }
+    if (a < 0x452u)
+        stram_snoop_lowram(a, (int)(n < 0x452u ? n : 0x452u));
+    pistorm_smc(a, n);
+}
+
 static addrbank pistorm_stram_bank = {
     sr_lget,
     sr_wget,

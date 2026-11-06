@@ -344,6 +344,7 @@ extern "C" {
 #endif
 
 void pistorm_dma_to_stram(uint32_t, const uint8_t*, uint32_t);
+void pistorm_dma_write_stram(uint32_t, const uint8_t*, uint32_t);
 void pistorm_dma_from_stram(uint32_t, uint8_t*, uint32_t);
 
 #ifdef __cplusplus
@@ -362,10 +363,11 @@ static inline uint32_t dma_hi_mask(void)
 
 static void dma_copy_to_ram(uint32_t addr, const uint8_t *buf, size_t count)
 {
-    for (size_t i = 0; i < count && addr + i < 0x400000u; i++)
-        ps_write_8(addr + i, buf[i]);                  /* real ST-RAM — video shifter / bus masters */
-
-    pistorm_dma_to_stram(addr, buf, (uint32_t)count);  /* JIT natmem mirror + SMC invalidate */
+    /* natmem mirror + SMC, and the real bus only where a CPU write would
+     * go (low RAM, the screen) - pistorm_natmem.cpp. Byte-by-byte bus
+     * writes of every transfer stalled the CPU thread ~55 ms per 64 KB
+     * read and lost VBLs (Bad Apple, 6 Nov 2026). */
+    pistorm_dma_write_stram(addr, buf, (uint32_t)count);
 }
 
 static void dma_copy_from_ram(uint32_t addr, uint8_t *buf, size_t count)

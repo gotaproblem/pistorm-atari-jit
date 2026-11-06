@@ -46,6 +46,8 @@ void pistorm_dma_to_stram(uint32_t a, const uint8_t *b, uint32_t n)
 { if (a + n <= sizeof ram) memcpy(ram + a, b, n); }
 void pistorm_dma_from_stram(uint32_t a, uint8_t *b, uint32_t n)
 { if (a + n <= sizeof ram) memcpy(b, ram + a, n); }
+void pistorm_dma_write_stram(uint32_t a, const uint8_t *b, uint32_t n)
+{ if (a + n <= sizeof ram) memcpy(ram + a, b, n); }
 void stram_dma_write(uint32_t a, const uint8_t *b, unsigned n)
 { if (a + n <= sizeof ram) memcpy(ram + a, b, n); }
 
