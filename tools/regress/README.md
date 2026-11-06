@@ -41,7 +41,7 @@ The `drives` boot runs IDE and ACSI on fresh 8 MB pattern images, then the flopp
 
 | Check | Holds when |
 |---|---|
-| `vbl=50` | after the first 15 s, the guest took exactly the VBLs the board made (`vbl: taken=` against `ep4=`, summed: a stalled log write shifts VBLs between neighbouring seconds but not the totals; +-2), and the board made 49-51 a second |
+| `vbl=50` | the guest's VBLs taken (`vbl: taken=`), averaged over the run after the first 15 s, are 49.5-50.5 a second (averaged because one stats "second" can stretch when a log write stalls) |
 | `gov>=K` | every `[GOV]` 5 s window after the first two reached K kHz |
 | `noov` | no `[dmasnd] STE stream overflow` (sound never queued faster than real time) |
 | `snd` | after 10 s of DMA sound, no second with the output queue empty while a frame plays |
@@ -79,4 +79,4 @@ Every guest check is counted against MFP Timer C (the real chip's crystal), so t
 
 ## Timeline capture
 
-`REGRESS_TIMELINE=1 tools/regress/run.sh core-104` also records the IPL timeline with level 2 (`PISTORM_IPL_TIMELINE=2`) for each boot, keeps it as `results/<commit>/<boot>.tl.gz`, and puts what `tools/ipl-timeline/hbl.py` finds in the summary: for every HBL that never reached the CPU during `irq_hbl`, whether a VBL/MFP interrupt was in the way, the CPU did not take a latched level 2, the line was seen but not latched, or the line's drop between two HBLs was too short for the confirm time or never seen. It is measurement only and changes no timing decision.
+`REGRESS_TIMELINE=1 tools/regress/run.sh core-104` also records the IPL timeline with level 2 (`PISTORM_IPL_TIMELINE=2`) for each boot, keeps it as `results/<commit>/<boot>.tl.gz`, and puts what `tools/ipl-timeline/hbl.py` finds in the summary: for every HBL that never reached the CPU during `irq_hbl`, whether a VBL/MFP interrupt was in the way, the CPU did not take a latched level 2, the line was seen but not latched, or the line's drop between two HBLs was too short for the confirm time or never seen. It is measurement only and changes no timing decision. `REGRESS_TIMELINE=4` records levels 4 and 6 only (`PISTORM_IPL_TIMELINE=1`: every VBL/MFP line change and take) - for programs whose HBLs would flood a level-2 log, such as Bad Apple - and just keeps it gzipped.
