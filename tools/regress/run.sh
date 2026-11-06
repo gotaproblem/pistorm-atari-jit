@@ -331,12 +331,16 @@ make_start_floppy() {
 
 run_tests() {
 	local name section image start extra secs checks what
-	local RUN_ENVS=(PISTORM_IPL_STATS=1 PISTORM_GOV_REPORT=1 PISTORM_SHM_DEBUG=1 PISTORM_DMASND_DEBUG=2)
+	# REGRESS_ENV="A=1 B=2": extra emulator environment for this run, and
+	# REGRESS_TAG=x names its results <name>-x, so an A/B pair of runs of
+	# one test sits side by side (e.g. REGRESS_ENV=PISTORM_SHM=0 REGRESS_TAG=noshm)
+	local RUN_ENVS=(PISTORM_IPL_STATS=1 PISTORM_GOV_REPORT=1 PISTORM_SHM_DEBUG=1 PISTORM_DMASND_DEBUG=2 ${REGRESS_ENV:-})
 	while IFS='|' read -r name section image start extra secs checks what; do
 		name=$(echo $name); section=$(echo $section); image=$(echo $image); secs=$(echo $secs)
 		start=$(echo "$start" | sed 's/^ *//; s/ *$//'); extra=$(echo "$extra" | sed 's/^ *//; s/ *$//')
 		checks=$(echo $checks); [ "$checks" = "-" ] && checks=""
 		want "$name" || continue
+		[ -n "${REGRESS_TAG:-}" ] && name="$name-$REGRESS_TAG"
 		if [ "$image" != "-" ] && [ ! -f "$image" ]; then
 			echo "$name: SKIP - $image not found"
 			continue

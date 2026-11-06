@@ -376,6 +376,10 @@ static void *tl_writer(void *)
             fprintf(f, "%.1f W %02X=%02X off=%u %u:%u\n", us, e.a, e.b,
                     e.d, e.d / 160u, e.d % 160u);
           break;
+        case 'K':                         /* mirror calibration read */
+          fprintf(f, "%.1f K %06X %s\n", us, e.d,
+                  e.a == 0 ? "ok" : e.a == 1 ? "torn" : "berr");
+          break;
         default:
           break;
       }

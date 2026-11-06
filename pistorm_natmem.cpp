@@ -2718,6 +2718,12 @@ extern "C" int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
     const uae_u32 lo  = ps_read_8_quiet(0x00FF8209u, 5, &e3);
     const uint64_t t1 = shm_ticks();
     const uae_u32 mid2 = ps_read_8_quiet(0x00FF8207u, 5, &e4);
+    /* PISTORM_IPL_TIMELINE: every calibration read, kept or torn, on the
+     * interrupt timeline (Bad Apple, 6 Nov 2026: 54 VBLs/s taken with
+     * the exact mirror on, 50 with PISTORM_SHM=0) */
+    if (pistorm_tl_enabled())
+        pistorm_tl_cpu('K', (uint8_t)((e1 | e2 | e3 | e4) ? 2 : mid2 != mid ? 1 : 0),
+                       0, 0, (hi << 16) | (mid << 8) | lo);
     if (e1 | e2 | e3 | e4 || mid2 != mid)
         return 0;
     uint32_t c = (hi << 16) | (mid << 8) | lo;
