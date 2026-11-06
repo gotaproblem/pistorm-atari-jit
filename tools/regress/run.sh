@@ -89,7 +89,10 @@ run_emulator() {
 	# only: the logging is a store into a ring on the ipl_task core)
 	[ "${REGRESS_TIMELINE:-0}" = 1 ] &&
 		envs+=(PISTORM_IPL_TIMELINE=2 "PISTORM_IPL_TIMELINE_LOG=${log%.log}.tl")
-	sudo env "${envs[@]}" timeout -s INT "$secs" ./emulator --config "$cfg" --no-setup > "$log" 2>&1 &
+	# stdin from /dev/null: the boot loops read their lists on stdin, and
+	# anything the emulator read would eat the remaining tests (6 Nov: only
+	# fastbobs of three ran)
+	sudo env "${envs[@]}" timeout -s INT "$secs" ./emulator --config "$cfg" --no-setup < /dev/null > "$log" 2>&1 &
 	local pid=$! rc
 	if [ "$until_end" = 1 ]; then
 		while kill -0 $pid 2>/dev/null; do
@@ -217,15 +220,32 @@ host_checks() {
 	for c in $checks; do
 		case "$c" in
 		vbl=*)
+			# Every guest VBL must match a real one: the guest's VBLs taken
+			# against the board's level-4 episodes (ep4), summed over the run
+			# after the first 15 s. Summed, not per second: the stats thread
+			# reads ep4 and taken at two moments, so a stalled log write
+			# between them moves VBLs between neighbouring seconds (57 then
+			# 50 against 50 then 57 - FastBobs, 6 Nov) but never changes the
+			# totals. Doubled or lost VBLs do. The board's own rate must
+			# average w +-1 per second.
 			v=${c#vbl=}
-			read -r n lo hi <<<"$(sed -n 's/^\[ipl\]   vbl: taken=\([0-9]*\)\/s.*/\1/p' "$log" |
-				awk -v w="$v" 'NR > 15 { n++; if (!m || $1 < lo) lo = $1; if ($1 > hi) hi = $1; m = 1
-				                         if ($1 < w - 1 || $1 > w + 1) bad++ }
-				               END { print (n ? bad + 0 : -1), lo + 0, hi + 0 }')"
+			read -r n st se lo hi <<<"$(awk -v w="$v" '
+				/^\[ipl\] ep2=/ { split($3, a, "="); e = a[2]; next }
+				/^\[ipl\]   vbl: taken=/ {
+					sub(/.*taken=/, ""); t = $0 + 0
+					if (++k > 15) { n++; st += t; se += e
+						if (!m || t < lo) lo = t; if (t > hi) hi = t; m = 1 } }
+				END { print (n ? n : -1), st + 0, se + 0, lo + 0, hi + 0 }' "$log")"
 			metric "$name" vbl_min "$lo"; metric "$name" vbl_max "$hi"
+			metric "$name" vbl_vs_board "$((st - se))"
 			if [ "$n" = -1 ]; then record "$name" "vbl_$v" FAIL "no [ipl] vbl lines (PISTORM_IPL_STATS)"
-			elif [ "$n" = 0 ]; then record "$name" "vbl_$v" PASS "taken $lo..$hi/s"
-			else record "$name" "vbl_$v" FAIL "$n seconds off $v: taken $lo..$hi/s"; fi ;;
+			elif [ $((st - se)) -gt 2 ] || [ $((st - se)) -lt -2 ]; then
+				record "$name" "vbl_$v" FAIL "guest took $st VBLs, the board made $se, in $n s"
+			elif [ $((se)) -lt $(((v - 1) * n)) ] || [ $((se)) -gt $(((v + 1) * n)) ]; then
+				record "$name" "vbl_$v" FAIL "board VBL rate $se in $n s, not $v/s"
+			else
+				record "$name" "vbl_$v" PASS "$st VBLs in $n s, all the board's (per-second $lo..$hi)"
+			fi ;;
 		gov\>=*)
 			v=${c#gov>=}
 			read -r n lo <<<"$(sed -n 's/^\[GOV\] reaching \([0-9]*\) kHz.*/\1/p' "$log" |

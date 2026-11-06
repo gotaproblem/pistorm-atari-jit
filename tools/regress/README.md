@@ -41,7 +41,7 @@ The `drives` boot runs IDE and ACSI on fresh 8 MB pattern images, then the flopp
 
 | Check | Holds when |
 |---|---|
-| `vbl=50` | every `[ipl] vbl: taken=` second after the first 15 is 49-51 |
+| `vbl=50` | after the first 15 s, the guest took exactly the VBLs the board made (`vbl: taken=` against `ep4=`, summed: a stalled log write shifts VBLs between neighbouring seconds but not the totals; +-2), and the board made 49-51 a second |
 | `gov>=K` | every `[GOV]` 5 s window after the first two reached K kHz |
 | `noov` | no `[dmasnd] STE stream overflow` (sound never queued faster than real time) |
 | `snd` | after 10 s of DMA sound, no second with the output queue empty while a frame plays |

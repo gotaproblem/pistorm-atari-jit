@@ -36,6 +36,6 @@ ide-acsi | games | -                                | - | - | 60 | -  | TOS 2.06
 # the [regression] section of psctrl.cfg - a machine kept for these tests
 # only (STE, EmuTOS 1.3, governed 8 MHz 68000, native_hdmi, DMA sound,
 # blitter); tools/regress/psctrl-regression.cfg is the copy to paste in:
-fastbobs | regression | ../dkimages/regression.img | auto D:\FASTBOBS.PRG | - | 120 | vbl=50 gov>=4000 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211)
+fastbobs | regression | ../dkimages/regression.img | auto D:\FASTBOBS.PRG | - | 120 | vbl=50 gov>=3700 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211). gov: the blitter holds the bus, so ~4100 kHz is normal (6 Nov: 4085-4143 steady, 3886 just after the start)
 badapple | regression | ../dkimages/regression.img | auto D:\COLOR.50K\BADAPPLE.TOS | - | 240 | vbl=50 noov snd | color.50k Bad Apple: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
 modplay  | regression | ../dkimages/regression.img | desk D:\PAULA26\PAULA.APP; acc MPSEND D:\PAULA26\MOD\AXEL_F.MOD | - | 120 | gov>=7900 noov snd | Paula 2.6 plays AXEL_F.MOD (MPSEND.ACC sends it MP_START) on the governed 68000: played slow when the governor wrote off debt (26 Oct 2026)
