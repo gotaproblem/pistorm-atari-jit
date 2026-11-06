@@ -31,8 +31,9 @@ tos306   | gem   | -                                | - | - | 60 | -  | ST536 TO
 ide-acsi | games | -                                | - | - | 60 | -  | TOS 2.06 + IDE images + a REAL ACSI board on the bus (connect it, any card): TOS probes IDE first (IDENTIFY, READ SECTORS x1) and the model must drop INTRQ after the last PIO data-in sector, or GPIP5 stays low, the ACSI probe reads every status at once ($FF), the board's read lands in live RAM and TOS runs away to $03000002 (fixed 8326bd3, was Falcon-only). Needs the section to boot TOS 2.06 with its IDE images
 #
 # Programs that keep breaking (5 Nov 2026), from dkimages/regression.img on
-# the [gem] machine (EmuTOS, STE, native_hdmi, DMA sound, blitter) run as
-# the governed 8 MHz 68000:
-fastbobs | gem | ../dkimages/regression.img | auto C:\FASTBOBS.PRG | jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 120 | vbl=50 gov>=4000 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211)
-badapple | gem | ../dkimages/regression.img | auto C:\COLOR.50K\BADAPPLE.TOS | jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 240 | vbl=50 noov snd | color.50k Bad Apple: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
-modplay  | gem | ../dkimages/regression.img | desk C:\PAULA26\PAULA.APP; acc MPSEND C:\PAULA26\MOD\AXEL_F.MOD | jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 120 | gov>=7900 noov snd | Paula 2.6 plays AXEL_F.MOD (MPSEND.ACC sends it MP_START) on the governed 68000: played slow when the governor wrote off debt (26 Oct 2026)
+# the [gem] machine (STE, native_hdmi, DMA sound, blitter) with EmuTOS
+# 1.3 (its own ACSI driver makes the image C:; TOS 1.04 has none) as the
+# governed 8 MHz 68000:
+fastbobs | gem | ../dkimages/regression.img | auto C:\FASTBOBS.PRG | rom etos256uk-13.rom; jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 120 | vbl=50 gov>=4000 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211)
+badapple | gem | ../dkimages/regression.img | auto C:\COLOR.50K\BADAPPLE.TOS | rom etos256uk-13.rom; jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 240 | vbl=50 noov snd | color.50k Bad Apple: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
+modplay  | gem | ../dkimages/regression.img | desk C:\PAULA26\PAULA.APP; acc MPSEND C:\PAULA26\MOD\AXEL_F.MOD | rom etos256uk-13.rom; jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 120 | gov>=7900 noov snd | Paula 2.6 plays AXEL_F.MOD (MPSEND.ACC sends it MP_START) on the governed 68000: played slow when the governor wrote off debt (26 Oct 2026)

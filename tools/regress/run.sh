@@ -328,9 +328,13 @@ run_tests() {
 		# on another ID stays on the bus (per-ID passthrough) and lands
 		# after C:. Without one the image replaces the section's hdd lines.
 		psctrl_paths > "$cfg"
-		awk -v s="[$section]" -v keep="$image" -v fl="$fl" '
+		# a key set in extra replaces the section's line(s) for it
+		local xkeys=""
+		[ "$extra" = "-" ] || xkeys=$(echo "$extra" | tr ';' '\n' | awk '{ printf " %s ", $1 }')
+		awk -v s="[$section]" -v keep="$image" -v fl="$fl" -v xk="$xkeys" '
 			/^\[/ { on = ($0 == s); next }
 			!on { next }
+			NF && index(xk, " " $1 " ") { next }
 			keep != "-" && $1 == "hdd" { next }
 			fl != "" && ($1 == "fdd" || (keep != "-" && ($1 ~ /^(acsi|acsi_order|hdd_order)$/))) { next }
 			{ print }' "$cfg_src" >> "$cfg"
@@ -347,6 +351,14 @@ run_tests() {
 		local rc=$? why
 		why=$(crash_reason "$log")
 		[ -z "$why" ] && [ $rc -ne 124 ] && why="emulator exited early (rc=$rc)"
+		# an auto start must be seen to launch (else the boot sat at the desktop)
+		case "$start" in auto*|*\;\ auto*|*\;auto*)
+			if [ -z "$why" ] && ! grep -q '\[NF_STDERR\] @I launch' "$log"; then
+				why="LAUNCH.PRG never ran (no @I launch line - floppy AUTO not run, or no NatFeats)"
+			elif [ -z "$why" ] && grep -q '\[NF_STDERR\] @T launch FAIL' "$log"; then
+				why="$(grep -m1 '\[NF_STDERR\] @T launch FAIL' "$log" | cut -c1-120)"
+			fi ;;
+		esac
 		if [ -z "$why" ]; then
 			record "$name" run PASS "ran ${secs}s"
 		else
