@@ -1,30 +1,38 @@
 # Regression register - one guest test per line, run by tools/regress/run.sh.
 #
-#   name | cfg section | hdd image (AUTO-starts the test, - = the section's own drives) | seconds | checks | what it guards
+#   name | cfg section | hdd image | start | extra cfg | seconds | checks | what it guards
 #
-# The section is copied out of ../configs/psctrl.cfg as-is, so each test
-# runs on the same machine settings you use by hand; only the hdd line is
-# swapped for the test image. A test PASSES when the guest runs the whole
-# time with no EmuTOS "Panic:" and the emulator neither crashes nor exits,
-# and every check in the checks column holds (- = none):
+# The section is copied out of ../configs/psctrl.cfg, so each test runs on
+# the same machine settings you use by hand; then
+#   hdd image  - (the section's own drives) or an image, relative to the
+#              repo. With start - it replaces the section's hdd lines and
+#              must boot and AUTO-start the test itself; with a start it
+#              goes on ACSI ID 0 (C:) in place of the section's hdd and
+#              acsi images.
+#   start      - or `;`-separated directives that build the boot floppy A:
+#              (the section's fdd lines are dropped; EmuTOS boots from A:):
+#                auto PATH [ARGS]  A:\AUTO\LAUNCH.PRG runs PATH (TOS programs)
+#                desk PATH         the desktop autostarts PATH (GEM programs)
+#                acc NAME ARG      guest/NAME.PRG as A:\NAME.ACC, ARG in A:\NAME.INF
+#              see make_start_floppy in run.sh.
+#   extra cfg  - or `;`-separated cfg lines appended after the section
+#              (the last value wins), e.g. to run the governed 68000.
+# A test PASSES when the guest runs the whole time with no EmuTOS "Panic:"
+# and the emulator neither crashes nor exits, and every check in the checks
+# column holds (- = none):
 #   vbl=50  gov>=7900  noov  snd  shmcal      - see host_checks in run.sh.
 # Tests run with PISTORM_IPL_STATS=1 PISTORM_GOV_REPORT=1
 # PISTORM_SHM_DEBUG=1 PISTORM_DMASND_DEBUG=2 for those reports (one line a
-# second or less each). gov needs the section to be governed (JIT off,
-# cpu_speed set); shmcal needs native_hdmi and the governed 68000.
+# second or less each). gov needs the 68000 governed (JIT off, cpu_speed
+# set); shmcal needs native_hdmi and the governed 68000.
 #
-# Test image: a copy of a bootable C: image with the program in C:\AUTO\
-# (EmuTOS runs C:\AUTO\*.PRG at boot - rename .TOS to .PRG). Anything the
-# program loads by relative name goes in C:\ (root) beside AUTO.
+sndh44   | games | ../dkimages/regress-sndh44.img   | - | - | 90 | -  | INTRO syncs Timer A with `stop #$2100` + bare-RTE HBL: HBL must wake STOP (broke f1d8741, fixed cd2cce5)
+tos306   | gem   | -                                | - | - | 60 | -  | ST536 TOS 3.06 (68030+FPU, 32M TT-RAM, addr32) boots to the desktop. Guards: ACSI pull limited to what the DMA moved (fix-acsi-pull) and fetch from undecoded space = bus error, not a host SIGSEGV (fix-runaway-pc). Run with the BBaN DISCONNECTED - its ACSI ID 1 answers a 1-sector read with 11 sectors and TOS 3.06's 255-sector limit lets them over $2908
+ide-acsi | games | -                                | - | - | 60 | -  | TOS 2.06 + IDE images + a REAL ACSI board on the bus (connect it, any card): TOS probes IDE first (IDENTIFY, READ SECTORS x1) and the model must drop INTRQ after the last PIO data-in sector, or GPIP5 stays low, the ACSI probe reads every status at once ($FF), the board's read lands in live RAM and TOS runs away to $03000002 (fixed 8326bd3, was Falcon-only). Needs the section to boot TOS 2.06 with its IDE images
 #
-sndh44   | games | ../dkimages/regress-sndh44.img   | 90 | -  | INTRO syncs Timer A with `stop #$2100` + bare-RTE HBL: HBL must wake STOP (broke f1d8741, fixed cd2cce5)
-tos306   | gem   | -                                | 60 | -  | ST536 TOS 3.06 (68030+FPU, 32M TT-RAM, addr32) boots to the desktop. Guards: ACSI pull limited to what the DMA moved (fix-acsi-pull) and fetch from undecoded space = bus error, not a host SIGSEGV (fix-runaway-pc). Run with the BBaN DISCONNECTED - its ACSI ID 1 answers a 1-sector read with 11 sectors and TOS 3.06's 255-sector limit lets them over $2908
-ide-acsi | games | -                                | 60 | -  | TOS 2.06 + IDE images + a REAL ACSI board on the bus (connect it, any card): TOS probes IDE first (IDENTIFY, READ SECTORS x1) and the model must drop INTRQ after the last PIO data-in sector, or GPIP5 stays low, the ACSI probe reads every status at once ($FF), the board's read lands in live RAM and TOS runs away to $03000002 (fixed 8326bd3, was Falcon-only). Needs the section to boot TOS 2.06 with its IDE images
-#
-# Programs that keep breaking (5 Nov 2026) - fill in the section that runs
-# each one (governed 68000, JIT off; machine ste + native_hdmi for the STE
-# ones) and make its image, then uncomment:
-#fastbobs | <ste section> | ../dkimages/regress-fastbobs.img | 120 | vbl=50 gov>=4000 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211)
-#badapple | <ste section> | ../dkimages/regress-badapple.img | 240 | vbl=50 noov snd | color.50k: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
-#modplay  | <section>     | ../dkimages/regress-modplay.img  | 120 | gov>=7900 | MOD player on the governed 68000: played slow when the governor wrote off debt (26 Oct 2026)
-#20years  | <ste section> | ../dkimages/regress-20years.img  | 120 | noov snd | 20 Years Atari STE Megademo: clr.w $FF8934 (bus error, ste-dmasnd-decode) and restart-every-VBL sound (stutter, f01528a)
+# Programs that keep breaking (5 Nov 2026), from dkimages/regression.img on
+# the [gem] machine (EmuTOS, STE, native_hdmi, DMA sound, blitter) run as
+# the governed 8 MHz 68000:
+fastbobs | gem | ../dkimages/regression.img | auto C:\FASTBOBS.PRG | jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 120 | vbl=50 gov>=4000 noov snd shmcal | STE blitter bobs, double-buffered at line ~312, DMA sound as ONE 345 KB repeat frame: whole balls on HDMI (shmcal, fixed eec9e25), music from the start with no overflow (2a53211)
+badapple | gem | ../dkimages/regression.img | auto C:\COLOR.50K\BADAPPLE.TOS | jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 240 | vbl=50 noov snd | color.50k Bad Apple: HBL code in data + DMA sound ring; ran 12% fast on doubled VBLs
+modplay  | gem | ../dkimages/regression.img | desk C:\PAULA26\PAULA.APP; acc MPSEND C:\PAULA26\MOD\AXEL_F.MOD | jit_power 0; cpu_compatible enabled; cpu_speed 8mhz | 120 | gov>=7900 noov snd | Paula 2.6 plays AXEL_F.MOD (MPSEND.ACC sends it MP_START) on the governed 68000: played slow when the governor wrote off debt (26 Oct 2026)

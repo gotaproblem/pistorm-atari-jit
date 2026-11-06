@@ -80,7 +80,11 @@ _start:
         move.w  #38,-(sp)               | Supexec
         trap    #14
         addq.l  #6,sp
-        clr.w   -(sp)                   | Pterm0
+        move.l  post_user,d0            | a program's user-mode tail (LAUNCH)
+        beq.s   1f
+        move.l  d0,a0
+        jsr     (a0)
+1:      clr.w   -(sp)                   | Pterm0
         trap    #1
 
 super_main:
@@ -374,6 +378,7 @@ hd_check:
         rts
 
 | ---------------------------------------------------------------- data
+post_user: .space 4                     | 0, or code to run in user mode before Pterm
 numbuf: .space  14
         .even
 
