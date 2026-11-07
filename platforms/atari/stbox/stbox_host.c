@@ -359,6 +359,12 @@ static int convert_cap(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
     if (idx >= STBOX_CAP_BUFS)
         return 0;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    static int view = -1;
+    if (view < 0) {
+        const char *e = getenv("PISTORM_STBOX_VIEW");
+        view = (e && !strcmp(e, "monitor")) ? 1 : 0;
+        if (view) stbox_render_set_view(24, 384);
+    }
     int w = 0, h = 0;
     if (!stbox_render_cap(&stbox_cap[idx], stbox_shared.ste, (uint32_t *)dst,
                           pitch / 4u, &w, &h))

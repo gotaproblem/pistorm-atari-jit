@@ -62,6 +62,8 @@ static int render_newest(uint32_t *px, int *w, int *h)
  * row as colour runs "RRGGBB x0-x1". */
 static void dump_frame(const char *prefix)
 {
+    if (getenv("HARNESS_VIEW") && !strcmp(getenv("HARNESS_VIEW"), "monitor"))
+        stbox_render_set_view(24, 384);
     static uint32_t px[1024 * 512];
     int w = 0, h = 0;
     memset(px, 0, sizeof px);
@@ -311,8 +313,22 @@ int main(int argc, char **argv)
                    stbox_shared.frame, stbox_shared.video_base, stbox_shared.shift_res,
                    last_change_sec == sec ? " changing" : " static");
 
+        /* HARNESS_KEYS="6:31,9:39,12:F": at second 6 tap scancode $31 ('n'),
+         * at 9 $39 (space), at 12 joystick fire. Replaces the default pokes. */
+        const char *hk = getenv("HARNESS_KEYS");
+        if (hk) {
+            char buf[512]; snprintf(buf, sizeof buf, "%s", hk);
+            for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) {
+                unsigned s2 = 0; char what[16] = "";
+                if (sscanf(t, "%u:%15s", &s2, what) == 2 && s2 == sec) {
+                    if (what[0] == 'F' && !what[1]) { stbox_joy_event(1, 0x80); stbox_joy_event(1, 0x00); }
+                    else { unsigned sc = (unsigned)strtoul(what, NULL, 16);
+                           stbox_key_event((uint8_t)sc, 1); stbox_key_event((uint8_t)sc, 0); }
+                }
+            }
+        }
         /* poke it: space / return / fire / '1', one every 3 s after boot */
-        if (keys && sec >= 8 && (sec % 3) == 0) {
+        else if (keys && sec >= 8 && (sec % 3) == 0) {
             switch (key_phase++ & 3) {
                 case 0: stbox_key_event(0x39, 1); stbox_key_event(0x39, 0); break;   /* space  */
                 case 1: stbox_key_event(0x1C, 1); stbox_key_event(0x1C, 0); break;   /* return */

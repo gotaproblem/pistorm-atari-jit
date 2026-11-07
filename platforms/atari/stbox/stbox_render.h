@@ -16,6 +16,9 @@ extern "C" {
  * the size drawn, 0 if there is nothing usable (no rows). */
 int stbox_render_cap(const stbox_cap_t *c, int ste, uint32_t *dst,
                      uint32_t pitch, int *w, int *h);
+/* x0 = first cycle shown, cycles = how many (320..512). Default 56, 320.
+ * Pi: PISTORM_STBOX_VIEW=monitor gives 24, 384 (borders/overscan shown). */
+void stbox_render_set_view(int x0, int cycles);
 #ifdef __cplusplus
 }
 #endif
