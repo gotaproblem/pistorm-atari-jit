@@ -6,3 +6,5 @@ m68kops.c: local fix - m68k_op_move16_32 guarded with CPU_TYPE_IS_040_PLUS
 (upstream installs it for all CPU types unguarded; breaks TOS line-F on 68000).
 m68kconf.h: 010-040 generations compiled out - the STBOX is a plain 68000.
 m68kconf.h: TRACE -> ON (STBOX block). Upstream default OFF ignores the T bit; ST launchers/protections use it.
+m68kcpu.c: local addition m68k_cycles_to_instr_end() - cycles into the timeslice at the end of the running instruction (STBOX beam position for video-register accesses).
+m68kcpu.c: local addition m68k_use_cycles(n) - charge extra cycles (STBOX ST bus-slot padding from the instruction hook).

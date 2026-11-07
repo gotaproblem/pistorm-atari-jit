@@ -1032,6 +1032,24 @@ int m68k_cycles_remaining(void)
 	return GET_CYCLES();
 }
 
+/* PISTORM STBOX (local addition, not upstream): cycles into the current
+ * timeslice at the END of the instruction now executing. Musashi charges an
+ * instruction's cycles after its handler returns, so m68k_cycles_run() seen
+ * from a bus callback is the instruction's START; a beam-timed access (video
+ * counter read, palette/sync write) lands at the end of it on a 68000.
+ * Valid only inside m68k_execute(). */
+int m68k_cycles_to_instr_end(void)
+{
+	return m68ki_initial_cycles - GET_CYCLES() + (int)CYC_INSTRUCTION[REG_IR];
+}
+
+/* PISTORM STBOX (local addition): charge n extra cycles to the running
+ * timeslice - the ST's 4-cycle bus slot padding, from the instruction hook. */
+void m68k_use_cycles(int n)
+{
+	USE_CYCLES(n);
+}
+
 /* Change the timeslice */
 void m68k_modify_timeslice(int cycles)
 {

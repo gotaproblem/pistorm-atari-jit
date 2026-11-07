@@ -29,17 +29,11 @@
 #define ST_CPU_HZ      8021248u
 #define CYC_PER_LINE   512
 #define LINES_PER_VBL  313
-/* Display-enable window (PAL, 50 Hz, borders closed): DE is active on
- * lines 63..262, and within each of those for 320 of the 512 cycles,
- * starting 56 cycles into the line. The shifter fetches 160 bytes in
- * that window (one byte per two cycles); Timer B's event input is DE's
- * trailing edge, and the video address counter only advances while DE
- * is active. Games' raster code counts on all three. */
-#define DE_FIRST_LINE  63
-#define DE_LINES       200
-#define DE_START_CYC   56
-#define DE_CYC         320
-#define DE_BYTES       160
+/* Frame geometry. The GLUE's line length and frame height follow the sync
+ * and resolution registers (50 Hz: 512 x 313, 60 Hz: 508 x 263, 71 Hz:
+ * 224 x 501) and the display window is decided per line from the writes
+ * made during it - see BEAM-EXACT VIDEO below. These two are only the PAL
+ * defaults the pacing clamp is sized on. */
 #define CYC_PER_VBL    (CYC_PER_LINE * LINES_PER_VBL)
 #define MFP_HZ         2457600u
 #define IKBD_BYTE_CYC  10267        /* 8021248 / 781.25 bytes-per-sec   */
@@ -209,23 +203,6 @@ static inline uint32_t ram_map(uint32_t a, int *ok)
 static uint32_t g_vid_base;        /* latched video base                */
 static uint8_t  g_sync;            /* $FF820A                           */
 static uint8_t  g_res;             /* $FF8260                           */
-static uint8_t  g_bottom_open;     /* border opened during this frame   */
-static uint8_t  g_top_open;        /* top border opened this frame       */
-
-/* Top-border removal: the GLUE starts a 60 Hz display at line 34 and a
- * 50 Hz one at line 63. Flip SYNC to 60 Hz around line 33 and back, and a
- * 50 Hz frame's display - and with it the video address counter and the
- * DE edges Timer B counts - starts at line 34. Fullscreen code locks to
- * the beam by waiting for $FF8209 to move, so with the counter still
- * parked until line 63 it ran 29 lines late, overran into the next VBL,
- * and the main loop never got the CPU back (field case: the Replicants
- * Turrican II intro, deaf to SPACE). */
-#define DE_FIRST_LINE_60  34
-#define DE_END_LINE       ( DE_FIRST_LINE + DE_LINES )   /* 263, both */
-static inline uint32_t de_first_line(void)
-{
-    return g_top_open ? DE_FIRST_LINE_60 : DE_FIRST_LINE;
-}
 static uint16_t g_pal[16];
 
 /* ------------------------------------------------------------------ */
@@ -243,38 +220,12 @@ static uint8_t  g_hscroll;         /* $FF8265: 0-15 pixels              */
 
 static unsigned g_cap_w;                        /* buffer being filled    */
 static uint32_t g_disp_base;                    /* base latched at VBL    */
-
-/* Copy the line the beam just finished into the capture buffer. Called
- * from the slice loop at every line end: memory-only, at most 168 + 32
- * bytes, so it keeps the ipl_task admission rule. The address follows
- * the same model as the $FF8205/07/09 video counter: row r starts at
- * the latched base + r * stride (STE: plus linewidth and the extra
- * hscroll word group). */
-static void cap_line(uint32_t line)
-{
-    if (line < DE_FIRST_LINE || line >= DE_FIRST_LINE + STBOX_CAP_ROWS)
-        return;
-    if (!stbox_shared.ram || !stbox_shared.ram_size)
-        return;
-    uint32_t row = line - DE_FIRST_LINE;
-    stbox_cap_t *c = &stbox_cap[g_cap_w];
-    uint32_t hs = g_ste ? (g_hscroll & 15u) : 0u;
-    uint32_t len = 160u + (hs ? (g_res == 0 ? 8u : 4u) : 0u);
-    uint32_t stride = len + (g_ste ? (uint32_t)g_linewidth * 2u : 0u);
-    if (row == 0) {
-        c->res = g_res;
-        c->hscroll = (uint8_t)hs;
-    }
-    uint32_t mask = stbox_shared.ram_size - 1u;       /* power of two */
-    uint32_t addr = (g_disp_base + row * stride) & mask;
-    uint8_t *d = c->pix + row * STBOX_CAP_PITCH;
-    if (addr + len <= stbox_shared.ram_size)
-        memcpy(d, stbox_shared.ram + addr, len);
-    else
-        for (uint32_t i = 0; i < len; i++)
-            d[i] = stbox_shared.ram[(addr + i) & mask];
-    memcpy(c->pal[row], g_pal, sizeof c->pal[row]);
-}
+/* the beam-exact video model below is defined after the MFP (it pulses
+ * Timer B); these are the bits of it the register code above needs */
+enum { VK_SYNC = 1, VK_REZ, VK_PAL, VK_HS, VK_LW, VK_CNT };
+static inline uint32_t beam_now(void);
+static void vev_push(uint8_t kind, uint8_t i, uint16_t v);
+static uint32_t video_counter_now(void);
 
 /* STE DMA sound. Core 3 fetches samples in step with guest cycles and
  * pushes S16 stereo frames at the 50066 Hz master rate into the ring
@@ -805,6 +756,8 @@ static void fdc_command(uint8_t v)
 /* ================================================================== */
 static uint8_t g_hbl_pending, g_vbl_pending;
 
+static int g_in_exec_irq;             /* = g_in_exec, set by the slice   */
+static int g_irq_level;
 static void update_irq(void)
 {
     int level = 0;
@@ -813,6 +766,13 @@ static void update_irq(void)
     else if (g_vbl_pending) level = 4;
     else if (g_hbl_pending) level = 2;
     m68k_set_irq(level);
+    /* Musashi samples the IPL only when a timeslice starts (or SR
+     * changes); a 68000 samples it every instruction. A level raised by
+     * the instruction now running (an MFP enable/mask write) ends the
+     * slice after it, so it is taken next, not up to a slice later. */
+    if (g_in_exec_irq && level > g_irq_level)
+        m68k_end_timeslice();
+    g_irq_level = level;
 }
 
 static void mfp_raise(int ch)
@@ -1091,17 +1051,484 @@ static void mfp_timera_event(void)
     }
 }
 
-/* Timer B in event mode counts end-of-line (DE trailing edge) pulses */
+/* Timer B in event mode counts display-enable trailing edges. The video
+ * model calls this once per line that had DE, 28 cycles after DE ended
+ * (cycle 404 of a normal 50 Hz line, as Hatari measures it): never on a
+ * border line, so TOS's VBL sync sees the pulses stop in the blank. */
 static void mfp_timerb_event(void)
 {
-    if (g_line < de_first_line() || g_line >= DE_END_LINE)
-        return;
     if ((mfp.tbcr & 0x0F) == 0x08) {
         if (--mfp.tbmain == 0) {
             mfp.tbmain = mfp.tbdr;
             mfp_raise(MFP_CH_TIMER_B);
         }
     }
+}
+
+/* ================================================================== */
+/* BEAM-EXACT VIDEO (GLUE + Shifter)                                  */
+/*                                                                    */
+/* Lessons from making games run on the main machine's governed 68000  */
+/* (Turrican II, Risky Woods, the HDMI mirror; Oct-Nov 2026), applied  */
+/* to the box:                                                        */
+/*  - Beam-timed accesses happen on the real clock. A video counter    */
+/*    read or a sync/resolution/palette write is placed at the cycle   */
+/*    its instruction's bus access lands (beam_now), not at the start  */
+/*    of the 64-cycle slice it ran in.                                 */
+/*  - Interrupt latency is part of the picture. Slices are cut at the  */
+/*    next video or MFP event (line end = HBL, display end = Timer B,  */
+/*    a timer underflow), so an interrupt is taken within one          */
+/*    instruction of its cause, as on a 68000, not up to a slice late. */
+/*  - Timer B counts DE trailing edges: 28 cycles after the line's     */
+/*    display ends (404 on a normal 50 Hz line), only on lines with    */
+/*    display enable. It was counted at the START of each line, one    */
+/*    line early: every Timer B raster split sat a line too high.      */
+/*  - The GLUE decides each line from the registers at given cycles    */
+/*    (Hatari's STF table, wakestate 1, the one shifter_mirror.c uses):*/
+/*    length latched at 54, DE start at 52/56 or 4 with the left       */
+/*    border off, end at 372/376 or later with the right border off,   */
+/*    vertical DE decided at cycle 502 (top border off = 60 Hz there   */
+/*    on line 33, bottom = not 50 Hz there on line 262). Guessing      */
+/*    "a sync write near line 262" opened the bottom border but drew   */
+/*    the top-border-off picture from the wrong address.               */
+/*                                                                    */
+/* Register writes go into a ring stamped with their frame cycle. At   */
+/* each line end the line's writes are applied in order, the line is   */
+/* decided, its fetched bytes are copied out with its palette events,  */
+/* and the video counter moves on by what the line fetched.            */
+/* ================================================================== */
+#define VEV_N 2048                      /* > one line of Spectrum writes  */
+typedef struct { uint32_t c; uint16_t v; uint8_t k, i; } vev_t;
+static vev_t    g_vev[VEV_N];
+static uint32_t g_vev_r, g_vev_w;
+static uint32_t g_vev_drop;
+
+static int      g_in_exec;              /* inside m68k_execute            */
+extern int m68k_cycles_to_instr_end(void);   /* m68kcpu.c, STBOX addition */
+static void video_relatch_len(void);
+
+/* line state */
+static uint32_t g_line_start;           /* frame cycle the line began at  */
+static uint16_t g_line_len;             /* 512 / 508 / 224                */
+static uint16_t g_frame_lines;          /* 313 / 263 / 501                */
+static uint8_t  g_ls_sync, g_ls_rez;    /* registers at the line start    */
+static uint8_t  g_ls_hs, g_ls_lw;       /* STE fine scroll / line width   */
+static uint16_t g_ls_pal[16];           /* palette at the line start      */
+static uint8_t  g_vde;                  /* vertical DE for this line      */
+static uint8_t  g_next_left_off;        /* full-overscan line: no left    */
+static uint8_t  g_tb_done;              /* Timer B pulse given this line  */
+static uint32_t g_vcnt;                 /* video counter at the line's
+                                           first fetch                    */
+static uint8_t  g_cap_rows_any_med;
+static uint32_t g_tb_cache;             /* tb_point() result, valid until
+                                           a sync/rez write or line change */
+static uint8_t  g_tb_cache_ok;
+
+/* Where this instruction's bus access lands, in frame cycles. Musashi
+ * charges cycles after the instruction, so from a bus callback the run
+ * count is the instruction's start; its last bus cycle is ~4 before its
+ * end. Outside m68k_execute (blitter, bookkeeping) it is the slice edge. */
+static inline uint32_t beam_now(void)
+{
+    if (!g_in_exec)
+        return g_frame_cyc;
+    int c = m68k_cycles_to_instr_end() - 4;
+    return g_frame_cyc + (uint32_t)(c > 0 ? c : 0);
+}
+
+static void vev_push(uint8_t kind, uint8_t i, uint16_t v)
+{
+    if (g_vev_w - g_vev_r >= VEV_N) { g_vev_drop++; return; }
+    vev_t *e = &g_vev[g_vev_w & (VEV_N - 1)];
+    e->c = beam_now(); e->k = kind; e->i = i; e->v = v;
+    g_vev_w++;
+    if (kind == VK_SYNC || kind == VK_REZ || kind == VK_HS)
+        g_tb_cache_ok = 0;
+    /* the line length is latched at cycle 54: a rate write before it, on
+     * the line in progress, changes where this line ends */
+    if ((kind == VK_SYNC || kind == VK_REZ) && e->c >= g_line_start &&
+        e->c - g_line_start < 54) {
+        video_relatch_len();
+    }
+}
+
+static inline int vfreq(uint8_t sync, uint8_t rez)
+{
+    if (rez & 2) return 71;
+    return (sync & 2) ? 50 : 60;
+}
+static inline uint16_t vlen(int f)   { return f == 71 ? 224 : f == 60 ? 508 : 512; }
+static inline uint16_t vlines(int f) { return f == 71 ? 501 : f == 60 ? 263 : 313; }
+
+/* sync/rez changes within a line: cycle (snapped to the 4-cycle bus
+ * grid), rate and resolution from then on */
+typedef struct { uint16_t c; uint8_t f, rez; } vch_t;
+#define VCH_MAX 64
+
+static inline int f_at(const vch_t *ch, int n, int f0, int c)
+{
+    int f = f0;
+    for (int i = 0; i < n && ch[i].c <= c; i++) f = ch[i].f;
+    return f;
+}
+static inline int rez_at(const vch_t *ch, int n, int r0, int c)
+{
+    int r = r0;
+    for (int i = 0; i < n && ch[i].c <= c; i++) r = ch[i].rez;
+    return r;
+}
+
+typedef struct {
+    int16_t  fstart, pstart;
+    uint16_t bytes;                     /* 0 = no DE on this line         */
+    uint8_t  rez, extra, left_full;     /* left_full: next line left off  */
+} vline_t;
+
+/* Hatari's STF horizontal table (video.c, wakestate 1), as the HDMI
+ * mirror has it (shifter_mirror.c glue_frame). left_off_in = the previous
+ * line removed its right border to the end (no left border here). */
+static void hdecide(const vch_t *ch, int n, int f0, int r0, int len,
+                    int left_off_in, int hs, vline_t *o)
+{
+    memset(o, 0, sizeof *o);
+    if (f0 == 71 && n == 0) {           /* a 71 Hz (mono) line            */
+        o->fstart = o->pstart = 4; o->bytes = 80; o->rez = 2;
+        return;
+    }
+    int left_off = f_at(ch, n, f0, 4) == 71 || left_off_in;
+    int no_de = 0, start, bytes = 0;
+    if (left_off && f_at(ch, n, f0, 56) == 71 && f_at(ch, n, f0, 164) == 71) {
+        no_de = 1; start = 4;
+    } else {
+        if (!left_off) {
+            if (f_at(ch, n, f0, 28) == 71)      no_de = 1;
+            else if (f_at(ch, n, f0, 56) == 71) no_de = 1;
+        }
+        if (left_off)                           start = 4;
+        else if (f_at(ch, n, f0, 52) == 60)     start = 52;
+        else if (f_at(ch, n, f0, 56) == 50)     start = 56;
+        else                                    { start = 56; no_de = 1; }
+    }
+    if (!no_de) {
+        bytes = 160;
+        if (left_off)          bytes += 26;
+        else if (start == 52)  bytes += 2;
+        if (f_at(ch, n, f0, 164) == 71)
+            bytes -= 106;
+        else if (f_at(ch, n, f0, 372) == 60)
+            bytes -= 2;
+        else if (f_at(ch, n, f0, 376) == 50)
+            ;                                   /* a normal end           */
+        else {
+            bytes += 44;                        /* right border off       */
+            if (f_at(ch, n, f0, 376) == 71 || f_at(ch, n, f0, len - 50) == 71) {
+                bytes += 22;
+                o->left_full = 1;
+            }
+        }
+    }
+    o->fstart = (int16_t)start;
+    o->pstart = (int16_t)(left_off ? 0 : start);
+    /* after a left-border hi/lo switch the Shifter is back in low/medium
+     * by cycle 16 (Hatari LINE_LEFT_STAB_LOW) */
+    o->rez = (uint8_t)rez_at(ch, n, r0, left_off ? 16 : start);
+    if (o->rez > 1)
+        no_de = 1;                              /* hi-res fetch in colour */
+    if (!no_de) {
+        o->bytes = (uint16_t)bytes;
+        if (hs) o->extra = o->rez == 0 ? 8 : 4;
+    }
+}
+
+/* Collect the sync/rez changes of the current line made up to frame cycle
+ * `upto` (exclusive) from the ring, without consuming them. */
+static int line_changes(uint32_t upto, vch_t *ch, uint8_t *sync, uint8_t *rez)
+{
+    int n = 0;
+    for (uint32_t j = g_vev_r; j != g_vev_w; j++) {
+        const vev_t *e = &g_vev[j & (VEV_N - 1)];
+        if (e->c >= upto) break;
+        if (e->k == VK_SYNC) *sync = (uint8_t)e->v;
+        else if (e->k == VK_REZ) *rez = (uint8_t)e->v;
+        else continue;
+        if (n < VCH_MAX) {
+            uint32_t c = e->c - g_line_start;
+            ch[n].c = (uint16_t)(((c + 2) / 4) * 4);
+            ch[n].f = (uint8_t)vfreq(*sync, *rez);
+            ch[n].rez = *rez & 3;
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The current line as decided by the writes made so far (later cycles
+ * assume the registers stay as they are now). */
+static void line_peek(vline_t *o)
+{
+    vch_t ch[VCH_MAX];
+    uint8_t sy = g_ls_sync, rz = g_ls_rez;
+    int n = line_changes(0xFFFFFFFFu, ch, &sy, &rz);
+    hdecide(ch, n, vfreq(g_ls_sync, g_ls_rez), g_ls_rez & 3, g_line_len,
+            g_next_left_off, g_ste ? (g_ls_hs & 15) : 0, o);
+}
+
+static void video_relatch_len(void)
+{
+    vch_t ch[VCH_MAX];
+    uint8_t sy = g_ls_sync, rz = g_ls_rez;
+    int n = line_changes(g_line_start + 54, ch, &sy, &rz);
+    g_line_len = vlen(f_at(ch, n, vfreq(g_ls_sync, g_ls_rez), 54));
+    g_next_line_cyc = g_line_start + g_line_len;
+}
+
+static uint32_t video_counter_now(void)
+{
+    if (!g_vde)
+        return g_vcnt;
+    vline_t l;
+    line_peek(&l);
+    if (!l.bytes)
+        return g_vcnt;
+    int32_t c = (int32_t)(beam_now() - g_line_start);
+    if (c <= l.fstart)
+        return g_vcnt;
+    uint32_t off = (uint32_t)(c - l.fstart) / 2u;
+    if (off > (uint32_t)(l.bytes + l.extra))
+        off = l.bytes + l.extra;
+    return g_vcnt + (off & ~1u);
+}
+
+/* frame cycle of this line's Timer B pulse, or ~0 if none is due */
+static uint32_t tb_point(void)
+{
+    if (g_tb_done || !g_vde)
+        return 0xFFFFFFFFu;
+    if (g_tb_cache_ok)
+        return g_tb_cache;
+    g_tb_cache_ok = 1;
+    g_tb_cache = 0xFFFFFFFFu;
+    vline_t l;
+    line_peek(&l);
+    if (!l.bytes)
+        return 0xFFFFFFFFu;
+    uint32_t p = (uint32_t)(l.fstart + 2 * (l.bytes + l.extra)) + 28u;
+    if (p > g_line_len) p = g_line_len;
+    return g_tb_cache = g_line_start + p;
+}
+
+static void tb_check(void)
+{
+    if (g_frame_cyc >= tb_point()) {
+        g_tb_done = 1;
+        mfp_timerb_event();
+    }
+}
+
+/* the line just finished: apply its writes, decide it, capture it */
+static void line_end(void)
+{
+    const uint32_t end = g_line_start + g_line_len;
+    const int f0 = vfreq(g_ls_sync, g_ls_rez), r0 = g_ls_rez & 3;
+    const int len = g_line_len;
+    vch_t ch[VCH_MAX];
+    int n = 0;
+    uint32_t pev[STBOX_CAP_PALEV];
+    int npev = 0;
+    uint16_t pal0[16];
+    memcpy(pal0, g_ls_pal, sizeof pal0);
+    const uint8_t hs0 = g_ls_hs, lw0 = g_ls_lw;
+    int cnt_w = 0;
+    uint32_t cnt_v = g_vcnt;
+
+    while (g_vev_r != g_vev_w) {
+        const vev_t *e = &g_vev[g_vev_r & (VEV_N - 1)];
+        if (e->c >= end) break;
+        const uint32_t c = e->c - g_line_start;
+        switch (e->k) {
+        case VK_SYNC: case VK_REZ:
+            if (e->k == VK_SYNC) g_ls_sync = (uint8_t)e->v; else g_ls_rez = (uint8_t)e->v;
+            if (n < VCH_MAX) {
+                ch[n].c = (uint16_t)(((c + 2) / 4) * 4);
+                ch[n].f = (uint8_t)vfreq(g_ls_sync, g_ls_rez);
+                ch[n].rez = g_ls_rez & 3;
+                n++;
+            }
+            break;
+        case VK_PAL:
+            g_ls_pal[e->i & 15] = e->v;
+            if (npev < STBOX_CAP_PALEV)
+                pev[npev++] = STBOX_PEV(c > 1023 ? 1023 : c, e->i, e->v);
+            else                    /* overflow: lands at the line start */
+                pal0[e->i & 15] = e->v;
+            break;
+        case VK_HS:  g_ls_hs = (uint8_t)e->v; break;
+        case VK_LW:  g_ls_lw = (uint8_t)e->v; break;
+        case VK_CNT: {
+            const int sh = 16 - 8 * e->i;
+            if (!cnt_w) cnt_v = g_vcnt;
+            cnt_v = (cnt_v & ~(0xFFu << sh)) | ((uint32_t)(e->v & 0xFF) << sh);
+            cnt_w = 1;
+            break;
+        }
+        }
+        g_vev_r++;
+    }
+
+    vline_t l;
+    hdecide(ch, n, f0, r0, len, g_next_left_off, g_ste ? (hs0 & 15) : 0, &l);
+    g_next_left_off = l.left_full && l.bytes;
+
+    if (g_vde) {
+        stbox_cap_t *cp = &stbox_cap[g_cap_w];
+        if (cp->rows < STBOX_CAP_ROWS && stbox_shared.ram && stbox_shared.ram_size) {
+            const unsigned row = cp->rows++;
+            stbox_cap_line_t *cl = &cp->ln[row];
+            if (row == 0) {
+                cp->first_line = (uint16_t)g_line;
+                cp->res = (uint8_t)l.rez;
+                cp->hscroll = l.extra ? (uint8_t)(hs0 & 15) : 0;
+            }
+            cl->pstart = l.pstart;
+            cl->bytes = l.bytes;
+            cl->extra = l.extra;
+            cl->rez = l.rez;
+            cl->hs = l.extra ? (uint8_t)(hs0 & 15) : 0;
+            cl->npev = (uint8_t)npev;
+            if (l.rez == 1 && l.bytes) g_cap_rows_any_med = 1;
+            memcpy(cp->pal[row], pal0, sizeof pal0);
+            memcpy(cp->pev[row], pev, (size_t)npev * sizeof pev[0]);
+            uint32_t nb = (uint32_t)l.bytes + l.extra;
+            if (nb > STBOX_CAP_PITCH) nb = STBOX_CAP_PITCH;
+            if (nb) {
+                const uint32_t mask = stbox_shared.ram_size - 1u;   /* pow2 */
+                const uint32_t addr = g_vcnt & mask;
+                uint8_t *d = cp->pix + (size_t)row * STBOX_CAP_PITCH;
+                if (addr + nb <= stbox_shared.ram_size)
+                    memcpy(d, stbox_shared.ram + addr, nb);
+                else
+                    for (uint32_t i = 0; i < nb; i++)
+                        d[i] = stbox_shared.ram[(addr + i) & mask];
+            }
+        }
+        if (l.bytes) {
+            if (!g_tb_done) { g_tb_done = 1; mfp_timerb_event(); }  /* late */
+            g_vcnt += (uint32_t)l.bytes + l.extra + (g_ste ? 2u * lw0 : 0u);
+        }
+    }
+    if (cnt_w) g_vcnt = cnt_v;
+
+    /* vertical DE for the next line, decided at cycle 502 */
+    const int fv = f_at(ch, n, f0, len >= 503 ? 502 : len - 10);
+    const unsigned L = g_line;
+    if (g_frame_lines == 501) {                         /* mono frame     */
+        if (!g_vde) { if (L == 50) g_vde = 1; }
+        else if (L == 450) g_vde = 0;
+    } else {
+        const unsigned nobot = g_frame_lines == 313 ? 310 : 263;
+        if (!g_vde) {
+            if (L == 33 && (fv == 60 || fv == 71)) g_vde = 1;
+            else if (L == 62 && fv == 50)          g_vde = 1;
+        } else if ((L == 233 && fv == 60) || (L == 262 && fv == 50) ||
+                   L + 1 == nobot)
+            g_vde = 0;
+    }
+}
+
+/* a new line starts at g_line_start: latch its registers and length */
+static void line_begin(void)
+{
+    g_tb_done = 0;
+    g_tb_cache_ok = 0;
+    video_relatch_len();
+}
+
+/* frame start (line 0): publish the finished capture, reload the counter */
+static void frame_begin(int publish)
+{
+    if (publish) {
+        stbox_cap_t *cp = &stbox_cap[g_cap_w];
+        cp->mono = g_frame_lines == 501;
+        cp->any_med = g_cap_rows_any_med;
+        stbox_shared.vis_lines = cp->rows;
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        stbox_shared.cap_idx = g_cap_w;
+        g_cap_w = (g_cap_w + 1u) % STBOX_CAP_BUFS;
+    }
+    stbox_cap[g_cap_w].rows = 0;
+    g_cap_rows_any_med = 0;
+    g_frame_lines = vlines(vfreq(g_ls_sync, g_ls_rez));
+    g_disp_base = g_vid_base;
+    g_vcnt = g_vid_base;
+    g_vde = 0;
+    g_next_left_off = 0;
+}
+
+static void video_reset(void)
+{
+    g_vev_r = g_vev_w = 0;
+    g_line = 0; g_line_start = 0; g_frame_cyc = 0;
+    g_ls_sync = g_sync; g_ls_rez = g_res; g_ls_hs = 0; g_ls_lw = 0;
+    memcpy(g_ls_pal, g_pal, sizeof g_ls_pal);
+    for (unsigned i = 0; i < STBOX_CAP_BUFS; i++) stbox_cap[i].rows = 0;
+    frame_begin(0);
+    line_begin();
+}
+
+/* After a slice: lines that ended, Timer B, HBL/VBL. */
+static void video_advance(void)
+{
+    tb_check();
+    while (g_frame_cyc >= g_next_line_cyc) {
+        line_end();
+        const uint32_t next = g_line_start + g_line_len;
+        g_line++;
+        if (g_line >= g_frame_lines) {
+            /* rebase the frame clock and any writes already made in the
+             * new frame (an instruction can overshoot the boundary) */
+            g_frame_cyc -= next;
+            for (uint32_t j = g_vev_r; j != g_vev_w; j++)
+                g_vev[j & (VEV_N - 1)].c -= next;
+            g_line = 0;
+            g_line_start = 0;
+            frame_begin(1);
+            g_vbl_pending = 1;
+            stbox_shared.frame++;
+        } else {
+            g_line_start = next;
+            g_hbl_pending = 1;
+        }
+        update_irq();
+        line_begin();
+        tb_check();
+    }
+}
+
+/* Guest cycles until the next MFP timer underflow that can interrupt, so
+ * the slice ends there (MFP clock 2.4576 MHz in 32.32 against the CPU). */
+static uint32_t mfp_cycles_to_next(void)
+{
+    uint32_t best = 0xFFFFFFFFu;
+    struct { uint8_t cr, cnt; uint32_t acc; int ch; } t[4] = {
+        { mfp.tacr & 7, mfp.tamain, mfp.ta_acc, MFP_CH_TIMER_A },
+        { (mfp.tbcr & 0x08) ? 0 : (mfp.tbcr & 7), mfp.tbmain, mfp.tb_acc, MFP_CH_TIMER_B },
+        { (mfp.tcdcr >> 4) & 7, mfp.tcmain, mfp.tc_acc, MFP_CH_TIMER_C },
+        { mfp.tcdcr & 7, mfp.tdmain, mfp.td_acc, MFP_CH_TIMER_D },
+    };
+    if (mfp.tacr & 0x08) t[0].cr = 0;               /* event / pulse modes */
+    for (int i = 0; i < 4; i++) {
+        const uint16_t pre = mfp_presc[t[i].cr];
+        if (!pre) continue;
+        const int c = t[i].ch;
+        const uint8_t ie = c >= 8 ? (mfp.iera & (1u << (c - 8))) : (mfp.ierb & (1u << c));
+        if (!ie) continue;
+        const uint32_t cnt = t[i].cnt ? t[i].cnt : 256u;
+        const uint64_t ticks = (uint64_t)(cnt - 1) * pre + (pre - (t[i].acc % pre));
+        const uint64_t fp = (ticks << 32) - (g_mfp_fp & 0xFFFFFFFFu);
+        const uint64_t cyc = (fp + MFP_FP_STEP - 1) / MFP_FP_STEP;
+        if (cyc < best) best = cyc > 0xFFFFFFF0u ? 0xFFFFFFF0u : (uint32_t)cyc;
+    }
+    return best;
 }
 
 /* ================================================================== */
@@ -1119,9 +1546,33 @@ static void mfp_timerb_event(void)
  * road it took, not just the wall it hit */
 uint32_t stbox_pc_ring[STBOX_PC_RING];
 volatile unsigned stbox_pc_ring_idx;
+/* ST BUS SLOTS. The GLUE/MMU give the 68000 the bus on a 4-cycle grid, so
+ * on an ST every instruction takes a multiple of 4 cycles (exg 6 -> 8,
+ * dbra 10 -> 12, lsl #n 6+2n rounded up). Musashi charges the bare 68000
+ * counts; code timed on a real ST then runs ahead of the beam and lands
+ * its sync/palette writes early - which the beam-exact video model would
+ * faithfully show. The hook runs before each instruction: pad the one
+ * that just finished up to the grid. g_hook_last = cycles into this
+ * timeslice at the last boundary (reset by the slice, which pads the
+ * slice's last instruction itself). PISTORM_STBOX_WAIT4=0 turns it off. */
+static int      g_wait4 = -1;         /* -1 unread, 0 off, 1 on */
+static int      g_hook_last;
+extern int  m68k_cycles_run(void);
+extern void m68k_use_cycles(int n);
+static int wait4_on(void)
+{
+    if (g_wait4 < 0) { const char *e = getenv("PISTORM_STBOX_WAIT4"); g_wait4 = !(e && *e == '0'); }
+    return g_wait4;
+}
 void stbox_pc_hook(unsigned int pc)
 {
     stbox_pc_ring[stbox_pc_ring_idx++ & (STBOX_PC_RING - 1)] = pc;
+    if (g_wait4 > 0) {
+        int run = m68k_cycles_run();
+        int pad = (g_hook_last - run) & 3;
+        if (pad) { m68k_use_cycles(pad); run += pad; }
+        g_hook_last = run;
+    }
 }
 
 static int g_berr_nest;              /* inside bus-error processing    */
@@ -1279,36 +1730,15 @@ static uint32_t hw_read(uint32_t a, int size)
     if (a == 0xFF8201) return (g_vid_base >> 16) & 0xFF;
     if (a == 0xFF8203) return (g_vid_base >> 8) & 0xFF;
     if (a >= 0xFF8205 && a <= 0xFF8209) {          /* video counter */
-        /* base through the top border; +stride per visible line, byte per
-         * 2 cycles inside the DE window; base+200 lines through the bottom
-         * border until VBL reloads. Was one byte per 2 cycles for the
-         * WHOLE frame (80 KB by the bottom), which fed raster-sync code
-         * garbage line numbers (field case: Xenon 2, address error with
-         * $FF8207 in A0 in both ST and STE mode). STE: linewidth and the
-         * extra hscroll word group are part of the per-line stride. */
-        uint32_t stride = DE_BYTES;
-        if (g_ste) stride += (uint32_t)g_linewidth * 2 + (g_hscroll ? 8u : 0u);
-        uint32_t line = g_line, cyc = g_frame_cyc - (g_next_line_cyc - CYC_PER_LINE);
-        uint32_t off;
-#ifdef STBOX_OLD_VIDCOUNTER                    /* harness A/B: pre-fix model */
-        off = (g_frame_cyc / 2) & ~1u; (void)line; (void)cyc; (void)stride;
-#else
-        uint32_t first = de_first_line();
-        if (line < first)                          off = 0;
-        else if (line >= DE_END_LINE)              off = (DE_END_LINE - first) * stride;
-        else {
-            uint32_t in = 0;
-            if (cyc > DE_START_CYC) {
-                in = (cyc - DE_START_CYC) / 2;
-                if (in > DE_BYTES) in = DE_BYTES;
-            }
-            off = (line - first) * stride + (in & ~1u);
-        }
-#endif
-        uint32_t vc = (g_vid_base + off) & 0xFFFFFF;
+        /* where the Shifter is fetching at this instruction's bus cycle:
+         * frozen at the base in the top border, advancing one word per 4
+         * cycles through each line's display window (whatever border
+         * tricks set it to), frozen in the bottom border (VIDEO below) */
+        uint32_t vc = video_counter_now() & 0xFFFFFF;
         if (a == 0xFF8205) return (vc >> 16) & 0xFF;
         if (a == 0xFF8207) return (vc >> 8) & 0xFF;
-        return vc & 0xFF;
+        if (a == 0xFF8209) return vc & 0xFF;
+        return 0;                                  /* $FF8206/08: gaps */
     }
     if (a == 0xFF820A) return g_sync;
     if (a >= 0xFF8240 && a < 0xFF8260) {
@@ -1450,17 +1880,10 @@ static void hw_write(uint32_t a, uint32_t v, int size)
                                       ((v & 0xFF) << 8);
                          stbox_shared.video_base = g_vid_base; return; }
     if (a == 0xFF820A) {
+        /* stamped with the beam position it landed at: border removal,
+         * line length and the display window all follow from it */
         g_sync = (uint8_t)v;
-        /* Bottom-border removal: the GLUE's vertical-border compare is at
-         * the start of line 263 (PAL). A game defeats it by flipping the
-         * sync rate for one line right there, and the display then runs on
-         * to the physical bottom - about 32 more low-res lines. A write to
-         * SYNC (or REZ) in that window is the whole signature; anywhere
-         * else it is an ordinary rate set and means nothing here. */
-        if (g_line >= 260 && g_line <= 266)
-            g_bottom_open = 1;
-        if (g_line >= 32 && g_line <= 34)
-            g_top_open = 1;
+        vev_push(VK_SYNC, 0, g_sync);
         return;
     }
     if (a >= 0xFF8240 && a < 0xFF8260) {
@@ -1471,12 +1894,12 @@ static void hw_write(uint32_t a, uint32_t v, int size)
         else                w = (uint16_t)((w & 0x00FF) | ((v & 0xFF) << 8));
         g_pal[idx] = w & (g_ste ? 0x0FFF : 0x0777);   /* STE: 4 bits/gun */
         stbox_shared.palette[idx] = g_pal[idx];
+        vev_push(VK_PAL, (uint8_t)idx, g_pal[idx]);   /* lands at its pixel */
         return;
     }
     if (a == 0xFF8260) {
         g_res = v & 3; stbox_shared.shift_res = g_res;
-        if (g_line >= 260 && g_line <= 266)
-            g_bottom_open = 1;
+        vev_push(VK_REZ, 0, g_res);
         return;
     }
 
@@ -1485,11 +1908,19 @@ static void hw_write(uint32_t a, uint32_t v, int size)
         if (a == 0xFF820D) { g_vid_base = (g_vid_base & 0xFFFF00) | (v & 0xFE);
                              stbox_shared.video_base = g_vid_base; return; }
         if (a == 0xFF820F) { g_linewidth = (uint8_t)v;
-                             stbox_shared.linewidth = g_linewidth; return; }
+                             stbox_shared.linewidth = g_linewidth;
+                             vev_push(VK_LW, 0, g_linewidth); return; }
         if (a == 0xFF8264 || a == 0xFF8265) {
                              g_hscroll = (uint8_t)(v & 0x0F);
-                             stbox_shared.hscroll = g_hscroll; return; }
-        if (a >= 0xFF8205 && a <= 0xFF8209) return;   /* counter writes: sink */
+                             stbox_shared.hscroll = g_hscroll;
+                             vev_push(VK_HS, 0, g_hscroll); return; }
+        if (a == 0xFF8205 || a == 0xFF8207 || a == 0xFF8209) {
+            /* STE: the counter is writable; the Shifter fetches the next
+             * line from it (Hatari / the HDMI mirror do the same) */
+            vev_push(VK_CNT, (uint8_t)((a - 0xFF8205) >> 1), (uint16_t)(v & 0xFF));
+            return;
+        }
+        if (a >= 0xFF8205 && a <= 0xFF8209) return;
 
         /* DMA sound */
         if (!ste_nodma() && a >= 0xFF8900 && a <= 0xFF893F) {
@@ -1852,6 +2283,7 @@ void stbox_core_arm(uint64_t now, uint64_t cntfrq)
     g_cntfrq  = cntfrq;
     g_fp_step = ((uint64_t)ST_CPU_HZ << 32) / cntfrq;
     g_slice_cap_ticks = ((uint64_t)slice_cap_ns() * cntfrq) / 1000000000ull;
+    (void)wait4_on();          /* env read here, never on core 3 */
     /* settle the log flag here, on a host thread, so core 3 never reads env */
     STBOX_DBG("[STBOX] slice cap %d ns = %llu ticks (cntfrq %llu)\n",
             slice_cap_ns(), (unsigned long long)g_slice_cap_ticks,
@@ -1937,13 +2369,12 @@ static void machine_cold_reset(void)
     stbox_shared.vis_lines = 200;
     g_halted = 0;
     g_berr_nest = 0;
-    g_frame_cyc = 0; g_next_line_cyc = CYC_PER_LINE; g_line = 0;
     g_hbl_pending = g_vbl_pending = 0;
     g_total_cyc = 0; g_mfp_fp = 0;
     stbox_shared.frame = 0;
     stbox_shared.cap_idx = STBOX_CAP_NONE;
     g_cap_w = 0;
-    g_disp_base = 0;
+    video_reset();                     /* after g_sync/g_res/g_pal above */
     stbox_shared.video_base = 0;
     stbox_shared.shift_res = 0;
     m68k_pulse_reset();
@@ -2147,8 +2578,23 @@ void stbox_slice(uint64_t now)
             }
         }
         {
-            int cpu = m68k_execute(SLICE_CYC);
-            if (cpu <= 0) cpu = SLICE_CYC;
+            /* end the slice at the next video or timer event, so the
+             * interrupt it raises is taken at the next instruction */
+            uint32_t budget = SLICE_CYC;
+            uint32_t ev = g_next_line_cyc;
+            const uint32_t tb = tb_point();
+            if (tb < ev) ev = tb;
+            ev = ev > g_frame_cyc ? ev - g_frame_cyc : 1;
+            if (ev < budget) budget = ev;
+            const uint32_t mt = mfp_cycles_to_next();
+            if (mt < budget) budget = mt ? mt : 1;
+            g_in_exec = g_in_exec_irq = 1;
+            g_hook_last = 0;
+            int cpu = m68k_execute((int)budget);
+            g_in_exec = g_in_exec_irq = 0;
+            if (cpu <= 0) cpu = (int)budget;
+            else if (g_wait4 > 0)
+                cpu += (g_hook_last - cpu) & 3;   /* the last one's pad */
             if (cpu > SLICE_CYC * 2) g_stat_overrun++;
             ran += cpu;
         }
@@ -2167,41 +2613,10 @@ void stbox_slice(uint64_t now)
         mfp_advance((uint32_t)ran);
         if (g_ste && !ste_nodma()) dma_advance((uint32_t)ran);
 
-        /* scanline / frame bookkeeping */
+        /* scanline / frame bookkeeping: line ends (capture, HBL), the
+         * Timer B pulse, the frame end (publish, VBL) */
         g_frame_cyc += (uint32_t)ran;
-        while (g_frame_cyc >= g_next_line_cyc) {
-            g_next_line_cyc += CYC_PER_LINE;
-            cap_line(g_line);                   /* the line just finished */
-            g_line++;
-            mfp_timerb_event();
-            if (g_line >= LINES_PER_VBL) {
-                g_line = 0;
-                g_frame_cyc -= CYC_PER_VBL;
-                g_next_line_cyc = CYC_PER_LINE;
-                g_vbl_pending = 1;
-                /* Publish the height this frame actually reached, then
-                 * disarm for the next one. Sticky-free: a game that stops
-                 * opening the border is back to 200 the very next frame,
-                 * which is correct - the border is closed again. */
-                stbox_shared.vis_lines = g_bottom_open ? 232 : 200;
-                /* the finished frame goes to the renderer, and the next
-                 * one is shown from the base the guest holds NOW - a
-                 * write to $FF8201/03 during a frame takes effect at the
-                 * next one, as on the Shifter */
-                stbox_cap[g_cap_w].rows = stbox_shared.vis_lines;
-                __atomic_thread_fence(__ATOMIC_RELEASE);
-                stbox_shared.cap_idx = g_cap_w;
-                g_cap_w = (g_cap_w + 1u) % STBOX_CAP_BUFS;
-                g_disp_base = g_vid_base;
-                g_bottom_open = 0;
-                g_top_open = 0;
-                stbox_shared.frame++;
-                update_irq();
-            } else {
-                g_hbl_pending = 1;
-                update_irq();
-            }
-        }
+        video_advance();
 
         g_stat_slices++;
         if (g_halted) break;
