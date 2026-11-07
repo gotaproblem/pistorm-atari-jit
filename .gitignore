@@ -54,3 +54,8 @@ session-*.patch
 
 # session notes dropped beside the tree; the Drive folder is their home
 Claude outputs/
+
+# STBOX harness builds and raster test output
+tools/stbox-harness/harness-*
+tools/stbox-harness/obj-*/
+tools/stbox-harness/rasters/out/

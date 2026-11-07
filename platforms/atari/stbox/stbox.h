@@ -285,28 +285,47 @@ typedef struct {
 } stbox_shared_t;
 extern stbox_shared_t stbox_shared;
 
-/* SCANLINE CAPTURE (low and medium resolution). Core 3 copies each
- * displayed line out of the box's RAM as the box's beam finishes it, with
- * the palette that line was shown in, from a video base latched at the
- * start of the frame the way the Shifter latches it. The renderer then
- * converts a complete, consistent frame instead of reading live RAM
- * while the box is drawing the next one - which showed half-drawn
- * frames, and the back buffer of any game that sets the next screen
- * before the VBL (flicker), and one palette for the whole frame (raster
- * colours smeared). Three buffers: the renderer reads the newest while
- * core 3 fills another, and a buffer is only rewritten two frames
- * (40 ms) after it was published. High resolution (71 Hz, 400 lines)
- * does not fit the box's PAL frame model and stays on the live path. */
-#define STBOX_CAP_ROWS  248          /* 200, or 232 with the bottom border */
-#define STBOX_CAP_PITCH 168          /* 160 + one STE hscroll word group  */
-#define STBOX_CAP_BUFS  3
-#define STBOX_CAP_NONE  0xFFFFFFFFu
+/* SCANLINE CAPTURE, beam exact. Core 3 runs the GLUE line by line (the
+ * Hatari STF decision table the HDMI mirror uses, shifter_mirror.c): line
+ * length, display-enable start/end, left/right/top/bottom border removal,
+ * from the sync/resolution writes at the cycle they landed. At each line's
+ * end it copies the bytes that line fetched out of the box's RAM, with the
+ * resolution, fine scroll and first pixel cycle of that line, the palette
+ * at the line's start and every palette write made during it (cycle,
+ * index, value). The renderer (stbox_render.c) draws each row from that,
+ * so raster splits land on the right line, mid-line colour changes
+ * (Spectrum 512 style) land at their pixel, mixed low/medium frames and
+ * overscan draw as the Shifter drew them, and a frame is never read from
+ * live RAM while the box draws the next one. Rows are the lines with
+ * vertical display enable: 200 normally, up to 276 with the top and bottom
+ * borders open, 400 in high resolution. Three buffers: the renderer reads
+ * the newest while core 3 fills another. */
+#define STBOX_CAP_ROWS   400         /* 71 Hz mono; 276 max in colour     */
+#define STBOX_CAP_PITCH  264         /* 160 +26 left +44 right +22 +8 hs  */
+#define STBOX_CAP_PALEV  56          /* palette writes kept per line      */
+#define STBOX_CAP_BUFS   3
+#define STBOX_CAP_NONE   0xFFFFFFFFu
+/* palette event: cycle in line << 16 | index << 12 | 12-bit colour */
+#define STBOX_PEV(c, i, v) (((uint32_t)(c) << 16) | ((uint32_t)((i) & 15) << 12) | ((v) & 0xFFFu))
+typedef struct {
+    int16_t  pstart;                 /* cycle of the line's first pixel   */
+    uint16_t bytes;                  /* fetched and shown (0: no DE)      */
+    uint8_t  extra;                  /* STE fine-scroll prefetch bytes    */
+    uint8_t  rez;                    /* 0 low, 1 medium, 2 high           */
+    uint8_t  hs;                     /* STE fine scroll 0-15              */
+    uint8_t  npev;                   /* palette writes in pev[]           */
+} stbox_cap_line_t;
 typedef struct {
     uint8_t  pix[STBOX_CAP_ROWS * STBOX_CAP_PITCH];
-    uint16_t pal[STBOX_CAP_ROWS][16];
-    uint16_t rows;                   /* visible rows this frame           */
-    uint8_t  res;                    /* shifter resolution at frame start */
-    uint8_t  hscroll;                /* STE fine scroll at frame start    */
+    uint16_t pal[STBOX_CAP_ROWS][16];        /* palette at the line start */
+    uint32_t pev[STBOX_CAP_ROWS][STBOX_CAP_PALEV];
+    stbox_cap_line_t ln[STBOX_CAP_ROWS];
+    uint16_t rows;                   /* lines with vertical DE            */
+    uint16_t first_line;             /* frame line of row 0               */
+    uint8_t  mono;                   /* 71 Hz frame                       */
+    uint8_t  any_med;                /* a medium-res row: draw 640 wide   */
+    uint8_t  res;                    /* resolution at the first row       */
+    uint8_t  hscroll;                /* STE fine scroll at the first row  */
 } stbox_cap_t;
 extern stbox_cap_t stbox_cap[STBOX_CAP_BUFS];
 

@@ -38,6 +38,7 @@
 #include "stbox.h"
 #include "../et4000/et4000_drm.h"
 #include "../../../third_party/musashi/m68k.h"   /* m68k_disassemble */
+#include "stbox_render.h"
 
 /* config_file.h can't be included here: its M68K_CPU_TYPE_* enum (the
  * JIT-side copy) collides with the identical names in Musashi's m68k.h
@@ -348,66 +349,24 @@ static const uint8_t lvl[8] = { 0, 36, 73, 109, 146, 182, 219, 255 };
  * wrap within the (power-of-two) RAM size, so a base near the top of RAM
  * or a transiently wrong one can never read outside the buffer (field
  * report: SIGSEGV loading Xenon 2). */
-/* Low/medium resolution from the scanline capture (stbox.h, SCANLINE
- * CAPTURE): one consistent frame, each row in its own palette. Returns 0
- * when there is no capture to use (none yet, or high resolution) and the
- * live path below runs instead. */
+/* The scanline capture (stbox.h, SCANLINE CAPTURE), drawn by
+ * stbox_render.c: one consistent frame, every line as the box's GLUE
+ * decided it, palette writes at their pixel. Returns 0 when there is no
+ * capture to use yet and the live path below runs instead. */
 static int convert_cap(uint8_t *dst, uint32_t pitch, int *out_w, int *out_h)
 {
     uint32_t idx = stbox_shared.cap_idx;
     if (idx >= STBOX_CAP_BUFS)
         return 0;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    const stbox_cap_t *c = &stbox_cap[idx];
-    const int res = c->res;
-    if (res > 1)
+    int w = 0, h = 0;
+    if (!stbox_render_cap(&stbox_cap[idx], stbox_shared.ste, (uint32_t *)dst,
+                          pitch / 4u, &w, &h))
         return 0;
-    const int ste = stbox_shared.ste;
-    const int hs = ste ? (c->hscroll & 15) : 0;
-    int rows = res == 0 ? (int)c->rows : 200;
-    if (rows < 200) rows = 200;
-    if (rows > STBOX_CAP_ROWS) rows = STBOX_CAP_ROWS;
-
-    for (int y = 0; y < rows; y++) {
-        uint32_t pal[16];
-        for (int i = 0; i < 16; i++) {
-            uint16_t p = c->pal[y][i];
-            if (ste) {
-                #define STE_LVL(n) ((uint8_t)(((((n) & 7) << 1) | (((n) >> 3) & 1)) * 17))
-                pal[i] = 0xFF000000u | ((uint32_t)STE_LVL(p >> 8) << 16) |
-                         ((uint32_t)STE_LVL(p >> 4) << 8) | STE_LVL(p);
-                #undef STE_LVL
-            } else {
-                pal[i] = 0xFF000000u | ((uint32_t)lvl[(p >> 8) & 7] << 16) |
-                         ((uint32_t)lvl[(p >> 4) & 7] << 8) | lvl[p & 7];
-            }
-        }
-        const uint8_t *s = c->pix + (size_t)y * STBOX_CAP_PITCH;
-        uint32_t *d = (uint32_t *)(dst + (size_t)y * pitch);
-        uint8_t px[656];
-        uint8_t *o = px;
-        if (res == 0) {
-            const int groups = 20 + (hs ? 1 : 0);
-            for (int g = 0; g < groups; g++, s += 8) {
-                uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
-                uint16_t p2 = (s[4] << 8) | s[5], p3 = (s[6] << 8) | s[7];
-                for (int b = 15; b >= 0; b--)
-                    *o++ = (uint8_t)(((p0 >> b) & 1) | (((p1 >> b) & 1) << 1) |
-                                     (((p2 >> b) & 1) << 2) | (((p3 >> b) & 1) << 3));
-            }
-            for (int x = 0; x < 320; x++) *d++ = pal[px[hs + x]];
-        } else {
-            const int groups = 40 + (hs ? 1 : 0);
-            for (int g = 0; g < groups; g++, s += 4) {
-                uint16_t p0 = (s[0] << 8) | s[1], p1 = (s[2] << 8) | s[3];
-                for (int b = 15; b >= 0; b--)
-                    *o++ = (uint8_t)(((p0 >> b) & 1) | (((p1 >> b) & 1) << 1));
-            }
-            for (int x = 0; x < 640; x++) *d++ = pal[px[hs + x]];
-        }
-    }
-    *out_w = res == 0 ? 320 : 640;
-    *out_h = rows;
+    if (w > SRC_W) w = SRC_W;                  /* buffer is 640 x 400   */
+    if (h > SRC_H) h = SRC_H;
+    *out_w = w;
+    *out_h = h;
     return 1;
 }
 

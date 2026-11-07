@@ -9,6 +9,8 @@
  * disassembly), trace count, halts, and whether the screen keeps changing.
  *
  *   harness --tos ROM --disk IMG [--ste] [--secs N] [--ram KB] [--nokeys]
+ *           [--dump PREFIX]   (PREFIX.ppm + PREFIX.rows: the last frame drawn
+ *                              exactly as the Pi draws it, rows summarised)
  *
  * Verdict line at the end: RUNNING / STUCK / CRASH / HALT, plus the facts.
  */
@@ -47,6 +49,60 @@ static uint32_t screen_hash(void)
     return fnv(stbox_shared.ram + vb, 32000) ^ (uint32_t)stbox_shared.shift_res;
 }
 
+/* ---- frame dump: the newest capture rendered as the Pi shows it ---- */
+#include "stbox_render.h"
+static int render_newest(uint32_t *px, int *w, int *h)
+{
+    uint32_t idx = stbox_shared.cap_idx;
+    if (idx >= STBOX_CAP_BUFS) return 0;
+    return stbox_render_cap(&stbox_cap[idx], stbox_shared.ste, px, 1024, w, h);
+}
+
+/* PPM of the newest frame plus a row summary: identical rows folded, each
+ * row as colour runs "RRGGBB x0-x1". */
+static void dump_frame(const char *prefix)
+{
+    static uint32_t px[1024 * 512];
+    int w = 0, h = 0;
+    memset(px, 0, sizeof px);
+    if (!render_newest(px, &w, &h)) { printf("DUMP none\n"); return; }
+    char fn[512];
+    snprintf(fn, sizeof fn, "%s.ppm", prefix);
+    FILE *f = fopen(fn, "wb");
+    if (f) {
+        fprintf(f, "P6\n%d %d\n255\n", w, h);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+            uint32_t v = px[(size_t)y * 1024 + x];
+            fputc((v >> 16) & 255, f); fputc((v >> 8) & 255, f); fputc(v & 255, f);
+        }
+        fclose(f);
+    }
+    snprintf(fn, sizeof fn, "%s.rows", prefix);
+    f = fopen(fn, "w");
+    if (!f) return;
+    fprintf(f, "frame %dx%d\n", w, h);
+    char prev[4096] = "", cur[4096];
+    int run0 = 0;
+    for (int y = 0; y <= h; y++) {
+        cur[0] = 0;
+        if (y < h) {
+            int x0 = 0; size_t n = 0;
+            for (int x = 1; x <= w; x++) {
+                uint32_t a = px[(size_t)y * 1024 + x0] & 0xFFFFFF;
+                if (x == w || (px[(size_t)y * 1024 + x] & 0xFFFFFF) != a) {
+                    if (n < sizeof cur - 32) n += (size_t)snprintf(cur + n, sizeof cur - n, " %06X %d-%d", a, x0, x - 1);
+                    x0 = x;
+                }
+            }
+        }
+        if (y == h || strcmp(cur, prev)) {
+            if (y) fprintf(f, "rows %3d-%3d:%s\n", run0, y - 1, prev);
+            strcpy(prev, cur); run0 = y;
+        }
+    }
+    fclose(f);
+}
+
 static const char *vecname(uint32_t v)
 {
     switch (v) { case 2: return "BUS"; case 3: return "ADDR"; case 4: return "ILLEGAL";
@@ -57,6 +113,7 @@ int main(int argc, char **argv)
 {
     const char *tos = NULL, *disk = NULL;
     int ste = 0, secs = 60, ram_kb = 1024, keys = 1, verbose = 0;
+    const char *dump = NULL;     /* --dump PREFIX: PREFIX.ppm + PREFIX.rows at the end */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--tos") && i + 1 < argc) tos = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
@@ -65,6 +122,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--ram") && i + 1 < argc) ram_kb = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nokeys")) keys = 0;
         else if (!strcmp(argv[i], "-v")) verbose = 1;
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
         else { fprintf(stderr, "bad arg %s\n", argv[i]); return 2; }
     }
     if (!tos) { fprintf(stderr, "need --tos\n"); return 2; }
@@ -254,6 +312,7 @@ int main(int argc, char **argv)
         }
         printf("  %u sectors total\n", nfdc);
     }
+    if (dump) dump_frame(dump);
     struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
     double host_s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     unsigned ran = stbox_shared.frame / 50;

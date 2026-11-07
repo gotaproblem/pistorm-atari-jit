@@ -88,6 +88,7 @@ CFILES += platforms/atari/psctrl/psctrl_tunables.c \
           config_file/config_file_save.c \
           platforms/atari/stbox/stbox.c \
           platforms/atari/stbox/stbox_host.c \
+          platforms/atari/stbox/stbox_render.c \
           platforms/atari/stbox/stbox_psg.c \
           platforms/atari/stbox/stbox_realfdc.c \
           platforms/atari/stbox/stbox_blit.c \

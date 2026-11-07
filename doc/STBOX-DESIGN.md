@@ -74,6 +74,37 @@ tracked at 2 457 600 Hz via fixed point. IKBD bytes paced at 7812.5 baud.
    EmuTOS's BSS (IKBD/MIDI handler pointers at $25A4), and the next
    keyboard interrupt jumped into the fill pattern - box stuck on the
    "EmuTOS Version 1.3" crash screen whenever a disk was in drive A.
+6. **Beam-timed accesses happen on the real clock** (the main machine's
+   Turrican II lesson). Musashi charges an instruction's cycles after it
+   runs, and the box used to place every video access at the start of its
+   64-cycle slice: video counter reads, palette and sync/resolution writes
+   were up to a slice off. `beam_now()` puts them at the end of the
+   instruction doing the access (`m68k_cycles_to_instr_end()`, a local
+   Musashi addition).
+7. **Interrupt latency is part of the picture.** Musashi samples the IPL
+   only when a timeslice starts, so an HBL, Timer B or timer interrupt was
+   taken up to a slice late. Slices now end at the next line end, Timer B
+   pulse and MFP timer underflow, and an MFP write that raises the level
+   ends the slice after that instruction.
+8. **Timer B fires 28 cycles after DE ends** (cycle 404 of a 50 Hz line,
+   Hatari's measurement), only on lines with display enable. It used to be
+   counted at the START of each line - one line early, so every Timer B
+   raster split, status-bar switch and palette band sat a line too high.
+9. **The GLUE decides each line.** Hatari's STF table (the one
+   `shifter_mirror.c` uses): line length latched at cycle 54, DE start at
+   52/56 (or 4 with the left border off), end at 372/376 (or later with
+   the right border off), vertical DE decided at cycle 502 (top border off
+   = 60 Hz there on line 33, bottom = not 50 Hz there on line 262). The box
+   used to guess "a sync write near line 262 opens the bottom border" and
+   draw the top-border-off picture from the wrong address, with the top 29
+   lines missing.
+10. **ST bus slots: every instruction is a multiple of 4 cycles.** The
+   GLUE/MMU hand the 68000 the bus on a 4-cycle grid (exg 6 -> 8, dbra 10
+   -> 12). Musashi charges bare 68000 counts, so code timed on a real ST ran
+   ahead of the beam; with finding 9 exact, its border and palette writes
+   would land early. The instruction hook pads each instruction to the grid
+   (`PISTORM_STBOX_WAIT4=0` = bare counts, for A/B). Not modelled: the
+   E-clock jitter of HBL/VBL autovector acknowledges.
 
 ## STE tier
 
@@ -89,11 +120,27 @@ machine and TOS 2.06's `$FF820D` probe still reads 0.
 | DMA sound `$FF8900-25`: play/repeat, frame start/end/counter, mono/stereo, 6258-50066 Hz, microwire master/L/R volume. Frame end pulses Timer A (event mode) and GPIP7. | core 3 fetches the bytes owed per slice (a handful) into an S16 stereo ring at 50066 Hz; `stbox_dmasnd.c` drains it into SDL | memory-only on core 3; SDL resamples/mixes off-core |
 | Joypad/paddle ports `$FF9200-3F` | decoded, idle (no input) | none |
 
-Not modelled: LMC1992 bass/treble/mixer (PSG always mixed), video-counter
-writes (`$FF8205/07/09`, sink), scanline-granular shifter effects (frame
-tier). Host routing of a game controller into `$FF9200` is the next step.
+Not modelled: LMC1992 bass/treble/mixer (PSG always mixed). Video-counter
+writes (`$FF8205/07/09`) take effect at the next line, as in Hatari and the
+HDMI mirror (STE split screens). Host routing of a game controller into `$FF9200` is the next step.
 
 ## Video out
+
+Beam exact (`stbox.c`, BEAM-EXACT VIDEO; `stbox_render.c`). Every
+sync/resolution/palette/STE register write goes into a ring stamped with
+the frame cycle it landed at. At each line end core 3 applies that line's
+writes, decides the line (findings 8-9), copies the bytes it fetched out of
+the box's RAM with its first-pixel cycle, resolution and fine scroll, the
+palette at the line start and every palette write during it, and moves the
+video counter on. The render thread draws the newest complete frame: the
+display window (cycles 56..376), 320 wide or 640 when any row is medium,
+one row per line with vertical DE (200; up to 276 with the borders open;
+400 mono), a palette write at cycle c from pixel c-28 on. So raster bands
+land on the right line, Spectrum-512-style mid-line colours at their
+pixel, low/medium status bars and STE split screens (per-line fine scroll,
+line width, counter writes) draw as on the Shifter. Overscan pixels outside
+the window are clipped. 60 Hz and 71 Hz frames have their own line length
+and height (508 x 263, 224 x 501).
 
 Sandbox Shifter → planar-to-XRGB8888 conversion (all three ST modes) into
 double-buffered dumb buffers → spare overlay plane on the guest CRTC
@@ -113,6 +160,15 @@ TOS path accepts a HOSTFS drive form (`X:\...`) or a literal host path;
 empty falls back to env `PISTORM_STBOX_TOS`, then cfg `stbox_tos`.
 
 ## Testing without the Pi
+
+Raster test ROMs (`tools/stbox-harness/rasters/`, GNU as for m68k, no TOS
+needed): Timer B bands, a counter-polled split, top+bottom border removal,
+a medium-res status area, mid-line palette writes, an STE split screen.
+`tools/stbox-harness/build.sh cur && tools/stbox-harness/rasters/run.sh`
+checks each frame against what a real ST shows (all six failed before the
+beam-exact model except the counter split; all pass now). `harness --dump
+PREFIX` writes the last frame, drawn exactly as the Pi draws it, as
+PREFIX.ppm plus a row summary.
 
 `stbox.c` + Musashi compile and run on any host. The harness boots a real
 TOS image headless by driving `stbox_slice()` with a synthetic arch timer
@@ -141,8 +197,8 @@ Real-Gotek bridge (stbox_realfdc.c) is EXPERIMENTAL, off by default
 flock test-and-set against the main guest's ACSI, PSG select latch
 save/restore. Field status: not yet booting; park until wanted.
 
-Not yet: GEMDOS HD, scanline palette (frame tier - mid-frame
-rasters smear), disk write-back (writes stay in memory), STE joypad host
+Not yet: GEMDOS HD, overscan pixels outside the display window
+(drawn into the line, clipped by the window), disk write-back (writes stay in memory), STE joypad host
 routing (`$FF9200` reads idle), joystick host
 routing from USB (NatFeat path exists), sandbox IKBD commands reaching the
 REAL IKBD (the box's TOS/game configures only the sandbox IKBD model, so a
