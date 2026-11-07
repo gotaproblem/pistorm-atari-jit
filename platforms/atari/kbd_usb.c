@@ -1307,8 +1307,9 @@ static int stbox_divert_real_byte(uint8_t v)
  *   Ctrl + Alt + Undo          restart the emulator (exit 42: the launcher
  *                              relaunches, the setup page comes up and the
  *                              .cfg is re-read)
- *   Ctrl + Alt + Shift + Undo  abort the emulator (exit 0: back to the
- *                              console)
+ *   Ctrl + Alt + Shift + Undo  shut Linux down (exit 43: run-pistorm.sh
+ *                              halts the Pi; run by hand, the emulator just
+ *                              ends)
  *   Ctrl + Alt + Clr/Home      eject the disk in A:
  *   Ctrl + Alt + Insert        put the next disk of the set in A:
  *                              ("(Disk 1 of 2)" -> "(Disk 2 of 2)")
@@ -1322,7 +1323,7 @@ static int stbox_divert_real_byte(uint8_t v)
  * reading the keyboard. USB keys are watched where they arrive, so the
  * USB combination works whatever the guest is doing. PISTORM_HOTKEYS=0
  * turns both off. */
-extern void pistorm_request_exit(int restart);   /* emulator.c */
+extern void pistorm_request_exit(int mode);   /* emulator.c: 1 restart, 0 stop, 2 halt */
 
 struct hk_state { uint8_t ctrl, alt, lsh, rsh; };
 
@@ -1348,12 +1349,12 @@ static void hk_key(struct hk_state *h, uint8_t sc, int down, const char *src)
         return;
     }
     if (sc == 0x61 && down && h->ctrl && h->alt) {  /* Undo        */
-        int abort_it = h->lsh || h->rsh;
+        int halt_it = h->lsh || h->rsh;
         printf("[KBD] Ctrl+Alt+%sUndo on the %s keyboard - %s\n",
-               abort_it ? "Shift+" : "", src,
-               abort_it ? "aborting the emulator" : "restarting the emulator");
+               halt_it ? "Shift+" : "", src,
+               halt_it ? "shutting Linux down" : "restarting the emulator");
         fflush(stdout);
-        pistorm_request_exit(!abort_it);
+        pistorm_request_exit(halt_it ? 2 : 1);
     }
 }
 
@@ -1368,7 +1369,7 @@ int kbd_hotkeys_on(void)
         hk_trace = e && *e == '2';
         if (on)
             printf("[KBD] hotkeys: Ctrl+Alt+Undo restarts, Ctrl+Alt+Shift+Undo "
-                   "aborts the emulator, Ctrl+Alt+Clr/Home ejects A:, "
+                   "shuts Linux down, Ctrl+Alt+Clr/Home ejects A:, "
                    "Ctrl+Alt+Insert inserts the next disk "
                    "(PISTORM_HOTKEYS=0 turns them off%s)\n",
                    hk_trace ? "; =2 tracing" : "");
