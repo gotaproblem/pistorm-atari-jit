@@ -1325,6 +1325,12 @@ static void tb_check(void)
     }
 }
 
+#ifdef STBOX_LINE_LOG
+/* harness-only: what the GLUE decided for every line of the last frames */
+stbox_linelog_t stbox_linelog[2][512];
+volatile unsigned stbox_linelog_frame;          /* frame the [f&1] set is */
+#endif
+
 /* the line just finished: apply its writes, decide it, capture it */
 static void line_end(void)
 {
@@ -1376,8 +1382,22 @@ static void line_end(void)
     }
 
     vline_t l;
+    const int left_in = g_next_left_off;
     hdecide(ch, n, f0, r0, len, g_next_left_off, g_ste ? (hs0 & 15) : 0, &l);
     g_next_left_off = l.left_full && l.bytes;
+#ifdef STBOX_LINE_LOG
+    if (g_line < 512) {
+        stbox_linelog_t *lg = &stbox_linelog[stbox_shared.frame & 1][g_line];
+        lg->vde = g_vde; lg->len = (uint16_t)len; lg->f0 = (uint8_t)f0; lg->r0 = (uint8_t)r0;
+        lg->left_in = (uint8_t)left_in; lg->fstart = l.fstart; lg->pstart = l.pstart;
+        lg->bytes = l.bytes; lg->rez = l.rez; lg->extra = l.extra; lg->vcnt = g_vcnt;
+        lg->npev = (uint8_t)npev; lg->nch = (uint8_t)(n > 8 ? 8 : n);
+        for (int i = 0; i < lg->nch; i++) { lg->ch_c[i] = ch[i].c; lg->ch_f[i] = ch[i].f; lg->ch_r[i] = ch[i].rez; }
+        stbox_linelog_frame = stbox_shared.frame;
+    }
+#else
+    (void)left_in;
+#endif
 
     if (g_vde) {
         stbox_cap_t *cp = &stbox_cap[g_cap_w];

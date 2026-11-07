@@ -103,6 +103,31 @@ static void dump_frame(const char *prefix)
     fclose(f);
 }
 
+#ifdef STBOX_LINE_LOG
+/* PREFIX.lines: every line of the last complete frame - vertical DE, rate
+ * and resolution at the start, the sync/rez writes (cycle:rate/rez), what
+ * the GLUE decided (first fetch/pixel cycle, bytes, rez) and the counter */
+static void dump_lines(const char *prefix)
+{
+    char fn[512];
+    snprintf(fn, sizeof fn, "%s.lines", prefix);
+    FILE *f = fopen(fn, "w");
+    if (!f) return;
+    const unsigned fr = stbox_linelog_frame;
+    const stbox_linelog_t *L = stbox_linelog[(fr + 1) & 1];  /* the complete one */
+    fprintf(f, "frame %u (previous, complete)\n line vde len f0 r0 lin | fst pst bytes rez ext | vcnt   npev | writes c:f/r\n", fr - 1);
+    for (int y = 0; y < 512; y++) {
+        const stbox_linelog_t *l = &L[y];
+        if (!l->len) continue;
+        fprintf(f, "%4d %u %3u %2u %u %u | %3d %3d %3u %u %u | %06X %2u |", y, l->vde, l->len, l->f0, l->r0,
+                l->left_in, l->fstart, l->pstart, l->bytes, l->rez, l->extra, l->vcnt & 0xFFFFFF, l->npev);
+        for (int i = 0; i < l->nch; i++) fprintf(f, " %u:%u/%u", l->ch_c[i], l->ch_f[i], l->ch_r[i]);
+        fputc('\n', f);
+    }
+    fclose(f);
+}
+#endif
+
 static const char *vecname(uint32_t v)
 {
     switch (v) { case 2: return "BUS"; case 3: return "ADDR"; case 4: return "ILLEGAL";
@@ -114,6 +139,7 @@ int main(int argc, char **argv)
     const char *tos = NULL, *disk = NULL;
     int ste = 0, secs = 60, ram_kb = 1024, keys = 1, verbose = 0;
     const char *dump = NULL;     /* --dump PREFIX: PREFIX.ppm + PREFIX.rows at the end */
+    const char *dumpat = NULL;   /* --dumpat 2,5,10: also PREFIX-<sec>.* at those seconds */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--tos") && i + 1 < argc) tos = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
@@ -123,6 +149,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--nokeys")) keys = 0;
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
+        else if (!strcmp(argv[i], "--dumpat") && i + 1 < argc) dumpat = argv[++i];
         else { fprintf(stderr, "bad arg %s\n", argv[i]); return 2; }
     }
     if (!tos) { fprintf(stderr, "need --tos\n"); return 2; }
@@ -265,6 +292,17 @@ int main(int argc, char **argv)
             for (int k = 8; k > 0; k--) printf(" %06X", stbox_pc_ring[(idx - (unsigned)k) & (STBOX_PC_RING - 1)]);
             printf("\n");
         }
+        if (dump && dumpat) {
+            char list[256]; snprintf(list, sizeof list, ",%s,", dumpat);
+            char key[16]; snprintf(key, sizeof key, ",%u,", sec);
+            if (strstr(list, key)) {
+                char pf[512]; snprintf(pf, sizeof pf, "%s-%02u", dump, sec);
+                dump_frame(pf);
+#ifdef STBOX_LINE_LOG
+                dump_lines(pf);
+#endif
+            }
+        }
         uint32_t h = screen_hash();
         if (h != last_hash) { last_hash = h; last_change_sec = sec; }
 
@@ -313,6 +351,9 @@ int main(int argc, char **argv)
         printf("  %u sectors total\n", nfdc);
     }
     if (dump) dump_frame(dump);
+#ifdef STBOX_LINE_LOG
+    if (dump) dump_lines(dump);
+#endif
     struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
     double host_s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     unsigned ran = stbox_shared.frame / 50;
