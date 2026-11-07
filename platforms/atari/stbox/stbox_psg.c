@@ -18,6 +18,7 @@
 #include "stbox.h"
 #include "../audio/dmasnd.h"
 #include "../audio/emu2149.h"
+#include "../psctrl/psctrl_tunables.h"     /* pst_ym_lag_ms, shared with ym2149.c */
 
 #define YM_CLOCK 2000000u
 #define YM_RATE  250000u
@@ -32,7 +33,7 @@ static PSG *g_psg;
 static SDL_AudioStream *g_stream;
 static atomic_int g_on;
 static uint64_t g_render_t;            /* ns, lags wall clock          */
-static uint64_t g_lag_ns = 30000000ull;
+static uint64_t g_lag_ns = 100000000ull;   /* = pst_ym_lag_ms, read per callback */
 static int32_t  g_dc_acc;
 static uint64_t g_tick_num, g_tick_den;   /* ticks -> ns conversion    */
 
@@ -67,10 +68,34 @@ static void SDLCALL stbox_psg_feed(void *ud, SDL_AudioStream *stream,
         return;
     int frames = (additional + (int)sizeof(int16_t) - 1) / (int)sizeof(int16_t);
 
+    /* The main machine's YM clock discipline (ym2149.c, measured there on
+     * a digidrum capture): never slam the render clock back - the old
+     * "render_t > now -> now - lag" reset fought SDL's bursty queue refill
+     * in a ~1 Hz limit cycle and warped event application by 5-20 ms, the
+     * audible stutter on a sample player (Turrican II in the box). Slew
+     * toward now - lag by at most 0.5% of the callback's span; jump only on
+     * the first call or a gross (>1 s) desync. Lag = pst_ym_lag_ms (default
+     * 100 ms, field-verified clean; 30 ms here sat inside SDL's ~25 ms pull
+     * bursts plus the box's own up-to-a-VBL pacing debt). */
+    {
+        long ms = pst_ym_lag_ms;
+        if (ms < 5) ms = 5;
+        if (ms > 200) ms = 200;
+        g_lag_ns = (uint64_t)ms * 1000000ull;
+    }
     uint64_t now = now_ns();
-    if (g_render_t == 0 || g_render_t > now ||
-        now - g_render_t > g_lag_ns + 300000000ull)
-        g_render_t = (now > g_lag_ns) ? now - g_lag_ns : 0;
+    uint64_t target = (now > g_lag_ns) ? now - g_lag_ns : 0;
+    if (g_render_t == 0 ||
+        (g_render_t > target ? g_render_t - target
+                             : target - g_render_t) > 1000000000ull) {
+        g_render_t = target;
+    } else {
+        int64_t diff = (int64_t)target - (int64_t)g_render_t;
+        int64_t max_slew = (int64_t)((uint64_t)frames * STEP_NS) / 200;
+        if (diff >  max_slew) diff =  max_slew;
+        if (diff < -max_slew) diff = -max_slew;
+        g_render_t += diff;
+    }
 
     unsigned t_idx = stbox_psg_tail;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
