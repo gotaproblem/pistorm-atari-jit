@@ -130,6 +130,62 @@ static void dump_lines(const char *prefix)
 }
 #endif
 
+/* ---- --wav FILE: the box's YM writes played through emu2149 (the synth
+ * the Pi's stbox_psg.c uses) at their timestamps, 50 kHz mono 16-bit ---- */
+#include "emu2149.h"
+extern stbox_psg_ev stbox_psg_ring[STBOX_PSG_RING];
+extern volatile unsigned stbox_psg_head, stbox_psg_tail;
+static FILE *g_wav;
+static PSG *g_wpsg;
+static uint64_t g_wrender_ns;            /* render clock                   */
+static uint32_t g_wav_frames;
+static int32_t g_wdc, g_wacc; static int g_wsub;
+static void wav_open(const char *fn)
+{
+    g_wav = fopen(fn, "wb");
+    if (!g_wav) return;
+    static const uint8_t hdr[44] = { 'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',
+        16,0,0,0, 1,0, 1,0, 0x50,0xC3,0,0, 0xA0,0x86,1,0, 2,0, 16,0, 'd','a','t','a',0,0,0,0 };
+    fwrite(hdr, 1, 44, g_wav);
+    g_wpsg = PSG_new(2000000u, 250000u);
+    PSG_setVolumeMode(g_wpsg, 1);
+    PSG_reset(g_wpsg);
+}
+static void wav_pump(uint64_t now_ticks)
+{
+    if (!g_wav) return;
+    const uint64_t now_ns = now_ticks * 1000ull / (CNTFRQ / 1000000ull);
+    const uint64_t lag = 30000000ull;                  /* as stbox_psg.c */
+    if (now_ns < lag) return;
+    unsigned t = stbox_psg_tail, h = stbox_psg_head;
+    while (g_wrender_ns + 4000 <= now_ns - lag) {
+        while (t != h) {
+            stbox_psg_ev *e = &stbox_psg_ring[t & (STBOX_PSG_RING - 1)];
+            if (e->ticks * 1000ull / (CNTFRQ / 1000000ull) > g_wrender_ns) break;
+            PSG_writeReg(g_wpsg, e->reg, e->val);
+            t++;
+        }
+        int32_t v = PSG_calc(g_wpsg);
+        g_wdc += ((v << 12) - g_wdc) >> 12;
+        g_wacc += v - (g_wdc >> 12);
+        if (++g_wsub == 5) {                           /* 250 -> 50 kHz  */
+            int32_t o = g_wacc / 5; g_wacc = 0; g_wsub = 0;
+            if (o > 32767) o = 32767; if (o < -32768) o = -32768;
+            int16_t sm = (int16_t)o; fwrite(&sm, 2, 1, g_wav); g_wav_frames++;
+        }
+        g_wrender_ns += 4000;
+    }
+    stbox_psg_tail = t;
+}
+static void wav_close(void)
+{
+    if (!g_wav) return;
+    uint32_t d = g_wav_frames * 2, r = d + 36;
+    fseek(g_wav, 4, SEEK_SET); fwrite(&r, 4, 1, g_wav);
+    fseek(g_wav, 40, SEEK_SET); fwrite(&d, 4, 1, g_wav);
+    fclose(g_wav);
+}
+
 static const char *vecname(uint32_t v)
 {
     switch (v) { case 2: return "BUS"; case 3: return "ADDR"; case 4: return "ILLEGAL";
@@ -152,6 +208,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
         else if (!strcmp(argv[i], "--dumpat") && i + 1 < argc) dumpat = argv[++i];
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_open(argv[++i]);
         else { fprintf(stderr, "bad arg %s\n", argv[i]); return 2; }
     }
     if (!tos) { fprintf(stderr, "need --tos\n"); return 2; }
@@ -203,9 +260,14 @@ int main(int argc, char **argv)
     for (unsigned sec = 1; sec <= (unsigned)secs; sec++) {
         uint32_t target = sec * 50;
         unsigned long guard = 0;
+        /* HARNESS_BURST=N: call the slice every N x 64 cycles of host time,
+         * as a busy ipl_task does on the Pi (bursts), instead of evenly */
+        static int burst = -1;
+        if (burst < 0) { const char *e = getenv("HARNESS_BURST"); burst = e ? atoi(e) : 1; if (burst < 1) burst = 1; }
         while (stbox_shared.frame < target) {
             stbox_slice(now);
-            now += TICKS_PER_CALL;
+            now += TICKS_PER_CALL * (unsigned)burst;
+            wav_pump(now);
             {
                 unsigned wi = stbox_watch_idx;
                 for (unsigned i = watch_seen; i != wi; i++) {
@@ -366,6 +428,7 @@ int main(int argc, char **argv)
         }
         printf("  %u sectors total\n", nfdc);
     }
+    wav_close();
     if (dump) dump_frame(dump);
 #ifdef STBOX_LINE_LOG
     if (dump) dump_lines(dump);
