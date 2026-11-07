@@ -2,16 +2,23 @@
 # run-pistorm.sh - launch the PiStorm emulator with restart support.
 #
 # The emulator signals what it wants through its exit code:
-#   42  relaunch  - the taskbar "Restart" action, and the crash handler.
+#   42  relaunch  - the taskbar "Restart" action, Ctrl+Alt+Undo, the ST's
+#                   own reset button, ST power loss, and the crash handler.
 #                   The relaunch comes back up on the pre-boot setup page,
 #                   so Restart is also how you get back to it.
 #                   Comes straight back up and re-reads the .cfg, so a
 #                   Restart after saving PiStorm settings is a real cold
 #                   boot with the new settings.
-#    0  stop       - the taskbar "Shut down" action; drops you here at the
-#                   console.
-#   other          - an error; also stops, so a genuine failure does not
-#                   spin in a relaunch loop.
+#   43  halt      - Ctrl+Alt+Shift+Undo: shut Linux down (shutdown -h now).
+#    0  stop      - the taskbar "Shut down" action, or Ctrl+C at the
+#                   console; drops you here at the console.
+#   other         - the emulator ended some other way (an error, a crash
+#                   the handler did not catch, the board reset under it):
+#                   relaunch too - a physical reset must never leave the
+#                   machine at a console. But if it ends that way within
+#                   15 s of starting, 3 times running, stop: that is a
+#                   genuine failure (bad .cfg, missing ROM, no board), and
+#                   relaunching it for ever would hide the message.
 #
 # Launch through this loop from the console instead of running ./emulator
 # directly. Extra arguments after the script name are forwarded.
@@ -33,14 +40,38 @@ if [ "$(id -u)" -ne 0 ]; then
 	keep=$(env | grep '^PISTORM_[A-Z0-9_]*=' | tr '\n' ' ')
 	exec sudo -- env $keep /bin/sh "$self" "$@"
 fi
+fails=0
 while :; do
+	started=$(date +%s)
 	./emulator --config ../configs/psctrl.cfg "$@"
 	rc=$?
-	if [ "$rc" -eq 42 ]; then
+	case "$rc" in
+	42)
+		fails=0
 		echo "[run-pistorm] restart requested (42) - relaunching..."
 		sleep 1
 		continue
+		;;
+	43)
+		echo "[run-pistorm] Ctrl+Alt+Shift+Undo (43) - shutting Linux down."
+		sync
+		shutdown -h now
+		exit 0
+		;;
+	0)
+		echo "[run-pistorm] emulator stopped (0)."
+		break
+		;;
+	esac
+	if [ $(( $(date +%s) - started )) -lt 15 ]; then
+		fails=$((fails + 1))
+	else
+		fails=1
 	fi
-	echo "[run-pistorm] emulator exited ($rc) - stopping."
-	break
+	if [ "$fails" -ge 3 ]; then
+		echo "[run-pistorm] emulator exited ($rc) within 15 s, 3 times running - stopping."
+		break
+	fi
+	echo "[run-pistorm] emulator exited ($rc) - relaunching..."
+	sleep 2
 done

@@ -2340,21 +2340,23 @@ void sigint_handler(int sig_num)
 }
 
 /*
- * Restart / shutdown from the PSCTRL taskbar. Runs on the CPU thread from
- * inside the NatFeat handler; _exit() ends the process there and then.
+ * Restart / stop / halt, from the PSCTRL taskbar or the keyboard hotkeys.
+ * Runs on the CPU thread (NatFeat) or wherever the hotkey was seen;
+ * _exit() ends the process there and then. The exit code tells the
+ * launcher (run-pistorm.sh) what to do next:
  *
- * restart != 0 exits 42, the code the launcher relaunches on (the same
- * code the crash handler uses), so the emulator comes straight back up and
- * re-reads the .cfg the user just saved - a genuine cold boot with the new
- * settings. restart == 0 exits 0, which the launcher treats as a clean
- * stop, dropping back to the console. Launch through run-pistorm.sh (or
- * any while-loop that relaunches on 42) for restart to relaunch rather
- * than fall through to the shell.
+ *   1 (restart) -> 42: relaunch - the same code the crash
+ *       handler, the ST's reset button and power loss use; the .cfg is
+ *       re-read, so a restart after saving settings is a cold boot with them
+ *   0 (stop)    ->  0: stop, back to the console
+ *   2 (halt)    -> 43: shut Linux down (Ctrl+Alt+Shift+Undo)
+ *
+ * Run ./emulator by hand and 42/43 just end it, like 0.
  */
-extern "C" void pistorm_request_exit(int restart)
+extern "C" void pistorm_request_exit(int mode)
 {
   orderly_teardown();
-  _exit(restart ? 42 : 0);
+  _exit(mode == 1 ? 42 : mode == 2 ? 43 : 0);
 }
 
 /*
