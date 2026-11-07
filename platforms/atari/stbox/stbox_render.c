@@ -17,8 +17,20 @@
 #include <string.h>
 #include "stbox_render.h"
 
-#define WIN_X0     56                  /* first cycle shown                 */
-#define WIN_HW     640                 /* half-cycles shown (320 cycles)    */
+/* The view: cycles shown per line. Default = the display window (56..376,
+ * 320 pixels). stbox_render_set_view(24, 384) = the monitor's view (what
+ * the HDMI mirror frames: borders and overscan visible). */
+static int WIN_X0 = 56;                /* first cycle shown                 */
+static int WIN_HW = 640;               /* half-cycles shown                 */
+#define WIN_HW_MAX 1024
+
+void stbox_render_set_view(int x0, int cycles)
+{
+    if (cycles < 320 || cycles > 512 || x0 < 0 || x0 + cycles > 512)
+        x0 = 56, cycles = 320;
+    WIN_X0 = x0;
+    WIN_HW = 2 * cycles;
+}
 #define STBOX_PALDX 28
 
 static const uint8_t lvl[8] = { 0, 36, 73, 109, 146, 182, 219, 255 };
@@ -98,7 +110,7 @@ int stbox_render_cap(const stbox_cap_t *c, int ste, uint32_t *dst,
     }
 
     const int wide = c->any_med;
-    uint8_t idx[WIN_HW];
+    uint8_t idx[WIN_HW_MAX];
     for (int y = 0; y < rows; y++) {
         uint32_t pal[16];
         for (int i = 0; i < 16; i++)
@@ -124,7 +136,7 @@ int stbox_render_cap(const stbox_cap_t *c, int ste, uint32_t *dst,
                 pal[(ev >> 12) & 15] = rgb((uint16_t)(ev & 0xFFF), ste);
         }
     }
-    *w = wide ? 640 : 320;
+    *w = wide ? WIN_HW : WIN_HW / 2;
     *h = rows;
     return 1;
 }
