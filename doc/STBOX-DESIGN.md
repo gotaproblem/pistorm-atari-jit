@@ -125,6 +125,20 @@ tracked at 2 457 600 Hz via fixed point. IKBD bytes paced at 7812.5 baud.
    writes to $FF820A/$FF8260 took the wrong byte. Only the palette is
    word wide.
 
+13. **The YM decodes address bit 1 only, on the high data byte** (Hatari
+   psg.c). Across $FF8800-$FF88FF bit 1 picks select/data, so movep through
+   $FF8804/06 and `move.l #$0800xx00,$FF8800` are register writes; a word
+   reaches the even address with its high byte; the odd shadows work for
+   byte/movep only; data writes with select >= 16 do nothing; only $FF8800
+   reads data. The box decoded $FF8800/02 bytes and took a word's low byte:
+   Turrican II's sample player (220k movep + 220k move.l writes a minute)
+   went mostly nowhere - hiss and a faint tune, no effects. PSG write
+   timestamps are now guest time (host time minus the pacing debt, plus
+   the cycle within the slice), not the host time of the burst, so a
+   5-10 kHz sample keeps its spacing when ipl_task runs the box in bursts.
+   `harness --wav FILE` plays the writes through emu2149 offline;
+   `HARNESS_BURST=N` paces like a busy Pi; `-DSTBOX_OLD_PSG` = old A/B.
+
 ## STE tier
 
 Selected per box: cfg `stbox_machine st|ste` (default `st`), overridden per

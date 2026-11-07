@@ -99,7 +99,7 @@ int  stbox_capture_blend_rect(void *dst, int dst_stride, int dst_w, int dst_h,
 /* sandbox PSG audio (stbox_psg.c renders; stbox.c produces)          */
 /* ------------------------------------------------------------------ */
 typedef struct { uint64_t ticks; uint8_t reg, val; } stbox_psg_ev;
-#define STBOX_PSG_RING 1024
+#define STBOX_PSG_RING 16384   /* sample players: ~10k writes/s, 30 ms lag */
 int  stbox_psg_start(void);               /* bind to the SDL device         */
 void stbox_psg_stop(void);
 

@@ -261,11 +261,23 @@ static uint8_t g_psg_sel;
 static uint8_t g_psg_reg[16];
 
 /* register-write ring for stbox_psg.c (SPSC: core 3 -> audio thread).
- * Timestamps are the arch-timer value the slice was entered with. */
+ *
+ * Timestamps are GUEST time in arch-timer ticks: the instant the write
+ * happened in the box's 8 MHz timeline, mapped onto the host clock through
+ * the pacing debt (guest time at a slice = host time at the burst minus
+ * the cycles still owed). They used to be the host time the slice was
+ * entered: a burst runs many guest slices in a microsecond or two, so a
+ * digitised sample played through the volume registers at 5-10 kHz
+ * (Turrican II, Hippel and Huelsbeck drivers) had its writes bunched per
+ * ipl_task pass and gapped between passes - hiss and a faint tune. */
 stbox_psg_ev stbox_psg_ring[STBOX_PSG_RING];
 volatile unsigned stbox_psg_head;
 volatile unsigned stbox_psg_tail;
-static uint64_t g_slice_now;             /* CNTVCT at slice entry       */
+static uint64_t g_psg_t0;                /* guest time at slice start   */
+static uint64_t g_psg_last;              /* last stamp (monotonic)      */
+static uint64_t g_tpc_fp;                /* arch ticks per cycle, 32.32 */
+static int      g_psg_in_exec;           /* = g_in_exec (defined later) */
+extern int m68k_cycles_to_instr_end(void);
 
 /* Debug: core 3 publishes the guest PC after each executed slice, plus a
  * tiny recent-PC set, so the host health line can show where TOS/game is
@@ -278,11 +290,27 @@ static int g_dbg = -1;             /* PISTORM_STBOX_DBG: publish PC telemetry */
 static int dbg_on(void){ if (g_dbg<0){const char*e=getenv("PISTORM_STBOX_DBG"); g_dbg=(e&&*e=='1');} return g_dbg; }
 int stbox_log_verbose(void) { return dbg_on(); }
 
+#ifdef STBOX_OLD_PSG
+#define STBOX_OLD_PSG_ON 1
+uint64_t stbox_old_psg_now;
+#else
+#define STBOX_OLD_PSG_ON 0
+#endif
 static void psg_snoop(uint8_t reg, uint8_t val)
 {
     unsigned h = stbox_psg_head;
     if (h - stbox_psg_tail >= STBOX_PSG_RING) return;      /* full: drop */
-    stbox_psg_ring[h & (STBOX_PSG_RING - 1)].ticks = g_slice_now;
+    uint64_t t = g_psg_t0;
+#ifdef STBOX_OLD_PSG            /* A/B: the host time of the burst      */
+    extern uint64_t stbox_old_psg_now; t = stbox_old_psg_now;
+#endif
+    if (!STBOX_OLD_PSG_ON && g_psg_in_exec) {
+        const int c = m68k_cycles_to_instr_end();
+        if (c > 0) t += ((uint64_t)c * g_tpc_fp) >> 32;
+    }
+    if (t < g_psg_last) t = g_psg_last;
+    g_psg_last = t;
+    stbox_psg_ring[h & (STBOX_PSG_RING - 1)].ticks = t;
     stbox_psg_ring[h & (STBOX_PSG_RING - 1)].reg = reg;
     stbox_psg_ring[h & (STBOX_PSG_RING - 1)].val = val;
     __atomic_thread_fence(__ATOMIC_RELEASE);
@@ -1908,8 +1936,14 @@ static uint32_t hw_read(uint32_t a, int size)
     if (a == 0xFF860B) return (fdc.dma_addr >> 8) & 0xFF;
     if (a == 0xFF860D) return fdc.dma_addr & 0xFF;
 
-    /* PSG */
-    if (a == 0xFF8800) return g_psg_reg[g_psg_sel & 15];
+    /* PSG (Hatari psg.c): only address bits 0-1 count across
+     * $FF8800-$FF88FF; data reads only at bit 1 = 0, bit 0 = 0;
+     * everything else reads $FF */
+    if (a >= 0xFF8800 && a <= 0xFF88FF) {
+        const uint8_t d = g_psg_sel < 16 ? g_psg_reg[g_psg_sel] : 0xFF;
+        if (size == 2) return (a & 2) ? 0xFFFF : (uint32_t)((d << 8) | 0xFF);
+        return (a & 3) ? 0xFF : d;
+    }
     if (a == 0xFF8802) return 0xFF;
 
     /* MFP */
@@ -2078,10 +2112,33 @@ static void hw_write(uint32_t a, uint32_t v, int size)
     if (a == 0xFF860B) { fdc.dma_addr = (fdc.dma_addr & 0xFF00FF) | ((v & 0xFF) << 8); return; }
     if (a == 0xFF860D) { fdc.dma_addr = (fdc.dma_addr & 0xFFFF00) | (v & 0xFF); return; }
 
-    /* PSG */
+    /* PSG (Hatari psg.c). The YM sits on the high data byte and decodes
+     * only address bit 1 (select / data) across $FF8800-$FF88FF, so
+     * movep to $FF8800..07 and move.l #$0800xx00,$FF8800 are register
+     * writes. A word access reaches the even address with its HIGH byte;
+     * the odd shadows ($FF8801/03) work for byte access and movep only.
+     * The select register is 8 bits: data writes with it >= 16 do nothing.
+     * Field case: Turrican II's sample player (word writes to $FF8800 and
+     * movep through $FF8804/06) - the box took the low byte as the
+     * register and ignored the mirrors: hiss, no effects. */
+#ifdef STBOX_OLD_PSG            /* A/B: the old decode                  */
     if (a == 0xFF8800) { g_psg_sel = (uint8_t)v; return; }
-    if (a == 0xFF8802) { g_psg_reg[g_psg_sel & 15] = (uint8_t)v;
-                         psg_snoop(g_psg_sel & 15, (uint8_t)v); return; }
+    if (a == 0xFF8802) { g_psg_reg[g_psg_sel & 15] = (uint8_t)v; psg_snoop(g_psg_sel & 15, (uint8_t)v); return; }
+    if (a >= 0xFF8800 && a <= 0xFF88FF) return;
+#endif
+    if (a >= 0xFF8800 && a <= 0xFF88FF) {
+        uint8_t b = (uint8_t)v;
+        if (size == 2) {
+            if (a & 1) return;
+            b = (uint8_t)(v >> 8);
+        }
+        if (!(a & 2)) { g_psg_sel = b; return; }
+        if (g_psg_sel < 16) {
+            g_psg_reg[g_psg_sel] = b;
+            psg_snoop(g_psg_sel, b);
+        }
+        return;
+    }
 
     /* MFP */
     if (a >= 0xFFFA01 && a <= 0xFFFA3F) { mfp_write(a, (uint8_t)v); return; }
@@ -2352,6 +2409,8 @@ void stbox_core_arm(uint64_t now, uint64_t cntfrq)
 {
     g_cntfrq  = cntfrq;
     g_fp_step = ((uint64_t)ST_CPU_HZ << 32) / cntfrq;
+    g_tpc_fp  = (cntfrq << 32) / ST_CPU_HZ;
+    g_psg_t0 = g_psg_last = now;
     g_slice_cap_ticks = ((uint64_t)slice_cap_ns() * cntfrq) / 1000000000ull;
     (void)wait4_on();          /* env read here, never on core 3 */
     /* settle the log flag here, on a host thread, so core 3 never reads env */
@@ -2574,8 +2633,10 @@ static void dma_advance(uint32_t cycles)
 void stbox_slice(uint64_t now)
 {
     if (!g_armed) return;
+#ifdef STBOX_OLD_PSG
+    stbox_old_psg_now = now;
+#endif
 
-    g_slice_now = now;
     if (g_reset_req) { g_reset_req = 0; machine_cold_reset(); }
     fdc_adopt_media();               /* media swap works even halted  */
     if (g_halted) return;            /* dead machine: frozen frame -
@@ -2659,10 +2720,17 @@ void stbox_slice(uint64_t now)
             if (ev < budget) budget = ev;
             const uint32_t mt = mfp_cycles_to_next();
             if (mt < budget) budget = mt ? mt : 1;
-            g_in_exec = g_in_exec_irq = 1;
+            {   /* guest time at this slice: host time at the burst minus
+                 * the cycles still owed (PSG timestamps) */
+                int64_t owed = g_cyc_debt_fp >> 32;
+                uint64_t back = owed > 0 ? (((uint64_t)owed * g_tpc_fp) >> 32) : 0;
+                g_psg_t0 = now > back ? now - back : 0;
+                if (owed < 0) g_psg_t0 = now + ((((uint64_t)-owed) * g_tpc_fp) >> 32);
+            }
+            g_in_exec = g_in_exec_irq = g_psg_in_exec = 1;
             g_hook_last = 0;
             int cpu = m68k_execute((int)budget);
-            g_in_exec = g_in_exec_irq = 0;
+            g_in_exec = g_in_exec_irq = g_psg_in_exec = 0;
             if (cpu <= 0) cpu = (int)budget;
             else if (g_wait4 > 0)
                 cpu += (g_hook_last - cpu) & 3;   /* the last one's pad */
@@ -2698,7 +2766,8 @@ void stbox_slice(uint64_t now)
         __asm__ volatile("mrs %0, cntvct_el0" : "=r"(tnow));
         g_stat_slice_ticks += tnow - now;           /* cumulative, see below */
         if (tnow - now >= g_slice_cap_ticks) { g_stat_capstop++; break; }
-        g_slice_now = tnow;                         /* PSG timestamps       */
+#elif defined(STBOX_HARNESS_UNCAPPED)
+        ;                                           /* harness: debt stops it */
 #else
         break;                                      /* no arch timer: 1/pass */
 #endif
