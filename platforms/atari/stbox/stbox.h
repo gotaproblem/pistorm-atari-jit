@@ -329,6 +329,19 @@ typedef struct {
 } stbox_cap_t;
 extern stbox_cap_t stbox_cap[STBOX_CAP_BUFS];
 
+#ifdef STBOX_LINE_LOG
+/* harness builds only (-DSTBOX_LINE_LOG): the GLUE's decision per line */
+typedef struct {
+    uint8_t  vde, f0, r0, left_in, rez, extra, npev, nch;
+    uint16_t len, bytes;
+    int16_t  fstart, pstart;
+    uint32_t vcnt;
+    uint16_t ch_c[8]; uint8_t ch_f[8], ch_r[8];   /* sync/rez writes */
+} stbox_linelog_t;
+extern stbox_linelog_t stbox_linelog[2][512];
+extern volatile unsigned stbox_linelog_frame;
+#endif
+
 #ifdef __cplusplus
 }
 #endif
