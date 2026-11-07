@@ -1052,8 +1052,8 @@ static void mfp_timera_event(void)
 }
 
 /* Timer B in event mode counts display-enable trailing edges. The video
- * model calls this once per line that had DE, 28 cycles after DE ended
- * (cycle 404 of a normal 50 Hz line, as Hatari measures it): never on a
+ * model calls this once per line that had DE, 24 cycles after DE ended
+ * (cycle 400 of a normal 50 Hz line, Hatari TIMERB_VIDEO_CYCLE_OFFSET): never on a
  * border line, so TOS's VBL sync sees the pulses stop in the blank. */
 static void mfp_timerb_event(void)
 {
@@ -1079,8 +1079,8 @@ static void mfp_timerb_event(void)
 /*    next video or MFP event (line end = HBL, display end = Timer B,  */
 /*    a timer underflow), so an interrupt is taken within one          */
 /*    instruction of its cause, as on a 68000, not up to a slice late. */
-/*  - Timer B counts DE trailing edges: 28 cycles after the line's     */
-/*    display ends (404 on a normal 50 Hz line), only on lines with    */
+/*  - Timer B counts DE trailing edges: 24 cycles after the line's     */
+/*    display ends (400 on a normal 50 Hz line), only on lines with    */
 /*    display enable. It was counted at the START of each line, one    */
 /*    line early: every Timer B raster split sat a line too high.      */
 /*  - The GLUE decides each line from the registers at given cycles    */
@@ -1120,6 +1120,15 @@ static uint8_t  g_tb_done;              /* Timer B pulse given this line  */
 static uint32_t g_vcnt;                 /* video counter at the line's
                                            first fetch                    */
 static uint8_t  g_cap_rows_any_med;
+/* Hatari's measured positions (video.h): the VBL signal at cycle 64 of
+ * the frame's first line (VBL_VIDEO_CYCLE_OFFSET_STF), when the GLUE also
+ * takes the frame's rate and height from the registers; Timer B 24 cycles
+ * after the last displayed pixel (TIMERB_VIDEO_CYCLE_OFFSET); the video
+ * counter reloaded from the base 3 lines before the frame ends, at cycle
+ * 56 (RESTART_VIDEO_COUNTER_LINE/CYCLE). */
+#define VBL_CYC   64
+#define TB_OFS    24u
+static uint8_t  g_vbl_done;
 static uint32_t g_tb_cache;             /* tb_point() result, valid until
                                            a sync/rez write or line change */
 static uint8_t  g_tb_cache_ok;
@@ -1158,7 +1167,6 @@ static inline int vfreq(uint8_t sync, uint8_t rez)
     return (sync & 2) ? 50 : 60;
 }
 static inline uint16_t vlen(int f)   { return f == 71 ? 224 : f == 60 ? 508 : 512; }
-static inline uint16_t vlines(int f) { return f == 71 ? 501 : f == 60 ? 263 : 313; }
 
 /* sync/rez changes within a line: cycle (snapped to the 4-cycle bus
  * grid), rate and resolution from then on */
@@ -1290,7 +1298,14 @@ static uint32_t video_counter_now(void)
     line_peek(&l);
     if (!l.bytes)
         return g_vcnt;
-    int32_t c = (int32_t)(beam_now() - g_line_start);
+    /* Hatari (video.c, Video_CalculateAddress): "We need to subtract '8'
+     * for correct video address calculation" - the counter a read sees is
+     * the one of 8 cycles before the read access. Without it the classic
+     * beam lock (move.b (a0),d3 / beq / sub.b d3,d2 / lsl.b d2,d3) waits 8
+     * cycles too little and every border switch after it lands 8 early:
+     * the Turrican II (Replicants) trainer's 230-byte fullscreen became
+     * 158-byte lines, the screen sheared into noise. */
+    int32_t c = (int32_t)(beam_now() - g_line_start) - 8;
     if (c <= l.fstart)
         return g_vcnt;
     uint32_t off = (uint32_t)(c - l.fstart) / 2u;
@@ -1312,7 +1327,7 @@ static uint32_t tb_point(void)
     line_peek(&l);
     if (!l.bytes)
         return 0xFFFFFFFFu;
-    uint32_t p = (uint32_t)(l.fstart + 2 * (l.bytes + l.extra)) + 28u;
+    uint32_t p = (uint32_t)(l.fstart + 2 * (l.bytes + l.extra)) + TB_OFS;
     if (p > g_line_len) p = g_line_len;
     return g_tb_cache = g_line_start + p;
 }
@@ -1439,7 +1454,8 @@ static void line_end(void)
     if (cnt_w) g_vcnt = cnt_v;
 
     /* vertical DE for the next line, decided at cycle 502 */
-    const int fv = f_at(ch, n, f0, len >= 503 ? 502 : len - 10);
+    const int vpos = len >= 503 ? 502 : len - 10;
+    const int fv = f_at(ch, n, f0, vpos);
     const unsigned L = g_line;
     if (g_frame_lines == 501) {                         /* mono frame     */
         if (!g_vde) { if (L == 50) g_vde = 1; }
@@ -1460,6 +1476,8 @@ static void line_begin(void)
 {
     g_tb_done = 0;
     g_tb_cache_ok = 0;
+    if (g_line == (unsigned)g_frame_lines - 3u)       /* counter restart  */
+        g_vcnt = g_vid_base;
     video_relatch_len();
 }
 
@@ -1477,9 +1495,8 @@ static void frame_begin(int publish)
     }
     stbox_cap[g_cap_w].rows = 0;
     g_cap_rows_any_med = 0;
-    g_frame_lines = vlines(vfreq(g_ls_sync, g_ls_rez));
+    g_vbl_done = 0;                    /* VBL + frame height at cycle 64 */
     g_disp_base = g_vid_base;
-    g_vcnt = g_vid_base;
     g_vde = 0;
     g_next_left_off = 0;
 }
@@ -1491,13 +1508,26 @@ static void video_reset(void)
     g_ls_sync = g_sync; g_ls_rez = g_res; g_ls_hs = 0; g_ls_lw = 0;
     memcpy(g_ls_pal, g_pal, sizeof g_ls_pal);
     for (unsigned i = 0; i < STBOX_CAP_BUFS; i++) stbox_cap[i].rows = 0;
+    g_frame_lines = (g_res & 2) ? 501 : (g_sync & 2) ? 313 : 263;
+    g_vcnt = g_vid_base;
     frame_begin(0);
     line_begin();
 }
 
 /* After a slice: lines that ended, Timer B, HBL/VBL. */
+static void vbl_check(void)
+{
+    if (!g_vbl_done && g_line == 0 && g_frame_cyc >= VBL_CYC) {
+        g_vbl_done = 1;
+        g_frame_lines = (g_res & 2) ? 501 : (g_sync & 2) ? 313 : 263;
+        g_vbl_pending = 1;
+        update_irq();
+    }
+}
+
 static void video_advance(void)
 {
+    vbl_check();
     tb_check();
     while (g_frame_cyc >= g_next_line_cyc) {
         line_end();
@@ -1512,7 +1542,6 @@ static void video_advance(void)
             g_line = 0;
             g_line_start = 0;
             frame_begin(1);
-            g_vbl_pending = 1;
             stbox_shared.frame++;
         } else {
             g_line_start = next;
@@ -1520,6 +1549,7 @@ static void video_advance(void)
         }
         update_irq();
         line_begin();
+        vbl_check();
         tb_check();
     }
 }
@@ -1737,12 +1767,27 @@ static void mfp_write(uint32_t a, uint8_t v)
     update_irq();
 }
 
+/* The GLUE/Shifter registers are bytes on the odd or even half of the
+ * bus. A word access at an even address is two byte accesses: the high
+ * byte to a, the low byte to a+1. 'move.w #$0007,$FF8200' sets the base
+ * high byte ($FF8201 = $07); 'move.w #$0200,$FF8260' sets low res from the
+ * HIGH byte. Only the palette ($FF8240-5F) is word wide. Field case: the
+ * Turrican II title sets its screen base with word writes to $FF8200/02;
+ * they were dropped, the title showed a stale buffer, every line a word
+ * group out ("ANFRED TRENZ ... M"). */
+static inline int glue_byte_reg(uint32_t a)
+{
+    return (a >= 0xFF8200 && a < 0xFF8240) || (a >= 0xFF8260 && a < 0xFF8280);
+}
+
 static uint32_t hw_read(uint32_t a, int size)
 {
     if (dbg_on()) {
         stbox_dbg_last_hwr = a;
         stbox_dbg_last_hwr_pc = (uint32_t)m68k_get_reg(NULL, M68K_REG_PPC);
     }
+    if (size == 2 && !(a & 1) && glue_byte_reg(a))         /* see hw_write */
+        return (hw_read(a, 1) << 8) | (hw_read(a + 1, 1) & 0xFF);
     /* memory controller */
     if (a == 0xFF8001) return g_memcfg;
 
@@ -1888,6 +1933,11 @@ static uint32_t hw_read(uint32_t a, int size)
 
 static void hw_write(uint32_t a, uint32_t v, int size)
 {
+    if (size == 2 && !(a & 1) && glue_byte_reg(a)) {
+        hw_write(a, (v >> 8) & 0xFF, 1);
+        hw_write(a + 1, v & 0xFF, 1);
+        return;
+    }
     if (a == 0xFF8001) { g_memcfg = (uint8_t)v; ram_recfg(); return; }
 
     /* On an STE, writing the high or mid video-base byte clears the low
@@ -2604,6 +2654,7 @@ void stbox_slice(uint64_t now)
             uint32_t ev = g_next_line_cyc;
             const uint32_t tb = tb_point();
             if (tb < ev) ev = tb;
+            if (!g_vbl_done && VBL_CYC < ev) ev = VBL_CYC;
             ev = ev > g_frame_cyc ? ev - g_frame_cyc : 1;
             if (ev < budget) budget = ev;
             const uint32_t mt = mfp_cycles_to_next();

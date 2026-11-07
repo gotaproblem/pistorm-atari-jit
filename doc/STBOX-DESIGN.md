@@ -86,8 +86,8 @@ tracked at 2 457 600 Hz via fixed point. IKBD bytes paced at 7812.5 baud.
    taken up to a slice late. Slices now end at the next line end, Timer B
    pulse and MFP timer underflow, and an MFP write that raises the level
    ends the slice after that instruction.
-8. **Timer B fires 28 cycles after DE ends** (cycle 404 of a 50 Hz line,
-   Hatari's measurement), only on lines with display enable. It used to be
+8. **Timer B fires 24 cycles after DE ends** (cycle 400 of a 50 Hz line,
+   Hatari's TIMERB_VIDEO_CYCLE_OFFSET), only on lines with display enable. It used to be
    counted at the START of each line - one line early, so every Timer B
    raster split, status-bar switch and palette band sat a line too high.
 9. **The GLUE decides each line.** Hatari's STF table (the one
@@ -105,6 +105,25 @@ tracked at 2 457 600 Hz via fixed point. IKBD bytes paced at 7812.5 baud.
    would land early. The instruction hook pads each instruction to the grid
    (`PISTORM_STBOX_WAIT4=0` = bare counts, for A/B). Not modelled: the
    E-clock jitter of HBL/VBL autovector acknowledges.
+11. **Hatari's measured positions, all of them** (video.h / video.c),
+   found on the Turrican II (Replicants) trainer, a 230-byte fullscreen
+   that came out as sheared noise: the video counter a read sees is the one
+   of 8 cycles BEFORE the read (Video_CalculateAddress "subtract 8") -
+   without it the classic lock (move.b (a0),d3 / beq / sub.b d3,d2 /
+   lsl.b d2,d3) waited 8 cycles too little and every border switch landed
+   8 early (158-byte lines); the VBL comes at cycle 64 of the frame's
+   first line, and that is where the GLUE takes the frame's rate and
+   height - deciding at cycle 0, where fullscreen code holds high res for
+   the left border, made frames 501 lines, and the VBL-timed top-border
+   switch landed 64 cycles early; the video counter restarts from the base
+   3 lines before the frame ends, at cycle 56.
+12. **GLUE/Shifter registers are bytes.** A word access at an even address
+   is the high byte there and the low byte at a+1: 'move.w #$0007,$FF8200'
+   sets the base high byte, 'move.w #$0200,$FF8260' sets low res. The box
+   took byte addresses only, so word writes to $FF8200/02 were dropped
+   (Turrican II's title showed a stale buffer, a word group out) and word
+   writes to $FF820A/$FF8260 took the wrong byte. Only the palette is
+   word wide.
 
 ## STE tier
 
