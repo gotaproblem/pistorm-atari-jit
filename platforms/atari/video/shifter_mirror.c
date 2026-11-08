@@ -1153,6 +1153,7 @@ static int render_static(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h
     return 1;
 }
 
+uint64_t shm_frame_end_mono_us;       /* see shm_render, diag only */
 int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
                uint32_t *sw, uint32_t *sh)
 {
@@ -1197,6 +1198,14 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
     if (fabs(O - last_origin) < P / 2)
         return 0;
     last_origin = O;
+    {   /* PISTORM_MOUSE_DIAG latency origin: the END of the frame drawn
+         * (O + P), as CLOCK_MONOTONIC microseconds */
+        struct timespec mt;
+        clock_gettime(CLOCK_MONOTONIC, &mt);
+        const double age_s = (now - (O + P)) / (double)tick_hz();
+        const double mono_us = (double)mt.tv_sec * 1e6 + (double)mt.tv_nsec / 1e3;
+        shm_frame_end_mono_us = (uint64_t)(mono_us - (age_s > 0 ? age_s * 1e6 : 0));
+    }
 
     if (!rs_ok)
         rs_reset_from_cpu();

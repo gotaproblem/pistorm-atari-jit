@@ -3476,6 +3476,8 @@ void *render_frame(void *vptr)
                     shr = shm_render(g_logical + ET4K_ROW_PAD, ET4K_STAGE_PITCH,
                                      &fw, &fh, &shw, &shh);
                     if (shr == 1) {
+                        extern uint64_t shm_frame_end_mono_us;
+                        drmpres_note_origin(shm_frame_end_mono_us);
                         g_logical_kind = DRMPRES_SRC_ST;
                         drmpres_set_shape(shw, shh);
                         sdl_set_logical(g_et4000, fw, fh, shw, shh);
@@ -3571,7 +3573,7 @@ void *render_frame(void *vptr)
                     uint32_t ln; double la, lm, ca, cm; int hz;
                     int as = drmpres_take_latency(&ln, &la, &lm, &ca, &cm, &hz);
                     printf("[DISPLAY] %s presented=%u/s unchanged=%u/s HDMI %dHz %s | "
-                           "VBL copy -> commit avg=%.1fms max=%.1fms -> on glass avg=%.1fms max=%.1fms (n=%u)\n",
+                           "frame end -> commit avg=%.1fms max=%.1fms -> on glass avg=%.1fms max=%.1fms (n=%u)\n",
                            src, n, skipped, hz, as ? "async" : "blocking",
                            ca, cm, la, lm, ln);
                     fflush(stdout);
