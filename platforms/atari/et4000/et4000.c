@@ -233,6 +233,7 @@ static int g_fbdev_mode = 0;
  * scanout buffer - the dirty-row swizzle writes straight into display
  * memory and presentation costs nothing. See et4000_drm.c. */
 #include "et4000_drm.h"
+#include "../psctrl/psctrl.h"
 
 /* The Atari's current video rate (50 / 60 / 71.4), published by
  * st_rez_sync_trace() in pistorm_natmem.cpp on a REZ or SYNC register
@@ -3576,6 +3577,24 @@ void *render_frame(void *vptr)
                            "frame end -> commit avg=%.1fms max=%.1fms -> on glass avg=%.1fms max=%.1fms (n=%u)\n",
                            src, n, skipped, hz, as ? "async" : "blocking",
                            ca, cm, la, lm, ln);
+                    /* the emulated Atari's own pace and the host's health:
+                     * 68000 cycles per second it actually ran (8000 kHz =
+                     * a real 8 MHz ST), share of time stopped/idle, ARM
+                     * clock, firmware throttle flags, SoC temperature */
+                    {
+                        static int started;
+                        if (!started) { started = 1; psctrl_sampler_start(); }
+                        const uint32_t thr = psctrl_getint(PS_HOST_THROTTLED);
+                        printf("[GUEST] speed=%u kHz idle=%.1f%% | host ARM %u MHz temp %.1fC "
+                               "throttled now=%s%s%s%s ever=0x%X\n",
+                               psctrl_getint(PS_JIT_EFF_KHZ),
+                               psctrl_getint(PS_JIT_IDLE_X10) / 10.0,
+                               psctrl_getint(PS_HOST_ARM_FREQ_KHZ) / 1000u,
+                               psctrl_getint(PS_HOST_SOC_TEMP_MC) / 1000.0,
+                               (thr & 1) ? "undervolt " : "", (thr & 2) ? "freqcap " : "",
+                               (thr & 4) ? "throttled " : "", (thr & 8) ? "templimit" : (thr & 15) ? "" : "no",
+                               (thr >> 16) & 15u);
+                    }
                     fflush(stdout);
                     n = skipped = 0; t0 = tn;
                 }
