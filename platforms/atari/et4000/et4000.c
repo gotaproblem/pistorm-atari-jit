@@ -3580,6 +3580,9 @@ void *render_frame(void *vptr)
             }
         }
 
+        remaining = FRAME_RATE - render_took;
+        (void)remaining;
+
         gettimeofday(&start, NULL);
 
         _VSYNC = 1;
