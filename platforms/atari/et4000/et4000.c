@@ -3546,6 +3546,35 @@ void *render_frame(void *vptr)
          * minimum and overshoots under scheduling jitter.) */
         gettimeofday(&stop, NULL);
         render_took = ((stop.tv_sec - start.tv_sec) * 1000000) + (stop.tv_usec - start.tv_usec);
+
+        /* PISTORM_MOUSE_DIAG=1: once a second, frames presented and the
+         * time from the VBL (end of the wait below) to the frame being
+         * presented - the display half of pointer latency. */
+        {
+            static int dg = -1;
+            static uint32_t n, sum, mx, loops, skipped;
+            static int64_t t0;
+            static const char *src = "none";
+            if (dg < 0) { const char *e = getenv("PISTORM_MOUSE_DIAG"); dg = e && *e == '1'; }
+            if (dg) {
+                loops++;
+                if (strcmp(render_source, "none")) {
+                    src = render_source;
+                    n++; sum += (uint32_t)render_took;
+                    if ((uint32_t)render_took > mx) mx = (uint32_t)render_took;
+                } else
+                    skipped++;
+                const int64_t tn = (int64_t)stop.tv_sec * 1000000 + stop.tv_usec;
+                if (!t0) t0 = tn;
+                if (tn - t0 >= 1000000) {
+                    printf("[DISPLAY] %s presented=%u/s unchanged=%u/s vbl-to-present avg=%.1fms max=%.1fms budget=%dms\n",
+                           src, n, skipped, n ? sum / 1000.0 / n : 0.0,
+                           mx / 1000.0, FRAME_RATE / 1000);
+                    fflush(stdout);
+                    n = sum = mx = loops = skipped = 0; t0 = tn;
+                }
+            }
+        }
         remaining = FRAME_RATE - render_took;
         (void)remaining;
 

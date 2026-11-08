@@ -2410,7 +2410,7 @@ static void *input_thread(void *arg)
      * CFS priority gets it run on wakeup. Not real-time (SCHED_FIFO caused
      * trouble on ipl_task); PISTORM_KBD_NICE=n sets it, 0 = old behaviour. */
     {
-        int nv = -10;
+        int nv = -10;                  /* see the [MOUSE]/[DISPLAY] capture */
         const char *e = getenv("PISTORM_KBD_NICE");
         if (e && *e) nv = atoi(e);
         if (nv < -20) nv = -20;
