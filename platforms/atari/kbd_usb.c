@@ -106,6 +106,8 @@ static uint64_t now_us(void)
 #define PKT_START 0x100
 
 static uint16_t         ring[RING_SIZE];
+static uint64_t         ring_t_us[RING_SIZE];   /* push time, PISTORM_MOUSE_DIAG */
+static _Atomic uint32_t ms_lat_n, ms_lat_sum_us, ms_lat_max_us;
 static _Atomic uint32_t ring_head;  /* consumer (CPU thread)             */
 static _Atomic uint32_t ring_tail;  /* producers (see above)             */
 static pthread_mutex_t  ring_push_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -260,6 +262,9 @@ static void ring_push_packet(const uint8_t *bytes, int n)
         return;
     }
     uint32_t t = atomic_load_explicit(&ring_tail, memory_order_relaxed);
+    const uint64_t pt = now_us();
+    for (int i = 0; i < n; i++)
+        ring_t_us[(t + (uint32_t)i) & RING_MASK] = pt;
     for (int i = 0; i < n; i++)
         ring[(t + (uint32_t)i) & RING_MASK] = (uint16_t)bytes[i] | (i == 0 ? PKT_START : 0);
     atomic_store_explicit(&ring_tail, t + (uint32_t)n, memory_order_release);
@@ -996,6 +1001,16 @@ uint8_t kbd_usb_rx_read(void)
         return 0;                            /* defensive: empty          */
 
     uint16_t e = ring[h & RING_MASK];
+    {   /* host push -> guest read of a mouse packet's header byte */
+        if ((e & PKT_START) && (e & 0xFC) == 0xF8) {
+            uint64_t d = now_us() - ring_t_us[h & RING_MASK];
+            uint32_t du = d > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)d;
+            atomic_fetch_add_explicit(&ms_lat_n, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&ms_lat_sum_us, du, memory_order_relaxed);
+            if (du > atomic_load_explicit(&ms_lat_max_us, memory_order_relaxed))
+                atomic_store_explicit(&ms_lat_max_us, du, memory_order_relaxed);
+        }
+    }
     atomic_store_explicit(&ring_head, h + 1, memory_order_release);
 
     /* peek: are we now mid-packet? (next entry exists, not pkt start)   */
@@ -2476,11 +2491,16 @@ static void *input_thread(void *arg)
                 ms_diag = e && *e == '1';
             }
             if (ms_diag && (ms_in || ms_sent)) {
+                const uint32_t ln = atomic_exchange(&ms_lat_n, 0);
+                const uint32_t ls = atomic_exchange(&ms_lat_sum_us, 0);
+                const uint32_t lm = atomic_exchange(&ms_lat_max_us, 0);
                 printf("[MOUSE] in=%u/s sent=%u/s clamped=%u/s pkts=%u/s full=%u/s "
-                       "carry_max=%u tail=%ums div=%d inj=%u ring=%d\n",
+                       "carry_max=%u tail=%ums div=%d inj=%u ring=%d "
+                       "deliver avg=%.1fms max=%.1fms (n=%u)\n",
                        ms_in, ms_sent, ms_clamped, ms_pkts, ms_full, ms_carry_max,
                        ms_tail_ms, kbd_usb_mouse_div,
-                       (unsigned)kbd_usb_stat_injected_bytes, ring_used());
+                       (unsigned)kbd_usb_stat_injected_bytes, ring_used(),
+                       ln ? ls / 1000.0 / ln : 0.0, lm / 1000.0, ln);
                 fflush(stdout);
             }
             ms_in = ms_sent = ms_clamped = ms_pkts = ms_full = ms_carry_max = ms_tail_ms = 0;
