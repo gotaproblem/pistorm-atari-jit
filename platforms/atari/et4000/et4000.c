@@ -2581,6 +2581,7 @@ typedef struct {
     uint16_t pal[16];
     uint8_t  rez, lw, hs;
     uint8_t  blend;              /* tlb holds the previous frame's     */
+    uint64_t vbl_us;             /* CLOCK_MONOTONIC at the copy (diag) */
     pal_tl_t tl, tlb;            /* palette timeline (PALETTE TIMELINE) */
 } st_snap_t;
 static st_snap_t         g_snap[ST_SNAP_BUFS];
@@ -2925,6 +2926,11 @@ void et4000_native_vbl_snapshot(void)
         return;
 
     memcpy(sn->pix, rtg.natmem + base, bytes);
+    {
+        struct timespec vt;
+        clock_gettime(CLOCK_MONOTONIC, &vt);
+        sn->vbl_us = (uint64_t)vt.tv_sec * 1000000ull + (uint64_t)vt.tv_nsec / 1000ull;
+    }
     for (int i = 0; i < 16; i++)
         sn->pal[i] = st_palette[i];
     pal_tl_copy(&sn->tl, tl);
@@ -2972,6 +2978,7 @@ static int blit_st_native_snapshot(ET4000State *s)
         return 0;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     const st_snap_t *sn = &g_snap[i];
+    drmpres_note_origin(sn->vbl_us);
     blit_st_native_ex(s, sn->pix, sn->rez, sn->pal, sn->lw, sn->hs,
                       &sn->tl, sn->blend ? &sn->tlb : NULL);
     return 1;
@@ -3547,36 +3554,31 @@ void *render_frame(void *vptr)
         gettimeofday(&stop, NULL);
         render_took = ((stop.tv_sec - start.tv_sec) * 1000000) + (stop.tv_usec - start.tv_usec);
 
-        /* PISTORM_MOUSE_DIAG=1: once a second, frames presented and the
-         * time from the VBL (end of the wait below) to the frame being
-         * presented - the display half of pointer latency. */
+        /* PISTORM_MOUSE_DIAG=1: once a second, frames presented and how long
+         * from the VBL their picture was copied at to the flip being on the
+         * glass (the display half of pointer latency; et4000_drm.c LATENCY) */
         {
             static int dg = -1;
-            static uint32_t n, sum, mx, loops, skipped;
+            static uint32_t n, skipped;
             static int64_t t0;
             static const char *src = "none";
             if (dg < 0) { const char *e = getenv("PISTORM_MOUSE_DIAG"); dg = e && *e == '1'; }
             if (dg) {
-                loops++;
-                if (strcmp(render_source, "none")) {
-                    src = render_source;
-                    n++; sum += (uint32_t)render_took;
-                    if ((uint32_t)render_took > mx) mx = (uint32_t)render_took;
-                } else
-                    skipped++;
+                if (strcmp(render_source, "none")) { src = render_source; n++; } else skipped++;
                 const int64_t tn = (int64_t)stop.tv_sec * 1000000 + stop.tv_usec;
                 if (!t0) t0 = tn;
                 if (tn - t0 >= 1000000) {
-                    printf("[DISPLAY] %s presented=%u/s unchanged=%u/s vbl-to-present avg=%.1fms max=%.1fms budget=%dms\n",
-                           src, n, skipped, n ? sum / 1000.0 / n : 0.0,
-                           mx / 1000.0, FRAME_RATE / 1000);
+                    uint32_t ln; double la, lm, ca, cm; int hz;
+                    int as = drmpres_take_latency(&ln, &la, &lm, &ca, &cm, &hz);
+                    printf("[DISPLAY] %s presented=%u/s unchanged=%u/s HDMI %dHz %s | "
+                           "VBL copy -> commit avg=%.1fms max=%.1fms -> on glass avg=%.1fms max=%.1fms (n=%u)\n",
+                           src, n, skipped, hz, as ? "async" : "blocking",
+                           ca, cm, la, lm, ln);
                     fflush(stdout);
-                    n = sum = mx = loops = skipped = 0; t0 = tn;
+                    n = skipped = 0; t0 = tn;
                 }
             }
         }
-        remaining = FRAME_RATE - render_took;
-        (void)remaining;
 
         gettimeofday(&start, NULL);
 

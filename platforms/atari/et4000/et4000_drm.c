@@ -17,6 +17,7 @@
  */
 
 #include <stdio.h>
+#include <time.h>
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdint.h>
 #include <string.h>
@@ -67,6 +68,42 @@ static int g_have_src;
 /* ---- async atomic present (PISTORM_DRM_ASYNC=1) --------------------------- */
 static int g_async;              /* atomic async available + enabled */
 static int g_flip_pending;       /* an async commit is in flight (awaiting event) */
+
+/* LATENCY (PISTORM_MOUSE_DIAG=1): the frame being presented carries the
+ * CLOCK_MONOTONIC time of the VBL its picture was copied at; when the flip
+ * is on the glass (async: the page-flip event's timestamp; legacy: the
+ * blocking SetPlane returning at vblank) the difference is accumulated. */
+static uint64_t g_lat_origin_us, g_lat_pending_origin_us, g_lat_commit_us;
+static uint32_t g_lat_n, g_lat_max_us, g_lat_cmax_us;
+static uint64_t g_lat_sum_us, g_lat_csum_us;
+static uint64_t lat_now_us(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000ull + (uint64_t)t.tv_nsec / 1000ull;
+}
+static void lat_note(uint64_t origin, uint64_t commit, uint64_t glass)
+{
+    if (!origin || glass < origin || glass - origin > 1000000ull)
+        return;
+    const uint32_t l = (uint32_t)(glass - origin), c = (uint32_t)(commit - origin);
+    g_lat_n++; g_lat_sum_us += l; g_lat_csum_us += c;
+    if (l > g_lat_max_us) g_lat_max_us = l;
+    if (c > g_lat_cmax_us) g_lat_cmax_us = c;
+}
+void drmpres_note_origin(uint64_t vbl_us) { g_lat_origin_us = vbl_us; }
+int drmpres_take_latency(uint32_t *n, double *avg_ms, double *max_ms,
+                         double *commit_avg_ms, double *commit_max_ms, int *hz)
+{
+    *n = g_lat_n;
+    *avg_ms = g_lat_n ? g_lat_sum_us / 1000.0 / g_lat_n : 0.0;
+    *max_ms = g_lat_max_us / 1000.0;
+    *commit_avg_ms = g_lat_n ? g_lat_csum_us / 1000.0 / g_lat_n : 0.0;
+    *commit_max_ms = g_lat_cmax_us / 1000.0;
+    *hz = (int)g_mode.vrefresh;
+    g_lat_n = 0; g_lat_sum_us = g_lat_csum_us = 0; g_lat_max_us = g_lat_cmax_us = 0;
+    return g_async;
+}
 static int g_first_flip = 1;     /* first atomic commit: blocking + ALLOW_MODESET */
 static int g_last_committed = -1;/* buffer index of the previous successful commit */
 /* plane atomic property ids */
@@ -433,8 +470,11 @@ static uint32_t plane_prop_id(int fd, uint32_t plane, const char *name)
 static void page_flip_handler(int fd, unsigned int seq, unsigned int tv_sec,
                               unsigned int tv_usec, unsigned int crtc_id, void *data)
 {
-    (void)fd; (void)seq; (void)tv_sec; (void)tv_usec; (void)crtc_id; (void)data;
+    (void)fd; (void)seq; (void)crtc_id; (void)data;
     g_flip_pending = 0;
+    lat_note(g_lat_pending_origin_us, g_lat_commit_us,
+             (uint64_t)tv_sec * 1000000ull + tv_usec);
+    g_lat_pending_origin_us = 0;
 }
 
 /* Non-blocking: consume any completed-flip events without ever waiting. */
@@ -795,8 +835,12 @@ void drmpres_flip(void)
             if (fchg) { g_filt_cur = g_filt_want; filter_note(); }
             if (g_first_flip)
                 g_first_flip = 0;   /* blocking commit: no completion event pending */
-            else
+            else {
                 g_flip_pending = 1;
+                g_lat_pending_origin_us = g_lat_origin_us;
+                g_lat_commit_us = lat_now_us();
+            }
+            g_lat_origin_us = 0;
             /* next render buffer = the one that is neither the buffer we just
              * committed (back) nor the one before it (g_last_committed, still
              * scanned until this flip latches). With 3 buffers exactly one such
@@ -831,6 +875,7 @@ void drmpres_flip(void)
             g_filt_cur = g_filt_want;   /* one try per change, no retry storm */
         }
     }
+    const uint64_t lat_c = lat_now_us();
     if (drmModeSetPlane(g_fd, g_plane_id, g_crtc_id, g_src[back].fb, 0,
                         g_dst_x, g_dst_y, g_dst_w, g_dst_h,
                         0, 0, g_src_w << 16, g_src_h << 16) < 0) {
@@ -843,6 +888,8 @@ void drmpres_flip(void)
         }
     }
 
+    lat_note(g_lat_origin_us, lat_c, lat_now_us());   /* SetPlane blocks to vblank */
+    g_lat_origin_us = 0;
     g_back = back ^ 1;   /* the buffer being scanned is now off-limits */
 }
 

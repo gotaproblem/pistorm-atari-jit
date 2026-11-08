@@ -82,6 +82,11 @@ uint32_t drmpres_src_h(void);
  * caller is expected to have written the complete frame into drmpres_backbuffer()
  * before calling (so the newly-back buffer is always current). */
 void drmpres_flip(void);
+/* PISTORM_MOUSE_DIAG: VBL time (CLOCK_MONOTONIC us) of the picture about
+ * to be presented; and the per-second VBL-to-glass figures (resets). */
+void drmpres_note_origin(uint64_t vbl_us);
+int  drmpres_take_latency(uint32_t *n, double *avg_ms, double *max_ms,
+                          double *commit_avg_ms, double *commit_max_ms, int *hz);
 
 void drmpres_close(void);
 
