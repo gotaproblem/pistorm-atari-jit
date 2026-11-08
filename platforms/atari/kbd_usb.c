@@ -74,6 +74,16 @@ volatile uint32_t kbd_usb_stat_dropped_bytes;
 #define MOUSE_MAX_QUEUE      6      /* bytes in flight: ~2 packets       */
 #define MOUSE_CARRY_CLAMP  384      /* max banked counts per axis        */
 
+/* Mouse path figures for the [KBD] diag line (input thread only): host
+ * counts in, counts sent in IKBD packets, counts thrown away by the carry
+ * clamp, packets, flushes that stopped on the in-flight bound, and the
+ * largest banked carry (counts still to send) seen in the second. All
+ * |x|+|y| in host counts. */
+static uint32_t ms_in, ms_sent, ms_clamped, ms_pkts, ms_full, ms_carry_max;
+static uint32_t ms_tail_ms;            /* ms of sending after the host stopped */
+static uint64_t ms_last_in_us;
+static int      ms_diag = -1;          /* PISTORM_MOUSE_DIAG=1: [MOUSE] line */
+
 /* Host-count divisor, "kbd usb mousediv N". 1 = raw host counts. */
 int kbd_usb_mouse_div = 1;
 
@@ -2191,10 +2201,19 @@ static void mouse_flush(void)
 
     /* Cap carried motion. Without this a fast swipe banks thousands of
      * counts that then dribble out over seconds. */
-    if (in_state.dx >  MOUSE_CARRY_CLAMP) in_state.dx =  MOUSE_CARRY_CLAMP;
-    if (in_state.dx < -MOUSE_CARRY_CLAMP) in_state.dx = -MOUSE_CARRY_CLAMP;
-    if (in_state.dy >  MOUSE_CARRY_CLAMP) in_state.dy =  MOUSE_CARRY_CLAMP;
-    if (in_state.dy < -MOUSE_CARRY_CLAMP) in_state.dy = -MOUSE_CARRY_CLAMP;
+    {
+        int ox = in_state.dx, oy = in_state.dy;
+        if (in_state.dx >  MOUSE_CARRY_CLAMP) in_state.dx =  MOUSE_CARRY_CLAMP;
+        if (in_state.dx < -MOUSE_CARRY_CLAMP) in_state.dx = -MOUSE_CARRY_CLAMP;
+        if (in_state.dy >  MOUSE_CARRY_CLAMP) in_state.dy =  MOUSE_CARRY_CLAMP;
+        if (in_state.dy < -MOUSE_CARRY_CLAMP) in_state.dy = -MOUSE_CARRY_CLAMP;
+        ms_clamped += (uint32_t)(abs(ox - in_state.dx) + abs(oy - in_state.dy));
+        uint32_t c = (uint32_t)(abs(in_state.dx) + abs(in_state.dy));
+        if (c > ms_carry_max) ms_carry_max = c;
+        if (c >= (uint32_t)(kbd_usb_mouse_div > 0 ? kbd_usb_mouse_div : 1) &&
+            now_us() - ms_last_in_us > 20000)
+            ms_tail_ms += MOUSE_TICK_US / 1000;   /* still draining, host idle */
+    }
 
     while (in_state.dx / div || in_state.dy / div ||
            buttons != in_state.last_sent_buttons)
@@ -2204,8 +2223,10 @@ static void mouse_flush(void)
          * showed up as the pointer lagging then catching up in lurches.
          * Holding only ~2 packets in flight keeps latency near 8ms and
          * lets unsent motion coalesce into the next packet instead. */
-        if (ring_used() >= MOUSE_MAX_QUEUE)
+        if (ring_used() >= MOUSE_MAX_QUEUE) {
+            ms_full++;
             break;
+        }
 
         int sx = in_state.dx / div, sy = in_state.dy / div;
         if (sx > 127)  sx = 127;
@@ -2219,6 +2240,8 @@ static void mouse_flush(void)
         if (!y0top)
             sy = -sy;
 
+        ms_sent += (uint32_t)(abs(sx) + abs(sy)) * (uint32_t)div;
+        ms_pkts++;
         uint8_t pkt[3];
         pkt[0] = (uint8_t)(0xF8 | (buttons & 0x03));
         pkt[1] = (uint8_t)(int8_t)sx;
@@ -2231,6 +2254,10 @@ static void handle_event(const struct input_event *ev, int is_mouse)
 {
     if (ev->type == EV_REL)
     {
+        if (ev->code == REL_X || ev->code == REL_Y) {
+            ms_in += (uint32_t)abs(ev->value);
+            ms_last_in_us = now_us();
+        }
         if (ev->code == REL_X)
             in_state.dx += ev->value;
         else if (ev->code == REL_Y)
@@ -2444,6 +2471,19 @@ static void *input_thread(void *arg)
 
         if (t >= in_state.next_diag_us)
         {
+            if (ms_diag < 0) {
+                const char *e = getenv("PISTORM_MOUSE_DIAG");
+                ms_diag = e && *e == '1';
+            }
+            if (ms_diag && (ms_in || ms_sent)) {
+                printf("[MOUSE] in=%u/s sent=%u/s clamped=%u/s pkts=%u/s full=%u/s "
+                       "carry_max=%u tail=%ums div=%d inj=%u ring=%d\n",
+                       ms_in, ms_sent, ms_clamped, ms_pkts, ms_full, ms_carry_max,
+                       ms_tail_ms, kbd_usb_mouse_div,
+                       (unsigned)kbd_usb_stat_injected_bytes, ring_used());
+                fflush(stdout);
+            }
+            ms_in = ms_sent = ms_clamped = ms_pkts = ms_full = ms_carry_max = ms_tail_ms = 0;
             kbd_usb_diag_tick();
             in_state.next_diag_us = t + 1000000;
         }
