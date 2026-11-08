@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include "platforms/atari/psctrl/psctrl_tunables.h"
 #include <stdlib.h>
+#include <sys/syscall.h>
+#include <sys/resource.h>
 #include <string.h>
 #include <strings.h>
 #include <stdatomic.h>
@@ -83,6 +85,7 @@ static uint32_t ms_in, ms_sent, ms_clamped, ms_pkts, ms_full, ms_carry_max;
 static uint32_t ms_tail_ms;            /* ms of sending after the host stopped */
 static uint64_t ms_last_in_us;
 static int      ms_diag = -1;          /* PISTORM_MOUSE_DIAG=1: [MOUSE] line */
+static uint32_t ms_gap_max_us, ms_gap_20;  /* input loop: longest gap, gaps > 20 ms */
 
 /* Host-count divisor, "kbd usb mousediv N". 1 = raw host counts. */
 int kbd_usb_mouse_div = 1;
@@ -2399,6 +2402,25 @@ static void *input_thread(void *arg)
 {
     (void)arg;
 
+    /* Scheduling. This thread wakes every 4 ms for a few microseconds. On a
+     * Pi 3A+ the two Linux cores also carry the video, audio and sampler
+     * threads; at normal priority it waited its turn for tens of ms
+     * (measured: up to ~54 ms of motion collected before a flush, packets at
+     * 22-35/s in fast moves instead of 125) - the pointer lag. A higher
+     * CFS priority gets it run on wakeup. Not real-time (SCHED_FIFO caused
+     * trouble on ipl_task); PISTORM_KBD_NICE=n sets it, 0 = old behaviour. */
+    {
+        int nv = -10;
+        const char *e = getenv("PISTORM_KBD_NICE");
+        if (e && *e) nv = atoi(e);
+        if (nv < -20) nv = -20;
+        if (nv > 19) nv = 19;
+        if (nv && setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nv) != 0)
+            printf("[KBD] input thread nice %d failed: %s\n", nv, strerror(errno));
+        else if (nv)
+            printf("[KBD] input thread nice %d\n", nv);
+    }
+
     in_state.ifd = inotify_init1(IN_NONBLOCK);
     if (in_state.ifd >= 0)
         inotify_add_watch(in_state.ifd, "/dev/input", IN_CREATE | IN_ATTRIB);
@@ -2427,6 +2449,16 @@ static void *input_thread(void *arg)
         n++;
 
         (void)poll(pfd, (nfds_t)n, 4 /* ms */);
+        {
+            static uint64_t last;
+            const uint64_t tw = now_us();
+            if (last) {
+                const uint64_t g = tw - last;
+                if (g > ms_gap_max_us) ms_gap_max_us = (uint32_t)g;
+                if (g > 20000) ms_gap_20++;
+            }
+            last = tw;
+        }
 
         /* hotplug */
         if (in_state.ifd >= 0 && (pfd[n - 1].revents & POLLIN))
@@ -2496,14 +2528,16 @@ static void *input_thread(void *arg)
                 const uint32_t lm = atomic_exchange(&ms_lat_max_us, 0);
                 printf("[MOUSE] in=%u/s sent=%u/s clamped=%u/s pkts=%u/s full=%u/s "
                        "carry_max=%u tail=%ums div=%d inj=%u ring=%d "
-                       "deliver avg=%.1fms max=%.1fms (n=%u)\n",
+                       "deliver avg=%.1fms max=%.1fms (n=%u) loop gap max=%.1fms >20ms=%u\n",
                        ms_in, ms_sent, ms_clamped, ms_pkts, ms_full, ms_carry_max,
                        ms_tail_ms, kbd_usb_mouse_div,
                        (unsigned)kbd_usb_stat_injected_bytes, ring_used(),
-                       ln ? ls / 1000.0 / ln : 0.0, lm / 1000.0, ln);
+                       ln ? ls / 1000.0 / ln : 0.0, lm / 1000.0, ln,
+                       ms_gap_max_us / 1000.0, ms_gap_20);
                 fflush(stdout);
             }
             ms_in = ms_sent = ms_clamped = ms_pkts = ms_full = ms_carry_max = ms_tail_ms = 0;
+            ms_gap_max_us = ms_gap_20 = 0;
             kbd_usb_diag_tick();
             in_state.next_diag_us = t + 1000000;
         }
