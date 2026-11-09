@@ -268,6 +268,13 @@ the ST monitor at every power-on and boots the last build after its countdown
 or add `--no-setup` to `ExecStart` in the unit. `PISTORM_CFG=` at install
 time names a different file (a flat single-machine .cfg has no page).
 
+`~` in a .cfg (disk and floppy images, ROMs) means the home of the user
+whose tree this is, never `$HOME`: under `sudo` that is `$SUDO_USER`, and
+under the service - root, with no `SUDO_USER` - it is the owner of the
+unit's `WorkingDirectory`, your checkout. Keep the checkout owned by your
+user, or set `Environment=SUDO_USER=<you>` in the unit. (Before this, the
+service resolved `~` to `/root`, so every `~/...` image failed to open.)
+
 ```bash
 sudo systemctl start pistorm     # test now
 journalctl -u pistorm -f         # watch its output

@@ -95,13 +95,22 @@ int sc_keys(const struct sc_cfg *c, const char *sec,
  *
  *   ../configs/psctrl.cfg      the runtime tree, as run-pistorm.sh uses
  *   configs/psctrl.cfg         a repo-local config
- *   ~<invoking user>/configs/psctrl.cfg   ($SUDO_USER, not $HOME)
+ *   ~<invoking user>/configs/psctrl.cfg   (sc_invoking_user(), not $HOME)
  *
  * If none exists but configs/psctrl.cfg.default does, it is copied to the
  * first writable candidate and that path returned, so a fresh tree comes
  * up configured. Returns 0 and fills `out`, or -1. `created` is set to 1
  * when the file was made from the default. */
 int sc_locate(char *out, unsigned long n, int *created);
+
+/* The user whose tree this is - what ~ means everywhere in the emulator.
+ * In order: $SUDO_USER (run with sudo); when running as root without it
+ * (pistorm.service), the owner of the working directory, which the unit
+ * sets to the user's checkout; otherwise the real uid. Never $HOME, which
+ * is /root in both the sudo and the service case. Returns getpwnam() /
+ * getpwuid() static storage: copy pw_dir before the next passwd call. */
+struct passwd;
+const struct passwd *sc_invoking_user(void);
 
 /* Same, with the home directory given rather than looked up. sc_locate()
  * is this with the invoking user's home; the harness passes a scratch

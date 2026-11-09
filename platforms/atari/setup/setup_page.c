@@ -1045,9 +1045,7 @@ static const char *page_home(void)
 {
     static char home[512];
     if (home[0]) return home;
-    const char *u = getenv("SUDO_USER");
-    const struct passwd *pw = (u && *u) ? getpwnam(u) : NULL;
-    if (!pw) pw = getpwuid(getuid());
+    const struct passwd *pw = sc_invoking_user();
     const char *h = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : getenv("HOME");
     snprintf(home, sizeof home, "%s", h ? h : ".");
     return home;
