@@ -475,14 +475,35 @@ int sc_locate_at(const char *home, char *out, unsigned long n, int *created)
     return 0;
 }
 
+const struct passwd *sc_invoking_user(void)
+{
+    const char *user = getenv("SUDO_USER");
+    const struct passwd *pw = user && *user ? getpwnam(user) : NULL;
+    if (pw)
+        return pw;
+
+    uid_t uid = getuid();
+    if (uid == 0) {
+        /* root with no SUDO_USER: pistorm.service. Its WorkingDirectory
+         * is the user's checkout, so the owner of "." is the user whose
+         * tree this is. Without this, getpwuid(0) below gave /root and
+         * every ~/... path in the .cfg (floppy and disk images, ROMs)
+         * pointed into /root and failed to open. */
+        struct stat st;
+        if (stat(".", &st) == 0 && st.st_uid != 0) {
+            pw = getpwuid(st.st_uid);
+            if (pw)
+                return pw;
+        }
+    }
+    return getpwuid(uid);
+}
+
 int sc_locate(char *out, unsigned long n, int *created)
 {
     /* the invoking user, not $HOME: under sudo and under pistorm.service
      * $HOME is /root, which is not where the configs live */
-    const char *user = getenv("SUDO_USER");
-    const struct passwd *pw = user && *user ? getpwnam(user) : NULL;
-    if (!pw)
-        pw = getpwuid(getuid());
+    const struct passwd *pw = sc_invoking_user();
     return sc_locate_at(pw && pw->pw_dir ? pw->pw_dir : NULL, out, n, created);
 }
 

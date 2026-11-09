@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <sys/mman.h>
 #include "config_file.h"
+#include "../platforms/atari/setup/setup_cfg.h"  /* sc_invoking_user() */
 
 /* platforms/atari/psctrl/psctrl_settings.cpp */
 extern int psctrl_settings_config_key(const char *key, const char *value);
@@ -618,17 +619,14 @@ const char *emulator_config_rom_path(void)
 }
 
 /* expand a leading ~ / ~/ to the INVOKING user's home - not $HOME, which
- * is /root under sudo and under pistorm.service (getpwnam of SUDO_USER,
- * else getpwuid of the real uid, else $HOME) */
+ * is /root under sudo and under pistorm.service (sc_invoking_user(), else
+ * $HOME) */
 static const char *user_home(void)
 {
   static char home[512];
   if (home[0])
     return home;
-  const char *u = getenv("SUDO_USER");
-  const struct passwd *pw = (u && *u) ? getpwnam(u) : NULL;
-  if (!pw)
-    pw = getpwuid(getuid());
+  const struct passwd *pw = sc_invoking_user();
   const char *h = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : getenv("HOME");
   snprintf(home, sizeof home, "%s", h ? h : ".");
   return home;

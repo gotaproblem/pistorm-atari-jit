@@ -7,5 +7,6 @@ out=${TMPDIR:-/tmp}/cfg_section_test
 ${CC:-cc} -std=gnu11 -Wall -Wextra -O1 -I"$root" -I"$root/gpio" \
     -I"$root/include" -I"$root/threaddep" \
     "$here/cfg_section_test.c" "$root/config_file/config_file.c" \
-    "$root/platforms/atari/disk_order.c" -o "$out"
+    "$root/platforms/atari/disk_order.c" \
+    "$root/platforms/atari/setup/setup_cfg.c" -o "$out"
 "$out"

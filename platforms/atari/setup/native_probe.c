@@ -202,10 +202,7 @@ int np_copy_rom(const struct np_result *r, const char *path)
 static void expand_home(const char *in, char *out, size_t n)
 {
     if (in[0] == '~' && (in[1] == 0 || in[1] == '/')) {
-        const char *user = getenv("SUDO_USER");
-        const struct passwd *pw = user && *user ? getpwnam(user) : NULL;
-        if (!pw)
-            pw = getpwuid(getuid());
+        const struct passwd *pw = sc_invoking_user();
         snprintf(out, n, "%s%s", pw && pw->pw_dir ? pw->pw_dir : "", in + 1);
     } else {
         snprintf(out, n, "%s", in);
