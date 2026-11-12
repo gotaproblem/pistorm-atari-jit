@@ -448,9 +448,39 @@ static int64_t gov_wait_until(int64_t now, int64_t until)
 	return now;
 }
 
-/* sync != 0: see pistorm_gov_sync() below */
+/* THE LEAD AT AN INTERRUPT (PISTORM_GOV_PARK=0 turns this off).
+ * An interrupt ends a governor wait at once, and no pause is taken inside
+ * a handler - so a handler can start with the guest AHEAD of real time by
+ * whatever the wait had left, and that is most when the interrupt comes
+ * right behind another handler (which ran unpaced; its lead was about to
+ * be waited out). The handler's first beam-timed access (pistorm_gov_sync)
+ * then waited the whole lead out before touching the bus.
+ *
+ * Turrican II title, 12 Nov 2026 (write-behind on, HDMI mirror off, raster
+ * trace): the line-199 Timer B handler polls $FF8209 for the $D0-$FF
+ * window of its line to open the lower border, and has ~34 us from its
+ * first read to the window's end. In the frames where the border did not
+ * open - the handler then spins into the next frame, the VBL is 4 ms late,
+ * the water is gone for two frames - the guest was 24-56 us ahead at the
+ * handler's start in 15 of 17; in the 1416 good frames it was under 24 us
+ * in all but 9. 10 of the 17 came within 20 us of a Timer C (music)
+ * interrupt: the flicker follows the tune.
+ *
+ * A real interrupt happens NOW: at the outermost handler's entry the lead
+ * is taken off the clock and parked, so the handler runs from real time,
+ * and the parked lead is put back at the first check outside a handler,
+ * where it is waited out as any lead is. Average speed is unchanged. */
+static int     gov_park_on = -1;
+static int64_t gov_parked_ns;
+unsigned long  pistorm_gov_parks;           /* [GOV] report */
+
+/* mode 0: a normal check; 1: see pistorm_gov_sync(); 2: an interrupt
+ * handler is starting (pistorm_gov_irq_entry) */
 static void pistorm_governor(int sync)
 {
+	const int irq_entry = (sync == 2);
+	if (irq_entry)
+		sync = 1;                               /* evaluate now, whatever gov_next says */
 	if (currprefs.m68k_speed != 0 || currprefs.cachesize)
 		return;                                 /* JIT / max speed: not ours */
 
@@ -540,6 +570,21 @@ static void pistorm_governor(int sync)
 	int64_t virt_ns  = (int64_t)((currcycle - gov_cyc0) / unit) * 1000000LL / gov_khz;
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 
+	if (irq_entry) {
+		if (ahead_ns > 0) {                     /* park the lead */
+			gov_ns0 -= ahead_ns;
+			gov_parked_ns += ahead_ns;
+			pistorm_gov_parks++;
+			rt_gov(ahead_ns, 1);
+		}
+		return;
+	}
+	if (gov_parked_ns && !sync && !pistorm_handler_running()) {
+		gov_ns0 += gov_parked_ns;               /* ... and put it back */
+		ahead_ns += gov_parked_ns;
+		gov_parked_ns = 0;
+	}
+
 	if (sync) {
 		/* a beam-timed register access: the guest and the real beam must
 		 * agree NOW. Ahead: wait out all of it (still capped). Behind:
@@ -603,6 +648,18 @@ static void pistorm_governor(int sync)
 extern "C" void pistorm_gov_sync(void)
 {
 	pistorm_governor(1);
+}
+
+/* newcpu.cpp: the outermost interrupt handler is starting - see THE LEAD
+ * AT AN INTERRUPT */
+void pistorm_gov_irq_entry(void)
+{
+	if (gov_park_on < 0) {
+		const char *e = getenv("PISTORM_GOV_PARK");
+		gov_park_on = !(e && *e == '0');
+	}
+	if (gov_park_on)
+		pistorm_governor(2);
 }
 #endif
 

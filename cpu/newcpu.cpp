@@ -5496,6 +5496,7 @@ extern "C" int pistorm_hbl_handler_is_rte(void)
 
 #include "platforms/atari/raster_trace.h"
 void pistorm_handler_enter(void);
+extern void pistorm_gov_irq_entry(void);   /* events.cpp */
 void pistorm_handler_pre(void);
 void pistorm_handler_post(void);
 static void do_interrupt (int nr)
@@ -6196,6 +6197,7 @@ void pistorm_handler_enter(void)
 	hnd_sp0  = m68k_areg(regs, 7);
 	hnd_cyc0 = get_cycles();
 	hnd_on   = 1;
+	pistorm_gov_irq_entry();            /* events.cpp: the handler starts from real time */
 }
 
 /* events.cpp's governor: is an interrupt waiting that the CPU would take
