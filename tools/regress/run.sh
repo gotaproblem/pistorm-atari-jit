@@ -129,6 +129,7 @@ timeline_report() {
 # ---------------------------------------------------------------- suite.txt
 run_suite() {
 	local name rom progs drives extra secs what
+	local RUN_ENVS=(${REGRESS_ENV:-})	# e.g. REGRESS_ENV=PISTORM_WRBEHIND=1
 	while IFS='|' read -r name rom progs drives extra secs what; do
 		name=$(echo $name); rom=$(echo $rom); drives=$(echo $drives)
 		secs=$(echo $secs); extra=$(echo "$extra" | sed 's/^ *//; s/ *$//')

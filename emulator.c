@@ -915,6 +915,20 @@ static void *ipl_stats_task(void *)
         pmb = nmb;
       }
       {
+        extern int stram_wb_on;         /* PISTORM_WRBEHIND, stram_wb.c */
+        extern unsigned long stram_wb_deferred, stram_wb_direct_after,
+                             stram_wb_pushed, stram_wb_flushes, stram_wb_max;
+        if (stram_wb_on) {
+          static unsigned long pd, pa, pp, pf;
+          unsigned long d = stram_wb_deferred, a = stram_wb_direct_after,
+                        pu = stram_wb_pushed, f = stram_wb_flushes;
+          fprintf(stderr, "[ipl]   write-behind: %lu/s deferred in handlers, %lu/s queued "
+                  "behind them, %lu/s pushed out (full), %lu/s forced flushes, deepest %lu\n",
+                  d - pd, a - pa, pu - pp, f - pf, stram_wb_max);
+          pd = d; pa = a; pp = pu; pf = f;
+        }
+      }
+      {
         uint64_t cmax = pistorm_ipl_call_max;
         uint32_t cop  = pistorm_ipl_call_max_op;
         pistorm_ipl_call_max = 0;

@@ -405,6 +405,7 @@ static inline int64_t gov_now_ns(void)
 extern int pistorm_irq_deliverable(void);
 extern int pistorm_handler_running(void);
 #include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
+#include "platforms/atari/stram_wb.h"       /* PISTORM_WRBEHIND */
 #include "platforms/atari/video/shifter_mirror.h"   /* exact HDMI mirror */
 
 /* Wait until CLOCK_MONOTONIC reaches `until` (ns): sleep most of it, spin
@@ -526,6 +527,14 @@ static void pistorm_governor(int sync)
 			win_ns0 = now;
 			win_cyc0 = currcycle;
 		}
+	}
+
+	/* PISTORM_WRBEHIND: RAM writes an interrupt handler left queued go
+	 * to the bus now that it has ended - until an interrupt is due
+	 * (platforms/atari/stram_wb.c). The time is real: it shows in `now`. */
+	if (__builtin_expect(stram_wb_n != 0, 0) && !sync && !pistorm_handler_running()) {
+		stram_wb_drain();
+		now = gov_now_ns();
 	}
 
 	int64_t virt_ns  = (int64_t)((currcycle - gov_cyc0) / unit) * 1000000LL / gov_khz;

@@ -61,6 +61,7 @@ extern "C"
     void ps_write_8(uint32_t address, uint16_t data);
     void ps_write_16(uint32_t address, uint16_t data);
     void ps_write_32(uint32_t address, uint32_t data);
+#include "platforms/atari/stram_wb.h"   /* PISTORM_WRBEHIND */
 
     uint8_t et4000_io_read8(ET4000State *, uint32_t);
     uint16_t et4000_io_read16(ET4000State *, uint32_t);
@@ -976,6 +977,7 @@ static void stram_shadow_program_base(void)
 {
     if (!stram_shadow_guest_base())
         return;                        /* nothing sane to mirror yet */
+    stram_wb_flush();
     ps_write_8(0x00FF8201u, (uae_u8)(g_shadow_base >> 16));
     ps_write_8(0x00FF8203u, (uae_u8)(g_shadow_base >> 8));
     if (g_shadow_ste_reg)             /* $FF820D is STE-only - see the
@@ -993,6 +995,7 @@ static void stram_shadow_refill(void)
     if (!scr || scr == g_shadow_src)
         return;
     const uae_u32 prev = g_shadow_src;
+    stram_wb_flush();                  /* queued writes carry the old mapping */
     g_shadow_src = scr;
     {   /* the first few moves, so the log says what the shadow believes
          * when something goes wrong later */
@@ -3904,6 +3907,19 @@ static int falcon_vbase_read(uaecptr a, int size, uae_u32 *out)
     return 1;
 }
 
+/* PISTORM_WRBEHIND: RAM writes still queued go to the bus before the
+ * guest touches the DMA/FDC registers ($FF8600-0F: real DMA reads and
+ * writes real RAM, and dma_snoop pulls it back) or WRITES the video base
+ * ($FF8200-0F: the screen shadow's mapping). One test when none wait. */
+static inline void stram_wb_io(uaecptr a, int wr)
+{
+    if (__builtin_expect(stram_wb_n != 0, 0)) {
+        a &= 0x00FFFFF0u;
+        if (a == 0x00FF8600u || (wr && a == 0x00FF8200u))
+            stram_wb_flush_slow();
+    }
+}
+
 static uae_u32 hw_lget(uaecptr a)
 {
     PROF_IO_R(a);
@@ -3912,6 +3928,7 @@ static uae_u32 hw_lget(uaecptr a)
 #else
     g_buserr = 0;
     fc_data();
+    stram_wb_io(a, 0);
     a = hw_fold_addr(a);
 
     if (fpu_in_regs(a) || nova_io_alias_addr(a))
@@ -4006,6 +4023,7 @@ static uae_u32 hw_wget(uaecptr a)
 #else
     g_buserr = 0;
     fc_data();
+    stram_wb_io(a, 0);
     a = hw_fold_addr(a);
     if (__builtin_expect(beam_timed_reg(a), 0))
         pistorm_gov_sync();
@@ -4093,6 +4111,7 @@ static uae_u32 hw_bget(uaecptr a)
 #else
     g_buserr = 0;
     fc_data();
+    stram_wb_io(a, 0);
     a = hw_fold_addr(a);
     if (__builtin_expect(beam_timed_reg(a), 0))
         pistorm_gov_sync();
@@ -4180,6 +4199,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
 #else
     g_buserr = 0;
     fc_data();
+    stram_wb_io(a, 1);
     a = hw_fold_addr(a);
     /* memcfg ($FF8001) has no HW_PAGE case of its own and fell through
      * to hw_bus_* unsnooped - the model missed every guest memcfg write
@@ -4297,6 +4317,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
 #else
     g_buserr = 0;
     fc_data();
+    stram_wb_io(a, 1);
     a = hw_fold_addr(a);
     stram_memcfg_snoop(a, v, 2);   /* see hw_lput */
     v = pistorm_stram_memcfg_bus_value(a, v, 2);
@@ -4411,6 +4432,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
 #else
     g_buserr = 0;
     fc_data();
+    stram_wb_io(a, 1);
     a = hw_fold_addr(a);
     stram_memcfg_snoop(a, v, 1);   /* see hw_lput */
     v = pistorm_stram_memcfg_bus_value(a, v, 1);
@@ -4660,6 +4682,31 @@ static inline void shm_ram_w(uaecptr a, int sz, uae_u32 v)
     }
 }
 
+/* The write-through itself. PISTORM_WRBEHIND=1: a write made while an
+ * interrupt handler runs waits in a FIFO and reaches the bus when the
+ * handler ends (platforms/atari/stram_wb.c - why, and the rules). */
+extern int pistorm_handler_running(void);          /* newcpu.cpp */
+extern int pistorm_irq_deliverable(void);
+extern "C" int stram_wb_irq_due(void) { return pistorm_irq_deliverable(); }
+static inline void stram_bus_put(uae_u32 bus_a, uae_u32 v, int size)
+{
+    fc_data();
+    if (__builtin_expect(stram_wb_on, 0)) {
+        const int in_h = pistorm_handler_running();
+        if (in_h || stram_wb_n) {
+            if (size == 4) {
+                stram_wb_slow(bus_a, v >> 16, 2, fc, in_h);
+                stram_wb_slow(bus_a + 2, v & 0xFFFFu, 2, fc, in_h);
+            } else
+                stram_wb_slow(bus_a, v, size, fc, in_h);
+            return;
+        }
+    }
+    if (size == 4)      ps_write_32(bus_a, v);
+    else if (size == 2) ps_write_16(bus_a, (uint16_t)v);
+    else                ps_write_8(bus_a, (uint8_t)v);
+}
+
 static void sr_lput(uaecptr a, uae_u32 v)
 {
     PROF_STRAM_W(a);
@@ -4673,8 +4720,7 @@ static void sr_lput(uaecptr a, uae_u32 v)
     stram_snoop_lowram(a, 4);
     if (stram_needs_bus_write(a, 4)) {
         uae_u32 bus_a = stram_bus_addr(a);   /* screen -> shadow */
-        fc_data();
-        ps_write_32(bus_a, v); // write-through to bus
+        stram_bus_put(bus_a, v, 4);         // write-through to bus
     }
     pistorm_smc(a, 4);
 }
@@ -4687,8 +4733,7 @@ static void sr_wput(uaecptr a, uae_u32 v)
     stram_snoop_lowram(a, 2);
     if (stram_needs_bus_write(a, 2)) {
         uae_u32 bus_a = stram_bus_addr(a);   /* screen -> shadow */
-        fc_data();
-        ps_write_16(bus_a, (uint16_t)v);
+        stram_bus_put(bus_a, v, 2);
     }
     pistorm_smc(a, 2);
 }
@@ -4701,8 +4746,7 @@ static void sr_bput(uaecptr a, uae_u32 v)
     stram_snoop_lowram(a, 1);
     if (stram_needs_bus_write(a, 1)) {
         uae_u32 bus_a = stram_bus_addr(a);   /* screen -> shadow */
-        fc_data();
-        ps_write_8(bus_a, (uint8_t)v);
+        stram_bus_put(bus_a, v, 1);
     }
     pistorm_smc(a, 1);
 }
@@ -4746,6 +4790,7 @@ extern "C" void pistorm_blit_write16(uint32_t a, uint16_t v)
     if (stram_needs_bus_write(a, 2))
     {
         uint8_t old_fc = fc;
+        stram_wb_flush();               /* older handler writes first */
         fc = 5;
         g_buserr = 0;
         ps_write_16(stram_bus_addr(a), v);   /* screen -> shadow */
@@ -4779,6 +4824,7 @@ extern "C" void pistorm_dma_write_stram(uint32_t a, const uint8_t *src, uint32_t
     const uint8_t old_fc = fc;
     int fc_set = 0;
     uint32_t i = 0;
+    stram_wb_flush();                   /* older handler writes first */
     while (i < n) {
         const uint32_t ad = a + i;
         if (!(ad & 1u) && i + 1u < n) {                  /* a whole word */
@@ -5983,6 +6029,7 @@ extern "C" void jit_mem_init(void)
      * direct-mapped regions. IDE (0xF00000) and HW (0xFF8000) stay on the bus. */
     // map_region(0,           0x01000000,       &pistorm_dummy_bank);
     map_region(0, GUEST_RESERVE, &pistorm_dummy_bank); //&pistorm_io_bank);
+    stram_wb_init();                    /* PISTORM_WRBEHIND */
     map_region(0, ST_RAM_SIZE, &pistorm_stram_bank);
     if (emulator_config_stram_direct_enabled()) {
         /* Fast mirror-only RAM is deliberately separate from stram_cache.
