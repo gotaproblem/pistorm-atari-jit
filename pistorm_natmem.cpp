@@ -3986,12 +3986,23 @@ static int falcon_vbase_read(uaecptr a, int size, uae_u32 *out)
 /* PISTORM_WRBEHIND: RAM writes still queued go to the bus before the
  * guest touches the DMA/FDC registers ($FF8600-0F: real DMA reads and
  * writes real RAM, and dma_snoop pulls it back) or WRITES the video base
- * ($FF8200-0F: the screen shadow's mapping). One test when none wait. */
+ * ($FF8200-03, $FF820C-0D: the screen shadow's mapping). One test when
+ * none wait.
+ * NOT the sync register $FF820A, which the first version included (the
+ * whole $FF8200-0F row): Turrican II's lower border, 12 Nov 2026 - the
+ * flush of the handler's stack frame and saved registers (~7 words, 5-7
+ * us) ran in front of the 60 Hz write, so whenever the routine's own
+ * padding was short the 60 and 50 Hz writes landed late (final counter
+ * value $D0 -> $DC should bring the write 3 us sooner after the read;
+ * measured 0.7), the return to 50 Hz came after line
+ * 200's display start and the reflection was drawn 16 pixels across. */
 static inline void stram_wb_io(uaecptr a, int wr)
 {
     if (__builtin_expect(stram_wb_n != 0, 0)) {
-        a &= 0x00FFFFF0u;
-        if (a == 0x00FF8600u || (wr && a == 0x00FF8200u))
+        a &= 0x00FFFFFFu;
+        if ((a & 0x00FFFFF0u) == 0x00FF8600u ||
+            (wr && ((a >= 0x00FF8200u && a <= 0x00FF8203u) ||
+                    (a >= 0x00FF820Cu && a <= 0x00FF820Du))))
             stram_wb_flush_slow();
     }
 }
