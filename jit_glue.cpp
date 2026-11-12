@@ -545,7 +545,20 @@ extern "C" { volatile uint8_t pistorm_iack_dsp; }  /* vector is the DSP's IVR */
  * long that bus cycle took in arch-timer ticks - newcpu.cpp IACK GUARD */
 extern "C" { volatile uint8_t pistorm_iack_real; volatile uint32_t pistorm_iack_ticks; }
 
+extern "C" volatile uint8_t pistorm_cpu_phase;   /* emulator.c STALL PROBE */
+extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
+static void intlev_ack_ (uint8_t nr);
 void intlev_ack (uint8_t nr)
+{
+    const uint8_t ph = pistorm_cpu_phase;
+    pistorm_cpu_phase = 4;
+    intlev_ack_ (nr);
+    pistorm_cpu_phase = ph;
+    /* a real bus IACK longer than 10 us (54 ticks/us on the Pi 4) */
+    if (pistorm_iack_real && pistorm_iack_ticks > 540u)
+        pistorm_tl_cpu('A', nr, (uint8_t)(pistorm_iack_vector & 0xFFu), 0, pistorm_iack_ticks);
+}
+static void intlev_ack_ (uint8_t nr)
 {
     pistorm_iack_dsp = 0;
     pistorm_iack_real = 0;

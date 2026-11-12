@@ -219,8 +219,14 @@ static inline void ps_spin_ticks (uint64_t n)
     asm volatile ("yield" ::: "memory");
 }
 
+/* emulator.c owns it; weak here so ataritest/setupvtest link without it */
+__attribute__ ((weak)) volatile uint8_t pistorm_cpu_phase;
+uint32_t ps_cpu_seq_peek (void) { return ps_cpu_seq; }
+
 static void __attribute__ ((noinline, cold)) ps_cpu_yield_bus (void)
 {
+  const uint8_t ph = pistorm_cpu_phase;
+  pistorm_cpu_phase = 5;
   do {
     asm volatile ("dmb sy" ::: "memory");      /* our GPIO writes have landed */
     ps_cpu_seq = ++ps_cpu_seq_local;            /* even: not in a transaction  */
@@ -230,6 +236,7 @@ static void __attribute__ ((noinline, cold)) ps_cpu_yield_bus (void)
     ps_cpu_seq = ++ps_cpu_seq_local;            /* odd again                   */
     asm volatile ("dmb ish" ::: "memory");      /* odd visible before req re-read */
   } while (ps_bus_req);
+  pistorm_cpu_phase = ph;
 }
 
 /* bounded (~60 ms): the CPU thread's own stuck-cycle recovery owns the

@@ -422,7 +422,17 @@ extern int pistorm_handler_running(void);
  * and paying the time back at the next step keeps the average speed and
  * gives the handler its line back. The sleep is done in slices so a long
  * wait notices too. */
+extern "C" volatile uint8_t pistorm_cpu_phase;   /* emulator.c STALL PROBE */
+static int64_t gov_wait_until_(int64_t now, int64_t until);
 static int64_t gov_wait_until(int64_t now, int64_t until)
+{
+	const uint8_t ph = pistorm_cpu_phase;
+	pistorm_cpu_phase = 1;
+	now = gov_wait_until_(now, until);
+	pistorm_cpu_phase = ph;
+	return now;
+}
+static int64_t gov_wait_until_(int64_t now, int64_t until)
 {
 	static const int64_t GOV_SLICE_NS = 100000LL;  /* longest sleep between checks */
 

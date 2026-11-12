@@ -5924,6 +5924,11 @@ static void do_interrupt (int nr)
 			noack_candidate_vec = 0;
 		}
 	}
+	if (nr == 6 && !interrupt_taken && pistorm_tl_enabled())
+		pistorm_tl_cpu('Q', (uint8_t)nr, (uint8_t)(pistorm_iack_vector & 0xFFu),
+		               (uint8_t)((interrupt_taken ? 1 : 0) | (clear_irq_latch ? 2 : 0) |
+		                         ((pistorm_iack_vector & 0xFFFFu) == 0xFFFEu ? 4 : 0)),
+		               m68k_getpc() & 0x00FFFFFFu);
 	if (interrupt_taken) {
 		Exception (exception_nr);
 		pistorm_handler_post();
@@ -6299,6 +6304,16 @@ void pistorm_handler_enter(void)
 
 /* events.cpp's governor: is an interrupt waiting that the CPU would take
  * now? Same test as intlev() below. */
+/* STALL PROBE (emulator.c): read from ipl_task, diagnostics only */
+extern "C" void pistorm_cpu_peek(uint32_t *pc, uint32_t *icnt, uint8_t *mask,
+                                 uint8_t *in_handler)
+{
+	*pc = (uint32_t)regs.instruction_pc & 0x00FFFFFFu;
+	*icnt = (uint32_t)regs.instruction_cnt;
+	*mask = (uint8_t)regs.intmask;
+	*in_handler = (uint8_t)pistorm_handler_running();
+}
+
 int pistorm_irq_deliverable(void)
 {
 	return g_irq > regs.intmask;

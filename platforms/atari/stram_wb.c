@@ -119,17 +119,24 @@ static inline void wb_push(uint32_t a, uint32_t v, int size, uint8_t wfc)
         stram_wb_max = stram_wb_n;
 }
 
+extern volatile uint8_t pistorm_cpu_phase;   /* emulator.c STALL PROBE */
 void stram_wb_drain(void)
 {
+    const uint8_t ph = pistorm_cpu_phase;
+    pistorm_cpu_phase = 2;
     while (stram_wb_n && !stram_wb_irq_due())
         wb_pop();
+    pistorm_cpu_phase = ph;
 }
 
 void stram_wb_flush_slow(void)
 {
+    const uint8_t ph = pistorm_cpu_phase;
+    pistorm_cpu_phase = 3;
     stram_wb_flushes++;
     while (stram_wb_n)
         wb_pop();
+    pistorm_cpu_phase = ph;
 }
 
 void stram_wb_slow(uint32_t bus_a, uint32_t v, int size, uint8_t wfc, int in_handler)

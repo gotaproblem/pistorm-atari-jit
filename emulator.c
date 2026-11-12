@@ -221,6 +221,15 @@ volatile uint32_t pistorm_ipl_call_max_op = 0;
 #define HOSTOP_NF          0x80000000u
 #define HOSTOP_JIT_COMPILE 0x40000000u
 volatile uint32_t pistorm_cpu_hostop = 0;
+/* STALL PROBE (PISTORM_IPL_TIMELINE + PISTORM_STALL_US): what the CPU
+ * thread is in, set by the few places that can hold it off the guest's
+ * instructions. 0 guest code, 1 governor wait, 2 write-behind drain,
+ * 3 write-behind flush, 4 IACK, 5 yielding the bus to another thread. */
+extern "C" { volatile uint8_t pistorm_cpu_phase = 0; }
+extern "C" void pistorm_cpu_peek(uint32_t *pc, uint32_t *icnt, uint8_t *mask,
+                                 uint8_t *in_handler);
+extern "C" uint32_t ps_cpu_seq_peek(void);
+extern "C" unsigned stram_wb_n;
 #define IPL_LATE_SLOTS 8
 volatile uint32_t pistorm_ipl_late_op[IPL_LATE_SLOTS];
 volatile unsigned pistorm_ipl_late_n[IPL_LATE_SLOTS];
@@ -320,7 +329,11 @@ static void *tl_writer(void *)
              "# us  X exception-nr iack-result sr-mask pc  (CPU took it;\n"
              "#       iack FE = bus IACK failed, FF = none)\n"
              "# us  M old->new interrupt mask, pc  (RTE / move to SR)\n"
-             "# us  W reg=val [video counter - base = line:byte]\n");
+             "# us  W reg=val [video counter - base = line:byte]\n"
+             "# us  S/N/T stall probe: an interrupt latched > PISTORM_STALL_US ago and\n"
+             "#       not taken - CPU phase, g_irq, mask, pc / instructions done,\n"
+             "#       write-behind queue, in-handler, age / bus transaction count\n"
+             "# us  Q level-6 IACK result the CPU did not deliver; A slow IACK\n");
   uint32_t pos[2] = { 0, 0 };
   uint64_t t0 = 0;
   const uint64_t hz = psctrl_cntfrq ? psctrl_cntfrq : 54000000ULL;
@@ -375,6 +388,23 @@ static void *tl_writer(void *)
           else
             fprintf(f, "%.1f W %02X=%02X off=%u %u:%u\n", us, e.a, e.b,
                     e.d, e.d / 160u, e.d % 160u);
+          break;
+        case 'S':                         /* stall probe, ipl_task */
+          fprintf(f, "%.1f S phase=%u g_irq=%u mask=%u pc=%06X\n", us, e.a, e.b, e.c, e.d);
+          break;
+        case 'N':
+          fprintf(f, "%.1f N instr=%u wbq=%u hnd=%u age=%uus\n", us, e.d, e.a, e.b, e.c * 4u);
+          break;
+        case 'T':
+          fprintf(f, "%.1f T bus_seq=%u %s\n", us, e.d, (e.d & 1) ? "IN-TXN" : "idle");
+          break;
+        case 'Q':                         /* CPU: level-6 interrupt not taken */
+          fprintf(f, "%.1f Q level=%u iack=%02X%s taken=%u clear=%u pc=%06X\n", us, e.a, e.b,
+                  e.c & 4 ? "(FE)" : "", e.c & 1, (e.c >> 1) & 1, e.d);
+          break;
+        case 'A':                         /* CPU: a slow bus IACK */
+          fprintf(f, "%.1f A level=%u vec=%02X iack_us=%.1f\n", us, e.a, e.b,
+                  (double)e.d * 1e6 / (double)hz);
           break;
         case 'K':                         /* mirror calibration read */
           fprintf(f, "%.1f K %06X %s\n", us, e.d,
@@ -1223,6 +1253,15 @@ static void *ipl_task(void *)
    * it, the follow-up stops here; MakeFromSR (newcpu.cpp) requests the
    * exit itself, on its own thread, when the mask comes back down. */
   const uint64_t kick_retry_ticks = psctrl_cntfrq / 100000u;      /* 10 us */
+  /* STALL PROBE threshold (timeline only): PISTORM_STALL_US, default 25,
+   * 0 = off; then a sample every 5 us while it lasts */
+  uint64_t stall_ticks = 0, stall_last = 0;
+  const uint64_t stall_every = psctrl_cntfrq / 200000u;           /* 5 us  */
+  {
+    const char *se = getenv("PISTORM_STALL_US");
+    unsigned long su = se ? strtoul(se, NULL, 10) : 25ul;
+    stall_ticks = (uint64_t)su * psctrl_cntfrq / 1000000ull;
+  }
   const uint64_t dlv_late_ticks   = psctrl_cntfrq / 1000u;        /* 1 ms  */
   /* KEYBOARD ACIA RESCUE. A level 6 pending and unmasked this long has
    * not been taken because the CPU thread is somewhere it cannot take
@@ -1352,6 +1391,20 @@ static void *ipl_task(void *)
           acia_polled = kn;
           (void)ps_acia_kbd_rescue();
         }
+      }
+      if (kick_armed && tl_on == 1 && stall_ticks &&
+          kn - kick_latch_tick >= stall_ticks && kn - stall_last >= stall_every)
+      {
+        /* STALL PROBE: latched, unmasked, still not taken */
+        uint32_t spc = 0, sic = 0;
+        uint8_t smask = 0, shnd = 0;
+        stall_last = kn;
+        pistorm_cpu_peek(&spc, &sic, &smask, &shnd);
+        uint64_t age_us = (kn - kick_latch_tick) * 1000000ull / psctrl_cntfrq;
+        tl_push(0, 'S', pistorm_cpu_phase, g_irq, smask, spc);
+        tl_push(0, 'N', stram_wb_n > 255 ? 255 : (uint8_t)stram_wb_n, shnd,
+                age_us / 4 > 255 ? 255 : (uint8_t)(age_us / 4), sic);
+        tl_push(0, 'T', 0, 0, 0, ps_cpu_seq_peek());
       }
       if (kick_armed && kn - kick_last_tick >= kick_retry_ticks)
       {
