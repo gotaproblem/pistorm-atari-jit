@@ -6294,8 +6294,20 @@ int pistorm_handler_running(void)
 
 void pistorm_handler_enter(void)
 {
-	if (pistorm_handler_cap() == 0 || pistorm_handler_running())
-		return;                             /* off, or nested: keep the outer */
+	if (pistorm_handler_cap() == 0)
+		return;
+	if (pistorm_handler_running()) {
+		/* NESTED: keep the outer handler's window, but this interrupt
+		 * also happens NOW - park the lead the outer one has built up.
+		 * Turrican II title (t2f, 12 Nov 2026): the Timer C handler
+		 * lowers its mask to 3 and plays the music inside its window,
+		 * unpaced; the line-198 Timer B came in on top of it with the
+		 * guest 55-178 us ahead, its first $FF8209 read (pistorm_gov_sync)
+		 * waited all of that out and missed the border window - 2 of the
+		 * 4 failed frames in the raster trace. */
+		pistorm_gov_irq_entry();
+		return;
+	}
 	hnd_sp0  = m68k_areg(regs, 7);
 	hnd_cyc0 = get_cycles();
 	hnd_on   = 1;
