@@ -12,6 +12,7 @@ extern volatile int rt_on;
 void rt_palette_slow(unsigned idx, uint16_t val);
 void rt_irq_slow(int level);
 void rt_mfp_slow(uint32_t addr, uint32_t val, int word);
+void rt_mfp_read_slow(uint32_t addr, uint32_t val);
 void rt_irq_vector_slow(unsigned vec);
 void rt_ipl_slow(int level);
 void rt_gov_slow(int64_t ns, int skipped);
@@ -27,6 +28,14 @@ static inline void rt_mfp(uint32_t addr, uint32_t val, int word)
 {
     if (__builtin_expect(rt_on, 0))
         rt_mfp_slow(addr, val, word);
+}
+
+/* a guest read of Timer B's data register ($FFFA21): what a raster
+ * handler's "wait for the next line" poll saw, and when */
+static inline void rt_mfp_read(uint32_t addr, uint32_t val)
+{
+    if (__builtin_expect(rt_on, 0) && (addr & 0x00FFFFFFu) == 0x00FFFA21u)
+        rt_mfp_read_slow(addr, val);
 }
 
 static inline void rt_irq_vector(unsigned vec)

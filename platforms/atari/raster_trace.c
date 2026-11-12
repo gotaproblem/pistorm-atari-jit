@@ -17,6 +17,11 @@
  *
  *   PISTORM_RASTER_TRACE=/home/pistorm/raster.txt   on, writes the file
  *                                                   when the emulator stops
+ * Guest reads of Timer B's data register ($FFFA21) are logged too (R): a
+ * handler that waits for the next line by polling it shows which count
+ * its first read found, so a poll that started after the line it was
+ * waiting for had already ended (and so waited one line more) is seen.
+ *
  *   PISTORM_RASTER_VCOUNT=1                         also read the real video
  *       counter at each palette/MFP write and Timer B at each VBL. Those are
  *       bus reads inside the guest's handlers: a game whose handlers nest
@@ -298,6 +303,19 @@ static int rt_mfp_reg(uint32_t a)
     return 0;
 }
 
+void rt_mfp_read_slow(uint32_t addr, uint32_t val)
+{
+    rt_ev_t *e = rt_slot();
+    (void)addr;
+    if (!e)
+        return;
+    e->t = rt_ticks();
+    e->kind = 'R';
+    e->a = 0x21;
+    e->v = (uint16_t)(val & 0xFFu);
+    e->c = 0;
+}
+
 void rt_mfp_slow(uint32_t addr, uint32_t val, int word)
 {
     uint32_t a = addr & 0x00FFFFFFu;
@@ -335,6 +353,7 @@ void rt_dump(void)
                "#   I level vector              (interrupt taken, vector from the IACK)\n"
                "#   I 4 screen_base TBCR TBDR   (VBL: base, Timer B control and count)\n"
                "#   M FAxx value video_counter  (guest write to an MFP register)\n"
+            "#   R FA21 value                (guest read of Timer B's count)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
                "#   G wait|skip ns              (governor pause; skip = not taken,\n"
                "#                               an interrupt handler was running)\n"
@@ -363,6 +382,8 @@ void rt_dump(void)
             fprintf(f, "%.1f P %u %03X %06X\n", us, e->a, e->v & 0xFFFu, e->c);
         else if (e->kind == 'M' && e->c == 0xFFFFFFFFu)
             fprintf(f, "%.1f M FA%02X %02X -\n", us, e->a, e->v & 0xFFu);
+        else if (e->kind == 'R')
+            fprintf(f, "%.1f R FA%02X %02X\n", us, e->a, e->v & 0xFFu);
         else if (e->kind == 'L')
             fprintf(f, "%.1f L %u\n", us, e->a);
         else if (e->kind == 'G')

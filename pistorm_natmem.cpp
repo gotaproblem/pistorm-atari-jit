@@ -3721,6 +3721,7 @@ static inline uae_u32 hw_mfp_bget(uaecptr a)
         pistorm_buserr(a, 0, true, sz_byte);
         v = mfp_hub_read_shim(a, v);
         mfp_trace("R", a, v, 0);
+        rt_mfp_read(a, v);                 /* PISTORM_RASTER_TRACE: $FFFA21 */
         return v;
     }
 }
