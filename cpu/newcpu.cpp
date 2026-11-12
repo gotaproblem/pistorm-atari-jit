@@ -8125,6 +8125,36 @@ static void m68k_run_1()
 				cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) & 0xffff;
 				if (!regs.loop_mode)
 					regs.ird = regs.opcode;
+#ifdef PISTORM_ATARI
+				/* THE ST'S 4-CYCLE BUS GRID (PISTORM_ROUND4=0: off). On an
+				 * ST every 68000 bus cycle starts on a 4-clock boundary (the
+				 * MMU/GLUE hold it off otherwise), so an instruction whose
+				 * length is not a multiple of 4 costs the next one the
+				 * difference: dbra taken is 10 clocks on paper and 12 on an
+				 * ST, lsl.l by an odd count 8+2n -> the next multiple of 4.
+				 * This core counts the paper figure. Measured in Hatari with
+				 * the regression suite's first CPU test, a dbra loop: 6675
+				 * kHz where the paper says 8000. Delay loops are built from
+				 * exactly these instructions: Turrican II's lower border
+				 * (12 Nov 2026) pads with lsl.l and dbra between its counter
+				 * read and its 60 Hz write, which Hatari lands at line 199
+				 * cycle 420 in every frame and we landed at 384-392, 8 clocks
+				 * past the line end it must stay behind. Each instruction is
+				 * rounded up to a multiple of 4 (Hatari's long-standing
+				 * rule; the rare "pairing" cases that save 4 are not
+				 * modelled). */
+				{
+					static int round4 = -1;
+					if (round4 < 0) {
+						const char *e = getenv("PISTORM_ROUND4");
+						round4 = !(e && *e == '0');
+					}
+					if (round4) {
+						const int g = 4 * (CYCLE_UNIT / 2);
+						cpu_cycles = (cpu_cycles + g - 1) / g * g;
+					}
+				}
+#endif
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				do_cycles(cpu_cycles);
 				regs.instruction_cnt++;
