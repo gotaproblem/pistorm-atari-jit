@@ -470,6 +470,7 @@ static int64_t gov_wait_until(int64_t now, int64_t until)
  * is taken off the clock and parked, so the handler runs from real time,
  * and the parked lead is put back at the first check outside a handler,
  * where it is waited out as any lead is. Average speed is unchanged. */
+int pistorm_gov_running;                    /* the governor paces this CPU (not JIT) */
 static int     gov_park_on = -1;
 static int64_t gov_parked_ns;
 unsigned long  pistorm_gov_parks;           /* [GOV] report */
@@ -483,6 +484,7 @@ static void pistorm_governor(int sync)
 		sync = 1;                               /* evaluate now, whatever gov_next says */
 	if (currprefs.m68k_speed != 0 || currprefs.cachesize)
 		return;                                 /* JIT / max speed: not ours */
+	pistorm_gov_running = 1;
 
 	static int     gov_on;
 	static int     gov_report;

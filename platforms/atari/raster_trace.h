@@ -13,6 +13,15 @@ void rt_palette_slow(unsigned idx, uint16_t val);
 void rt_irq_slow(int level);
 void rt_mfp_slow(uint32_t addr, uint32_t val, int word);
 void rt_mfp_read_slow(uint32_t addr, uint32_t val);
+void rt_vcount_slow(uint32_t raw, uint32_t given, uint32_t dur_ns);
+/* a guest read of the video counter's low byte ($FF8209): what the bus
+ * returned, what the guest was given (pistorm_natmem.cpp, BACK-DATED
+ * READS) and how long the bus read took */
+static inline void rt_beam_read(uint32_t raw, uint32_t given, uint32_t dur_ns)
+{
+    if (__builtin_expect(rt_on, 0))
+        rt_vcount_slow(raw, given, dur_ns);
+}
 void rt_irq_vector_slow(unsigned vec);
 void rt_ipl_slow(int level);
 void rt_gov_slow(int64_t ns, int skipped);

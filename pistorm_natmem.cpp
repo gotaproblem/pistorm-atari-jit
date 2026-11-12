@@ -3205,8 +3205,84 @@ static inline uae_u32 hw_bus_wget(uaecptr a)
     return v;
 }
 
+/* BACK-DATED READS OF THE VIDEO COUNTER (PISTORM_BEAM_BACKDATE=0: off).
+ * A border routine waits for the beam by polling the counter's low byte
+ * and then pads by what it read. Turrican II's lower border (title, 12 Nov
+ * 2026): move.b $8209,d0 / cmp.b #$D0,d0 / bcs, then lsl.l by (~d0 & 31).
+ * The loop is 26 cycles on an ST - 13 bytes of counter - so the first
+ * value >= $D0 is never above $DF and 5 bits are enough. Here each
+ * pass is paced to the same 26 cycles (pistorm_gov_sync), but the bus read
+ * itself can start late - the bus was lent to ipl_task, the lock, a host
+ * hiccup. Up to ~0.75 us late the routine's own padding absorbs it. More,
+ * and the value read can be $E0 or above, the 5-bit count wraps, and both
+ * sync writes land 64 cycles (8 us) late: the return to 50 Hz comes after
+ * line 200's display start, that line takes 162 bytes, and every line
+ * under it - the reflection - is drawn 16 pixels across. Raster trace +
+ * IPL timeline of the first capture: all 72 frames whose water colours
+ * found the counter 2 bytes on had their 50 Hz write 430-436 us before
+ * them; the 1371 good frames, 438-446.
+ *
+ * So the guest is given the value the counter had when the read was DUE:
+ * the time the bus read took beyond the shortest seen is taken off, at the
+ * counter's rate (2 bytes per 4 cycles = 1 byte per 250 ns). Only while
+ * the counter is seen to be counting - this read and the last one, under
+ * 40 us apart, differ by what the time between them predicts - and by at
+ * most 24 bytes; the first read of a poll is never changed. Governed
+ * 68000 only. */
+extern int pistorm_gov_running;             /* events.cpp */
+static inline int64_t beam_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+static uae_u32 beam_lo_read(uaecptr a)
+{
+    static int on = -1;
+    static int64_t dur_min = 0, last_t = 0;
+    static uae_u8 last_raw;
+    if (on < 0) {
+        const char *e = getenv("PISTORM_BEAM_BACKDATE");
+        on = !(e && *e == '0');
+    }
+    const int64_t t0 = beam_ns();
+    const uae_u8 raw = ps_read_8(a);
+    const int64_t t1 = beam_ns();
+    const int64_t dur = t1 - t0;
+    uae_u8 v = raw;
+
+    if (dur_min == 0 || dur < dur_min)
+        dur_min = dur;
+    else if (dur_min < dur && (t1 & 0x3FF) == 0)
+        dur_min++;                          /* creeps up: follows a slower bus */
+    if (on && pistorm_gov_running && last_t && t1 - last_t < 40000) {
+        const int64_t late = dur - dur_min;
+        if (late >= 500) {
+            /* is it counting? bytes since the last read against the time */
+            const int exp_b = (int)((t1 - last_t) / 250);
+            const int got_b = (uae_u8)(raw - last_raw);
+            int d = got_b - (exp_b & 0xFF);
+            if (d > 127) d -= 256; else if (d < -128) d += 256;
+            if (d >= -8 && d <= 8) {
+                int back = (int)((late + 125) / 250);
+                if (back > 24) back = 24;
+                v = (uae_u8)(raw - (back & ~1));   /* the counter steps in words */
+            }
+        }
+    }
+    last_t = t1;
+    last_raw = raw;
+    rt_beam_read(raw, v, (uint32_t)dur);
+    return v;
+}
+
 static inline uae_u32 hw_bus_bget(uaecptr a)
 {
+    if (__builtin_expect((a & 0x00FFFFFFu) == 0x00FF8209u, 0)) {
+        uae_u32 v = beam_lo_read(a);
+        pistorm_buserr(a, 0, true, sz_byte);
+        return v;
+    }
     uae_u8 v = ps_read_8(a);
     pistorm_buserr(a, 0, true, sz_byte);
     return v;

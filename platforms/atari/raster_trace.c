@@ -303,6 +303,18 @@ static int rt_mfp_reg(uint32_t a)
     return 0;
 }
 
+void rt_vcount_slow(uint32_t raw, uint32_t given, uint32_t dur_ns)
+{
+    rt_ev_t *e = rt_slot();
+    if (!e)
+        return;
+    e->t = rt_ticks();
+    e->kind = 'V';
+    e->a = (uint8_t)raw;
+    e->v = (uint16_t)(given & 0xFFu);
+    e->c = dur_ns;
+}
+
 void rt_mfp_read_slow(uint32_t addr, uint32_t val)
 {
     rt_ev_t *e = rt_slot();
@@ -354,6 +366,7 @@ void rt_dump(void)
                "#   I 4 screen_base TBCR TBDR   (VBL: base, Timer B control and count)\n"
                "#   M FAxx value video_counter  (guest write to an MFP register)\n"
             "#   R FA21 value                (guest read of Timer B's count)\n"
+            "#   V raw given ns              (guest read of $FF8209: bus value, value given, bus read time)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
                "#   G wait|skip ns              (governor pause; skip = not taken,\n"
                "#                               an interrupt handler was running)\n"
@@ -382,6 +395,8 @@ void rt_dump(void)
             fprintf(f, "%.1f P %u %03X %06X\n", us, e->a, e->v & 0xFFFu, e->c);
         else if (e->kind == 'M' && e->c == 0xFFFFFFFFu)
             fprintf(f, "%.1f M FA%02X %02X -\n", us, e->a, e->v & 0xFFu);
+        else if (e->kind == 'V')
+            fprintf(f, "%.1f V %02X %02X %u\n", us, e->a, e->v & 0xFFu, e->c);
         else if (e->kind == 'R')
             fprintf(f, "%.1f R FA%02X %02X\n", us, e->a, e->v & 0xFFu);
         else if (e->kind == 'L')
