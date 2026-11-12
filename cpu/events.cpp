@@ -403,6 +403,7 @@ static inline int64_t gov_now_ns(void)
 /* newcpu.cpp: an interrupt is waiting that the CPU would take now; an
  * interrupt handler is running (no pauses inside one - see newcpu.cpp) */
 extern int pistorm_irq_deliverable(void);
+extern "C" uint32_t pistorm_cur_pc(void);   /* newcpu.cpp, for raster trace H */
 extern int pistorm_handler_running(void);
 #include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
 #include "platforms/atari/stram_wb.h"       /* PISTORM_WRBEHIND */
@@ -575,6 +576,17 @@ static void pistorm_governor(int sync)
 		shm_cal_poll();
 
 	int64_t now = gov_now_ns();
+	/* PISTORM_RASTER_TRACE 'H': real time since the last check ended,
+	 * i.e. spent running 32 guest cycles (and their bus accesses) */
+	{
+		static int64_t gov_last_exit;
+		struct gov_exit_t {
+			~gov_exit_t() { if (__builtin_expect(rt_on, 0)) gov_last_exit = gov_now_ns(); }
+		} gov_exit_;
+		if (__builtin_expect(rt_on, 0) && gov_last_exit && !irq_entry &&
+		    now - gov_last_exit > 20000)
+			rt_gap(0, now - gov_last_exit, pistorm_cur_pc());
+	}
 
 	/* Achieved speed over 5 s windows of real time. Printed once if a
 	 * window falls below 90% of the target, or every window with
@@ -634,9 +646,12 @@ static void pistorm_governor(int sync)
 		 * This comes BEFORE the handler test below: Turrican II's
 		 * lower-border sync is done from inside its Timer B handler, so a
 		 * handler must still line up with the beam when it asks to. */
-		if (ahead_ns > 0)
+		if (ahead_ns > 0) {
+			const int64_t w0 = now;
 			now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
-		else
+			if (now - w0 > 2000)
+				rt_gap(1, now - w0, pistorm_cur_pc());
+		} else
 			gov_ns0 = now - virt_ns;
 	} else if (pistorm_handler_running()) {
 		/* inside an interrupt handler: no pause - it is paid back at the

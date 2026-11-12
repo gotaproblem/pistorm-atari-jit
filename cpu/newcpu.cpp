@@ -6326,6 +6326,11 @@ extern "C" void pistorm_cpu_peek(uint32_t *pc, uint32_t *icnt, uint8_t *mask,
 	*in_handler = (uint8_t)pistorm_handler_running();
 }
 
+extern "C" uint32_t pistorm_cur_pc(void)
+{
+	return (uint32_t)regs.instruction_pc & 0x00FFFFFFu;
+}
+
 int pistorm_irq_deliverable(void)
 {
 	return g_irq > regs.intmask;

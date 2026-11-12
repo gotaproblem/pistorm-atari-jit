@@ -25,6 +25,14 @@ static inline void rt_beam_read(uint32_t raw, uint32_t given, uint32_t dur_ns)
 void rt_irq_vector_slow(unsigned vec);
 void rt_ipl_slow(int level);
 void rt_gov_slow(int64_t ns, int skipped);
+void rt_gap_slow(int kind, int64_t ns, uint32_t pc);
+/* H records: the CPU thread away from guest code (kind 0, between two
+ * governor checks - normally ~2-8 us) or in a beam-sync wait (kind 1) */
+static inline void rt_gap(int kind, int64_t ns, uint32_t pc)
+{
+    if (__builtin_expect(rt_on, 0))
+        rt_gap_slow(kind, ns, pc);
+}
 void rt_dump(void);
 
 static inline void rt_palette(unsigned idx, uint16_t val)

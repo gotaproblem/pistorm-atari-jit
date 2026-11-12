@@ -290,6 +290,18 @@ void rt_gov_slow(int64_t ns, int skipped)
     e->c = ns < 0 ? 0u : ns > 0xFFFFFFFFLL ? 0xFFFFFFFFu : (uint32_t)ns;
 }
 
+void rt_gap_slow(int kind, int64_t ns, uint32_t pc)
+{
+    rt_ev_t *e;
+    if (!(e = rt_slot()))
+        return;
+    e->t = rt_ticks();
+    e->kind = 'H';
+    e->a = (uint8_t)((kind & 1) | ((pc >> 16) & 0x7Fu) << 1);
+    e->v = (uint16_t)pc;
+    e->c = ns < 0 ? 0u : ns > 0xFFFFFFFFLL ? 0xFFFFFFFFu : (uint32_t)ns;
+}
+
 /* MFP registers worth seeing for a Timer B raster chain */
 static int rt_mfp_reg(uint32_t a)
 {
@@ -368,6 +380,9 @@ void rt_dump(void)
             "#   R FA21 value                (guest read of Timer B's count)\n"
             "#   V raw given ns              (guest read of $FF8209: bus value, value given, bus read time)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
+               "#   H gap|syncwait ns pc        (CPU thread: time between two governor\n"
+               "#                               checks over 20 us / a beam-sync wait\n"
+               "#                               over 2 us)\n"
                "#   G wait|skip ns              (governor pause; skip = not taken,\n"
                "#                               an interrupt handler was running)\n"
                "#   W total_ns guest_clocks bus_n bus_ns bus_max_ns yield_ns gap_max_ns gov_ns\n"
@@ -403,6 +418,9 @@ void rt_dump(void)
             fprintf(f, "%.1f L %u\n", us, e->a);
         else if (e->kind == 'G')
             fprintf(f, "%.1f G %s %u\n", us, e->a ? "skip" : "wait", e->c);
+        else if (e->kind == 'H')
+            fprintf(f, "%.1f H %s %u %06X\n", us, (e->a & 1) ? "syncwait" : "gap", e->c,
+                    ((uint32_t)(e->a >> 1) << 16) | e->v);
         else if (e->kind == 'M')
             fprintf(f, "%.1f M FA%02X %02X %06X\n", us, e->a, e->v & 0xFFu, e->c);
         else if (e->a == 4 && !rt_vc)
