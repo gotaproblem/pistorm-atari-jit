@@ -541,9 +541,14 @@ static void l6_tick(void)
 
 extern "C" { volatile uint8_t pistorm_iack_dsp; }  /* vector is the DSP's IVR */
 
+/* the last IACK came off the real bus (not the hub, not the DSP), and how
+ * long that bus cycle took in arch-timer ticks - newcpu.cpp IACK GUARD */
+extern "C" { volatile uint8_t pistorm_iack_real; volatile uint32_t pistorm_iack_ticks; }
+
 void intlev_ack (uint8_t nr)
 {
     pistorm_iack_dsp = 0;
+    pistorm_iack_real = 0;
     if (nr == 6) l6_tick();
     /* Virtual keyboard (USB/Bluetooth -> IKBD injection): if the pending
      * level-6 was raised for an injected byte, the real MFP has nothing to
@@ -663,7 +668,12 @@ void intlev_ack (uint8_t nr)
     }
 
     uint8_t iack_berr = 0;
+    uint64_t iack_t0, iack_t1;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(iack_t0));
     uint8_t vector = ps_read_8_fc (0x00FFFFF1u | (nr << 1), 7, &iack_berr);
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(iack_t1));
+    pistorm_iack_ticks = (uint32_t)(iack_t1 - iack_t0);
+    pistorm_iack_real = 1;               /* newcpu.cpp: IACK GUARD */
     if (iack_berr)
     {
         /* Mark a failed IACK. newcpu.cpp decides whether to retry/drop or

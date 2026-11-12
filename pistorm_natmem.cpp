@@ -231,6 +231,7 @@ extern "C"
     void     dma_snoop_read   (uint32_t addr, uint32_t val, int size);
     uint8_t  fdd_gpip         (uint8_t other_gpip);
     void     mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word);
+    void     pistorm_mfp_ier_note(uint32_t addr, uint32_t value, int size);
 }
 extern bool FDD_enabled;
 extern bool DMA_Sound_enabled;
@@ -3813,6 +3814,7 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
         return;
     }
     /* MFP registers live on odd addresses: a long write covers two */
+    pistorm_mfp_ier_note(a, v, 4);         /* newcpu.cpp IACK GUARD */
     mfp_hub_write_snoop(a + 1, (v >> 16) & 0xFF, 0);
     mfp_hub_write_snoop(a + 3, v & 0xFF, 0);
     hw_bus_lput(a, v);

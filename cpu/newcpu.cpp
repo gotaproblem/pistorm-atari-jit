@@ -3337,6 +3337,100 @@ static uae_u8 atari_live_ipl_level(void)
  * $3FC) - so the MFP-only checks below must not touch it. */
 extern "C" volatile uint8_t pistorm_iack_dsp;
 
+/* IACK GUARD - a level-6 vector that is in the MFP's range but names a
+ * channel the guest has not enabled.
+ *
+ * Turrican II, Pi 4, fw 1.1b, 12 Nov 2026 (t2d capture): a level-6 IACK
+ * that was on the bus at the moment Timer B's event arrived (88 lines
+ * after its start, to within 2 us) came back $40 - channel 0, the printer
+ * BUSY input, which nothing had enabled. $40 passed every check there was
+ * (they only reject vectors OUTSIDE $40-$4F), the guest went through
+ * vector $100 at IPL 6 and never came back: black screen, no sound. In
+ * over 3 million level-6 interrupts logged before it there is not one
+ * $40.
+ *
+ * The 68901 only ever passes the vector of a channel that is ENABLED
+ * (IERA/IERB). pistorm_mfp_ier_ok holds the channels known enabled:
+ * taken from the guest's own byte writes to $FFFA07/$FFFA09, and read
+ * off the chip when it is not known (first use, or after a word/long
+ * write). A vector for any other channel is checked against the chip
+ * before it is called bad, so the shadow is only ever a fast path. A
+ * bad one is logged with the chip's state and then handled exactly as a
+ * vector outside the range always has been (in-service recovery, else
+ * the IACK is not delivered and the MFP raises again whatever it still
+ * has pending). PISTORM_IACK_GUARD=0 turns it off. */
+extern "C" volatile uint8_t pistorm_iack_real;
+extern "C" volatile uint32_t pistorm_iack_ticks;
+static volatile uint16_t pistorm_mfp_ier_ok;      /* channels known enabled      */
+static volatile uint8_t  pistorm_mfp_ier_known;   /* bit0 IERB, bit1 IERA valid  */
+extern "C" void pistorm_mfp_ier_note(uint32_t addr, uint32_t value, int size)
+{
+	addr &= 0x00FFFFFFu;
+	if (addr + size <= 0x00FFFA06u || addr > 0x00FFFA09u)
+		return;
+	if (size == 1 && addr == 0x00FFFA07u) {
+		pistorm_mfp_ier_ok = (uint16_t)((pistorm_mfp_ier_ok & 0x00FFu) | ((value & 0xFFu) << 8));
+		pistorm_mfp_ier_known |= 2;
+	} else if (size == 1 && addr == 0x00FFFA09u) {
+		pistorm_mfp_ier_ok = (uint16_t)((pistorm_mfp_ier_ok & 0xFF00u) | (value & 0xFFu));
+		pistorm_mfp_ier_known |= 1;
+	} else if (size != 1)
+		pistorm_mfp_ier_known = 0;        /* word/long: ask the chip     */
+}
+
+/* true = `vec` ($40-$4F) names a channel that is not enabled */
+static bool atari_mfp_vector_not_enabled(const uae_u8 vec)
+{
+#ifdef PISTORM_ATARI
+	static int on = -1;
+	if (on < 0) {
+		const char *e = getenv("PISTORM_IACK_GUARD");
+		on = !(e && *e == '0');
+	}
+	if (!on || !pistorm_iack_real)
+		return false;
+	const uint16_t bit = (uint16_t)(1u << (vec & 0x0F));
+	if (pistorm_mfp_ier_known == 3 && (pistorm_mfp_ier_ok & bit))
+		return false;                     /* the usual case: one test    */
+	uint8_t be = 0, wb = 0;
+	const uae_u8 iera = ps_read_8_fc(0x00FFFA07u, 5, &be); wb |= be;
+	const uae_u8 ierb = ps_read_8_fc(0x00FFFA09u, 5, &be); wb |= be;
+	if (wb) {
+		g_buserr = 0;
+		return false;                     /* cannot tell: leave it alone */
+	}
+	pistorm_mfp_ier_ok = (uint16_t)((iera << 8) | ierb);
+	pistorm_mfp_ier_known = 3;
+	if (pistorm_mfp_ier_ok & bit)
+		return false;
+	{
+		static uint32_t n;
+		const uae_u8 ipra = ps_read_8_fc(0x00FFFA0Bu, 5, &be);
+		const uae_u8 iprb = ps_read_8_fc(0x00FFFA0Du, 5, &be);
+		const uae_u8 isra = ps_read_8_fc(0x00FFFA0Fu, 5, &be);
+		const uae_u8 isrb = ps_read_8_fc(0x00FFFA11u, 5, &be);
+		const uae_u8 imra = ps_read_8_fc(0x00FFFA13u, 5, &be);
+		const uae_u8 imrb = ps_read_8_fc(0x00FFFA15u, 5, &be);
+		const uae_u8 vr   = ps_read_8_fc(0x00FFFA17u, 5, &be);
+		uint8_t live = 0xEE;
+		ps_read_ipl(&live);
+		g_buserr = 0;
+		n++;
+		if (n <= 32 || (n & 0x3ff) == 0)
+			fprintf(stderr, "[IACK-GUARD] level-6 vector $%02X: channel %u is not enabled "
+				"(IER %02X/%02X IPR %02X/%02X ISR %02X/%02X IMR %02X/%02X VR %02X) "
+				"iack cycle %u ticks, IPL now %u, pc %06X - not delivered (count %u)\n",
+				(unsigned)vec, (unsigned)(vec & 0x0F), iera, ierb, ipra, iprb,
+				isra, isrb, imra, imrb, vr, (unsigned)pistorm_iack_ticks,
+				(unsigned)live, (unsigned)(m68k_getpc() & 0x00FFFFFFu), n);
+	}
+	return true;
+#else
+	(void)vec;
+	return false;
+#endif
+}
+
 static bool atari_iack_vector_is_valid(const int level, const int bus_vector)
 {
 	if (level == 6 && pistorm_iack_dsp)
@@ -5775,7 +5869,7 @@ static void do_interrupt (int nr)
 					noack_candidate_vec = 0;
 				}
 			}
-		else if (vec < 0x40 || vec > 0x4F)
+		else if (vec < 0x40 || vec > 0x4F || atari_mfp_vector_not_enabled(vec))
 		{
 			/* The physical IACK cycle COMPLETED - the MFP set the acked
 			 * channel's in-service bit and cleared its pending bit - but
@@ -5818,7 +5912,10 @@ static void do_interrupt (int nr)
 				}
 				bad_iack_count++;
 				interrupt_taken = false;
-				clear_irq_latch = false;
+				/* IACK GUARD (in-range vector, channel not enabled): drop
+				 * the latch - the sampler latches level 6 again within one
+				 * pass if the MFP still asks. No IACK is fired blind. */
+				clear_irq_latch = (vec >= 0x40 && vec <= 0x4F);
 			}
 		}
 		else

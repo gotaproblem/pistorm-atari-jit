@@ -669,9 +669,11 @@ extern "C" void mfp_note_write(uint32_t addr, uint32_t value, bool word)
 
 }
 
+extern "C" void pistorm_mfp_ier_note(uint32_t addr, uint32_t value, int size);
 extern "C" void mfp_note_eoi_write(uint32_t addr, uint32_t value, bool word)
 {
   rt_mfp(addr, value, word);             /* PISTORM_RASTER_TRACE */
+  pistorm_mfp_ier_note(addr, value, word ? 2 : 1);   /* newcpu.cpp IACK GUARD */
   mfp_note_write(addr, value, word);
 }
 
