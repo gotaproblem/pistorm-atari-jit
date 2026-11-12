@@ -432,10 +432,38 @@ static int64_t gov_wait_until(int64_t now, int64_t until)
 	pistorm_cpu_phase = ph;
 	return now;
 }
+/* SPIN, DO NOT SLEEP (PISTORM_GOV_SLEEP=1: the old sleeping wait).
+ * The interrupt test above only ran between sleeps, and a sleep was up
+ * to 100 us (GOV_SLICE_NS) of a wait's first part, everything but its
+ * last GOV_SPIN_NS - plus the kernel's wake-up latency. An interrupt
+ * raised during one was not seen until it ended.
+ * Turrican II title, 12 Nov 2026 (t2e, stall probe): every Timer B
+ * interrupt taken more than 30 us after ipl_task latched it had the CPU
+ * thread inside this wait, outside any handler, mask 3, g_irq 6, the
+ * guest's instruction count not moving - for 30-97 us. The guest is
+ * ahead after the Timer C (music) handler; the governor then sleeps the
+ * lead off, and a Timer B raised in that sleep was taken one line late:
+ * the lower border failed and the whole picture jumped for two frames
+ * (17 in 73 s in t2d). The CPU thread has its own core; spinning costs
+ * nothing the emulator needs, and the test is one load of g_irq. */
+static int gov_sleep_on = -1;
 static int64_t gov_wait_until_(int64_t now, int64_t until)
 {
 	static const int64_t GOV_SLICE_NS = 100000LL;  /* longest sleep between checks */
 
+	if (gov_sleep_on < 0) {
+		const char *e = getenv("PISTORM_GOV_SLEEP");
+		gov_sleep_on = (e && *e == '1');
+	}
+	if (!gov_sleep_on) {
+		while (now < until) {
+			if (pistorm_irq_deliverable())
+				break;
+			asm volatile ("yield" ::: "memory");
+			now = gov_now_ns();
+		}
+		return now;
+	}
 	while (until - now > GOV_SPIN_NS) {
 		struct timespec dl;
 		int64_t wake = until - GOV_SPIN_NS;
