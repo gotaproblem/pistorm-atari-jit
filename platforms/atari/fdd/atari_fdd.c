@@ -1076,6 +1076,33 @@ bool fdd_irq_active(void)
     return true;
 }
 
+/* DRIVE B WITH NO IMAGE. An image-less drive B used to answer exactly
+ * like a drive that is not there: the command ran here (all FDC accesses
+ * route to this file once any image is mounted), its INTRQ was raised -
+ * and then hidden, because GPIP5 was only pulled for a drive with a disk.
+ * TOS 2.06's floppy init then sat in its INTRQ wait ($E03F32) to the 1.5/3 s
+ * timeout and retried: 7.7 s of a 22 s boot (PC profile, 13 Nov 2026).
+ * Hatari, same ROM, disk in A: 5 s to boot with drive B connected and
+ * empty, 11 s with drive B unplugged - the wait is what TOS does for a
+ * MISSING drive. The default is now a connected, empty drive B, as
+ * Hatari's: commands to it complete at once (Type II with Record Not
+ * Found). PISTORM_FDD_B=absent restores the missing-drive behaviour. */
+static int fdd_b_present = -1;
+static bool fdd_drive_answers(int drv)
+{
+    if (drv < 0 || drv >= FDD_MAX_DRIVES)
+        return false;
+    if (fdc.drives[drv].disk_inserted)
+        return true;
+    if (drv != 1)
+        return false;
+    if (fdd_b_present < 0) {
+        const char *e = getenv("PISTORM_FDD_B");
+        fdd_b_present = !(e && strcmp(e, "absent") == 0);
+    }
+    return fdd_b_present != 0;
+}
+
 uint8_t fdd_gpip(uint8_t other_gpip)
 {
     /* GPIP bit 5 is the SHARED disk interrupt: WD1772 INTRQ and the ACSI
@@ -1091,8 +1118,7 @@ uint8_t fdd_gpip(uint8_t other_gpip)
         return other_gpip & ~(1u << 5);   /* emulated ACSI target asserts */
     }
 
-    if (fdc.selected_drive >= 0 &&
-        fdc.drives[fdc.selected_drive].disk_inserted &&
+    if (fdd_drive_answers(fdc.selected_drive) &&
         fdd_irq_active()) {
         hdc_trace_gpip(1, (other_gpip & (1u << 5)) ? 'F' : 'R');
         return other_gpip & ~(1u << 5);   /* our FDC asserts */
