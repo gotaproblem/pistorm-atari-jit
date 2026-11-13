@@ -313,6 +313,41 @@ static const char *const tl_act[8] = {
   "line", "LATCH", "skip-hbl-rte", "skip-refract", "-", "-", "-", "LATCH-hub6"
 };
 static const char *const tl_why[4] = { "-", "av_held", "<=g_irq", "<=mask" };
+/* PISTORM_PC_PROFILE=file: every 1 ms (real time) the guest pc, SR
+ * mask, CPU-thread phase (STALL PROBE codes) and the bus transactions
+ * the CPU thread made since the last sample. Where a slow boot spends
+ * its time, and whether that time is bus traffic or guest code. */
+static void *pc_profile_task(void *arg)
+{
+  FILE *f = fopen((const char *)arg, "w");
+  if (!f) {
+    fprintf(stderr, "[PCPROF] cannot open %s\n", (const char *)arg);
+    return NULL;
+  }
+  fprintf(f, "# ms pc mask phase bus_txn_since_last (phase: 0 guest 1 gov-wait "
+             "2 wb-drain 3 wb-flush 4 iack 5 bus-yield)\n");
+  struct timespec t0, ts = { 0, 1000000 };
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  uint32_t last_seq = ps_cpu_seq_peek();
+  unsigned n = 0;
+  for (;;) {
+    nanosleep(&ts, NULL);
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint32_t pc = 0, ic = 0;
+    uint8_t mask = 0, hnd = 0;
+    pistorm_cpu_peek(&pc, &ic, &mask, &hnd);
+    const uint32_t seq = ps_cpu_seq_peek();
+    const double ms = (now.tv_sec - t0.tv_sec) * 1e3 + (now.tv_nsec - t0.tv_nsec) / 1e6;
+    fprintf(f, "%.1f %06X %u %u %u\n", ms, pc, mask, pistorm_cpu_phase,
+            (unsigned)((seq - last_seq) / 2u));
+    last_seq = seq;
+    if (++n % 1000 == 0)
+      fflush(f);
+  }
+  return NULL;
+}
+
 static void *tl_writer(void *)
 {
   const char *fn = getenv("PISTORM_IPL_TIMELINE_LOG");
@@ -3173,6 +3208,18 @@ int main (int argc, char *argv[])
         pthread_setname_np(stats_tid, "pistorm: iplstat");
         pthread_detach(stats_tid);
         printf("[MAIN] IPL stats enabled (1 Hz)\n");
+      }
+    }
+  }
+  {
+    static const char *pcp;
+    pcp = getenv("PISTORM_PC_PROFILE");
+    if (pcp && *pcp) {
+      pthread_t pcp_tid;
+      if (pthread_create(&pcp_tid, NULL, pc_profile_task, (void *)pcp) == 0) {
+        pthread_setname_np(pcp_tid, "pistorm: pcprof");
+        pthread_detach(pcp_tid);
+        printf("[MAIN] guest pc profile every 1 ms -> %s\n", pcp);
       }
     }
   }
