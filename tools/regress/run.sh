@@ -149,13 +149,6 @@ run_suite() {
 		python3 "$here/mkimg.py" st "$d/boot.st" --pattern PATTERN.DAT=300000 "${args[@]}" ||
 			{ record "$name" setup FAIL "mkimg.py st failed"; continue; }
 		local cfg="$out/$name.cfg" log="$out/$name.log"
-		# Boot a scratch COPY: games write to their own disk while they
-		# boot (Arkanoid II and Black Tiger rewrote sector 0 within 4 s on
-		# 13 Nov 2026), and the regression must never change the user's
-		# images. The copy is compared afterwards and a write is reported.
-		local disk="$out/.disk.${image##*.}" sum0 sum1 wrote=""
-		cp -f "$image" "$disk" || { echo "$name: SKIP - cannot copy $image"; continue; }
-		sum0=$(md5sum < "$disk")
 		{
 			psctrl_paths
 			echo "cpu 68000"
@@ -439,10 +432,10 @@ run_tests() {
 
 # ---------------------------------------------------------------- games.txt
 # OPTIONAL (REGRESS_GAMES=1 with the full run, or `run.sh games`, or a
-# game's own name): every game image boots from A: on a fixed machine -
-# not a psctrl.cfg section, so day-to-day config changes never move the
-# results - the way games are always run: 68000, compatible core, governed
-# 8 MHz, JIT off, ST, 4 MB, no hard disks. Nothing presses keys, so a game
+# game's own name): every game image boots from A: on the psctrl.cfg
+# section its games.txt row names ([regression]), with the section's
+# drives dropped, the row's rom, and the row's extra keys replacing the
+# section's lines for them. Nothing presses keys, so a game
 # that waits on its title screen ends "static". From the emulator's
 # once-a-second reports (PISTORM_IPL_STATS: "vbl: taken=" and "screen:",
 # a hash of the 32000 bytes at the screen base plus the guest pc) over the
@@ -456,11 +449,12 @@ run_tests() {
 # Each game also leaves a `state` measurement (2 running, 1 static, 0 a
 # failure), so running -> static between two runs shows in the summary.
 # Results: games.csv and games.html beside summary.txt.
-game_rows() {                     # games.txt -> name|rom|image|secs, scans expanded
-	local a b c d
-	while IFS='|' read -r a b c d; do
-		a=$(echo $a); b=$(echo $b); d=$(echo $d)
-		c=$(echo "$c" | sed 's/^ *//; s/ *$//')
+game_rows() {                     # games.txt -> name|section|rom|image|secs|extra, scans expanded
+	local a sec b c d x
+	while IFS='|' read -r a sec b c d x; do
+		a=$(echo $a); sec=$(echo $sec); b=$(echo $b); d=$(echo $d)
+		c=$(echo "$c" | sed 's/^ *//; s/ *$//'); x=$(echo "$x" | sed 's/^ *//; s/ *$//')
+		[ -z "$x" ] && x=-
 		if [ "$a" = scan ]; then
 			[ -d "$c" ] || { echo "games: SKIP scan - $c not found" >&2; continue; }
 			local img tag=${b%%.rom}; tag=${tag#tos}; tag=${tag%%[a-z]*}
@@ -472,10 +466,10 @@ game_rows() {                     # games.txt -> name|rom|image|secs, scans expa
 				*"(Disk "[2-9]" of "*|*"(Disk "[1-9][0-9]" of "*) continue ;;
 				esac
 				local n; n=$(basename "$img" | sed 's/\.[^.]*$//; s/([^)]*)//g; s/\[[^]]*\]//g; s/[^A-Za-z0-9]\+/_/g; s/^_//; s/_$//' | cut -c1-28)
-				echo "g$tag-$n|$b|$(realpath "$img")|$d"
+				echo "g$tag-$n|$sec|$b|$(realpath "$img")|$d|$x"
 			done
 		else
-			echo "$a|$b|$(realpath "$c" 2>/dev/null || echo "$c")|$d"
+			echo "$a|$sec|$b|$(realpath "$c" 2>/dev/null || echo "$c")|$d|$x"
 		fi
 	done < <(grep -v '^[[:space:]]*#' "$here/games.txt" | grep '|')
 }
@@ -486,11 +480,11 @@ want_game() {                     # REGRESS_GAMES=1, `games`, or this game's nam
 	return 1
 }
 run_games() {
-	local name rom image secs
+	local name section rom image secs extra
 	local RUN_ENVS=(PISTORM_IPL_STATS=1 ${REGRESS_ENV:-})
 	[ -f "$here/games.txt" ] || return 0
 	: > "$out/.games"
-	while IFS='|' read -r name rom image secs; do
+	while IFS='|' read -r name section rom image secs extra; do
 		want_game "$name" || continue
 		[ -n "${REGRESS_TAG:-}" ] && name="$name-$REGRESS_TAG"
 		if [ ! -f "$image" ]; then
@@ -504,23 +498,28 @@ run_games() {
 		local disk="$out/.disk.${image##*.}" sum0 sum1 wrote=""
 		cp -f "$image" "$disk" || { echo "$name: SKIP - cannot copy $image"; continue; }
 		sum0=$(md5sum < "$disk")
+		if ! grep -q "^\[$section\]" "$cfg_src"; then
+			echo "$name: SKIP - no [$section] in $cfg_src"; rm -f "$disk"; continue
+		fi
+		# The machine is the [section] of psctrl.cfg, as for tests.txt, with
+		# its drives dropped (the game boots alone from A:), its rom line
+		# replaced by the row's, and each key set in the row's extra
+		# column (`;`-separated) replacing the section's line(s) for it.
+		local xkeys=""
+		[ "$extra" = "-" ] || xkeys=$(echo "$extra" | tr ';' '\n' | awk '{ printf " %s ", $1 }')
 		{
 			psctrl_paths
-			echo "cpu 68000"
-			echo "cpu_compatible enabled"
-			echo "cpu_speed 8mhz"
-			echo "jit_power 0"
-			echo "machine st"
-			echo "shifter st"
-			echo "stram_size 4M"
-			echo "ym2149 enabled"
-			# TOS 2.06's cold boot spends its first 80 s on the RAM test
-			# and the hard-disk wait: a 60 s run never reached the game
-			echo "fastboot enabled"
+			awk -v s="[$section]" -v xk="$xkeys" '
+				/^\[/ { on = ($0 == s); next }
+				!on { next }
+				NF && index(xk, " " $1 " ") { next }
+				$1 ~ /^(rom|hdd|hdd_order|acsi|acsi_order|fdd|hostfs|ide)$/ { next }
+				{ print }' "$cfg_src"
 			echo "rom $rom"
 			echo "ide disabled"
 			echo "acsi disabled"
 			echo "fdd A:$disk"
+			[ "$extra" = "-" ] || echo "$extra" | tr ';' '\n' | sed 's/^ *//'
 		} > "$cfg"
 		echo "$name: running ${secs}s on $commit ..."
 		run_emulator "$cfg" "$secs" "$log" 0

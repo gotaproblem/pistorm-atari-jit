@@ -68,7 +68,7 @@ REGRESS_GAMES=1 nohup tools/regress/run.sh > /dev/null 2>&1 &     everything plu
 tools/regress/run.sh games                                          the games only
 ```
 
-`games.txt` lists them: `scan | tos104uk.rom | ../games-share | 90` boots every `.st`/`.msa` in games-share from A: for 90 s, and a `name | rom | image | seconds` line adds one game. The machine is fixed, not a psctrl.cfg section: 68000, compatible core, governed 8 MHz, JIT off, ST, 4 MB, no hard disks. The two scan lines (TOS 1.04 and 2.06) take about an hour each for ~40 images.
+`games.txt` lists them: `scan | regression | tos104uk.rom | ../games-share | 60 | machine st; ...` boots every `.st`/`.msa` in games-share from A: for 60 s on psctrl.cfg's [regression] machine, with its drives dropped, the row's rom, and the `;`-separated extra lines replacing the section's lines for those keys; a `name | section | rom | image | seconds | extra` line adds one game. Each game boots a scratch copy of its image, so the originals are never written. TOS 2.06 runs from `tos206uk-fastboot.rom` (no cold-boot RAM test or 80 s hard-disk wait). The two scan lines (TOS 1.04 and 2.06) take about an hour each for ~40 images.
 
 Nothing presses keys. Each game gets a verdict from the last 10 s of the emulator's once-a-second reports: `vbl: taken=` and `screen:` (a hash of the 32000 bytes at the screen base, plus the guest pc):
 

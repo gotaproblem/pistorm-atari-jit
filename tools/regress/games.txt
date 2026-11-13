@@ -1,13 +1,17 @@
 # Games - OPTIONAL, run with REGRESS_GAMES=1 tools/regress/run.sh (with the
 # rest) or tools/regress/run.sh games (alone). See run_games in run.sh.
 #
-#   name | rom | image | seconds      one game
-#   scan | rom | dir   | seconds      every .st/.msa in dir (named g<tos>-<title>);
-#                                      of a set, only "(Disk 1 of N)"
+#   name | section | rom | image | seconds | extra     one game
+#   scan | section | rom | dir   | seconds | extra     every .st/.msa in dir
+#                                      (named g<tos>-<title>); of a set,
+#                                      only "(Disk 1 of N)"
 #
-# rom is a file in [psctrl] rom_path; paths are relative to the repo.
-# The machine is fixed: 68000, compatible core, governed 8 MHz, JIT off,
-# ST, 4 MB, no hard disks, the image in A:. One boot per game, so a pass
-# over ~40 images takes about 40 minutes per TOS line.
-scan | tos104uk.rom | ../games-share | 60
-scan | tos206uk.rom | ../games-share | 60
+# section is the psctrl.cfg machine the games boot on; its hdd/acsi/fdd/
+# hostfs/ide lines are dropped and the game goes in A:. rom is a file in
+# [psctrl] rom_path and replaces the section's rom. extra (- = none) is
+# `;`-separated cfg lines, each replacing the section's line(s) for that
+# key - [regression] is an STE with the ST-RAM cache on for the tests
+# above, and games run on a plain ST without it. Paths are relative to
+# the repo. One boot per game: ~40 images take ~40 minutes per TOS line.
+scan | regression | tos104uk.rom          | ../games-share | 60 | machine st; shifter st; stram_cache disabled; stram_direct disabled
+scan | regression | tos206uk-fastboot.rom | ../games-share | 60 | machine st; shifter st; stram_cache disabled; stram_direct disabled
