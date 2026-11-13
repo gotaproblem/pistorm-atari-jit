@@ -2515,6 +2515,44 @@ extern "C" void pistorm_power_lost(void)
 }
 
 
+/* `fastboot enabled`: TOS 2.06 (and the later TOSes built the same way)
+ * runs its cold-boot block only while hz200 < 16000, the first 80 s after
+ * reset. Inside it are the ROM CRC check and the memory test, and the
+ * block does not end when the test does: it draws a bar and waits for
+ * hz200 to reach 16000 so a hard disk can spin up, unless a key is
+ * pressed (TOS 2.06 UK, $E0097A):
+ *     move.l  #16000,d7 ; cmp.l $4BA,d7 ; bcs.w past_the_wait
+ * and the CRC check ($E007EC):
+ *     cmpi.l  #16000,$4BA ; bcc.w past_the_check
+ * A warm reset (hz200 already past 16000) takes both branches. Making
+ * the two branches unconditional gives every boot the warm-reset path:
+ * nothing else changes. The patterns are searched for, not addressed,
+ * so any ROM holding them is patched and any other ROM (TOS 1.0x,
+ * EmuTOS) is left as it is. The RAM image is patched, never the file. */
+static void tos_fastboot_patch(uint8_t *rom, int size)
+{
+  static const uint8_t wait_pat[] = { 0x2E,0x3C,0x00,0x00,0x3E,0x80,
+                                      0xBE,0xB9,0x00,0x00,0x04,0xBA, 0x65,0x00 };
+  static const uint8_t crc_pat[]  = { 0x0C,0xB9,0x00,0x00,0x3E,0x80,
+                                      0x00,0x00,0x04,0xBA, 0x64,0x00 };
+  int nwait = 0, ncrc = 0;
+  if (!rom || size < 16)
+    return;
+  for (int i = 0; i + (int)sizeof wait_pat <= size; i += 2) {
+    if (!memcmp(rom + i, wait_pat, sizeof wait_pat)) {
+      rom[i + 12] = 0x60;            /* bcs.w -> bra.w */
+      printf ("[ROM] fastboot: memory test / hard-disk wait skipped (ROM+$%05X)\n", i + 12);
+      nwait++;
+    } else if (!memcmp(rom + i, crc_pat, sizeof crc_pat)) {
+      rom[i + 10] = 0x60;            /* bcc.w -> bra.w */
+      printf ("[ROM] fastboot: cold-boot ROM CRC check skipped (ROM+$%05X)\n", i + 10);
+      ncrc++;
+    }
+  }
+  if (!nwait && !ncrc)
+    printf ("[ROM] fastboot: this ROM has no cold-boot wait to skip\n");
+}
+
 void *cpu_task(void *)
 {
   cpu_set_t cpuset;
@@ -2963,6 +3001,9 @@ int main (int argc, char *argv[])
       printf ("[INIT] ROM loaded - %dK mapped at 0x%06X-0x%06X\n",
               config->rom.rom_size / 1024,
               (unsigned) ROM_START, (unsigned) ROM_END);
+
+      if (config->fastboot)
+        tos_fastboot_patch (config->rom.rom_ptr, config->rom.rom_size);
 
       /* Falcon TOS (4.0x: the version word at ROM+2) on `machine falcon`:
        * it drives Videl, the sound matrix and the DSP from its first

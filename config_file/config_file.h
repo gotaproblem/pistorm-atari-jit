@@ -123,6 +123,7 @@ struct emulator_config {
   bool shifter_ste;   /* shifter ste: mirror honours STE video regs ($FF820D/0F/8265); default ST ignores them like the real chip */
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
   bool stram_cache;
+  bool fastboot;      /* skip TOS's cold-boot RAM test + 80 s hard-disk wait */
   bool stram_direct;
   uint32_t stram_size;   /* PHYSICAL ST-RAM bytes (0 = flat 4MB model) */
   uint32_t falcon_stram; /* Falcon ST-RAM bytes, 14MB = Pi-backed above 4MB (0 = 4MB) */

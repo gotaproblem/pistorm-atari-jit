@@ -50,6 +50,7 @@ typedef enum {
   CONFITEM_SHIFTER,
   CONFITEM_MACHINE,
   CONFITEM_STRAM_CACHE,
+  CONFITEM_FASTBOOT,
   CONFITEM_STRAM_DIRECT,
   CONFITEM_NATIVE_HDMI,
   CONFITEM_HDMI_ONLY,
@@ -117,6 +118,7 @@ static const config_switch_def config_switches[] = {
   { "shifter", CONFITEM_SHIFTER },
   { "machine", CONFITEM_MACHINE },
   { "stram_cache", CONFITEM_STRAM_CACHE },
+  { "fastboot", CONFITEM_FASTBOOT },
   { "stram_direct", CONFITEM_STRAM_DIRECT },
   { "native_hdmi", CONFITEM_NATIVE_HDMI },
   { "hdmi_only", CONFITEM_HDMI_ONLY },
@@ -1294,6 +1296,13 @@ struct emulator_config *load_config_file_section(char *filename,
                   !cfg->blitter ? "disabled" :
                   cfg->blitter_real ? "real (pass-through)" : "emulated");
         }
+        break;
+
+      case CONFITEM_FASTBOOT:
+        /* `fastboot enabled`: skip TOS's cold-boot memory test and
+         * hard-disk spin-up wait (tos_fastboot_patch, emulator.c) */
+        cfg->fastboot = get_bool_default_true(parse_line + str_pos);
+        printf ("[CFG] fastboot %s\n", cfg->fastboot ? "enabled" : "disabled");
         break;
 
       case CONFITEM_STRAM_CACHE:

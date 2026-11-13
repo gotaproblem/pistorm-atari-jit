@@ -514,6 +514,9 @@ run_games() {
 			echo "shifter st"
 			echo "stram_size 4M"
 			echo "ym2149 enabled"
+			# TOS 2.06's cold boot spends its first 80 s on the RAM test
+			# and the hard-disk wait: a 60 s run never reached the game
+			echo "fastboot enabled"
 			echo "rom $rom"
 			echo "ide disabled"
 			echo "acsi disabled"
