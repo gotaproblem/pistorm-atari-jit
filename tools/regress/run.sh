@@ -459,6 +459,11 @@ game_rows() {                     # games.txt -> name|rom|image|secs, scans expa
 			local img tag=${b%%.rom}; tag=${tag#tos}; tag=${tag%%[a-z]*}
 			for img in "$c"/*.st "$c"/*.msa "$c"/*.ST "$c"/*.MSA; do
 				[ -f "$img" ] || continue
+				# a set's later disks are not games of their own: only
+				# "(Disk 1 of N)" is booted (TOSEC naming)
+				case "$(basename "$img")" in
+				*"(Disk "[2-9]" of "*|*"(Disk "[1-9][0-9]" of "*) continue ;;
+				esac
 				local n; n=$(basename "$img" | sed 's/\.[^.]*$//; s/([^)]*)//g; s/\[[^]]*\]//g; s/[^A-Za-z0-9]\+/_/g; s/^_//; s/_$//' | cut -c1-28)
 				echo "g$tag-$n|$b|$(realpath "$img")|$d"
 			done
