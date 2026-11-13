@@ -1,0 +1,12 @@
+# Games - OPTIONAL, run with REGRESS_GAMES=1 tools/regress/run.sh (with the
+# rest) or tools/regress/run.sh games (alone). See run_games in run.sh.
+#
+#   name | rom | image | seconds      one game
+#   scan | rom | dir   | seconds      every .st/.msa in dir (named g<tos>-<title>)
+#
+# rom is a file in [psctrl] rom_path; paths are relative to the repo.
+# The machine is fixed: 68000, compatible core, governed 8 MHz, JIT off,
+# ST, 4 MB, no hard disks, the image in A:. One boot per game, so a pass
+# over ~40 images takes about an hour per TOS line.
+scan | tos104uk.rom | ../games-share | 90
+scan | tos206uk.rom | ../games-share | 90

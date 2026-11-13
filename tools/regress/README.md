@@ -61,6 +61,27 @@ A tests.txt boot can also start a program off a hard disk image on its own (the 
 
 Every guest check is counted against MFP Timer C (the real chip's crystal), so the expected figures are a real ST's, whatever the emulated CPU speed. All programs pass in Hatari 2.4 (cycle-exact ST/STE) on TOS 1.04 and 2.06. The one difference between TOS versions there: Timer B event mode counts 199 lines per frame under 2.06 and 200 under 1.04, every frame.
 
+## Games (optional)
+
+```
+REGRESS_GAMES=1 nohup tools/regress/run.sh > /dev/null 2>&1 &     everything plus the games
+tools/regress/run.sh games                                          the games only
+```
+
+`games.txt` lists them: `scan | tos104uk.rom | ../games-share | 90` boots every `.st`/`.msa` in games-share from A: for 90 s, and a `name | rom | image | seconds` line adds one game. The machine is fixed, not a psctrl.cfg section: 68000, compatible core, governed 8 MHz, JIT off, ST, 4 MB, no hard disks. The two scan lines (TOS 1.04 and 2.06) take about an hour each for ~40 images.
+
+Nothing presses keys. Each game gets a verdict from the last 10 s of the emulator's once-a-second reports: `vbl: taken=` and `screen:` (a hash of the 32000 bytes at the screen base, plus the guest pc):
+
+| State | Means | Verdict |
+|---|---|---|
+| running | the screen kept changing | PASS |
+| static | screen unchanged, the game's own code running (a title screen waiting for a key?) | PASS |
+| tos | screen unchanged, pc in TOS 8+ of 10 s: back at the desktop, bombs, or the disk never booted | FAIL |
+| hung | no VBL taken at all | FAIL |
+| crash | emulator crash, guest halt or early exit | FAIL |
+
+Each game also leaves a `state` measurement (2/1/0), so running -> static between runs shows in the summary. `games.csv` and `games.html` beside `summary.txt` list every game with this run's and the previous run's state.
+
 ## Files
 
 - `run.sh`: the runner.

@@ -1098,6 +1098,24 @@ static void *ipl_stats_task(void *)
               ps_gpip7_stable ? "colour" : "MONO",
               ps_gpip7_reads, ps_gpip7_glitches);
     }
+    /* What is on the screen, for tools/regress games: a hash of the 32000
+     * bytes at the guest's screen base, read from the emulator's RAM image
+     * (no bus access), and the guest pc at that moment. A hash that stops
+     * changing is a static screen; the pc says whether it is the program's
+     * code or TOS's. */
+    if (natmem_offset) {
+      const uint32_t sb = ((uint32_t)rtg.high << 16) | ((uint32_t)rtg.mid << 8);
+      uint32_t h = 2166136261u, spc = 0, sic = 0;
+      uint8_t smask = 0, shnd = 0;
+      if (sb + 32000u <= 0x00400000u) {
+        const uint8_t *q = natmem_offset + sb;
+        for (unsigned i = 0; i < 32000u; i++)
+          h = (h ^ q[i]) * 16777619u;
+      }
+      pistorm_cpu_peek(&spc, &sic, &smask, &shnd);
+      fprintf(stderr, "[ipl]   screen: base=%06X crc=%08X pc=%06X\n",
+              (unsigned)sb, (unsigned)h, (unsigned)spc);
+    }
 
     /* A screen in 320x200 at 50 Hz makes 50 VBLs. More than 60 delivered
      * in a second is the fault, so dump what led up to it - once. */

@@ -3,6 +3,8 @@
 #
 #   tools/regress/run.sh                 everything (suite.txt, then tests.txt)
 #   tools/regress/run.sh core-206 sndh44 just these (names from either file)
+#   REGRESS_GAMES=1 tools/regress/run.sh everything AND the games (games.txt)
+#   tools/regress/run.sh games            the games only
 #   nohup tools/regress/run.sh >/dev/null 2>&1 &     and walk away
 #
 # Run from inside the repo after `make`, as the normal user: only the
@@ -428,8 +430,151 @@ run_tests() {
 	done < <(grep -v '^[[:space:]]*#' "$here/tests.txt" | grep '|')
 }
 
+# ---------------------------------------------------------------- games.txt
+# OPTIONAL (REGRESS_GAMES=1 with the full run, or `run.sh games`, or a
+# game's own name): every game image boots from A: on a fixed machine -
+# not a psctrl.cfg section, so day-to-day config changes never move the
+# results - the way games are always run: 68000, compatible core, governed
+# 8 MHz, JIT off, ST, 4 MB, no hard disks. Nothing presses keys, so a game
+# that waits on its title screen ends "static". From the emulator's
+# once-a-second reports (PISTORM_IPL_STATS: "vbl: taken=" and "screen:",
+# a hash of the 32000 bytes at the screen base plus the guest pc) over the
+# last 10 s of the run:
+#   running  the screen kept changing                     PASS
+#   static   screen unchanged, the game's own code runs   PASS (title/menu?)
+#   tos      screen unchanged and the pc in TOS 8+ of 10 s: back at the
+#            desktop, bombs, or the disk never booted     FAIL
+#   hung     no VBL taken at all (interrupts dead)        FAIL
+#   crash    emulator crash/halt/early exit               FAIL
+# Each game also leaves a `state` measurement (2 running, 1 static, 0 a
+# failure), so running -> static between two runs shows in the summary.
+# Results: games.csv and games.html beside summary.txt.
+game_rows() {                     # games.txt -> name|rom|image|secs, scans expanded
+	local a b c d
+	while IFS='|' read -r a b c d; do
+		a=$(echo $a); b=$(echo $b); d=$(echo $d)
+		c=$(echo "$c" | sed 's/^ *//; s/ *$//')
+		if [ "$a" = scan ]; then
+			[ -d "$c" ] || { echo "games: SKIP scan - $c not found" >&2; continue; }
+			local img tag=${b%%.rom}; tag=${tag#tos}; tag=${tag%%[a-z]*}
+			for img in "$c"/*.st "$c"/*.msa "$c"/*.ST "$c"/*.MSA; do
+				[ -f "$img" ] || continue
+				local n; n=$(basename "$img" | sed 's/\.[^.]*$//; s/([^)]*)//g; s/\[[^]]*\]//g; s/[^A-Za-z0-9]\+/_/g; s/^_//; s/_$//' | cut -c1-28)
+				echo "g$tag-$n|$b|$(realpath "$img")|$d"
+			done
+		else
+			echo "$a|$b|$(realpath "$c" 2>/dev/null || echo "$c")|$d"
+		fi
+	done < <(grep -v '^[[:space:]]*#' "$here/games.txt" | grep '|')
+}
+want_game() {                     # REGRESS_GAMES=1, `games`, or this game's name
+	[ "${REGRESS_GAMES:-0}" = 1 ] && [ ${#names[@]} -eq 0 ] && return 0
+	local n
+	for n in "${names[@]}"; do [ "$n" = games ] || [ "$n" = "$1" ] && return 0; done
+	return 1
+}
+run_games() {
+	local name rom image secs
+	local RUN_ENVS=(PISTORM_IPL_STATS=1 ${REGRESS_ENV:-})
+	[ -f "$here/games.txt" ] || return 0
+	: > "$out/.games"
+	while IFS='|' read -r name rom image secs; do
+		want_game "$name" || continue
+		[ -n "${REGRESS_TAG:-}" ] && name="$name-$REGRESS_TAG"
+		if [ ! -f "$image" ]; then
+			echo "$name: SKIP - $image not found"; continue
+		fi
+		local cfg="$out/$name.cfg" log="$out/$name.log"
+		{
+			psctrl_paths
+			echo "cpu 68000"
+			echo "cpu_compatible enabled"
+			echo "cpu_speed 8mhz"
+			echo "jit_power 0"
+			echo "machine st"
+			echo "shifter st"
+			echo "stram_size 4M"
+			echo "ym2149 enabled"
+			echo "rom $rom"
+			echo "ide disabled"
+			echo "acsi disabled"
+			echo "fdd A:$image"
+		} > "$cfg"
+		echo "$name: running ${secs}s on $commit ..."
+		run_emulator "$cfg" "$secs" "$log" 0
+		local rc=$? why state detail
+		why=$(crash_reason "$log")
+		[ -z "$why" ] && [ $rc -ne 124 ] && why="emulator exited early (rc=$rc)"
+		# the last 10 seconds' reports
+		read -r nv vbl0 nscr ncrc inrom lastpc <<<"$(awk '
+			/^\[ipl\]   vbl: taken=/ { sub(/.*taken=/, ""); v[++nv] = $0 + 0; next }
+			/^\[ipl\]   screen: / {
+				c = $4; sub(/crc=/, "", c); p = $5; sub(/pc=/, "", p)
+				s[++ns] = c; q[ns] = p }
+			END {
+				z = 0; for (i = nv - 9; i <= nv; i++) if (i > 0 && v[i] == 0) z++
+				k = 0; d = 0; r = 0
+				for (i = ns - 9; i <= ns; i++) {
+					if (i < 1) continue
+					k++; if (!(s[i] in seen)) { seen[s[i]] = 1; d++ }
+					# 6 upper-case hex digits: compare as strings (mawk has no strtonum)
+					if ((q[i] >= "E00000" && q[i] < "F00000") || q[i] >= "FC0000") r++
+				}
+				print (nv < 10 ? nv : 10), z, k, d, r, (ns ? q[ns] : "-") }' "$log")"
+		if [ -n "$why" ]; then
+			state=crash; detail="$why"
+		elif [ "${nscr:-0}" -lt 5 ]; then
+			state=crash; detail="under 5 s of screen reports - did it run? (rc=$rc)"
+		elif [ "$nv" -gt 0 ] && [ "$vbl0" = "$nv" ]; then
+			state=hung; detail="no VBL taken in the last $nv s (pc $lastpc)"
+		elif [ "$ncrc" -gt 1 ]; then
+			state=running; detail="$ncrc different screens in the last $nscr s"
+		elif [ "$inrom" -ge 8 ]; then
+			state=tos; detail="static screen, pc in TOS $inrom of $nscr s (pc $lastpc): desktop, bombs or not booted"
+		else
+			state=static; detail="static screen, the game's code running (pc $lastpc) - waiting for input?"
+		fi
+		case "$state" in
+		running) record "$name" game PASS "$detail"; metric "$name" state 2 ;;
+		static)  record "$name" game PASS "$detail"; metric "$name" state 1 ;;
+		*)       record "$name" game FAIL "$state: $detail"; metric "$name" state 0 ;;
+		esac
+		echo "$name|$rom|$(basename "$image")|$state|$detail" >> "$out/.games"
+	done < <(game_rows)
+	# the table: games.csv and games.html, with the previous run's state
+	[ -s "$out/.games" ] || { rm -f "$out/.games"; return 0; }
+	{
+		echo "game,rom,image,state,previous,detail"
+		while IFS='|' read -r n r i st de; do
+			pv=$(grep -F "  $n  state  " "$here/metrics.txt" | grep -vF "$stamp  $commit" | tail -1 | awk '{print $6}')
+			case "$pv" in 2) pv=running ;; 1) pv=static ;; 0) pv=failed ;; *) pv="" ;; esac
+			printf '"%s","%s","%s","%s","%s","%s"\n' "$n" "$r" "${i//\"/\'}" "$st" "$pv" "${de//\"/\'}"
+		done < "$out/.games"
+	} > "$out/games.csv"
+	python3 - "$out/games.csv" "$out/games.html" "$commit" "$stamp" <<'PY'
+import csv, html, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+col = {"running": "#d4f4d4", "static": "#eef0c8", "tos": "#f8d0d0", "hung": "#f8d0d0", "crash": "#f8d0d0"}
+cnt = {}
+for r in rows: cnt[r["state"]] = cnt.get(r["state"], 0) + 1
+o = ["<!DOCTYPE html><html><head><meta charset='utf-8'><title>Games %s</title>" % html.escape(sys.argv[3]),
+     "<style>body{font:14px sans-serif;margin:2em}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:3px 8px;text-align:left}th{background:#eee}</style></head><body>",
+     "<h2>Games run %s on %s</h2><p>%s</p><table><tr><th>game</th><th>TOS</th><th>state</th><th>previous</th><th>detail</th><th>image</th></tr>"
+     % (html.escape(sys.argv[4]), html.escape(sys.argv[3]), ", ".join("%s %d" % (k, v) for k, v in sorted(cnt.items())))]
+for r in rows:
+    ch = r["previous"] and r["previous"] != r["state"] and not (r["previous"] == "failed" and r["state"] in ("tos", "hung", "crash"))
+    o.append("<tr><td>%s</td><td>%s</td><td style='background:%s'>%s</td><td%s>%s</td><td>%s</td><td>%s</td></tr>" % (
+        html.escape(r["game"]), html.escape(r["rom"]), col.get(r["state"], "#fff"), r["state"],
+        " style='font-weight:bold'" if ch else "", html.escape(r["previous"]), html.escape(r["detail"]), html.escape(r["image"])))
+o.append("</table></body></html>")
+open(sys.argv[2], "w").write("\n".join(o))
+PY
+	rm -f "$out/.games"
+}
+
 run_suite
 run_tests
+run_games
 
 # ---------------------------------------------------------------- summary
 # The previous result of each check (history.txt, before this run) tells
