@@ -888,6 +888,16 @@ static void *ipl_stats_task(void *)
 
     e2 = pistorm_ipl_ep2;  e4 = pistorm_ipl_ep4;  e6 = pistorm_ipl_ep6;
     d2 = pistorm_ipl_lat2; d4 = pistorm_ipl_lat4; d6 = pistorm_ipl_lat6;
+    /* VBLs taken: read at the same moment as the episode counters and
+     * scaled to the real length of the window. Before, it was read after
+     * the first fprintf; a slow log write in between (Bad Apple, regress
+     * 12 Nov: "taken=70/s" in the same second as ep4=60, every level-4
+     * gap 15-25 ms) moved the window, so a 60 Hz screen read 61 or 70. */
+    const uint32_t vbl_now = pistorm_vbl_taken;
+    const unsigned vrearm_now = pistorm_ipl_vbl_rearm, hrearm_now = pistorm_ipl_hbl_rearm;
+    struct timespec vts;
+    clock_gettime(CLOCK_MONOTONIC, &vts);
+    const uint64_t vns = (uint64_t)vts.tv_sec * 1000000000ull + (uint64_t)vts.tv_nsec;
 
     fprintf(stderr,
             "[ipl] ep2=%u ep4=%u ep6=%u | del2=%u del4=%u del6=%u  (per second)\n",
@@ -895,13 +905,16 @@ static void *ipl_stats_task(void *)
     {
       static uint32_t pv;
       static unsigned pr;
-      uint32_t nv = pistorm_vbl_taken;
+      static uint64_t pvns;
+      uint32_t nv = vbl_now;
       static unsigned ph;
-      unsigned nr = pistorm_ipl_vbl_rearm, nh = pistorm_ipl_hbl_rearm;
+      unsigned nr = vrearm_now, nh = hrearm_now;
+      const uint64_t win = pvns ? vns - pvns : 1000000000ull;
+      const unsigned per_s = (unsigned)(((uint64_t)(nv - pv) * 1000000000ull + win / 2) / win);
       fprintf(stderr, "[ipl]   vbl: taken=%u/s pre-empted+re-latched=%u/s"
               "  hbl: held level re-armed=%u/s\n",
-              (unsigned)(nv - pv), nr - pr, nh - ph);
-      pv = nv; pr = nr; ph = nh;
+              per_s, nr - pr, nh - ph);
+      pv = nv; pr = nr; ph = nh; pvns = vns;
     }
     {
       static unsigned pp, pb, pt;

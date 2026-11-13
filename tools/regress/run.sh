@@ -250,7 +250,22 @@ host_checks() {
 			else
 				local dif; dif=$(awk -v t="$st" -v h="$sh" -v n="$n" 'BEGIN { printf "%.2f", (t - h) / n }')
 				metric "$name" vbl_per_s_vs_sync "$dif"
-				if awk -v d="$dif" 'BEGIN { exit !(d >= -0.5 && d <= 0.5) }'; then
+				# and no single second over the sync rate: a guest never gets
+				# more VBLs than the Shifter makes (Bad Apple at 60 Hz must
+				# never read 61 or 70 - Steve, 13 Nov). The stats line is
+				# per real second since then, so +1 is rounding only.
+				local over; over=$(awk '
+					/^\[ipl\]   vbl: taken=/ { sub(/.*taken=/, ""); t = $0 + 0; have = 1; next }
+					/^\[ipl\]   shifter:/ && have {
+						have = 0
+						if (!match($0, /guest=[0-9.]+/)) next
+						h = substr($0, RSTART + 6, RLENGTH - 6) + 0
+						if (++k > 15 && t > int(h + 1)) n++ }
+					END { print n + 0 }' "$log")
+				metric "$name" vbl_over_rate "$over"
+				if [ "$over" != 0 ]; then
+					record "$name" vbl FAIL "$over seconds with more VBLs taken than the sync rate ($st for $sh in $n s; per-second $lo..$hi)"
+				elif awk -v d="$dif" 'BEGIN { exit !(d >= -0.5 && d <= 0.5) }'; then
 					record "$name" vbl PASS "$st VBLs taken for $sh at the sync rate in $n s ($dif/s; per-second $lo..$hi)"
 				else
 					record "$name" vbl FAIL "$st VBLs taken for $sh at the sync rate in $n s ($dif/s; per-second $lo..$hi)"
