@@ -149,6 +149,13 @@ run_suite() {
 		python3 "$here/mkimg.py" st "$d/boot.st" --pattern PATTERN.DAT=300000 "${args[@]}" ||
 			{ record "$name" setup FAIL "mkimg.py st failed"; continue; }
 		local cfg="$out/$name.cfg" log="$out/$name.log"
+		# Boot a scratch COPY: games write to their own disk while they
+		# boot (Arkanoid II and Black Tiger rewrote sector 0 within 4 s on
+		# 13 Nov 2026), and the regression must never change the user's
+		# images. The copy is compared afterwards and a write is reported.
+		local disk="$out/.disk.${image##*.}" sum0 sum1 wrote=""
+		cp -f "$image" "$disk" || { echo "$name: SKIP - cannot copy $image"; continue; }
+		sum0=$(md5sum < "$disk")
 		{
 			psctrl_paths
 			echo "cpu 68000"
@@ -490,6 +497,13 @@ run_games() {
 			echo "$name: SKIP - $image not found"; continue
 		fi
 		local cfg="$out/$name.cfg" log="$out/$name.log"
+		# Boot a scratch COPY: games write to their own disk while they
+		# boot (Arkanoid II and Black Tiger rewrote sector 0 within 4 s on
+		# 13 Nov 2026), and the regression must never change the user's
+		# images. The copy is compared afterwards and a write is reported.
+		local disk="$out/.disk.${image##*.}" sum0 sum1 wrote=""
+		cp -f "$image" "$disk" || { echo "$name: SKIP - cannot copy $image"; continue; }
+		sum0=$(md5sum < "$disk")
 		{
 			psctrl_paths
 			echo "cpu 68000"
@@ -503,11 +517,13 @@ run_games() {
 			echo "rom $rom"
 			echo "ide disabled"
 			echo "acsi disabled"
-			echo "fdd A:$image"
+			echo "fdd A:$disk"
 		} > "$cfg"
 		echo "$name: running ${secs}s on $commit ..."
 		run_emulator "$cfg" "$secs" "$log" 0
 		local rc=$? why state detail
+		sum1=$(md5sum < "$disk"); rm -f "$disk"
+		[ "$sum0" != "$sum1" ] && wrote=" (the game wrote to its disk - a copy was booted, the image is untouched)"
 		why=$(crash_reason "$log")
 		[ -z "$why" ] && [ $rc -ne 124 ] && why="emulator exited early (rc=$rc)"
 		# the last 10 seconds' reports
@@ -539,6 +555,7 @@ run_games() {
 		else
 			state=static; detail="static screen, the game's code running (pc $lastpc) - waiting for input?"
 		fi
+		detail="$detail$wrote"
 		case "$state" in
 		running) record "$name" game PASS "$detail"; metric "$name" state 2 ;;
 		static)  record "$name" game PASS "$detail"; metric "$name" state 1 ;;
