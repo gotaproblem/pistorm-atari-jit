@@ -735,6 +735,9 @@ static void run_relevance(void)
     CHECK(se_machine_rule("dma_sound", "st") && se_machine_rule("dma_sound", "megast") &&
           !se_machine_rule("dma_sound", "ste") && !se_machine_rule("dma_sound", "falcon"),
           "dma_sound must be STE/Falcon only");
+    CHECK(se_machine_rule("lmc", "st") && se_machine_rule("lmc", "megast") &&
+          !se_machine_rule("lmc", "ste") && !se_machine_rule("lmc", "falcon"),
+          "lmc must be STE/Falcon only");
     CHECK(se_machine_rule("shifter", "st") && !se_machine_rule("shifter", "ste") &&
           se_machine_rule("shifter", "falcon"), "shifter must be STE only");
     { const char *d = NULL; int seen = 0;

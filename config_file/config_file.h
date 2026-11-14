@@ -120,6 +120,7 @@ struct emulator_config {
   uint32_t machine_mch;/* forced _MCH value */
   int machine_kind;    /* 0=st 1=ste 2=megast 3=falcon (_MCH only, STE hardware) */
   bool shifter_set;    /* cfg set shifter explicitly */
+  bool lmc_set;       /* an `lmc` line was read (the key itself is a PSCTRL tunable) */
   bool shifter_ste;   /* shifter ste: mirror honours STE video regs ($FF820D/0F/8265); default ST ignores them like the real chip */
   bool blitter_real;   /* blitter=true: false = emulated (default), true = real chip */
   bool stram_cache;

@@ -3180,6 +3180,11 @@ int main (int argc, char *argv[])
       PS_INFO ("[CFG] machine STE-class: DMA sound OFF (dma_sound disabled)\n");
     else if (want_dmasnd)
       PS_INFO ("[CFG] machine STE-class: DMA sound ON\n");
+    /* The LMC1992 shadow hears Microwire writes only through the DMA
+     * sound bank, so without DMA sound an `lmc` line does nothing. */
+    if (config->lmc_set && !want_dmasnd)
+      printf ("[CFG] lmc line IGNORED - the LMC1992 is STE sound hardware "
+              "(needs `machine ste` with DMA sound) - remove it\n");
   }
   /* the Falcon DAC (falcon_dsp) plays through the same SDL device */
   if (want_dmasnd || config->ym2149 || config->falcon_dsp) {

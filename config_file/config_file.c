@@ -1559,6 +1559,8 @@ struct emulator_config *load_config_file_section(char *filename,
           cfg->jit = strtol(parse_line + str_pos, NULL, 0) != 0;
           printf ("[CFG] JIT %s (jit_power)\n", cfg->jit ? "enabled" : "disabled");
         }
+        if (!strcasecmp(cur_cmd, "lmc"))
+          cfg->lmc_set = true;          /* emulator.c: STE-class only */
         if (psctrl_settings_config_key(cur_cmd, parse_line + str_pos))
           break;
         if (!strcasecmp(cur_cmd, "vga_render") ||

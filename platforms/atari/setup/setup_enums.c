@@ -432,6 +432,9 @@ static const struct { const char *key; const char *machines; const char *why; } 
     /* the emulator turns DMA sound on for these two only (emulator.c
      * want_dmasnd); a dma_sound line elsewhere does nothing */
     { "dma_sound",      " ste falcon ",    "STE/Falcon only" },
+    /* the LMC1992 shadow only sees Microwire writes through the DMA
+     * sound bank (dmasnd_capture.c), so it follows dma_sound */
+    { "lmc",            " ste falcon ",    "STE/Falcon only (needs DMA sound)" },
     /* emulator_config_shifter_ste(): the STE video personality exists
      * on machine ste only - on a Falcon the video is PSVIDEL's */
     { "shifter",        " ste ",           "STE only" },
