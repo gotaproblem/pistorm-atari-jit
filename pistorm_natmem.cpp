@@ -4386,11 +4386,15 @@ static void hw_lput(uaecptr a, uae_u32 v)
              * register whose first attempt actually landed. Games/demos that
              * race the beam need single-shot writes - the shifter output is
              * the reference display for those. */
+        {
+            const uint64_t rta = rt_tick();
             st_video_snoop32(a, (uint32_t)v);
             psvidel_video_snoop(a, (uint32_t)v, 4);
+            const uint64_t rtb = rt_tick();
             hw_bus_lput(a, v);
+            rt_sync(a, (uint32_t)v, 4, rta, rtb); /* PISTORM_RASTER_TRACE */
             shm_io_write(a, (uint32_t)v, 4);   /* stamped as it landed */
-            rt_sync(a, (uint32_t)v, 4);        /* PISTORM_RASTER_TRACE */
+        }
             stram_shadow_video_after(a, 4);
             break;
         case HW_PAGE_FDD_DMA:
@@ -4497,9 +4501,12 @@ static void hw_wput(uaecptr a, uae_u32 v)
             psvidel_video_snoop(a, v & 0xFFFFu, 2);
             if (__builtin_expect(beam_timed_reg(a), 0))
                 pistorm_gov_sync();
+        {
+            const uint64_t rtb = rt_tick();
             hw_bus_wput(a, v);
+            rt_sync(a, (uint32_t)v, 2, rtb, rtb); /* PISTORM_RASTER_TRACE */
             shm_io_write(a, (uint32_t)v, 2);   /* stamped as it landed */
-            rt_sync(a, (uint32_t)v, 2);        /* PISTORM_RASTER_TRACE */
+        }
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 2);
             stram_shadow_video_after(a, 2);
@@ -4610,9 +4617,12 @@ static void hw_bput(uaecptr a, uae_u32 v)
             psvidel_video_snoop(a, v & 0xFFu, 1);
             if (__builtin_expect(beam_timed_reg(a), 0))
                 pistorm_gov_sync();
+        {
+            const uint64_t rtb = rt_tick();
             hw_bus_bput(a, v);
+            rt_sync(a, (uint32_t)v, 1, rtb, rtb); /* PISTORM_RASTER_TRACE */
             shm_io_write(a, (uint32_t)v, 1);   /* stamped as it landed */
-            rt_sync(a, (uint32_t)v, 1);        /* PISTORM_RASTER_TRACE */
+        }
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 1);
             stram_shadow_video_after(a, 1);

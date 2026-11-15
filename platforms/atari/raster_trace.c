@@ -355,16 +355,21 @@ void rt_vcount_slow(uint32_t raw, uint32_t given, uint32_t dur_ns)
     e->c = dur_ns;
 }
 
-void rt_sync_slow(uint32_t reg, uint32_t v)
+void rt_sync_slow(uint32_t reg, uint32_t v, uint64_t t_a, uint64_t t_b)
 {
     rt_ev_t *e = rt_slot2();
+    uint64_t pre, bus;
     if (!e)
         return;
     e->t = rt_ticks();
+    pre = t_b - t_a;                      /* snoops etc. before the bus write */
+    bus = e->t - t_b;                     /* the bus write itself */
+    if (pre > 0xFFFFu) pre = 0xFFFFu;
+    if (bus > 0xFFFFu) bus = 0xFFFFu;
     e->kind = 'S';
     e->a = (uint8_t)reg;
     e->v = (uint16_t)v;
-    e->c = 0;
+    e->c = (uint32_t)pre | ((uint32_t)bus << 16);
     rt_k(e + 1, e->t);
 }
 
@@ -421,7 +426,7 @@ void rt_dump(void)
             "#   R FA21 value                (guest read of Timer B's count)\n"
             "#   V raw given ns              (guest read of $FF8209: bus value, value given, bus read time)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
-            "#   S 0A|60 value               (guest write to $FF820A / $FF8260, after the bus write)\n"
+            "#   S 0A|60 value pre_ns bus_ns (guest write to $FF820A / $FF8260, after the bus write)\n"
             "#   K guest_clocks pc           (follows I 6, V and S: the guest's 8 MHz clock count\n"
             "#                               (low 32 bits) and pc at that event)\n"
                "#   H gap|syncwait ns pc        (CPU thread: time between two governor\n"
@@ -461,7 +466,9 @@ void rt_dump(void)
         else if (e->kind == 'R')
             fprintf(f, "%.1f R FA%02X %02X\n", us, e->a, e->v & 0xFFu);
         else if (e->kind == 'S')
-            fprintf(f, "%.1f S %02X %02X\n", us, e->a, e->v & 0xFFu);
+            fprintf(f, "%.1f S %02X %02X %.0f %.0f\n", us, e->a, e->v & 0xFFu,
+                    (double)(e->c & 0xFFFFu) * 1e9 / (double)rt_hz(),
+                    (double)(e->c >> 16) * 1e9 / (double)rt_hz());
         else if (e->kind == 'K')
             fprintf(f, "%.1f K %u %06X\n", us, e->c, ((uint32_t)e->a << 16) | e->v);
         else if (e->kind == 'L')
