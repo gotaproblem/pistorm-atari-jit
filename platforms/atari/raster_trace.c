@@ -66,6 +66,8 @@ typedef struct {
 } rt_ev_t;
 
 volatile int rt_on;
+volatile int rt_x_left;
+enum { RT_X_N = 10 };
 static int rt_vc;                           /* 1 = read the real counters (bus) */
 static rt_ev_t *rt_buf;
 static rt_ev_t *rt_last_irq;               /* gets its vector after the IACK */
@@ -371,7 +373,27 @@ void rt_sync_slow(uint32_t reg, uint32_t v, uint64_t t_a, uint64_t t_b)
     e->a = (uint8_t)reg;
     e->v = (uint16_t)v;
     e->c = (uint32_t)pre | ((uint32_t)bus << 16);
+    if (reg == 0x0Au)
+        rt_x_left = RT_X_N;
     rt_k(e + 1, e->t);
+}
+
+void rt_x_slow(uint32_t pc, uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3)
+{
+    rt_ev_t *e;
+    uint64_t a = t0 ? t1 - t0 : 0, b = t2 - t1, c = t3 - t2;
+
+    if (rt_x_left > 0)
+        rt_x_left--;
+    e = rt_slot();
+    if (a > 1023u) a = 1023u;
+    if (b > 1023u) b = 1023u;
+    if (c > 1023u) c = 1023u;
+    e->t = t0 ? t0 : t1;
+    e->kind = 'X';
+    e->a = (uint8_t)(pc >> 16);
+    e->v = (uint16_t)pc;
+    e->c = (uint32_t)(a | (b << 10) | (c << 20) | (t0 ? 0u : 1u << 30));
 }
 
 void rt_mfp_read_slow(uint32_t addr, uint32_t val)
@@ -437,6 +459,9 @@ void rt_dump(void)
             "#   R FA21 value                (guest read of Timer B's count)\n"
             "#   V raw given ns              (guest read of $FF8209: bus value, value given, bus read time)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
+            "#   X pc exec_ns cycles_ns rest_ns (the 10 instructions after a $FF820A write:\n"
+            "#                               the instruction, do_cycles/governor, intlev etc.;\n"
+            "#                               ~ = timing started after the instruction ran)\n"
             "#   S 0A|60 value pre_ns bus_ns (guest write to $FF820A / $FF8260, after the bus write)\n"
             "#   K guest_clocks pc           (follows I 6, V and S: the guest's 8 MHz clock count\n"
             "#                               (low 32 bits) and pc at that event)\n"
@@ -480,6 +505,12 @@ void rt_dump(void)
             fprintf(f, "%.1f S %02X %02X %.0f %.0f\n", us, e->a, e->v & 0xFFu,
                     (double)(e->c & 0xFFFFu) * 1e9 / (double)rt_hz(),
                     (double)(e->c >> 16) * 1e9 / (double)rt_hz());
+        else if (e->kind == 'X')
+            fprintf(f, "%.1f X %06X %s%.0f %.0f %.0f\n", us,
+                    ((uint32_t)e->a << 16) | e->v, (e->c >> 30) & 1u ? "~" : "",
+                    (double)(e->c & 1023u) * 1e9 / (double)hz,
+                    (double)((e->c >> 10) & 1023u) * 1e9 / (double)hz,
+                    (double)((e->c >> 20) & 1023u) * 1e9 / (double)hz);
         else if (e->kind == 'K')
             fprintf(f, "%.1f K %u %06X\n", us, e->c, ((uint32_t)e->a << 16) | e->v);
         else if (e->kind == 'L')

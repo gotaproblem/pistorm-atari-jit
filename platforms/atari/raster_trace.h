@@ -35,6 +35,13 @@ static inline void rt_gap(int kind, int64_t ns, uint32_t pc)
 }
 void rt_dump(void);
 
+/* X records: after a write to $FF820A, the next RT_X_N instructions of the
+ * compat core (newcpu.cpp m68k_run_1) are timed in three parts - the
+ * instruction itself, do_cycles (events, governor check), and the rest of
+ * the loop (serial poll, intlev, specialties) */
+extern volatile int rt_x_left;
+void rt_x_slow(uint32_t pc, uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3);
+
 /* a guest write to the sync ($FF820A) or resolution ($FF8260) register,
  * after it reached the bus (pistorm_natmem.cpp): S reg value pc, then a K
  * record with the guest clock - border routines time these against the
