@@ -565,6 +565,24 @@ static int     gov_beam_on = -1;
 static int64_t gov_beam_irq_cyc = 40;
 static int     gov_beam_handler;            /* this handler's clock is the beam's */
 static int64_t gov_beam_late;               /* ... set this far behind (part of the park) */
+static uint32_t gov_beam_sp;                /* ... its stack at the start */
+extern "C" uint32_t pistorm_cur_ssp(void);  /* cpu/newcpu.cpp */
+extern "C" int      pistorm_sp_live(uint32_t sp);
+/* Is the beam-timed handler still running? Not the handler window
+ * (pistorm_handler_running): that spans an outer handler, ends at its
+ * 2000-cycle cap, and once ended let the park be put back and the governor
+ * pause in the middle of the border routine - Defender, 15 Nov 2026: a
+ * 164 us pause between the routine's reads and its $FF820A writes, the
+ * writes 3-4 lines late or in the next frame's display (the picture
+ * jumping). The handler is over when its RTE has taken the stack above
+ * where it started; until then it is on the beam's clock whatever the
+ * window says. */
+static inline int beam_live(void)
+{
+	if (gov_beam_handler && !pistorm_sp_live(gov_beam_sp))
+		gov_beam_handler = 0;
+	return gov_beam_handler;
+}
 unsigned long  pistorm_gov_beam_n, pistorm_gov_beam_rej, pistorm_gov_beam_back;   /* [GOV] report */
 unsigned long  pistorm_gov_beam_nomodel;
 /* cpu/newcpu.cpp: guest clock at the start of do_interrupt */
@@ -638,11 +656,12 @@ static void pistorm_governor(int sync)
 	 * counter so the mirror knows the beam to the cycle (shifter_mirror.c).
 	 * Never inside an interrupt handler - a raster handler gets no extra
 	 * bus time from us. One test of a flag when the mirror is off. */
-	if (__builtin_expect(shm_on, 0) && !pistorm_handler_running())
+	const int in_handler = pistorm_handler_running() || beam_live();
+	if (__builtin_expect(shm_on, 0) && !in_handler)
 		shm_cal_poll();
 	/* the beam clock (beam_clock.c): VBL sightings in, and once a frame
 	 * its own video counter read - never inside a handler */
-	if (!pistorm_handler_running())
+	if (!in_handler)
 		bc_poll();
 
 	int64_t now = gov_now_ns();
@@ -690,7 +709,7 @@ static void pistorm_governor(int sync)
 	/* PISTORM_WRBEHIND: RAM writes an interrupt handler left queued go
 	 * to the bus now that it has ended - until an interrupt is due
 	 * (platforms/atari/stram_wb.c). The time is real: it shows in `now`. */
-	if (__builtin_expect(stram_wb_n != 0, 0) && !sync && !pistorm_handler_running()) {
+	if (__builtin_expect(stram_wb_n != 0, 0) && !sync && !in_handler) {
 		stram_wb_drain();
 		now = gov_now_ns();
 	}
@@ -711,7 +730,7 @@ static void pistorm_governor(int sync)
 					gov_beam_irq_cyc = v;
 			}
 		}
-		if (gov_beam_on && !gov_beam_handler &&
+		if (gov_beam_on &&
 		    (pistorm_iack_vector & 0xFFu) == mfp_hub_timer_b_vector() &&
 		    (mfp_hub_tbcr() & 0x0Fu) == 8u) {
 			const uint64_t tk = bc_ticks();
@@ -731,6 +750,7 @@ static void pistorm_governor(int sync)
 					gov_parked_ns += shift;     /* put back when the handler is over */
 					gov_beam_handler = 1;
 					gov_beam_late = late_ns;
+					gov_beam_sp = pistorm_cur_ssp();
 					pistorm_gov_beam_n++;
 					rt_gov(late_ns, 2);
 					return;
@@ -739,6 +759,8 @@ static void pistorm_governor(int sync)
 			} else
 				pistorm_gov_beam_nomodel++;
 		}
+		if (beam_live())
+			return;                             /* nested in a beam-timed handler: its clock stays */
 		if (ahead_ns > 0) {                     /* park the lead */
 			gov_ns0 -= ahead_ns;
 			gov_parked_ns += ahead_ns;
@@ -747,9 +769,7 @@ static void pistorm_governor(int sync)
 		}
 		return;
 	}
-	if (gov_beam_handler && !pistorm_handler_running())
-		gov_beam_handler = 0;                   /* the handler is over */
-	if (gov_parked_ns && !sync && !pistorm_handler_running()) {
+	if (gov_parked_ns && !sync && !in_handler) {
 		gov_ns0 += gov_parked_ns;               /* ... and put it back */
 		ahead_ns += gov_parked_ns;
 		gov_parked_ns = 0;
@@ -769,7 +789,7 @@ static void pistorm_governor(int sync)
 			now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
 			if (now - w0 > 2000)
 				rt_gap(1, now - w0, pistorm_cur_pc());
-		} else if (sync_read && gov_beam_handler) {
+		} else if (sync_read && beam_live()) {
 			/* BEAM-TIMED HANDLER, a read reached late: keep the beam's
 			 * clock, the read is answered as at the guest's time */
 			pistorm_gov_read_behind_ns = -ahead_ns;
@@ -777,14 +797,14 @@ static void pistorm_governor(int sync)
 			pistorm_gov_beam_back++;
 		} else {
 			gov_ns0 = now - virt_ns;
-			if (gov_beam_handler && gov_beam_late) {
+			if (beam_live() && gov_beam_late) {
 				/* the debt written off includes the delay the beam's clock
 				 * put on: it is not owed again when the park is put back */
 				gov_parked_ns -= gov_beam_late;
 				gov_beam_late = 0;
 			}
 		}
-	} else if (pistorm_handler_running()) {
+	} else if (in_handler) {
 		/* inside an interrupt handler: no pause - it is paid back at the
 		 * next check outside. step_ns/step_cyc stay where they are, so
 		 * the catch-up cap there spans the handler too. */

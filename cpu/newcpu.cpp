@@ -6333,6 +6333,19 @@ extern "C" uint32_t pistorm_cur_pc(void)
 	return (uint32_t)regs.instruction_pc & 0x00FFFFFFu;
 }
 
+/* events.cpp, BEAM-TIMED HANDLERS: the supervisor stack pointer now, and
+ * whether a handler that started with the stack at `sp` is still running
+ * (supervisor, the stack no higher: its RTE has not popped its frame) */
+extern "C" uint32_t pistorm_cur_ssp(void)
+{
+	return regs.s ? (uint32_t)m68k_areg(regs, 7) : 0xFFFFFFFFu;
+}
+
+extern "C" int pistorm_sp_live(uint32_t sp)
+{
+	return regs.s && (uint32_t)m68k_areg(regs, 7) <= sp;
+}
+
 int pistorm_irq_deliverable(void)
 {
 	return g_irq > regs.intmask;
