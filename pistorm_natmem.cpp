@@ -4353,6 +4353,7 @@ static void hw_lput(uaecptr a, uae_u32 v)
             psvidel_video_snoop(a, (uint32_t)v, 4);
             hw_bus_lput(a, v);
             shm_io_write(a, (uint32_t)v, 4);   /* stamped as it landed */
+            rt_sync(a, (uint32_t)v, 4);        /* PISTORM_RASTER_TRACE */
             stram_shadow_video_after(a, 4);
             break;
         case HW_PAGE_FDD_DMA:
@@ -4461,6 +4462,7 @@ static void hw_wput(uaecptr a, uae_u32 v)
                 pistorm_gov_sync();
             hw_bus_wput(a, v);
             shm_io_write(a, (uint32_t)v, 2);   /* stamped as it landed */
+            rt_sync(a, (uint32_t)v, 2);        /* PISTORM_RASTER_TRACE */
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 2);
             stram_shadow_video_after(a, 2);
@@ -4573,6 +4575,7 @@ static void hw_bput(uaecptr a, uae_u32 v)
                 pistorm_gov_sync();
             hw_bus_bput(a, v);
             shm_io_write(a, (uint32_t)v, 1);   /* stamped as it landed */
+            rt_sync(a, (uint32_t)v, 1);        /* PISTORM_RASTER_TRACE */
             if (__builtin_expect(pistorm_tl_enabled(), 0))
                 tl_video_write(a, v, 1);
             stram_shadow_video_after(a, 1);

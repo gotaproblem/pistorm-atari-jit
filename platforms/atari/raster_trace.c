@@ -52,6 +52,7 @@ extern uint64_t ps_rt_bus_n, ps_rt_bus_ticks, ps_rt_bus_max, ps_rt_yield_ticks,
                 ps_rt_gap_max, ps_rt_last_end;
 uint64_t ps_rt_now(void);
 uint64_t pistorm_guest_clocks(void);          /* cpu/events.cpp */
+uint32_t pistorm_cur_pc(void);                /* cpu/newcpu.cpp */
 
 #define RT_MAX (1u << 21)                     /* events, 16 bytes each: 32 MB */
 
@@ -124,6 +125,27 @@ static inline rt_ev_t *rt_slot(void)
     uint64_t n = __atomic_fetch_add(&rt_n, 1u, __ATOMIC_RELAXED);
 
     return &rt_buf[n & (RT_MAX - 1u)];
+}
+
+/* two adjacent slots: an event and its K (guest clock, pc) record */
+static inline rt_ev_t *rt_slot2(void)
+{
+    uint64_t n = __atomic_fetch_add(&rt_n, 2u, __ATOMIC_RELAXED);
+
+    if (((n + 1u) & (RT_MAX - 1u)) < (n & (RT_MAX - 1u)))
+        return NULL;                          /* would wrap: drop this one */
+    return &rt_buf[n & (RT_MAX - 1u)];
+}
+
+static inline void rt_k(rt_ev_t *k, uint64_t t)
+{
+    uint64_t clk = pistorm_guest_clocks();
+    uint32_t pc = pistorm_cur_pc();
+    k->t = t;
+    k->kind = 'K';
+    k->a = (uint8_t)(pc >> 16);
+    k->v = (uint16_t)pc;
+    k->c = (uint32_t)clk;
 }
 
 /* four adjacent slots (the W record), so no other thread's event lands
@@ -214,11 +236,13 @@ void rt_palette_slow(unsigned idx, uint16_t val)
 
 void rt_irq_slow(int level)
 {
-    rt_ev_t *e = rt_slot();
+    rt_ev_t *e = level == 6 ? rt_slot2() : rt_slot();
 
     if (!e)
         return;
     e->t = rt_ticks();
+    if (level == 6)
+        rt_k(e + 1, e->t);
     e->kind = 'I';
     e->a = (uint8_t)level;
     e->v = 0;
@@ -317,14 +341,28 @@ static int rt_mfp_reg(uint32_t a)
 
 void rt_vcount_slow(uint32_t raw, uint32_t given, uint32_t dur_ns)
 {
-    rt_ev_t *e = rt_slot();
+    rt_ev_t *e = rt_slot2();
     if (!e)
         return;
     e->t = rt_ticks();
+    rt_k(e + 1, e->t);
     e->kind = 'V';
     e->a = (uint8_t)raw;
     e->v = (uint16_t)(given & 0xFFu);
     e->c = dur_ns;
+}
+
+void rt_sync_slow(uint32_t reg, uint32_t v)
+{
+    rt_ev_t *e = rt_slot2();
+    if (!e)
+        return;
+    e->t = rt_ticks();
+    e->kind = 'S';
+    e->a = (uint8_t)reg;
+    e->v = (uint16_t)v;
+    e->c = 0;
+    rt_k(e + 1, e->t);
 }
 
 void rt_mfp_read_slow(uint32_t addr, uint32_t val)
@@ -380,6 +418,9 @@ void rt_dump(void)
             "#   R FA21 value                (guest read of Timer B's count)\n"
             "#   V raw given ns              (guest read of $FF8209: bus value, value given, bus read time)\n"
                "#   L level                     (ipl_task saw the IPL lines change)\n"
+            "#   S 0A|60 value               (guest write to $FF820A / $FF8260, after the bus write)\n"
+            "#   K guest_clocks pc           (follows I 6, V and S: the guest's 8 MHz clock count\n"
+            "#                               (low 32 bits) and pc at that event)\n"
                "#   H gap|syncwait ns pc        (CPU thread: time between two governor\n"
                "#                               checks over 20 us / a beam-sync wait\n"
                "#                               over 2 us)\n"
@@ -414,6 +455,10 @@ void rt_dump(void)
             fprintf(f, "%.1f V %02X %02X %u\n", us, e->a, e->v & 0xFFu, e->c);
         else if (e->kind == 'R')
             fprintf(f, "%.1f R FA%02X %02X\n", us, e->a, e->v & 0xFFu);
+        else if (e->kind == 'S')
+            fprintf(f, "%.1f S %02X %02X\n", us, e->a, e->v & 0xFFu);
+        else if (e->kind == 'K')
+            fprintf(f, "%.1f K %u %06X\n", us, e->c, ((uint32_t)e->a << 16) | e->v);
         else if (e->kind == 'L')
             fprintf(f, "%.1f L %u\n", us, e->a);
         else if (e->kind == 'G')

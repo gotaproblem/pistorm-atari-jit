@@ -35,6 +35,27 @@ static inline void rt_gap(int kind, int64_t ns, uint32_t pc)
 }
 void rt_dump(void);
 
+/* a guest write to the sync ($FF820A) or resolution ($FF8260) register,
+ * after it reached the bus (pistorm_natmem.cpp): S reg value pc, then a K
+ * record with the guest clock - border routines time these against the
+ * beam, and the K clocks against the real times say how the governor
+ * paced the code in between */
+void rt_sync_slow(uint32_t reg, uint32_t v);
+static inline void rt_sync(uint32_t a, uint32_t v, int size)
+{
+    if (__builtin_expect(!rt_on, 1))
+        return;
+    a &= 0x00FFFFFFu;
+    if (size == 1 && (a == 0x00FF820Au || a == 0x00FF8260u))
+        rt_sync_slow(a & 0xFFu, v & 0xFFu);
+    else if (size == 2 && (a == 0x00FF820Au || a == 0x00FF8260u))
+        rt_sync_slow(a & 0xFFu, (v >> 8) & 0xFFu);
+    else if (size == 4 && a == 0x00FF8208u)
+        rt_sync_slow(0x0Au, (v >> 8) & 0xFFu);
+    else if (size == 4 && a == 0x00FF8260u)
+        rt_sync_slow(0x60u, (v >> 24) & 0xFFu);
+}
+
 static inline void rt_palette(unsigned idx, uint16_t val)
 {
     if (__builtin_expect(rt_on, 0))

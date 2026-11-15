@@ -54,6 +54,10 @@
  *   PISTORM_SHM_DEBUG=1      one summary line every 5 s (timing lock,
  *                            calibration error, events, border tricks seen,
  *                            render cost). =2 adds a line per calibration.
+ *                            =4 adds [SHM4] lines: every $FF820A/$FF8260
+ *                            write on lines 258-266 with the cycle it
+ *                            landed on, and per frame whether the bottom
+ *                            border opened (50 Hz frames).
  *   PISTORM_SHM_X0=24        first cycle shown at the left edge (negative:
  *                            border colour before the line starts)
  *   PISTORM_SHM_W=384        cycles shown (canvas width in low-res pixels)
@@ -815,6 +819,7 @@ static void glue_frame(vstate_t *g, uint32_t j, uint32_t iend, double O, double 
 
         /* ---- vertical: decided at cycle 502 of the line before ---- */
         const int fv = f_at(ch, n, f0, l->len >= 503 ? 502.0 : (double)l->len - 1);
+        const int vde_was = vde;
         if (!vde) {
             if (L == 33 && (fv == 60 || fv == 71)) { vde = 1; if (cls == 50) st.top_off++; }
             else if (L == 62 && fv == 50)          vde = 1;
@@ -824,6 +829,29 @@ static void glue_frame(vstate_t *g, uint32_t j, uint32_t iend, double O, double 
             else if (L + 1 == nobot) {
                 vde = 0;
                 if (cls == 50) st.bottom_off++;
+            }
+        }
+        /* PISTORM_SHM_DEBUG=4: the sync/rez writes on the lines around the
+         * bottom-border decision (cycle 502 of line 262 at 50 Hz) and what
+         * the GLUE made of them - one line per written line, and one
+         * verdict per frame */
+        if (__builtin_expect(cfg_dbg >= 4, 0) && cls == 50 && L >= 258 && L <= 266) {
+            static int dbg4_left = 20000;
+            if (dbg4_left > 0 && (n || L == 262)) {
+                char buf[512];
+                int k = 0;
+                for (int i = 0; i < n && k < (int)sizeof buf - 24; i++)
+                    k += snprintf(buf + k, sizeof buf - (size_t)k, " %d:%dHz/r%d",
+                                  (int)ch[i].c, ch[i].f, ch[i].rez);
+                buf[k] = 0;
+                fprintf(stderr, "[SHM4] f%llu L%d len=%d f@start=%d%s%s\n",
+                        (unsigned long long)st.frames, L, (int)l->len, f0,
+                        n ? " writes" : "", buf);
+                if (L == 262)
+                    fprintf(stderr, "[SHM4] f%llu L262 freq@502=%d -> bottom border %s\n",
+                            (unsigned long long)st.frames, fv,
+                            vde_was && vde ? "OPEN" : "closed");
+                dbg4_left--;
             }
         }
         s += l->len * tc;
