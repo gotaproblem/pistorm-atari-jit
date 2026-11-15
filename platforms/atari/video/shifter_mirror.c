@@ -463,9 +463,11 @@ static int reg_cls_vote(int c)
     return v50 >= 6 ? 50 : v60 >= 6 ? 60 : v71 >= 6 ? 71 : 0;
 }
 
+static unsigned dbg_sightings, dbg_disagree, dbg_undecided;   /* unlocked_print */
 static void lock_sighting(uint64_t t, int sight_reg_cls)
 {
     const double hz = (double)tick_hz();
+    dbg_sightings++;
     if (L_last) {
         double iv = (double)(t - L_last);
         if (iv > hz / 250.0 && iv < hz / 25.0)
@@ -488,10 +490,13 @@ static void lock_sighting(uint64_t t, int sight_reg_cls)
      * (reg_cls_vote), never at render time. */
     {
         const int reg_cls = reg_cls_vote(sight_reg_cls);
-        if (!reg_cls)
+        if (!reg_cls) {
             cls = L_cls;                       /* registers undecided: no change */
-        else if (cls != reg_cls)
+            dbg_undecided++;
+        } else if (cls != reg_cls) {
             cls = (L_cls == reg_cls) ? L_cls : 0;
+            dbg_disagree++;
+        }
     }
     if (cls != L_cls) {
         L_cls = cls;
@@ -547,6 +552,33 @@ static double frame_origin_at(double x, int *calibrated)
     const double ofs = C_vblofs_n ? C_vblofs : cfg_vblofs * L_P / frame_cycles(L_cls);
     const double a = L_A + ofs;
     return a + floor((x - a) / L_P) * L_P;
+}
+
+/* PISTORM_SHM_DEBUG: with no frame lock the summary line above never
+ * prints (it needs a lock), and the mirror draws every frame with one
+ * palette - raster splits gone (Wrath of the Demon on a 60 Hz ST, 15 Nov
+ * 2026: one start-up line and nothing else). Say why there is no lock:
+ * the VBL sightings, their average interval and the class it gives, and
+ * the registers' vote. */
+static void unlocked_print(void)
+{
+    static uint64_t t0;
+    const uint64_t now = shm_ticks();
+    const double hz = (double)tick_hz();
+    if (!t0) { t0 = now; return; }
+    if ((double)(now - t0) < 5.0 * hz)
+        return;
+    const double us = L_ema * 1e6 / hz;
+    const int icls = (us > 18000 && us < 22000) ? 50 : (us > 15000 && us <= 18000) ? 60 :
+                     (us > 12500 && us <= 15000) ? 71 : 0;
+    fprintf(stderr, "[SHM] NO LOCK: %u VBL sightings in %.1f s, interval avg %.0f us (-> %d Hz), "
+            "last %.0f us ago, lock class %d have %d, regs: sync $%02X rez $%02X; "
+            "intervals vs registers disagreed %u, registers undecided %u\n",
+            dbg_sightings, (double)(now - t0) / hz, us, icls,
+            L_last ? (double)(now - L_last) * 1e6 / hz : -1.0, L_cls, L_have,
+            cpu_reg[0x0A], cpu_reg[0x60], dbg_disagree, dbg_undecided);
+    dbg_sightings = dbg_disagree = dbg_undecided = 0;
+    t0 = now;
 }
 
 int shm_locked_hz(void)
@@ -1176,8 +1208,11 @@ int shm_render(uint32_t *dst, uint32_t pitch, uint32_t *w, uint32_t *h,
      * no lock: lock_sighting votes the registers at each sighting. They
      * are not read here: left-border code sets 71 Hz mode for a few cycles
      * on every line it opens, and a render landing there lost the lock.) */
-    if (!L_have || !L_cls)
+    if (!L_have || !L_cls) {
+        if (cfg_dbg)
+            unlocked_print();
         return render_static(dst, pitch, w, h, sw, sh);
+    }
     if (cfg_dbg)
         stats_print();
 

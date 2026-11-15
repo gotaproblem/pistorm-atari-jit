@@ -9,6 +9,8 @@ shm-test: test.c $(ROOT)/platforms/atari/video/shifter_mirror.c $(ROOT)/platform
 check: shm-test
 	./shm-test
 	SHM_TEST_STE=1 ./shm-test
+	SHM_TEST_60=1 ./shm-test
+	SHM_TEST_60=1 SHM_TEST_60_CAL=0 ./shm-test
 
 clean:
 	rm -f shm-test

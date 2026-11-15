@@ -35,7 +35,8 @@ static const uint32_t BASE = 0x078000u;
 static double T0 = 1e9;                   /* origin of frame 0 */
 static int VBL_OFS_CYC = 64;              /* the VBL comes 64 cycles after origin */
 static int frame_k;
-static int bytes_of_line[313];            /* truth for the counter model */
+static int bytes_of_line[313];
+static int g_lc = 512, g_de0 = 63;          /* line cycles, first display line (60 Hz: 508, 34) */            /* truth for the counter model */
 static uint32_t real_base = 0x078000u;    /* what the GLUE reloaded for frame_k */
 
 static double origin(int k) { return T0 + k * P; }
@@ -45,13 +46,14 @@ static void at(int k, int L, double c) { fake_t = (uint64_t)llround(origin(k) + 
 int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
 {
     double cyc = ((double)fake_t - origin(frame_k)) / NS_PER_CYC;
-    int L = (int)(cyc / LINE);
-    double c = cyc - L * LINE;
+    int L = (int)(cyc / g_lc);
+    double c = cyc - L * g_lc;
     uint32_t a = real_base;
-    for (int i = 63; i < L && i < 263; i++)
+    const int c0 = g_lc == 508 ? 52 : 56;
+    for (int i = g_de0; i < L && i < g_de0 + 200; i++)
         a += (uint32_t)bytes_of_line[i];
-    if (L >= 63 && L < 263 && c >= 56) {
-        int b = (int)((c - 56) / 2.0) & ~1;
+    if (L >= g_de0 && L < g_de0 + 200 && c >= c0) {
+        int b = (int)((c - c0) / 2.0) & ~1;
         if (b > bytes_of_line[L]) b = bytes_of_line[L];
         a += (uint32_t)b;
     }
@@ -112,6 +114,69 @@ static void expect(const char *what, uint32_t got, uint32_t want)
 /* display line y, display pixel p: canvas row/cycle at a normal 50 Hz frame */
 static uint32_t dpx(int y, int p) { return px(63 + y - 34, 56 + p); }
 
+/* A 60 Hz SCREEN (Wrath of the Demon on a 60 Hz ST, 15 Nov 2026: the ST
+ * monitor showed the raster splits, the HDMI mirror did not). The GLUE
+ * runs 263 lines of 508 cycles, the display is lines 34-233, the VBL is
+ * sighted once a frame. SHM_TEST_60=1 runs only this; SHM_TEST_60_CAL=0
+ * leaves out the CPU's video counter reads. */
+static int run60(void)
+{
+    g_lc = 508; g_de0 = 34;
+    P = 263.0 * 508.0 * NS_PER_CYC;
+    const int cal = !getenv("SHM_TEST_60_CAL") || atoi(getenv("SHM_TEST_60_CAL"));
+    uint32_t w, h, sw, sh;
+    fake_t = (uint64_t)(T0 - P);
+    io8(0xFF8201, (uint8_t)(BASE >> 16));
+    io8(0xFF8203, (uint8_t)(BASE >> 8));
+    io8(0xFF820A, 0x00);
+    io8(0xFF8260, 0x00);
+    io16(0xFF8240, 0x001);
+    io16(0xFF8242, 0x777);
+    unsigned seed = 2718281;
+    int locked = 0, good = 0, drawn = 0, first_red = -1;
+    for (frame_k = 0; frame_k < 200; frame_k++) {
+        const int k = frame_k;
+        fake_t = (uint64_t)(origin(k) + VBL_OFS_CYC * NS_PER_CYC);
+        if (k == 0) shm_vbl_sighting();
+        fake_t = (uint64_t)(origin(k) + (VBL_OFS_CYC + 200) * NS_PER_CYC);
+        shm_cpu_vbl_taken();
+        /* colour 1 red from display line 100 (frame line 134), cycle 200:
+         * pixel 5 of line 134 is drawn before that, line 135 is a colour-0
+         * stripe, so the first red at pixel 5 is frame line 136 */
+        fake_t = (uint64_t)(origin(k) + (134.0 * 508 + 200) * NS_PER_CYC);
+        io16(0xFF8242, 0x700);
+        if (cal) {
+            seed = seed * 1103515245u + 12345u;
+            fake_t = (uint64_t)(origin(k) + (110.0 * 508 + 200 + (seed >> 16) % 100u) * NS_PER_CYC);
+            shm_cal_poll();
+        }
+        fake_t = (uint64_t)(origin(k) + (250.0 * 508) * NS_PER_CYC);
+        io16(0xFF8242, 0x777);
+        seed = seed * 1103515245u + 12345u;
+        fake_t = (uint64_t)(origin(k + 1) + VBL_OFS_CYC * NS_PER_CYC + (double)((seed >> 16) % 40000u));
+        shm_vbl_sighting();
+        fake_t += 20000u + (uint64_t)((seed >> 4) % 500000u);
+        const int r = shm_render(out, 1024, &w, &h, &sw, &sh);
+        if (shm_locked_hz() == 60) locked++;
+        if (r != 1 || k < 100) continue;
+        drawn++;
+        /* canvas row of frame line L is L - top60 (5); look for the first
+         * red row in the stripes' colour-1 column */
+        int fr = -1;
+        for (int rr = 0; rr < 276 && fr < 0; rr++)
+            if ((out[rr * 1024 + (int)(2 * (52 + 5 - 8))] & 0xFFFFFFu) == RED) fr = rr;
+        if (fr + 5 == 136) good++;   /* line 134's pixel 5 is before cycle 200; 135 is a colour-0 stripe */
+        first_red = fr;
+    }
+    printf("60 Hz screen%s: locked at 60 in %d of 200 frames; split on its line in %d of %d drawn "
+           "(last: first red row %d = frame line %d, want 136)\n",
+           cal ? "" : " (no counter reads)", locked, good, drawn, first_red, first_red + 5);
+    expect("60 Hz screen locked", locked >= 150, 1);
+    expect("60 Hz palette split on its line", good >= 90, 1);
+    printf("%d checks, %d failed\n", checks, fails);
+    return fails ? 1 : 0;
+}
+
 int main(void)
 {
     if (getenv("SHM_TEST_PPM"))
@@ -135,6 +200,8 @@ int main(void)
         printf("init failed\n");
         return 1;
     }
+    if (getenv("SHM_TEST_60") && atoi(getenv("SHM_TEST_60")))
+        return run60();
     /* base and palette as the guest would set them */
     fake_t = (uint64_t)(T0 - P);
     io8(0xFF8201, (uint8_t)(BASE >> 16));
