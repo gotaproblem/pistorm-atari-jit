@@ -38,6 +38,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -418,6 +419,16 @@ void rt_dump(void)
     hz = rt_hz();
     uint64_t total = rt_n, first = total > RT_MAX ? total - RT_MAX : 0;
     t0 = total ? rt_buf[first & (RT_MAX - 1u)].t : 0;
+    {
+        /* clock pair for lining the trace up with ftrace (trace_clock
+         * mono_raw): an event's mono_raw ns = mono_raw_ns - (cntvct - t) / hz */
+        struct timespec ts;
+        uint64_t c = rt_ticks();
+        clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+        fprintf(f, "# clocks t0 %llu hz %llu cntvct %llu mono_raw_ns %lld\n",
+                (unsigned long long)t0, (unsigned long long)hz, (unsigned long long)c,
+                (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+    }
     fprintf(f, "# raster trace: t_us kind ...\n"
                "#   P idx value video_counter   (palette write, real counter after it)\n"
                "#   I level vector              (interrupt taken, vector from the IACK)\n"
