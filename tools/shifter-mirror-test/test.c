@@ -62,6 +62,9 @@ int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
     return 1;
 }
 
+static uint8_t glue_sync = 0x02;          /* what the GLUE reads back */
+int pistorm_shm_read_sync(uint8_t *v) { *v = (uint8_t)(0xFCu | glue_sync); return 1; }
+
 static void io8(uint32_t a, uint8_t v)  { shm_io_write(a, v, 1); }
 static void io16(uint32_t a, uint16_t v) { shm_io_write(a, v, 2); }
 
@@ -128,7 +131,11 @@ static int run60(void)
     fake_t = (uint64_t)(T0 - P);
     io8(0xFF8201, (uint8_t)(BASE >> 16));
     io8(0xFF8203, (uint8_t)(BASE >> 8));
-    io8(0xFF820A, 0x00);
+    /* SHM_TEST_SYNC_UNKNOWN=1: a 60 Hz TOS never writes SYNC - the
+     * mirror must read the GLUE (60 Hz out of reset) */
+    glue_sync = 0x00;
+    if (!(getenv("SHM_TEST_SYNC_UNKNOWN") && atoi(getenv("SHM_TEST_SYNC_UNKNOWN"))))
+        io8(0xFF820A, 0x00);
     io8(0xFF8260, 0x00);
     io16(0xFF8240, 0x001);
     io16(0xFF8242, 0x777);
@@ -152,6 +159,7 @@ static int run60(void)
         }
         fake_t = (uint64_t)(origin(k) + (250.0 * 508) * NS_PER_CYC);
         io16(0xFF8242, 0x777);
+        shm_cal_poll();                    /* the governor's check (reads SYNC if unknown) */
         seed = seed * 1103515245u + 12345u;
         fake_t = (uint64_t)(origin(k + 1) + VBL_OFS_CYC * NS_PER_CYC + (double)((seed >> 16) % 40000u));
         shm_vbl_sighting();

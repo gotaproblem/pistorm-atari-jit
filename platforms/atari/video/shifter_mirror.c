@@ -125,6 +125,16 @@ static volatile uint32_t g_frame_bytes = 32000u + 512u;  /* render publishes */
 /* the CPU thread's view of the registers (old values for the log) */
 static uint16_t cpu_pal[16];
 static uint8_t  cpu_reg[0x68];
+/* $FF820A as the guest last wrote it is in cpu_reg[0x0A]. A 60 Hz TOS
+ * (NTSC flag in the header, a US or Brazilian ST) never writes it: the
+ * GLUE comes out of reset at 60 Hz and stays there. The shadow's default
+ * then said 50 Hz, every VBL sighting (16.7 ms apart) disagreed with it,
+ * and the mirror never locked: one palette per frame, no raster splits
+ * (Wrath of the Demon, 15 Nov 2026: 301 sightings in 5 s, all
+ * disagreeing, sync $02). Until the guest writes it, the GLUE is read -
+ * once, on the CPU thread (shm_cal_poll_slow). */
+static int sync_known;                 /* cpu_reg[0x0A] is the GLUE's */
+static int sync_reads;                 /* attempts at reading it      */
 
 /* VBL sightings: ipl_task -> render */
 #define SIGHT_N 64u
@@ -183,6 +193,8 @@ static void reg_w8(uint64_t t, uint32_t r, uint8_t b)
     }
     uint8_t old = cpu_reg[r];
     cpu_reg[r] = b;
+    if (r == 0x0A)
+        sync_known = 1;
     ev_push(t, (SHM_K_REG << 24) | r, old, b);
     if (r == 0x01 || r == 0x03) {
         /* the STE clears the low byte on a high/mid write */
@@ -255,6 +267,22 @@ void shm_cpu_vbl_taken(void)
 
 void shm_cal_poll_slow(uint64_t now)
 {
+    if (__builtin_expect(!sync_known, 0) && sync_reads < 64) {
+        /* the guest has not written $FF820A: read the GLUE (see sync_known) */
+        uint8_t v;
+        sync_reads++;
+        if (pistorm_shm_read_sync(&v)) {
+            reg_w8(now, 0x0A, (uint8_t)(v & 0x03u));
+            fprintf(stderr, "[SHM] $FF820A never written by the guest: the GLUE reads $%02X "
+                    "(%d Hz)\n", v, (v & 2u) ? 50 : 60);
+        }
+        if (!sync_known && sync_reads < 64)
+            return;                       /* bus error: next poll */
+        if (!cal_P) {
+            shm_cal_lo = UINT64_MAX;
+            return;
+        }
+    }
     const uint64_t P = cal_P;
     if (!P) {
         shm_cal_lo = UINT64_MAX;
@@ -378,10 +406,15 @@ int shm_init(const uint8_t *natmem, int ste)
         cpu_reg[0x65] = rtg.hscroll;
         cpu_reg[0x60] = rtg.hw_rez;
         cpu_reg[0x0A] = (pistorm_guest_hz > 55.0 && pistorm_guest_hz < 65.0) ? 0x00 : 0x02;
+        /* pistorm_guest_hz is 0 until the guest writes SYNC or REZ */
+        sync_known = pistorm_guest_hz > 0.0;
     }
 #else
     cpu_reg[0x0A] = 0x02;
+    sync_known = !(getenv("SHM_TEST_SYNC_UNKNOWN") && atoi(getenv("SHM_TEST_SYNC_UNKNOWN")));
 #endif
+    if (!sync_known)
+        shm_cal_lo = 0;                   /* the next governor check reads it */
     base_range_update();
     __atomic_store_n(&shm_on, 1, __ATOMIC_RELEASE);
     fprintf(stderr, "[SHM] exact HDMI mirror on: %u-event log, canvas cycles %d..%d, "

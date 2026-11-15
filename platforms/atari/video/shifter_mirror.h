@@ -63,6 +63,8 @@ void shm_cpu_vbl_taken(void);
 /* events.cpp governor, every check (~4 us of guest time). Cheap test inline. */
 extern volatile uint64_t shm_cal_lo;     /* next read window opens (ticks) */
 void shm_cal_poll_slow(uint64_t now);
+/* pistorm_natmem.cpp: one quiet read of the GLUE's $FF820A; 1 = ok */
+int pistorm_shm_read_sync(uint8_t *v);
 
 static inline uint64_t shm_ticks(void)
 {

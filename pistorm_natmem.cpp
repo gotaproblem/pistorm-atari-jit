@@ -2741,6 +2741,19 @@ extern "C" int pistorm_shm_read_counter(uint32_t *cnt, uint64_t *t)
     return 1;
 }
 
+/* The GLUE's sync mode, for the HDMI mirror when the guest has never
+ * written it (shifter_mirror.c, sync_known). CPU thread, quiet: the
+ * guest's fc and bus error latch are untouched. */
+extern "C" int pistorm_shm_read_sync(uint8_t *v)
+{
+    uint8_t e = 0;
+    const uae_u32 s = ps_read_8_quiet(0x00FF820Au, 5, &e);
+    if (e)
+        return 0;
+    *v = (uint8_t)s;
+    return 1;
+}
+
 static void tl_video_write(uaecptr a, uae_u32 v, int size)
 {
     uae_u32 val;

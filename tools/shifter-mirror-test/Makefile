@@ -11,6 +11,7 @@ check: shm-test
 	SHM_TEST_STE=1 ./shm-test
 	SHM_TEST_60=1 ./shm-test
 	SHM_TEST_60=1 SHM_TEST_60_CAL=0 ./shm-test
+	SHM_TEST_60=1 SHM_TEST_SYNC_UNKNOWN=1 ./shm-test
 
 clean:
 	rm -f shm-test
