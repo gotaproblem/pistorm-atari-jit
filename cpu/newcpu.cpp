@@ -6262,8 +6262,10 @@ static evt_t pistorm_handler_cap(void)
 	return hnd_cap;
 }
 
+evt_t pistorm_irq_cyc;      /* events.cpp, BEAM-TIMED HANDLERS: do_interrupt's start */
 void pistorm_handler_pre(void)
 {
+	pistorm_irq_cyc = get_cycles();
 	if (pistorm_handler_cap() == 0)
 		return;
 	hnd_pre_cyc = get_cycles();

@@ -307,6 +307,7 @@ extern volatile uint16_t st_palette[16];
 extern "C" void st_palette_log(unsigned idx, uint16_t val);  /* et4000.c */
 #include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
 #include "platforms/atari/video/shifter_mirror.h"   /* exact HDMI mirror */
+#include "platforms/atari/video/beam_clock.h"       /* BACK-DATED READS */
 
 #define STRAM_LOW_WRITE_THROUGH_SIZE 0x000005B4u
 #define STRAM_LOW_CONTROL_BANK_SIZE 0x00010000u
@@ -2700,7 +2701,8 @@ static void io_bput(uaecptr a, uae_u32 v){ PROF_IO_W(a); fc_data(); m68k_write_m
  * around each new writing pc goes to stderr once. */
 extern "C" int pistorm_tl_enabled(void);
 extern "C" void pistorm_tl_cpu(uint8_t k, uint8_t a, uint8_t b, uint8_t c, uint32_t d);
-/* Exact HDMI mirror calibration (shifter_mirror.c, via the governor):
+/* Exact HDMI mirror calibration (shifter_mirror.c, via the governor) and
+ * the beam clock's (beam_clock.c):
  * the real video counter and the tick its low byte was read at. The mid
  * byte is read again after: if it moved, the low byte wrapped between the
  * reads and the value is torn - the caller tries again on its next poll.
@@ -3242,7 +3244,19 @@ static inline uae_u32 hw_bus_wget(uaecptr a)
  * the counter is seen to be counting - this read and the last one, under
  * 40 us apart, differ by what the time between them predicts - and by at
  * most 24 bytes; the first read of a poll is never changed. Governed
- * 68000 only. */
+ * 68000 only.
+ *
+ * A BEAM-TIMED HANDLER's read reached late (cpu/events.cpp: a Timer B
+ * handler on the beam's clock, the guest behind real time at the read by
+ * pistorm_gov_read_behind_ns): the counter is given as it stood at the
+ * guest's time, from the beam clock (beam_clock.c) - the bytes it fetched
+ * between then and the read are taken off (bc_counter_advance,
+ * nominal display geometry; 0 in the border, where it stands still).
+ * Defender's first read is due in the border after line 261, where the
+ * counter shows $60; reached in line 262's display it read $70-$92 and
+ * shortened the routine's delay. Without a model, or across a counter
+ * reload, the read is left as it came. */
+extern "C" int64_t pistorm_gov_read_behind_ns, pistorm_gov_read_behind_at;   /* events.cpp */
 extern int pistorm_gov_running;             /* events.cpp */
 static inline int64_t beam_ns(void)
 {
@@ -3269,6 +3283,28 @@ static uae_u32 beam_lo_read(uaecptr a)
         dur_min = dur;
     else if (dur_min < dur && (t1 & 0x3FF) == 0)
         dur_min++;                          /* creeps up: follows a slower bus */
+    const int64_t behind = pistorm_gov_read_behind_ns;
+    if (behind > 0) {
+        pistorm_gov_read_behind_ns = 0;
+    }
+    /* set by the sync just before this read (a few us at most); a value
+     * left by a read of another register is not this read's */
+    if (behind > 0 && t0 - pistorm_gov_read_behind_at < 20000) {
+        /* when the bus sampled it (the shortest read's latency into it),
+         * and the guest's time, in arch-timer ticks */
+        const double hz = bc_tick_hz();
+        const uint64_t tk1 = bc_ticks();
+        const uint64_t ts = tk1 - (uint64_t)((double)(dur - dur_min) * hz / 1e9);
+        const uint64_t tg = ts - (uint64_t)((double)behind * hz / 1e9);
+        const int adv = bc_counter_advance(tg, ts);
+        if (adv >= 0) {
+            v = (uae_u8)(raw - (uae_u8)adv);
+            last_t = t1;
+            last_raw = raw;
+            rt_beam_read(raw, v, (uint32_t)dur);
+            return v;
+        }
+    }
     if (on && pistorm_gov_running && last_t && t1 - last_t < 40000) {
         const int64_t late = dur - dur_min;
         if (late >= 500) {
@@ -3952,6 +3988,7 @@ static void psvidel_ste_mirror(uaecptr a, uae_u32 v, int size)
 /* cpu/events.cpp: put the guest on the real clock before a beam-timed
  * access (video counter, sync, resolution) - see pistorm_gov_sync(). */
 extern "C" void pistorm_gov_sync(void);
+extern "C" void pistorm_gov_sync_read(void);   /* the same, before a read */
 static inline int beam_timed_reg(uaecptr a)
 {
     a &= 0x00FFFFFFu;
@@ -4132,7 +4169,7 @@ static uae_u32 hw_wget(uaecptr a)
     stram_wb_io(a, 0);
     a = hw_fold_addr(a);
     if (__builtin_expect(beam_timed_reg(a), 0))
-        pistorm_gov_sync();
+        pistorm_gov_sync_read();
 
     if (fpu_in_regs(a))
         return 0;
@@ -4220,7 +4257,7 @@ static uae_u32 hw_bget(uaecptr a)
     stram_wb_io(a, 0);
     a = hw_fold_addr(a);
     if (__builtin_expect(beam_timed_reg(a), 0))
-        pistorm_gov_sync();
+        pistorm_gov_sync_read();
 
     if (fpu_in_regs(a))
         return 0;

@@ -109,6 +109,11 @@ int mfp_hub_top_wanted(void);
  * caller falls through to the real-bus IACK. */
 int mfp_hub_iack(void);
 
+/* Timer B's vector ((VR & $F0) | 8) and its control register as the
+ * guest last wrote it (TBCR = 8: event count on the display enable) */
+uint8_t mfp_hub_timer_b_vector(void);
+uint8_t mfp_hub_tbcr(void);
+
 /* Diagnostics: virtual IACKs taken on a channel since start. */
 uint32_t mfp_hub_iacks(int ch);
 

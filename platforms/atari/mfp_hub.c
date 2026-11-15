@@ -33,6 +33,7 @@ static _Atomic uint16_t g_imr = 0xFFFF;      /* mask     (A<<8 | B)      */
 static _Atomic uint16_t g_vpend = 0;         /* virtual pending latches  */
 static _Atomic uint16_t g_visr  = 0;         /* virtual in-service bits  */
 static _Atomic uint8_t  g_vr    = 0x48;      /* vector reg, S=1 (sw EOI) */
+static _Atomic uint8_t  g_tbcr  = 0;         /* Timer B control, as written */
 
 /* Timer A event-count mode (dmasnd frame counter feeds it) */
 static _Atomic uint8_t  g_tacr  = 0;
@@ -183,6 +184,9 @@ static void reg_write(uint32_t a, uint8_t b)
         if ((b & 0x08u) == 0)                /* auto-EOI: nothing held   */
             atomic_store(&g_visr, 0);
         break;
+    case 0x00FFFA1Bu:                        /* TBCR: shadow only        */
+        atomic_store(&g_tbcr, (uint8_t)(b & 0x1Fu));
+        break;
     case 0x00FFFA19u:                        /* TACR: reprogram re-arms  */
         atomic_store(&g_tacr, (uint8_t)(b & 0x0Fu));
         atomic_store(&g_tacnt, atomic_load(&g_tadr));
@@ -207,6 +211,19 @@ void mfp_hub_write_snoop(uint32_t addr, uint32_t value, int is_word)
     } else {
         reg_write(a, (uint8_t)(value & 0xFF));
     }
+}
+
+/* the vector the MFP gives Timer B ((VR & $F0) | 8) and Timer B's mode as
+ * the guest last wrote it (8 = event count: one interrupt per display
+ * line end) - cpu/events.cpp, BEAM-TIMED HANDLERS */
+uint8_t mfp_hub_timer_b_vector(void)
+{
+    return (uint8_t)((atomic_load(&g_vr) & 0xF0u) | 0x08u);
+}
+
+uint8_t mfp_hub_tbcr(void)
+{
+    return atomic_load(&g_tbcr);
 }
 
 /* ---- guest read shim -------------------------------------------------- */
@@ -396,6 +413,7 @@ void mfp_hub_reset(void)
     atomic_store(&g_imr, 0xFFFF);
     atomic_store(&g_vr, 0x48);
     atomic_store(&g_tacr, 0);
+    atomic_store(&g_tbcr, 0);
     atomic_store(&g_tadr, 256);
     atomic_store(&g_tacnt, 256);
 }

@@ -384,6 +384,9 @@ static int cycles_to_add_remain;
  *                           8..2000; 250 = the pre-30 Oct 2026 behaviour).
  *   PISTORM_GOV_CATCHUP=x   catch-up cap as a multiple of the target
  *                           (default 2, 0 = unlimited, i.e. flat out).
+ *   PISTORM_GOV_BEAM=0      no beam-timed Timer B handlers (see BEAM-TIMED
+ *                           HANDLERS); PISTORM_GOV_BEAM_CYC=n moves their
+ *                           start (cycles after the display end, default 40).
  *   A report steady near the target with audio/timing still wrong means
  *   the problem is not CPU speed (look at interrupt delivery instead).
  * ======================================================================== */
@@ -408,6 +411,7 @@ extern int pistorm_handler_running(void);
 #include "platforms/atari/raster_trace.h"   /* PISTORM_RASTER_TRACE */
 #include "platforms/atari/stram_wb.h"       /* PISTORM_WRBEHIND */
 #include "platforms/atari/video/shifter_mirror.h"   /* exact HDMI mirror */
+#include "platforms/atari/video/beam_clock.h"       /* BEAM-TIMED HANDLERS */
 
 /* Wait until CLOCK_MONOTONIC reaches `until` (ns): sleep most of it, spin
  * the last GOV_SPIN_NS. Returns the time on leaving.
@@ -514,13 +518,75 @@ static int     gov_park_on = -1;
 static int64_t gov_parked_ns;
 unsigned long  pistorm_gov_parks;           /* [GOV] report */
 
+/* BEAM-TIMED HANDLERS (PISTORM_GOV_BEAM=0 turns this off).
+ * Parking the lead makes a handler start from the moment the CPU thread
+ * took the interrupt. For a Timer B event-count interrupt that moment is
+ * late: ipl_task looks at the IPL lines every ~16 us, and the IACK, the
+ * frame push and the handler's first I/O accesses each cost a bus
+ * transaction. A border routine that counts its writes from the interrupt
+ * then misses.
+ * Defender (defender.st, 15 Nov 2026, raster trace + PISTORM_SHM_DEBUG=4):
+ * the Timer B at the end of line 261's display enters a handler that reads
+ * $FF8209 twice - once in the border (the counter frozen at $60), once
+ * early in line 262's display, where `not/lsl d0,d0` turns the counter's
+ * phase into a delay that ends at the same cycle wherever the read fell -
+ * and then writes $FF820A = 0 / 2 around cycle 502 of line 262 to open the
+ * bottom border. Its second read has to fall in a 62-cycle stretch of line
+ * 262. On the Pi the first read came 17.6 us after the interrupt (7.5 on
+ * an ST), the second fell past that stretch, and the 60 Hz write landed in
+ * line 263-265: the border opened in 2 of 2775 frames.
+ * A Timer B in event-count mode (TBCR = 8) fires a fixed time after a
+ * line's display enable ends, and the beam clock (beam_clock.c: VBL
+ * sightings plus one video counter read a frame, native Shifter only - no
+ * HDMI needed) says when that was. So the handler's
+ * clock is set to where a real 68000 would be: the interrupt's start
+ * (do_interrupt) at GOV_BEAM_IRQ_CYC cycles after the display enable
+ * ended. The guest is then BEHIND by the delivery delay; the handler runs
+ * unpaced and catches up, and its beam-timed accesses (pistorm_gov_sync)
+ * wait for their own moment. A read the CPU thread reaches late does not
+ * write the debt off - that would move the clock back onto the late real
+ * time - but is answered with the counter as it stood at the guest's time
+ * (pistorm_natmem.cpp, BACK-DATED READS). A write reached late still
+ * writes it off: it cannot land earlier. Only with the beam clock
+ * calibrated (governed 68000, a counter read accepted in the last 0.5 s,
+ * a 50 or 60 Hz screen with the normal line layout), only for Timer B in
+ * event-count mode, and only when the delay found is 0-40 us; otherwise
+ * the lead is parked as before. 50 and 60 Hz alike (the model's line
+ * length and display end follow the frame rate).
+ * GOV_BEAM_IRQ_CYC: Timer B's event comes 24 cycles after the display end
+ * (Hatari, TIMERB_VIDEO_CYCLE_OFFSET), the CPU samples it a few cycles
+ * later, and this core charges an instruction's cycles when it ends, so a
+ * beam access is synced at its instruction's start, ~12 cycles before a
+ * 68000's bus cycle. Against Defender's routine (measured: 92 guest cycles
+ * from the interrupt to each $FF8209 read, 350 + 2n from the second read
+ * to the $FF820A write) 40 puts the second read at cycle ~87 of line 262,
+ * the middle of its 56..118 stretch. PISTORM_GOV_BEAM_CYC overrides. */
+static int     gov_beam_on = -1;
+static int64_t gov_beam_irq_cyc = 40;
+static int     gov_beam_handler;            /* this handler's clock is the beam's */
+static int64_t gov_beam_late;               /* ... set this far behind (part of the park) */
+unsigned long  pistorm_gov_beam_n, pistorm_gov_beam_rej, pistorm_gov_beam_back;   /* [GOV] report */
+unsigned long  pistorm_gov_beam_nomodel;
+/* cpu/newcpu.cpp: guest clock at the start of do_interrupt */
+extern evt_t   pistorm_irq_cyc;
+/* pistorm_natmem.cpp reads this right after pistorm_gov_sync_read(): how
+ * far behind real time the guest was at a beam-timed read whose debt was
+ * kept (0 = not behind, or written off) */
+extern "C" { int64_t pistorm_gov_read_behind_ns, pistorm_gov_read_behind_at; }
+extern uae_u16 pistorm_iack_vector;         /* jit_glue.cpp */
+extern "C" uint8_t mfp_hub_timer_b_vector(void);
+extern "C" uint8_t mfp_hub_tbcr(void);
+
 /* mode 0: a normal check; 1: see pistorm_gov_sync(); 2: an interrupt
- * handler is starting (pistorm_gov_irq_entry) */
+ * handler is starting (pistorm_gov_irq_entry); 3: pistorm_gov_sync_read() */
 static void pistorm_governor(int sync)
 {
 	const int irq_entry = (sync == 2);
-	if (irq_entry)
+	const int sync_read = (sync == 3);
+	if (irq_entry || sync_read)
 		sync = 1;                               /* evaluate now, whatever gov_next says */
+	if (sync_read)
+		pistorm_gov_read_behind_ns = 0;
 	if (currprefs.m68k_speed != 0 || currprefs.cachesize)
 		return;                                 /* JIT / max speed: not ours */
 	pistorm_gov_running = 1;
@@ -574,6 +640,10 @@ static void pistorm_governor(int sync)
 	 * bus time from us. One test of a flag when the mirror is off. */
 	if (__builtin_expect(shm_on, 0) && !pistorm_handler_running())
 		shm_cal_poll();
+	/* the beam clock (beam_clock.c): VBL sightings in, and once a frame
+	 * its own video counter read - never inside a handler */
+	if (!pistorm_handler_running())
+		bc_poll();
 
 	int64_t now = gov_now_ns();
 	/* PISTORM_RASTER_TRACE 'H': real time since the last check ended,
@@ -604,7 +674,13 @@ static void pistorm_governor(int sync)
 			if (gov_report || (!said && khz * 10 < gov_khz * 9)) {
 				said = 1;
 				fprintf(stderr, "[GOV] reaching %lld kHz of the %lld kHz target "
-				        "(5 s average)\n", (long long)khz, (long long)gov_khz);
+				        "(5 s average)", (long long)khz, (long long)gov_khz);
+				if (pistorm_gov_beam_n || pistorm_gov_beam_rej || pistorm_gov_beam_nomodel)
+					fprintf(stderr, " | beam-timed Timer B handlers %lu (%lu out of range, "
+					        "%lu with no calibrated beam model), late reads back-dated %lu",
+					        pistorm_gov_beam_n, pistorm_gov_beam_rej,
+					        pistorm_gov_beam_nomodel, pistorm_gov_beam_back);
+				fputc('\n', stderr);
 			}
 			win_ns0 = now;
 			win_cyc0 = currcycle;
@@ -623,6 +699,46 @@ static void pistorm_governor(int sync)
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 
 	if (irq_entry) {
+		/* BEAM-TIMED HANDLERS: a Timer B event-count interrupt starts on
+		 * the beam's clock (see above) */
+		if (gov_beam_on < 0) {
+			const char *e = getenv("PISTORM_GOV_BEAM");
+			gov_beam_on = !(e && *e == '0');
+			const char *c = getenv("PISTORM_GOV_BEAM_CYC");
+			if (c) {
+				long v = atol(c);
+				if (v >= 0 && v <= 200)
+					gov_beam_irq_cyc = v;
+			}
+		}
+		if (gov_beam_on && !gov_beam_handler &&
+		    (pistorm_iack_vector & 0xFFu) == mfp_hub_timer_b_vector() &&
+		    (mfp_hub_tbcr() & 0x0Fu) == 8u) {
+			const uint64_t tk = bc_ticks();
+			double de, tc;
+			if (bc_de_end(tk, &de, &tc)) {
+				/* real ns since the interrupt should have started, less
+				 * the guest's ns since do_interrupt began */
+				const double t_irq = de + (double)gov_beam_irq_cyc * tc;
+				const int64_t since_irq_ns = (int64_t)(((double)tk - t_irq) * 1e9 / bc_tick_hz());
+				const int64_t guest_ns = currcycle > pistorm_irq_cyc
+				    ? (int64_t)((currcycle - pistorm_irq_cyc) / unit) * 1000000LL / gov_khz : 0;
+				const int64_t late_ns = since_irq_ns - guest_ns;
+				if (late_ns > -15000 && late_ns < 40000) {
+					/* the guest's clock to (real - late): it is behind by late */
+					const int64_t shift = ahead_ns + late_ns;
+					gov_ns0 -= shift;
+					gov_parked_ns += shift;     /* put back when the handler is over */
+					gov_beam_handler = 1;
+					gov_beam_late = late_ns;
+					pistorm_gov_beam_n++;
+					rt_gov(late_ns, 2);
+					return;
+				}
+				pistorm_gov_beam_rej++;
+			} else
+				pistorm_gov_beam_nomodel++;
+		}
 		if (ahead_ns > 0) {                     /* park the lead */
 			gov_ns0 -= ahead_ns;
 			gov_parked_ns += ahead_ns;
@@ -631,6 +747,8 @@ static void pistorm_governor(int sync)
 		}
 		return;
 	}
+	if (gov_beam_handler && !pistorm_handler_running())
+		gov_beam_handler = 0;                   /* the handler is over */
 	if (gov_parked_ns && !sync && !pistorm_handler_running()) {
 		gov_ns0 += gov_parked_ns;               /* ... and put it back */
 		ahead_ns += gov_parked_ns;
@@ -651,8 +769,21 @@ static void pistorm_governor(int sync)
 			now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
 			if (now - w0 > 2000)
 				rt_gap(1, now - w0, pistorm_cur_pc());
-		} else
+		} else if (sync_read && gov_beam_handler) {
+			/* BEAM-TIMED HANDLER, a read reached late: keep the beam's
+			 * clock, the read is answered as at the guest's time */
+			pistorm_gov_read_behind_ns = -ahead_ns;
+			pistorm_gov_read_behind_at = now;   /* CLOCK_MONOTONIC: only for the read that follows */
+			pistorm_gov_beam_back++;
+		} else {
 			gov_ns0 = now - virt_ns;
+			if (gov_beam_handler && gov_beam_late) {
+				/* the debt written off includes the delay the beam's clock
+				 * put on: it is not owed again when the park is put back */
+				gov_parked_ns -= gov_beam_late;
+				gov_beam_late = 0;
+			}
+		}
 	} else if (pistorm_handler_running()) {
 		/* inside an interrupt handler: no pause - it is paid back at the
 		 * next check outside. step_ns/step_cyc stay where they are, so
@@ -703,6 +834,13 @@ static void pistorm_governor(int sync)
 extern "C" void pistorm_gov_sync(void)
 {
 	pistorm_governor(1);
+}
+
+/* the same, before a READ of one of those registers (see BEAM-TIMED
+ * HANDLERS: a late read does not write the debt off) */
+extern "C" void pistorm_gov_sync_read(void)
+{
+	pistorm_governor(3);
 }
 
 /* newcpu.cpp: the outermost interrupt handler is starting - see THE LEAD

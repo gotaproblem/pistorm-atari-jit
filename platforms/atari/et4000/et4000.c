@@ -40,6 +40,7 @@
 #include "../stbox/stbox.h"      /* ST Box overlay: screendump/recorder blend */
 #include "../psvidel/psvidel.h"
 #include "../video/shifter_mirror.h"   /* beam-exact ST mirror */
+#include "../video/beam_clock.h"       /* the beam's clock for the CPU thread */
 #include "../../../config_file/config_file.h"
 
 #include <stdio.h>
@@ -2864,6 +2865,9 @@ void et4000_native_vbl_snapshot(void)
     extern bool emulator_config_shifter_ste(void);
 
     __atomic_add_fetch(&g_vbl_seq, 1u, __ATOMIC_RELEASE);  /* render pacing */
+
+    /* the beam clock (beam_clock.c): one timestamp, mirror on or off */
+    bc_vbl_sighting();
 
     /* Beam-exact mirror (cfg native_hdmi true): one timestamp here, the
      * rest on the render thread - no palette timeline, no screen copy on

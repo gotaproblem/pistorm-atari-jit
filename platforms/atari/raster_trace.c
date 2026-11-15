@@ -312,6 +312,9 @@ void rt_gov_slow(int64_t ns, int skipped)
     e->a = (uint8_t)skipped;
     e->v = 0;
     e->c = ns < 0 ? 0u : ns > 0xFFFFFFFFLL ? 0xFFFFFFFFu : (uint32_t)ns;
+    if (skipped == 2)                         /* beam-timed handler: signed delay */
+        e->c = (uint32_t)(int32_t)(ns < -2000000000LL ? -2000000000LL :
+                                   ns > 2000000000LL ? 2000000000LL : ns);
 }
 
 void rt_gap_slow(int kind, int64_t ns, uint32_t pc)
@@ -426,6 +429,8 @@ void rt_dump(void)
                "#                               over 2 us)\n"
                "#   G wait|skip ns              (governor pause; skip = not taken,\n"
                "#                               an interrupt handler was running)\n"
+               "#   G beam ns                   (a Timer B handler put on the beam's clock:\n"
+               "#                               the guest starts this far behind)\n"
                "#   W total_ns guest_clocks bus_n bus_ns bus_max_ns yield_ns gap_max_ns gov_ns\n"
                "#                               (Timer B taken -> this colour write, CPU thread:\n"
                "#                               bus accesses, waits for the bus, longest\n"
@@ -461,6 +466,8 @@ void rt_dump(void)
             fprintf(f, "%.1f K %u %06X\n", us, e->c, ((uint32_t)e->a << 16) | e->v);
         else if (e->kind == 'L')
             fprintf(f, "%.1f L %u\n", us, e->a);
+        else if (e->kind == 'G' && e->a == 2)
+            fprintf(f, "%.1f G beam %d\n", us, (int32_t)e->c);
         else if (e->kind == 'G')
             fprintf(f, "%.1f G %s %u\n", us, e->a ? "skip" : "wait", e->c);
         else if (e->kind == 'H')
