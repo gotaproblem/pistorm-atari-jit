@@ -4377,6 +4377,9 @@ extern "C"
     if (JOY_USB_enabled && joy_usb_ste_addr(address))
       joy_usb_ste_write(address, 1, value);   /* STE joypad column select */
     ps_write_8 (address, (uint8_t)value);
+    if (address == 0x00FFFC00)
+      ps_acia_kbd_cr_note ((uint8_t)value);   /* for the keyboard IRQ re-edge */
+    ps_mfp_ierb_written (address, value, 1);
   }
 
 #if (0)
@@ -4513,6 +4516,9 @@ extern "C"
     if (JOY_USB_enabled && joy_usb_ste_addr(address))
       joy_usb_ste_write(address, 2, value);   /* STE joypad column select */
     ps_write_16 (address, (uint16_t)value);
+    if (address == 0x00FFFC00)
+      ps_acia_kbd_cr_note ((uint8_t)(value >> 8));
+    ps_mfp_ierb_written (address, value, 2);
   }
 
   void m68k_write_memory_32 (unsigned int address, unsigned int value)
@@ -4620,6 +4626,7 @@ extern "C"
       joy_usb_ste_write(address, 4, value);   /* STE joypad column select */
     cpu_data_fc();
     ps_write_32 (address, value);
+    ps_mfp_ierb_written (address, value, 4);
   }
 
 } // end extern "C"

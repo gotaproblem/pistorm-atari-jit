@@ -172,6 +172,10 @@ typedef union
 } t_a32;
 
 uint8_t ps_read_8(uint32_t address);
+int ps_acia_kbd_ierb_enabled(void);       /* keyboard IRQ re-edge, see ps_protocol.c */
+void ps_mfp_ierb_written(uint32_t addr, uint32_t value, int size);
+void ps_acia_kbd_cr_note(uint8_t cr);
+extern volatile unsigned ps_acia_kbd_reedged;
 uint8_t ps_read_8_fc(uint32_t address, uint8_t fc_value, uint8_t *berr_out);
 uint16_t ps_read_16(uint32_t address);
 uint16_t ps_read_16_fc(uint32_t address, uint8_t fc_value, uint8_t *berr_out);

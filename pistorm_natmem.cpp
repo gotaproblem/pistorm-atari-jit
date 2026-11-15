@@ -3689,6 +3689,7 @@ extern "C" uint16_t ps_acia_kbd_read16(uint32_t addr);
 /* a 6850 master reset (CR1:CR0 = 11) empties the receiver - the
  * rescued bytes are part of it */
 extern "C" void     ps_acia_kbd_ctrl_written(uint8_t cr);
+extern "C" void     ps_mfp_ierb_written(uint32_t addr, uint32_t value, int size);
 static inline int kbd_acia_reg(uaecptr a)
 {
     return a == KBD_ACIA_CTRL || a == KBD_ACIA_DATA;
@@ -3831,6 +3832,7 @@ static inline void hw_mfp_lput(uaecptr a, uae_u32 v)
     mfp_hub_write_snoop(a + 1, (v >> 16) & 0xFF, 0);
     mfp_hub_write_snoop(a + 3, v & 0xFF, 0);
     hw_bus_lput(a, v);
+    ps_mfp_ierb_written(a, v, 4);          /* keyboard IRQ re-edge */
 }
 
 static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
@@ -3844,6 +3846,7 @@ static inline void hw_mfp_wput(uaecptr a, uae_u32 v)
     mfp_note_eoi_write(a, v, true);
     mfp_hub_write_snoop(a, v, 1);
     hw_bus_wput(a, v);
+    ps_mfp_ierb_written(a, v, 2);          /* keyboard IRQ re-edge */
 }
 
 static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
@@ -3857,6 +3860,7 @@ static inline void hw_mfp_bput(uaecptr a, uae_u32 v)
     mfp_note_eoi_write(a, v, false);
     mfp_hub_write_snoop(a, v, 0);
     hw_bus_bput(a, v);
+    ps_mfp_ierb_written(a, v, 1);          /* keyboard IRQ re-edge */
 }
 
 static inline uae_u32 hw_fdd_lget(uaecptr a)

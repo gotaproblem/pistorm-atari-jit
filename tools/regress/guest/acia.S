@@ -7,6 +7,9 @@
 |   ikbd_mouse    20 x $87 interrogate mouse button action -> $F6 + 7 bytes
 |   acia_clean    no framing/overrun/parity errors, no interrupt that
 |                 found nothing to read, nothing left pending afterwards
+|   ierb_window   a reply that lands while GPIP4 is disabled in IERB is
+|                 still taken once IERB is enabled again (Wrath of the
+|                 Demon: a key in that window killed keyboard and joystick)
 | The IKBD is reset at the end, so TOS gets its usual mouse back.
 
         .include "lib.S"
@@ -117,6 +120,51 @@ main:
         PS      " expect=300"
         bsr     pr_flush
 
+| ierb_window: disable GPIP4, let a time-of-day reply land in the ACIA
+| (IRQ low, no MFP latch), enable GPIP4 again. A real ST never takes that
+| byte - no edge - and the keyboard is dead; the emulator re-edges IRQ on
+| the enable (ps_acia_kbd_ierb_enabled), so the handler must run.
+        bclr    #6,0xFFFFFA09           | IERB: GPIP4 off
+        move.b  #0xBF,0xFFFFFA0D        | IPRB: nothing pending on it
+        moveq   #0x1C,d0                | time-of-day: 7 bytes come back
+        bsr     send
+        moveq   #6,d0                   | 30 ms: the reply has landed
+        bsr     wait_ticks
+        moveq   #0,d6                   | d6 = the precondition held
+        move.b  ACIAC,d0
+        and.b   #0x81,d0                | IRQ and RDRF
+        cmp.b   #0x81,d0
+        bne.s   1f
+        moveq   #1,d6
+1:      move.l  nentries,d7
+        bset    #6,0xFFFFFA09           | IERB: GPIP4 on again
+        moveq   #4,d0                   | 20 ms
+        bsr     wait_ticks
+        moveq   #0,d5                   | d5 = handler ran and GPIP4 is high
+        cmp.l   nentries,d7
+        beq.s   2f
+        btst    #4,GPIP
+        beq.s   2f
+        moveq   #1,d5
+2:      move.b  ACIAC,d0                | unstick it either way, for TOS
+        btst    #0,d0
+        beq.s   3f
+        move.b  ACIAD,d0
+        bra.s   2b
+3:      tst.l   d6
+        beq.s   4f
+        move.l  d5,d0
+        cmp.l   #1,d0
+        CHECK   eq, ierb_window
+        PS      "taken="
+        move.l  d5,d0
+        bsr     pr_dec
+        PS      " expect=1"
+        bsr     pr_flush
+        bra.s   5f
+4:      PS      "ierb_window: no byte waiting after 30 ms - not run"
+        bsr     pr_flush
+5:
         moveq   #0x80-256,d0            | reset: mouse back on for TOS
         bsr     send
         moveq   #1,d0

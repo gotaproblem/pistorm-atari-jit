@@ -1698,13 +1698,100 @@ uint16_t ps_acia_kbd_read16 (uint32_t addr)
  * (CR1:CR0 = 11) clears the chip's receiver; the FIFO holds bytes that
  * were in that receiver, so it is cleared with it - otherwise bytes from
  * before an IKBD/ACIA reset would reach the guest after it. */
+static uint8_t acia_kbd_cr = 0x96u;        /* last CR written to the chip (TOS: $96) */
+
+/* record only (emulator.c's write path, which has no FIFO clear) */
+void ps_acia_kbd_cr_note (uint8_t cr)
+{
+  acia_kbd_cr = cr;
+}
+
 void ps_acia_kbd_ctrl_written (uint8_t cr)
 {
+  acia_kbd_cr = cr;
   if ((cr & 0x03u) != 0x03u)
     return;
   ps_lock_bus ();
   acia_kq_head = acia_kq_tail;
   ps_unlock_bus ();
+}
+
+/* KEYBOARD INTERRUPT ENABLED WITH A BYTE ALREADY WAITING.
+ *
+ * The MFP latches GPIP4 on the EDGE of the ACIA's IRQ line, and only
+ * while the channel is enabled in IERB. A byte that reaches the keyboard
+ * ACIA while the guest has the channel disabled pulls IRQ low with no
+ * latch; when the guest then enables the channel the line is already low,
+ * no edge ever comes, and no keyboard or joystick byte is taken again -
+ * the ACIA just overruns. A real ST hangs the same way; games get away
+ * with it because nobody touches the keyboard in that window.
+ *
+ * Wrath of the Demon (15 Nov 2026, Hatari trace): its loader disables
+ * every MFP channel, writes ACIA CR=$D6, sends $12 and $14, then sets
+ * IERB=IMRB=$40 - about one frame, no read of $FFFC02, no ACIA reset in
+ * between. A key or joystick change in that frame (a released hotkey,
+ * fire held to start the game) killed the keyboard and the joystick for
+ * the rest of the session: the guest never read the ACIA again.
+ *
+ * Called on the CPU thread right after the guest's IERB write has gone to
+ * the chip, when it sets bit 6 (GPIP4). If the ACIA's IRQ is asserted
+ * (status bit 7 with RDRF), give the line its edge: CR with the receive
+ * interrupt off, then the guest's CR again. The line goes high and low,
+ * the MFP latches channel 6, and the guest's own handler reads the byte
+ * from the chip. Nothing is queued, invented or reordered, and nothing
+ * happens unless the ACIA was already holding the line - which on a real
+ * ST is always a dead keyboard. Returns 1 if the line was re-edged. */
+volatile unsigned ps_acia_kbd_reedged = 0;
+
+/* Guest MFP write, after it reached the chip (both write paths). Tracks
+ * IERB and calls ps_acia_kbd_ierb_enabled when bit 6 goes 0 -> 1. The
+ * shadow starts at 0, so the first enable is checked too (harmless: it
+ * does nothing unless the ACIA holds IRQ). */
+void ps_mfp_ierb_written (uint32_t addr, uint32_t value, int size)
+{
+  static uint8_t ierb;
+  uint8_t nv;
+  addr &= 0x00FFFFFFu;
+  if (size == 1 && addr == 0x00FFFA09u)
+    nv = (uint8_t)value;
+  else if (size == 2 && addr == 0x00FFFA08u)
+    nv = (uint8_t)value;
+  else if (size == 4 && addr == 0x00FFFA06u)
+    nv = (uint8_t)value;                     /* bytes $FA07 and $FA09 */
+  else if (size == 4 && addr == 0x00FFFA08u)
+    nv = (uint8_t)(value >> 16);             /* bytes $FA09 and $FA0B */
+  else
+    return;
+  const uint8_t old = ierb;
+  ierb = nv;
+  if ((nv & 0x40u) && !(old & 0x40u) && ps_acia_kbd_ierb_enabled ())
+  {
+    if (ps_acia_kbd_reedged <= 8u)
+      fprintf (stderr, "[ACIA] keyboard interrupt enabled with a byte already waiting: "
+               "IRQ re-edged so the MFP takes it (%u so far)\n", ps_acia_kbd_reedged);
+  }
+}
+
+int ps_acia_kbd_ierb_enabled (void)
+{
+  uint8_t be = 0;
+  const uint8_t st = ps_read_8_fc (ACIA_KBD_CTRL, 5, &be);
+  if (be || (st & 0x81u) != 0x81u)          /* IRQ and RDRF */
+    return 0;
+  ps_io_t ps_io;
+  const uint8_t cr = acia_kbd_cr;
+  ps_io.addr = ACIA_KBD_CTRL;
+  ps_io.fc = 5;
+  ps_io.io_type = WRITE_BYTE;
+  ps_io.data = (uint16_t)((cr & 0x7Fu) << 8);   /* ACIA on D8-D15 */
+  ps_write (&ps_io);
+  ps_io.addr = ACIA_KBD_CTRL;
+  ps_io.fc = 5;
+  ps_io.io_type = WRITE_BYTE;
+  ps_io.data = (uint16_t)(cr << 8);
+  ps_write (&ps_io);
+  ps_acia_kbd_reedged++;
+  return 1;
 }
 
 /* ipl_task: if the keyboard ACIA holds a byte, move it into the FIFO.
