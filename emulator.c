@@ -2968,11 +2968,11 @@ int main (int argc, char *argv[])
   if (emulator_config_shifter_ste()) {
     if (!config->native_hdmi) {
       config->native_hdmi = true;
-      printf("[CFG] shifter ste: native_hdmi switched on - the HDMI mirror "
+      fprintf(stderr, "[CFG] shifter ste: native_hdmi switched on - the HDMI mirror "
              "is the display that shows STE video right\n");
     }
     if (np_board_ste() == 0)
-      printf("[STE] WARNING: shifter ste on an ST board - the ST's Shifter has "
+      fprintf(stderr, "[STE] WARNING: shifter ste on an ST board - the ST's Shifter has "
              "no $FF820D/$FF820F/$FF8265, so STE screens (fine screen address, "
              "line width, fine scroll) can be wrong on the ST monitor. HDMI "
              "shows them right.\n");

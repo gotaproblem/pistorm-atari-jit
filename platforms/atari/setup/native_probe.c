@@ -76,7 +76,7 @@ int np_board_ste(void)
         known = answers(REG_DMASND);
         fc = old_fc;
         g_buserr = 0;
-        printf("[NATIVE] board: %s ($FF8901 DMA sound %s)\n",
+        fprintf(stderr, "[NATIVE] board: %s ($FF8901 DMA sound %s)\n",
                known ? "STE" : "ST", known ? "answers" : "does not answer");
     }
     return known;
