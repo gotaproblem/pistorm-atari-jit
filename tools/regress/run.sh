@@ -348,6 +348,11 @@ make_start_floppy() {
 		esac
 	done
 	python3 "$here/mkimg.py" hdboot "$fl" "${args[@]}" &&
+	# the boot disk goes on IDE 0, and the IDE model refuses an image
+	# under 4 MB (idedriver.c ide_attach_hdf: "Image must be > 4 MB") -
+	# 720K alone left no master, EmuTOS saw no IDE, and only A: and B:
+	# were on the desktop. The partition stays 720K; the rest is unused.
+	truncate -s 8M "$fl" &&
 	python3 "$here/mkimg.py" st "${fl%.img}.st" "${args[@]}"
 }
 
