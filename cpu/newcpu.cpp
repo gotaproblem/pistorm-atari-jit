@@ -4198,6 +4198,30 @@ static void add_approximate_exception_cycles(int nr)
 		{
 			/* Interrupts */
 			cycles = 44;
+#ifdef PISTORM_ATARI
+			/* An ST's interrupts cost more than the generic 44: the IACK
+			 * bus cycle comes on top (Hatari cpu/newcpu.c, m68000.h, all
+			 * measured on real STs):
+			 *   level 6, the MFP: 12 cycles before the IACK, the MFP's
+			 *     vectored IACK 12, then 32 for the frame and the vector:
+			 *     56 cycles.
+			 *   level 2 HBL / level 4 VBL: autovectored - VPA makes the
+			 *     IACK wait for the E clock (every 10 cycles): 12, then
+			 *     0..9 to the next E edge, then 10, then 32: 54..63 cycles.
+			 * The real IACK has already happened on the real bus; this is
+			 * the guest's clock, which the governor paces and the
+			 * beam-timed handlers are placed by - 12 cycles (1.5 us) short
+			 * for every interrupt otherwise. The E clock's phase is the
+			 * guest clock's here, as in Hatari (CyclesGlobalClockCounter):
+			 * the same 0..9 spread a real ST shows. */
+			if (nr == 30)
+				cycles = 56;
+			else if (nr == 26 || nr == 28) {
+				const evt_t c8 = get_cycles() / (CYCLE_UNIT / 2) + 12;
+				const int e = (int)((10 - c8 % 10) % 10);
+				cycles = 54 + e;
+			}
+#endif
 		}
 		else if (nr >= 32 && nr <= 47)
 		{
