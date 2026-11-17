@@ -566,6 +566,11 @@ static int64_t gov_beam_irq_cyc = 40;
 static int     gov_beam_handler;            /* this handler's clock is the beam's */
 static int64_t gov_beam_late;               /* ... set this far behind (part of the park) */
 static uint32_t gov_beam_sp;                /* ... its stack at the start */
+/* the last 16 handlers put on the beam's clock, for the CPU_DIAG crash
+ * capture (cpu/newcpu.cpp pistorm_crash_capture) */
+struct gov_beam_e { uint32_t pc, sp; int32_t late_ns, shift_ns; };
+static gov_beam_e gov_beam_ring[16];
+static unsigned gov_beam_ring_i;
 extern "C" uint32_t pistorm_cur_ssp(void);  /* cpu/newcpu.cpp */
 extern "C" int      pistorm_sp_live(uint32_t sp);
 /* Is the beam-timed handler still running? Not the handler window
@@ -752,6 +757,11 @@ static void pistorm_governor(int sync)
 					gov_beam_late = late_ns;
 					gov_beam_sp = pistorm_cur_ssp();
 					pistorm_gov_beam_n++;
+					{
+						gov_beam_e *r = &gov_beam_ring[gov_beam_ring_i++ & 15];
+						r->pc = pistorm_cur_pc(); r->sp = gov_beam_sp;
+						r->late_ns = (int32_t)late_ns; r->shift_ns = (int32_t)shift;
+					}
 					rt_gov(late_ns, 2);
 					return;
 				}
@@ -1151,4 +1161,23 @@ void clear_events(void)
 extern "C" uint64_t pistorm_guest_clocks(void)
 {
 	return (uint64_t)get_cycles() / (CYCLE_UNIT / 2);
+}
+
+/* CPU_DIAG crash capture (cpu/newcpu.cpp): the beam-timed handler state */
+extern "C" void pistorm_gov_beam_dump(void)
+{
+	fprintf(stderr, "[CRASH] governor: beam-timed handlers %lu (%lu out of range, %lu no "
+	        "model), late reads back-dated %lu; now: beam handler %d (live %d, sp %08X), "
+	        "late %lld ns, parked %lld ns, read behind %lld ns\n",
+	        pistorm_gov_beam_n, pistorm_gov_beam_rej, pistorm_gov_beam_nomodel,
+	        pistorm_gov_beam_back, gov_beam_handler, beam_live(), (unsigned)gov_beam_sp,
+	        (long long)gov_beam_late, (long long)gov_parked_ns,
+	        (long long)pistorm_gov_read_behind_ns);
+	unsigned n = gov_beam_ring_i < 16 ? gov_beam_ring_i : 16;
+	fprintf(stderr, "[CRASH] last %u handlers put on the beam's clock (pc sp late_ns shift_ns):\n", n);
+	for (unsigned k = 0; k < n; k++) {
+		const gov_beam_e *r = &gov_beam_ring[(gov_beam_ring_i - n + k) & 15];
+		fprintf(stderr, "[CRASH]   %06X %08X %d %d\n", (unsigned)r->pc, (unsigned)r->sp,
+		        (int)r->late_ns, (int)r->shift_ns);
+	}
 }

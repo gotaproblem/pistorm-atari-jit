@@ -3257,6 +3257,31 @@ static inline uae_u32 hw_bus_wget(uaecptr a)
  * shortened the routine's delay. Without a model, or across a counter
  * reload, the read is left as it came. */
 extern "C" int64_t pistorm_gov_read_behind_ns, pistorm_gov_read_behind_at;   /* events.cpp */
+/* the last 32 reads of the counter's low byte: what the bus gave, what
+ * the guest got and why (B = back-dated in a beam-timed handler, P =
+ * back-dated in a poll, - = as read). Printed by the CPU_DIAG crash
+ * capture (cpu/newcpu.cpp pistorm_crash_capture). */
+extern "C" uint32_t pistorm_cur_pc(void);  /* cpu/newcpu.cpp */
+struct vcr_e { uint32_t pc; uint8_t raw, given; char why; int32_t behind_ns, dur_ns, adv; };
+static vcr_e g_vcr[32];
+static unsigned g_vcr_i;
+static inline void vcr_add(uint8_t raw, uint8_t given, char why, int64_t behind, int64_t dur, int adv)
+{
+    vcr_e *e = &g_vcr[g_vcr_i++ & 31];
+    e->pc = pistorm_cur_pc(); e->raw = raw; e->given = given; e->why = why;
+    e->behind_ns = (int32_t)behind; e->dur_ns = (int32_t)dur; e->adv = adv;
+}
+extern "C" void pistorm_vcr_dump(void)
+{
+    unsigned n = g_vcr_i < 32 ? g_vcr_i : 32;
+    fprintf(stderr, "[CRASH] last %u video-counter low-byte reads, oldest first "
+            "(pc raw->given why behind_ns read_ns advance):\n", n);
+    for (unsigned k = 0; k < n; k++) {
+        const vcr_e *e = &g_vcr[(g_vcr_i - n + k) & 31];
+        fprintf(stderr, "[CRASH]   %06X %02X->%02X %c %d %d %d\n", (unsigned)e->pc,
+                e->raw, e->given, e->why, (int)e->behind_ns, (int)e->dur_ns, e->adv);
+    }
+}
 extern int pistorm_gov_running;             /* events.cpp */
 static inline int64_t beam_ns(void)
 {
@@ -3302,9 +3327,11 @@ static uae_u32 beam_lo_read(uaecptr a)
             last_t = t1;
             last_raw = raw;
             rt_beam_read(raw, v, (uint32_t)dur);
+            vcr_add(raw, v, 'B', behind, dur, adv);
             return v;
         }
     }
+    char why = '-';
     if (on && pistorm_gov_running && last_t && t1 - last_t < 40000) {
         const int64_t late = dur - dur_min;
         if (late >= 500) {
@@ -3317,12 +3344,14 @@ static uae_u32 beam_lo_read(uaecptr a)
                 int back = (int)((late + 125) / 250);
                 if (back > 24) back = 24;
                 v = (uae_u8)(raw - (back & ~1));   /* the counter steps in words */
+                why = 'P';
             }
         }
     }
     last_t = t1;
     last_raw = raw;
     rt_beam_read(raw, v, (uint32_t)dur);
+    vcr_add(raw, v, why, behind, dur, -1);
     return v;
 }
 

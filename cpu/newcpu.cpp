@@ -5075,14 +5075,74 @@ void pistorm_exc_ring_dump(void)
  * the top of the stack, read from the host mirror so it cannot fault -
  * the first 8 times, without PISTORM_CPU_DIAG: a TOS/MiNT panic shows
  * the registers only, and by then the evidence is gone. */
+/* PISTORM_CPU_DIAG=1, the FIRST address error outside the ROM: everything
+ * needed to tell a guest bug from an emulator one, in one go, as it
+ * happens (Turrican II, 17 Nov 2026: printed at the emulator's stop, the
+ * exception ring had rolled past the fault).
+ *   - the exception ring NOW (the interrupts leading in, with registers)
+ *   - the code around the PC (128 bytes) and every RAM handler the
+ *     interrupt vectors point at (autovectors $64-$7C, MFP $100-$13C,
+ *     96 bytes each) - to disassemble
+ *   - the last video-counter reads and what the guest was given
+ *     (pistorm_natmem.cpp: back-dated reads), and the governor's beam
+ *     counters (cpu/events.cpp) */
+void pistorm_exc_ring_dump(void);
+extern "C" void pistorm_vcr_dump(void);                 /* pistorm_natmem.cpp */
+extern "C" void pistorm_gov_beam_dump(void);            /* cpu/events.cpp */
+static void pistorm_crash_capture(void)
+{
+	extern uae_u8 *natmem_offset;
+	const uaecptr pc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
+	fprintf(stderr, "[CRASH] ===== first address error outside the ROM: pc %08X sr %04X "
+		"usp %08X ssp %08X =====\n", (unsigned)pc, (unsigned)regs.sr,
+		(unsigned)(regs.s ? regs.usp : m68k_areg(regs, 7)),
+		(unsigned)(regs.s ? m68k_areg(regs, 7) : regs.isp));
+	pistorm_exc_ring_dump();
+	auto mem = [&](const char *what, uae_u32 a, uae_u32 n) {
+		a &= 0x00FFFFFEu;
+		if (a < 0x400u || a + n >= 0x00400000u)
+			return;
+		fprintf(stderr, "[CRASH] %s %06X:", what, (unsigned)a);
+		for (uae_u32 i = 0; i < n; i += 2) {
+			if (i && !(i & 31))
+				fprintf(stderr, "\n[CRASH] %s %06X:", what, (unsigned)(a + i));
+			fprintf(stderr, " %02X%02X", natmem_offset[a + i], natmem_offset[a + i + 1]);
+		}
+		fprintf(stderr, "\n");
+	};
+	mem("code", pc - 64, 128);
+	uae_u32 seen[40]; int ns = 0;
+	for (uae_u32 v = 0x64; v <= 0x13C; v += 4) {
+		if (v > 0x7C && v < 0x100)
+			continue;
+		const uae_u32 t = ((uae_u32)natmem_offset[v] << 24 | (uae_u32)natmem_offset[v + 1] << 16 |
+		                   (uae_u32)natmem_offset[v + 2] << 8 | natmem_offset[v + 3]) & 0x00FFFFFFu;
+		fprintf(stderr, "[CRASH] vector %03X -> %06X\n", (unsigned)v, (unsigned)t);
+		bool dup = false;
+		for (int i = 0; i < ns; i++) dup |= seen[i] == t;
+		if (!dup && ns < 40 && t >= 0x400u && t < 0x00400000u) {
+			seen[ns++] = t;
+			char w[24]; snprintf(w, sizeof w, "handler@%03X", (unsigned)v);
+			mem(w, t, 96);
+		}
+	}
+	pistorm_vcr_dump();
+	pistorm_gov_beam_dump();
+	fprintf(stderr, "[CRASH] ===== end =====\n");
+	fflush(stderr);
+}
+
 extern "C" void falcon_trace_mark(const char *why);   /* falcon_hw.c */
 static void pistorm_bad_opcode_dump(int nr)
 {
-	static int shown;
+	static int shown, shown3;
 	extern uae_u8 *natmem_offset;
-	if (shown >= 8 || !natmem_offset)
+	/* address errors (3) count apart: the illegal-instruction probes
+	 * every TOS boot makes must not use up the ones a crash needs */
+	int *cnt = nr == 3 ? &shown3 : &shown;
+	if (*cnt >= 8 || !natmem_offset)
 		return;
-	shown++;
+	(*cnt)++;
 	extern uint32_t tt_ram_size;
 	const uae_u32 top = 0x01000000u + tt_ram_size - 0x40u;   /* mirrored */
 	uaecptr pc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
@@ -5094,15 +5154,21 @@ static void pistorm_bad_opcode_dump(int nr)
 	 * and only with PISTORM_CPU_DIAG=1 - 19 Oct 2026, it was drowning
 	 * every boot log. */
 	fprintf(stderr, "[CPU] %s %04X at %08X (sr %04X sp %08X)%s\n",
-		nr == 4 ? "illegal instruction" : "Line F", (unsigned)regs.opcode,
+		nr == 4 ? "illegal instruction" : nr == 3 ? "address error" : "Line F",
+		(unsigned)regs.opcode,
 		(unsigned)pc, (unsigned)regs.sr, (unsigned)sp,
 		pistorm_cpu_diag() ? ":" : "  (PISTORM_CPU_DIAG=1 for code/stack/registers/PC ring)");
+	if (nr == 3)
+		fprintf(stderr, "[CPU]   address error: %s %08X (instruction at %08X, opcode %04X)\n",
+			last_writeaccess_for_exception_3 ? "write to" : "read of",
+			(unsigned)last_fault_for_exception_3, (unsigned)last_addr_for_exception_3,
+			(unsigned)last_op_for_exception_3);
 	if (!pistorm_cpu_diag())
 		return;
 	{
 		/* PISTORM_DSP_TRACE: hold the Falcon host-port trace as it was
 		 * when the 68k went astray, and write it (no-op otherwise) */
-		falcon_trace_mark(nr == 4 ? "68k illegal instruction" : "68k Line F");
+		falcon_trace_mark(nr == 4 ? "68k illegal instruction" : nr == 3 ? "68k address error" : "68k Line F");
 	}
 	if (pc >= 0x20u && pc < top && !(pc >= 0x00E00000u && pc < 0x01000000u)) {
 		uaecptr a0 = (pc - 0x20u) & ~1u;
@@ -5192,6 +5258,19 @@ void REGPARAM2 Exception(int nr)
 	 * trap through it constantly - so dumping it buried the console */
 	if (nr == 4)
 		pistorm_bad_opcode_dump(nr);
+	/* an address error outside the ROM: a program crashing (TOS draws
+	 * three bombs). Turrican II, 17 Nov 2026: one at $2432C in the game's
+	 * main loop, now and then - the exception ring had rolled past it by
+	 * the time it was printed, so dump it as it happens */
+	else if (nr == 3) {
+		uaecptr apc = regs.instruction_pc ? regs.instruction_pc : m68k_getpc();
+		if (!(apc >= 0x00E00000u && apc < 0x01000000u)) {
+			static int full;
+			pistorm_bad_opcode_dump(nr);
+			if (!full++ && pistorm_cpu_diag())
+				pistorm_crash_capture();
+		}
+	}
 #if CPU_EXCEPTION_TRACE
 	extern volatile uint8_t g_buserr;
 	extern volatile uint32_t g_buserr_addr; /* your ps_protocol fault address */
@@ -5273,8 +5352,16 @@ void REGPARAM2 Exception(int nr)
 
 			/* fault-class: capture the instruction and register file so
 			 * the first bad lap is self-explanatory in the dump */
-			e->has_regs = faultclass ? 1 : 0;
+			/* registers for EVERY entry (interrupts too): a crash that a
+			 * handler set up shows as a register changed between two
+			 * interrupt entries; code words only for fault-class */
+			e->has_regs = 1;
+			for (int r = 0; r < 8; r++) {
+				e->dreg[r] = m68k_dreg(regs, r);
+				e->areg[r] = m68k_areg(regs, r);
+			}
 			memset(e->code, 0, sizeof e->code);
+			memset(e->pre, 0, sizeof e->pre);
 			if (faultclass) {
 				/* full 32-bit pc (TT-RAM code!); only strip the odd bit.
 				 * 24-bit map: pistorm_pc_executable() judges the PC with
