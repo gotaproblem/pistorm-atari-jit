@@ -382,12 +382,14 @@ run_tests() {
 			make_start_floppy "$fl" "$start" > /dev/null ||
 				{ record "$name" setup FAIL "boot disk: $start"; continue; }
 		fi
-		# With a start, the boot disk goes on ACSI ID 0 (C:) and in A:, the
-		# image on ID 1 (D:) - ACSI drives come before IDE - and the
-		# section's own hdd/acsi images and fdd lines are dropped. A real ACSI device
-		# on another ID stays on the bus (per-ID passthrough) and lands
-		# after D:. Without a start the image replaces the section's hdd
-		# lines.
+		# With a start, the boot disk goes on IDE 0 (C:) and in A:, the
+		# image on IDE 1 (D:), ACSI off, and the section's own hdd/acsi
+		# images and fdd lines are dropped. IDE, not ACSI: the [regression]
+		# machine is set up on IDE (17 Nov 2026: Bad Apple played its sound
+		# right from IDE images, and slow - 2-4 repeated chunks a second,
+		# 55 VBLs a second at 60 Hz - from the same build on ACSI). ACSI
+		# keeps its own boots (drives, ide-acsi). Without a start the image
+		# replaces the section's hdd lines.
 		psctrl_paths > "$cfg"
 		# a key set in extra replaces the section's line(s) for it
 		local xkeys=""
@@ -397,11 +399,11 @@ run_tests() {
 			!on { next }
 			NF && index(xk, " " $1 " ") { next }
 			keep != "-" && $1 == "hdd" { next }
-			fl != "" && $1 ~ /^(fdd|acsi|acsi_order)$/ { next }
+			fl != "" && $1 ~ /^(fdd|acsi|acsi_order|ide|hdd)$/ { next }
 			{ print }' "$cfg_src" >> "$cfg"
 		if [ -n "$fl" ]; then
-			printf 'fdd A:%s\nacsi enabled\nacsi 0:%s\n' "${fl%.img}.st" "$fl" >> "$cfg"
-			[ "$image" = "-" ] || echo "acsi 1:$image" >> "$cfg"
+			printf 'fdd A:%s\nacsi disabled\nide enabled\nhdd 0:%s\n' "${fl%.img}.st" "$fl" >> "$cfg"
+			[ "$image" = "-" ] || echo "hdd 1:$image" >> "$cfg"
 		else
 			[ "$image" = "-" ] || echo "hdd $image" >> "$cfg"
 		fi
