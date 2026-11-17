@@ -8266,15 +8266,10 @@ static void m68k_run_1()
 				if (__builtin_expect(r->opcode == 0, 0))
 					pistorm_pc_ring_zero_slide(r->instruction_pc);
 #endif
-#ifdef PISTORM_ATARI
-				uint64_t rtx0 = rt_x_left > 0 ? rt_tick() : 0, rtx1 = 0, rtx2 = 0;
-#endif
 				cpu_cycles = (*cpufunctbl[r->opcode])(r->opcode) & 0xffff;
 				if (!regs.loop_mode)
 					regs.ird = regs.opcode;
 #ifdef PISTORM_ATARI
-				if (__builtin_expect(rtx0 || rt_x_left > 0, 0))
-					rtx1 = rt_tick();
 				/* THE ST'S 4-CYCLE BUS GRID (PISTORM_ROUND4=0: off). On an
 				 * ST every 68000 bus cycle starts on a 4-clock boundary (the
 				 * MMU/GLUE hold it off otherwise), so an instruction whose
@@ -8306,10 +8301,6 @@ static void m68k_run_1()
 #endif
 				cpu_cycles = adjust_cycles(cpu_cycles);
 				do_cycles(cpu_cycles);
-#ifdef PISTORM_ATARI
-				if (__builtin_expect(rtx1 != 0, 0))
-					rtx2 = rt_tick();
-#endif
 				regs.instruction_cnt++;
 				atari_serial_irq_poll();
 #ifdef PISTORM_ATARI
@@ -8321,10 +8312,6 @@ static void m68k_run_1()
 						exit = true;
 				}
 				regs.ipl[0] = regs.ipl_pin;
-#ifdef PISTORM_ATARI
-				if (__builtin_expect(rtx1 != 0, 0))
-					rt_x_slow(r->instruction_pc, rtx0, rtx1, rtx2, rt_tick());
-#endif
 				if (!currprefs.cpu_compatible || (currprefs.cpu_cycle_exact && currprefs.cpu_model <= 68010))
 					exit = true;
 			}
