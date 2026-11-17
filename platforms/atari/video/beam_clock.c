@@ -448,6 +448,13 @@ int bc_locked_hz(void)
     return L_have ? L_cls : 0;
 }
 
+double bc_cpu_hz(void)
+{
+    if (!L_have || (L_cls != 50 && L_cls != 60) || C_good < 2 || L_P <= 0)
+        return 0;
+    return frame_cycles(L_cls) * bc_tick_hz() / L_P;
+}
+
 int bc_de_end(uint64_t t, double *de, double *tc)
 {
     double O, k;

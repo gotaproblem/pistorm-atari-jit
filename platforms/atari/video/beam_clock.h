@@ -73,6 +73,10 @@ int bc_counter_advance(uint64_t t0, uint64_t t1);
 
 /* 50 / 60 when locked, else 0 */
 int bc_locked_hz(void);
+/* the board's 68000 clock in Hz, measured: cycles per frame (160256 at
+ * 50 Hz, 133604 at 60) over the frame period. 0 until calibrated. A PAL ST
+ * runs at 8.021247 MHz (32.084988 MHz / 4), not 8 MHz. */
+double bc_cpu_hz(void);
 
 #ifdef __cplusplus
 }

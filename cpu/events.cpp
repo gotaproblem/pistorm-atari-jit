@@ -315,7 +315,8 @@ static int cycles_to_add_remain;
  *   default max-speed configs never call into the pacing below.
  *
  * HOW IT KEEPS TIME
- *   Guest time   = cycles since the anchor / 8 MHz-units -> ns at gov_khz.
+ *   Guest time   = cycles since the anchor / 8 MHz-units -> ns at gov_hz
+ *                  (an 8 MHz ST: the board's measured 68000 clock).
  *   Real time    = CLOCK_MONOTONIC since the anchor (gov_ns0).
  *   ahead_ns     = guest time - real time.
  *   Every gov_step guest cycles (GOV_STEP, 32 = 4 us at 8 MHz):
@@ -395,6 +396,13 @@ static evt_t gov_step = GOV_STEP;                /* PISTORM_GOV_STEP may overrid
 static const int64_t GOV_FORGIVE_NS = 50000000LL; /* debt beyond this = host stall */
 static const int64_t GOV_SPIN_NS    = 50000LL;    /* spin this much before a deadline */
 static const int64_t GOV_WAIT_MAX   = 1000000LL;  /* cap on any single wait */
+
+/* guest time: currcycle units -> ns at hz. 128-bit: cycles since the
+ * anchor x 1e9 passes int64 after ~19 minutes at 8 MHz */
+static inline int64_t gov_cyc_ns(evt_t cyc, evt_t unit, int64_t hz)
+{
+	return (int64_t)((__int128)(cyc / unit) * 1000000000 / hz);
+}
 
 static inline int64_t gov_now_ns(void)
 {
@@ -553,16 +561,18 @@ unsigned long  pistorm_gov_parks;           /* [GOV] report */
  * event-count mode, and only when the delay found is 0-40 us; otherwise
  * the lead is parked as before. 50 and 60 Hz alike (the model's line
  * length and display end follow the frame rate).
- * GOV_BEAM_IRQ_CYC: Timer B's event comes 24 cycles after the display end
- * (Hatari, TIMERB_VIDEO_CYCLE_OFFSET), the CPU samples it a few cycles
- * later, and this core charges an instruction's cycles when it ends, so a
- * beam access is synced at its instruction's start, ~12 cycles before a
- * 68000's bus cycle. Against Defender's routine (measured: 92 guest cycles
- * from the interrupt to each $FF8209 read, 350 + 2n from the second read
- * to the $FF820A write) 40 puts the second read at cycle ~87 of line 262,
- * the middle of its 56..118 stretch. PISTORM_GOV_BEAM_CYC overrides. */
+ * GOV_BEAM_IRQ_CYC: where the interrupt starts, in cycles after the
+ * display end - Hatari's figures: Timer B's event comes 24 cycles after
+ * the display end (TIMERB_VIDEO_CYCLE_OFFSET) and the MFP's IRQ reaches
+ * the CPU 4 cycles later (MFP_IRQ_DELAY_TO_CPU): 28. It was 40, tuned
+ * against Defender (its second $FF8209 read at cycle ~87 of line 262, the
+ * middle of its 56..118 stretch) while this core charged an interrupt the
+ * generic 44 cycles; an ST's MFP interrupt is 56 (newcpu.cpp,
+ * add_approximate_exception_cycles), and those 12 cycles were what the
+ * extra 12 stood in for: the read lands where it did. PISTORM_GOV_BEAM_CYC
+ * overrides. */
 static int     gov_beam_on = -1;
-static int64_t gov_beam_irq_cyc = 40;
+static int64_t gov_beam_irq_cyc = 28;
 static int     gov_beam_handler;            /* this handler's clock is the beam's */
 static int64_t gov_beam_late;               /* ... set this far behind (part of the park) */
 static uint32_t gov_beam_sp;                /* ... its stack at the start */
@@ -618,7 +628,9 @@ static void pistorm_governor(int sync)
 
 	static int     gov_on;
 	static int     gov_report;
-	static int64_t gov_khz;                     /* target, kHz               */
+	static int64_t gov_khz;                     /* target, kHz (cfg/env)     */
+	static int64_t gov_hz;                      /* target, Hz: the pace      */
+	static int     gov_hz_auto;                 /* follow the board's clock  */
 	static int64_t gov_catchup_x;               /* catch-up cap, x target    */
 	static evt_t   gov_cyc0;                    /* anchor: guest cycles ...  */
 	static int64_t gov_ns0;                     /* ... and real time         */
@@ -642,6 +654,19 @@ static void pistorm_governor(int sync)
 			gov_khz = env ? atoll(env) : pistorm_gov_khz ? pistorm_gov_khz : 8000;
 			if (gov_khz < 1000 || gov_khz > 64000)
 				gov_khz = 8000;
+			/* An 8 MHz ST is not 8 MHz: a PAL board's 68000 runs at
+			 * 8.021247 MHz (32.084988 MHz / 4; Hatari clocks_timings.c),
+			 * and the Shifter, GLUE and MFP here are real, so the frame is
+			 * 160256 of THOSE cycles (19979 us - what [BEAM] measures).
+			 * Paced at 8.000 MHz the guest lost 0.27% to the beam: ~0.17 us
+			 * a line from any sync point, half a line by line 200, and
+			 * every park/write-off re-synced it at a different point - a
+			 * wandering error. So an 8 MHz target follows the board's own
+			 * clock, measured by the beam model (cycles per frame over the
+			 * period; NTSC boards come out at theirs), starting at PAL.
+			 * PISTORM_GOV_KHZ set by hand is taken as given. */
+			gov_hz_auto = !env && gov_khz == 8000;
+			gov_hz = gov_hz_auto ? 8021247 : gov_khz * 1000;
 			const char *rep = getenv("PISTORM_GOV_REPORT");
 			gov_report = rep && *rep == '1';
 			const char *cu = getenv("PISTORM_GOV_CATCHUP");
@@ -649,9 +674,11 @@ static void pistorm_governor(int sync)
 			if (gov_catchup_x < 0 || gov_catchup_x > 100)
 				gov_catchup_x = 2;
 			fprintf(stderr, "[GOV] 68k governor active: %lld kHz, catch-up cap %s%lldx, "
-			        "check every %lld cycles\n",
+			        "check every %lld cycles%s\n",
 			        (long long)gov_khz, gov_catchup_x ? "" : "off ",
-			        (long long)gov_catchup_x, (long long)gov_step);
+			        (long long)gov_catchup_x, (long long)gov_step,
+			        gov_hz_auto ? ", paced at the board's 68000 clock "
+			                      "(8021247 Hz until the beam model measures it)" : "");
 		}
 		gov_next = currcycle + gov_step * unit;
 		gov_on = 1;
@@ -697,10 +724,10 @@ static void pistorm_governor(int sync)
 		} else if (now - win_ns0 >= 5000000000LL) {
 			int64_t khz = (int64_t)((currcycle - win_cyc0) / unit) * 1000000LL
 			              / (now - win_ns0);
-			if (gov_report || (!said && khz * 10 < gov_khz * 9)) {
+			if (gov_report || (!said && khz * 10000 < gov_hz * 9)) {
 				said = 1;
 				fprintf(stderr, "[GOV] reaching %lld kHz of the %lld kHz target "
-				        "(5 s average)", (long long)khz, (long long)gov_khz);
+				        "(5 s average)", (long long)khz, (long long)(gov_hz / 1000));
 				if (pistorm_gov_beam_n || pistorm_gov_beam_rej || pistorm_gov_beam_nomodel)
 					fprintf(stderr, " | beam-timed Timer B handlers %lu (%lu out of range, "
 					        "%lu with no calibrated beam model), late reads back-dated %lu, "
@@ -723,7 +750,33 @@ static void pistorm_governor(int sync)
 		now = gov_now_ns();
 	}
 
-	int64_t virt_ns  = (int64_t)((currcycle - gov_cyc0) / unit) * 1000000LL / gov_khz;
+	/* follow the board's clock (above): once a second, outside handlers.
+	 * Re-anchored so the lead or debt carries over unchanged. Steps under
+	 * 20 Hz (2.5 ppm) are the period estimate's own noise: ignored. */
+	if (gov_hz_auto && !in_handler && !irq_entry) {
+		static int64_t hz_chk_ns;
+		if (now - hz_chk_ns > 1000000000LL) {
+			hz_chk_ns = now;
+			const double m = bc_cpu_hz();
+			if (m > 7900000.0 && m < 8100000.0) {
+				const int64_t hz = (int64_t)(m + 0.5);
+				if (hz - gov_hz > 20 || gov_hz - hz > 20) {
+					const int64_t old_ahead = gov_cyc_ns(currcycle - gov_cyc0, unit, gov_hz)
+					                          - (now - gov_ns0);
+					static int said_hz;
+					if (gov_report || !said_hz)
+						fprintf(stderr, "[GOV] board 68000 clock measured: %lld Hz "
+						        "(was pacing at %lld)\n", (long long)hz, (long long)gov_hz);
+					said_hz = 1;
+					gov_hz   = hz;
+					gov_cyc0 = currcycle;
+					gov_ns0  = now + old_ahead;
+				}
+			}
+		}
+	}
+
+	int64_t virt_ns  = gov_cyc_ns(currcycle - gov_cyc0, unit, gov_hz);
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 
 	if (irq_entry) {
@@ -750,7 +803,7 @@ static void pistorm_governor(int sync)
 				const double t_irq = de + (double)gov_beam_irq_cyc * tc;
 				const int64_t since_irq_ns = (int64_t)(((double)tk - t_irq) * 1e9 / bc_tick_hz());
 				const int64_t guest_ns = currcycle > pistorm_irq_cyc
-				    ? (int64_t)((currcycle - pistorm_irq_cyc) / unit) * 1000000LL / gov_khz : 0;
+				    ? gov_cyc_ns(currcycle - pistorm_irq_cyc, unit, gov_hz) : 0;
 				const int64_t late_ns = since_irq_ns - guest_ns;
 				if (late_ns > -15000 && late_ns < 40000) {
 					/* the guest's clock to (real - late): it is behind by late */
@@ -857,8 +910,7 @@ static void pistorm_governor(int sync)
 		/* repaying debt: this step may not have run faster than
 		 * gov_catchup_x times the target (see CATCH-UP above) */
 		if (gov_catchup_x) {
-			int64_t min_ns = (int64_t)((currcycle - step_cyc) / unit) * 1000000LL
-			                 / (gov_khz * gov_catchup_x);
+			int64_t min_ns = gov_cyc_ns(currcycle - step_cyc, unit, gov_hz * gov_catchup_x);
 			if (now - step_ns < min_ns) {
 				rt_gov(step_ns + min_ns - now, 0);
 				now = gov_wait_until(now, step_ns + min_ns);
