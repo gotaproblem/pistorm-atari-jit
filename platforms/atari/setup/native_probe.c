@@ -67,6 +67,21 @@ static int tos_header_at(uint32_t base, uint16_t *ver)
     return 1;
 }
 
+int np_board_ste(void)
+{
+    static int known = -1;
+    if (known < 0) {
+        uint8_t old_fc = fc;
+        fc = FC_SUPER_DATA;
+        known = answers(REG_DMASND);
+        fc = old_fc;
+        g_buserr = 0;
+        printf("[NATIVE] board: %s ($FF8901 DMA sound %s)\n",
+               known ? "STE" : "ST", known ? "answers" : "does not answer");
+    }
+    return known;
+}
+
 int np_probe(struct np_result *r)
 {
     memset(r, 0, sizeof *r);

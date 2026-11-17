@@ -48,6 +48,13 @@ struct np_result {
  * not answer (no board, or no ST-RAM: nothing to describe). */
 int np_probe(struct np_result *r);
 
+/* Is the board an STE? 1 = yes, 0 = a plain ST (or Mega ST), asked once
+ * and remembered. The test TOS uses and np_probe uses: the STE DMA sound
+ * chip ($FF8901) answers. $FF8265 is no test - a plain ST's GLUE decodes
+ * the whole shifter page. Needs the bus with the 68k not running (before
+ * the setup page or before the CPU thread starts). */
+int np_board_ste(void);
+
 /* Copy the real ROM (r->rom_base, r->rom_size) to `path`. 0 or -1. */
 int np_copy_rom(const struct np_result *r, const char *path);
 

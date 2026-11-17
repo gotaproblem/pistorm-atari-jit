@@ -2956,6 +2956,27 @@ int main (int argc, char *argv[])
     return 1;
   }
   emulator_config_set_current(config);
+  /* THE STE SHIFTER ON AN ST BOARD. `shifter ste` (machine ste) gives the
+   * guest the STE video registers - fine screen address $FF820D, line
+   * width $FF820F, fine scroll $FF8265 - and the HDMI mirror plays them.
+   * A plain ST's Shifter has none of them, so a program that uses them
+   * shows wrong on the ST monitor: Bad Apple puts every frame at
+   * base+$10 (the ST starts it 32 pixels early - picture shifted right),
+   * FastBobs sets 256-byte lines (the ST draws them 160 apart). Nothing
+   * here re-lays the screen for the ST (no extra buffer: they cost time),
+   * so the STE build always has HDMI on, and an ST board says so. */
+  if (emulator_config_shifter_ste()) {
+    if (!config->native_hdmi) {
+      config->native_hdmi = true;
+      printf("[CFG] shifter ste: native_hdmi switched on - the HDMI mirror "
+             "is the display that shows STE video right\n");
+    }
+    if (np_board_ste() == 0)
+      printf("[STE] WARNING: shifter ste on an ST board - the ST's Shifter has "
+             "no $FF820D/$FF820F/$FF8265, so STE screens (fine screen address, "
+             "line width, fine scroll) can be wrong on the ST monitor. HDMI "
+             "shows them right.\n");
+  }
   /* Order matters: the .cfg has already set whatever tunables it named
    * (load_config_file hands unknown keys to psctrl_settings_config_key),
    * and this now lets a PISTORM_* in the launch script override it, which

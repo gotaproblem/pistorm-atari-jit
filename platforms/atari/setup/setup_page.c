@@ -42,6 +42,7 @@
 #include "setup_cfg.h"
 #include "setup_enums.h"
 #include "setup_hdmi.h"
+#include "native_probe.h"
 
 #define MAX_ROWS   96
 #define MAX_BUILDS 16
@@ -879,6 +880,24 @@ static void jit_follow(struct state *st, const char *key)
     }
 }
 
+/* A build with the STE video personality: machine ste, and shifter ste
+ * (a missing shifter line follows the machine). config_file.c's
+ * emulator_config_shifter_ste() is the same rule. */
+static int build_ste_video(const struct sc_cfg *c, const char *sec)
+{
+    const char *m = sc_get(c, sec, "machine");
+    if (!m || strcasecmp(m, "ste"))
+        return 0;
+    const char *sh = sc_get(c, sec, "shifter");
+    return !sh || !strcasecmp(sh, "ste");
+}
+
+/* The line the page shows for an STE build on an ST board: the ST's
+ * Shifter has no $FF820D/$FF820F/$FF8265, so STE screens can be wrong on
+ * the ST monitor; the HDMI mirror shows them right (emulator.c says the
+ * same at boot). */
+#define STE_ON_ST_WARNING "ST board: STE video may be wrong on ST monitor (HDMI is right)"
+
 /*
  * The shifter follows the machine: st and megast have the ST shifter,
  * ste the STE one, so changing the machine sets `shifter` to match. On an
@@ -907,6 +926,14 @@ void sp_shifter_follow(struct sc_cfg *c, const char *sec, const char *key,
     } else if (!strcasecmp(key, "shifter") && is_ste && !ste) {
         if (sc_set(c, sec, "shifter", "st") == 0)
             snprintf(did, n, "shifter ste needs machine ste - kept st");
+    }
+    /* the STE video is only certain on HDMI: an STE build has it on */
+    if (build_ste_video(c, sec)) {
+        const char *h = sc_get(c, sec, "native_hdmi");
+        if ((!h || !sp_row_on("native_hdmi", h)) &&
+            sc_set(c, sec, "native_hdmi", "enabled") == 0)
+            snprintf(did + strlen(did), n - strlen(did), "%s+native_hdmi",
+                     *did ? " " : "");
     }
 }
 
@@ -1421,6 +1448,11 @@ static void draw_builds(struct ss_screen *ss, const struct state *st)
     ss_puts(ss, 1, SS_ROWS - 3, line, hi, 0);
     ss_clear_row(ss, SS_ROWS - 2, 0);
     ss_clear_row(ss, SS_ROWS - 1, 0);
+    if (!st->naming && !st->copying && st->nbuilds &&
+        build_ste_video(&st->cfg, st->builds[st->bsel]) && np_board_ste() == 0) {
+        snprintf(line, sizeof line, "%.15s: %s", st->builds[st->bsel], STE_ON_ST_WARNING);
+        ss_puts(ss, 1, SS_ROWS - 2, line, hi, 0);
+    }
     if (st->naming) {
         ss_puts(ss, 1, SS_ROWS - 2, "becomes the section [name]: letters, digits, - and _, 15 at most",
                 hi, 0);
@@ -1755,6 +1787,8 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     snprintf(st.sec, sizeof st.sec, "%s", st.builds[st.bsel]);
                     st.screen = SCR_EDIT; st.tab = 0; st.sel = 0; st.top = 0;
                     st.msg[0] = '\0';
+                    if (build_ste_video(&st.cfg, st.sec) && np_board_ste() == 0)
+                        snprintf(st.msg, sizeof st.msg, "%.63s", STE_ON_ST_WARNING);
                 } else if (e.ch == 'n' || e.ch == 'N') {
                     if (st.nbuilds >= MAX_BUILDS)
                         snprintf(st.msg, sizeof st.msg, "%d builds is as many as the page lists", MAX_BUILDS);
