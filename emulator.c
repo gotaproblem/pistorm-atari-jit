@@ -1212,6 +1212,32 @@ static void *ipl_task(void *)
         fprintf(stderr, "[MAIN] PISTORM_IPL_PASS_NS=%s ignored (250..100000)\n", e);
     }
   }
+  /* IDLE CPU, FAST LOOK: see the wait at the end of the pass */
+  uint64_t ipl_idle_ns = 1000;
+  {
+    const char *e = getenv("PISTORM_IPL_IDLE_NS");
+    if (e && *e)
+    {
+      long v = atol(e);
+      if (v == 0 || (v >= 250 && v <= 100000))
+      {
+        ipl_idle_ns = (uint64_t)v;
+        fprintf(stderr, "[MAIN] IPL sampled every %ld ns while the CPU thread waits "
+                "(PISTORM_IPL_IDLE_NS; default 1000, 0 = off)\n", v);
+      }
+      else
+        fprintf(stderr, "[MAIN] PISTORM_IPL_IDLE_NS=%s ignored (0, or 250..100000)\n", e);
+    }
+  }
+  uint64_t ipl_pass_ticks, ipl_idle_ticks;
+  {
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    if (!f)
+      f = 54000000ULL;                  /* Pi 4 arch-timer fallback */
+    ipl_pass_ticks = ipl_pass_ns * f / 1000000000ULL;
+    ipl_idle_ticks = ipl_idle_ns * f / 1000000000ULL;
+  }
   /* av_held for level 2 expires after one line - see "HBL HELD" below */
   uint64_t av2_rearm_ticks, av2_tick = 0;
   {
@@ -2085,8 +2111,33 @@ static void *ipl_task(void *)
      * write landed anywhere in the first ~130 pixels of the line. Each
      * sample stops the CPU thread's bus for the hand-off (~0.7 us), so a
      * shorter period costs bus time: PISTORM_IPL_PASS_NS sets it.
+     *
+     * IDLE CPU, FAST LOOK (PISTORM_IPL_IDLE_NS, default 1000; 0 = off).
+     * That cost is only paid while the CPU thread is using the bus. While
+     * it sits in a governor wait (pistorm_cpu_phase 1) it is not, and a
+     * sample costs it nothing - yet the wait ends only when g_irq is set,
+     * i.e. at this loop's next look. So while it waits, look every 1 us.
+     * A real 68000 sees its IPL lines at the end of the instruction in
+     * hand: the MFP's request 4 cycles after it rises, plus the tail of
+     * the instruction (Hatari mfp.c MFP_IRQ_DELAY_TO_CPU). Measured here
+     * (Turrican II raster trace, 17 Nov 2026): Timer B seen 7.5 us late at
+     * the median, 17.9 us at the 95th percentile, 62.8 us at worst - up to
+     * a quarter of a line, a different amount every frame: the colour
+     * changes and register writes an interrupt makes wander along the line
+     * and now and then onto the next. With the CPU waiting (most of the
+     * time at 8 MHz) that becomes ~1 us plus the 2 us confirm.
      */
-    wait_ns (ipl_pass_ns);
+    {
+      uint64_t w0, w;
+      __asm__ volatile("mrs %0, cntvct_el0" : "=r"(w0));
+      do
+      {
+        asm volatile("yield" ::: "memory");
+        __asm__ volatile("mrs %0, cntvct_el0" : "=r"(w));
+        if (ipl_idle_ticks && w - w0 >= ipl_idle_ticks && pistorm_cpu_phase == 1)
+          break;
+      } while (w - w0 < ipl_pass_ticks);
+    }
 
   }
 
