@@ -566,6 +566,8 @@ static int64_t gov_beam_irq_cyc = 40;
 static int     gov_beam_handler;            /* this handler's clock is the beam's */
 static int64_t gov_beam_late;               /* ... set this far behind (part of the park) */
 static uint32_t gov_beam_sp;                /* ... its stack at the start */
+static uint32_t gov_beam_read_pc;           /* ... the instruction of its last kept-debt read */
+unsigned long  pistorm_gov_beam_polls;      /* [GOV] report: reads answered as read (a poll) */
 /* the last 16 handlers put on the beam's clock, for the CPU_DIAG crash
  * capture (cpu/newcpu.cpp pistorm_crash_capture) */
 struct gov_beam_e { uint32_t pc, sp; int32_t late_ns, shift_ns; };
@@ -701,9 +703,11 @@ static void pistorm_governor(int sync)
 				        "(5 s average)", (long long)khz, (long long)gov_khz);
 				if (pistorm_gov_beam_n || pistorm_gov_beam_rej || pistorm_gov_beam_nomodel)
 					fprintf(stderr, " | beam-timed Timer B handlers %lu (%lu out of range, "
-					        "%lu with no calibrated beam model), late reads back-dated %lu",
+					        "%lu with no calibrated beam model), late reads back-dated %lu, "
+					        "polls on real time %lu",
 					        pistorm_gov_beam_n, pistorm_gov_beam_rej,
-					        pistorm_gov_beam_nomodel, pistorm_gov_beam_back);
+					        pistorm_gov_beam_nomodel, pistorm_gov_beam_back,
+					        pistorm_gov_beam_polls);
 				fputc('\n', stderr);
 			}
 			win_ns0 = now;
@@ -755,6 +759,7 @@ static void pistorm_governor(int sync)
 					gov_parked_ns += shift;     /* put back when the handler is over */
 					gov_beam_handler = 1;
 					gov_beam_late = late_ns;
+					gov_beam_read_pc = 0;
 					gov_beam_sp = pistorm_cur_ssp();
 					pistorm_gov_beam_n++;
 					{
@@ -799,13 +804,31 @@ static void pistorm_governor(int sync)
 			now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
 			if (now - w0 > 2000)
 				rt_gap(1, now - w0, pistorm_cur_pc());
-		} else if (sync_read && beam_live()) {
+		} else if (sync_read && beam_live() && pistorm_cur_pc() != gov_beam_read_pc) {
 			/* BEAM-TIMED HANDLER, a read reached late: keep the beam's
 			 * clock, the read is answered as at the guest's time */
+			gov_beam_read_pc = pistorm_cur_pc();
 			pistorm_gov_read_behind_ns = -ahead_ns;
 			pistorm_gov_read_behind_at = now;   /* CLOCK_MONOTONIC: only for the read that follows */
 			pistorm_gov_beam_back++;
 		} else {
+			/* ... but the SAME instruction reading again is a poll: the
+			 * loop's own exit times what follows, as on a real ST, so
+			 * the guest is put on real time and the read answered as
+			 * read. Back-dating every pass kept the guest off real time
+			 * through the whole poll - Turrican II's lower-border poll in
+			 * its Timer B handler ($114E4, move.b $8209 / cmp.b #$D0 /
+			 * bcs): reads back-dated by up to 62 counter bytes, the guest
+			 * up to 16 us behind. Now and then its main loop then met the
+			 * end of a sample block in the Timer C music handler while A7
+			 * pointed at a table just above the real stack ($28F5E): the
+			 * handler's ~60 bytes of pushes overwrote the return address,
+			 * rts popped garbage, address error, bombs (17 Nov 2026:
+			 * crashes in seconds to minutes with the beam path, an hour
+			 * clean with PISTORM_GOV_BEAM=0). Defender's two reads are two
+			 * instructions: both are still answered at the guest's time. */
+			if (sync_read && beam_live())
+				pistorm_gov_beam_polls++;
 			gov_ns0 = now - virt_ns;
 			if (beam_live() && gov_beam_late) {
 				/* the debt written off includes the delay the beam's clock
