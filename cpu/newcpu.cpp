@@ -218,15 +218,21 @@ struct pistorm_irqtl_e {
 	int32_t  parked_ns;     /* governor: lead parked for a handler  */
 	uint32_t pc, sp;        /* I: handler, R: return pc, S/T: pc     */
 	uint16_t sr;            /* I: sr now, R: sr restored, S: new sr  */
-	char     k;             /* I interrupt, R rte, S stop, T trap    */
+	char     k;             /* I interrupt, R rte, S stop, T trap,
+	                         * L lead written off (events.cpp)      */
 	uint8_t  lvl, vec;
+	uint8_t  fl;            /* governor: 1 handler window, 2 beam-timed
+	                         * handler live, 4 parked lead held      */
 };
-static pistorm_irqtl_e pistorm_irqtl[1024];
+#define IRQTL_N 8192u
+static pistorm_irqtl_e pistorm_irqtl[IRQTL_N];
 static unsigned pistorm_irqtl_i;
 extern "C" long long pistorm_gov_ahead_now(long long *parked);   /* events.cpp */
+extern "C" int pistorm_gov_beam_live(void);                       /* events.cpp */
+int pistorm_handler_running(void);
 static void pistorm_irqtl_rec(char k, int lvl, int vec, uae_u32 pc, uae_u32 sp, uae_u16 sr)
 {
-	pistorm_irqtl_e *e = &pistorm_irqtl[pistorm_irqtl_i++ & 1023];
+	pistorm_irqtl_e *e = &pistorm_irqtl[pistorm_irqtl_i++ & (IRQTL_N - 1)];
 	uint64_t t;
 	__asm__ volatile("mrs %0, cntvct_el0" : "=r"(t));
 	long long parked = 0;
@@ -237,29 +243,38 @@ static void pistorm_irqtl_rec(char k, int lvl, int vec, uae_u32 pc, uae_u32 sp, 
 	e->parked_ns = (int32_t)parked;
 	e->pc = pc; e->sp = sp; e->sr = sr;
 	e->k = k; e->lvl = (uint8_t)lvl; e->vec = (uint8_t)vec;
+	e->fl = (uint8_t)((pistorm_handler_running() ? 1 : 0) | (pistorm_gov_beam_live() ? 2 : 0) |
+	                  (parked ? 4 : 0));
+}
+/* events.cpp: the governor wrote a lead off (GOV_LEAD_MAX) */
+extern "C" void pistorm_irqtl_lead(void)
+{
+	if (pistorm_cpu_diag())
+		pistorm_irqtl_rec('L', 0, 0, m68k_getpc(), m68k_areg(regs, 7), regs.sr);
 }
 static void pistorm_irqtl_dump(void)
 {
-	const unsigned n = pistorm_irqtl_i < 1024 ? pistorm_irqtl_i : 1024;
+	const unsigned n = pistorm_irqtl_i < IRQTL_N ? pistorm_irqtl_i : IRQTL_N;
 	if (!n)
 		return;
 	uint64_t f;
 	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
 	if (!f)
 		f = 54000000ULL;
-	const pistorm_irqtl_e *last = &pistorm_irqtl[(pistorm_irqtl_i - 1) & 1023];
+	const pistorm_irqtl_e *last = &pistorm_irqtl[(pistorm_irqtl_i - 1) & (IRQTL_N - 1)];
 	fprintf(stderr, "[IRQTL] last %u interrupts / RTEs / STOPs / TRAPs, oldest first:\n"
-	        "[IRQTL]  t_us(to the last) dt_us dcyc kind lvl vec pc sp sr ahead_us parked_us\n", n);
+	        "[IRQTL]  t_us(to the last) dt_us dcyc kind lvl vec pc sp sr ahead_us parked_us "
+	        "flags(1 window 2 beam 4 parked)\n", n);
 	const pistorm_irqtl_e *prev = 0;
 	for (unsigned k = 0; k < n; k++) {
-		const pistorm_irqtl_e *e = &pistorm_irqtl[(pistorm_irqtl_i - n + k) & 1023];
+		const pistorm_irqtl_e *e = &pistorm_irqtl[(pistorm_irqtl_i - n + k) & (IRQTL_N - 1)];
 		const double t_us  = -(double)(last->t - e->t) * 1e6 / (double)f;
 		const double dt_us = prev ? (double)(e->t - prev->t) * 1e6 / (double)f : 0.0;
 		const uint32_t dcyc = prev ? e->cyc - prev->cyc : 0;
-		fprintf(stderr, "[IRQTL] %10.1f %7.1f %6u %c %u %02X %06X %06X %04X %8.1f %7.1f\n",
+		fprintf(stderr, "[IRQTL] %10.1f %7.1f %6u %c %u %02X %06X %06X %04X %8.1f %7.1f %u\n",
 		        t_us, dt_us, (unsigned)dcyc, e->k, e->lvl, e->vec,
 		        (unsigned)(e->pc & 0xFFFFFFu), (unsigned)(e->sp & 0xFFFFFFu), e->sr,
-		        e->ahead_ns / 1000.0, e->parked_ns / 1000.0);
+		        e->ahead_ns / 1000.0, e->parked_ns / 1000.0, e->fl);
 		prev = e;
 	}
 }
@@ -6545,6 +6560,12 @@ extern "C" void pistorm_cpu_peek(uint32_t *pc, uint32_t *icnt, uint8_t *mask,
 extern "C" uint32_t pistorm_cur_pc(void)
 {
 	return (uint32_t)regs.instruction_pc & 0x00FFFFFFu;
+}
+
+extern "C" uint16_t pistorm_cur_sr(void)
+{
+	MakeSR();
+	return (uint16_t)regs.sr;
 }
 
 /* events.cpp, BEAM-TIMED HANDLERS: the supervisor stack pointer now, and

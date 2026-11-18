@@ -525,6 +525,10 @@ int pistorm_gov_running;                    /* the governor paces this CPU (not 
 static int     gov_park_on = -1;
 static int64_t gov_parked_ns;
 unsigned long  pistorm_gov_parks;           /* [GOV] report */
+unsigned long  pistorm_gov_lead_off;        /* [GOV] report: leads over GOV_LEAD_MAX written off */
+int64_t        pistorm_gov_lead_off_ns;
+extern "C" void pistorm_irqtl_lead(void);   /* newcpu.cpp, PISTORM_CPU_DIAG timeline */
+extern "C" uint16_t pistorm_cur_sr(void);
 
 /* BEAM-TIMED HANDLERS (PISTORM_GOV_BEAM=0 turns this off).
  * Parking the lead makes a handler start from the moment the CPU thread
@@ -600,6 +604,7 @@ static inline int beam_live(void)
 		gov_beam_handler = 0;
 	return gov_beam_handler;
 }
+extern "C" int pistorm_gov_beam_live(void) { return beam_live(); }   /* newcpu.cpp timeline */
 unsigned long  pistorm_gov_beam_n, pistorm_gov_beam_rej, pistorm_gov_beam_back;   /* [GOV] report */
 unsigned long  pistorm_gov_beam_nomodel;
 /* cpu/newcpu.cpp: guest clock at the start of do_interrupt */
@@ -752,6 +757,9 @@ static void pistorm_governor(int sync)
 					        pistorm_gov_beam_n, pistorm_gov_beam_rej,
 					        pistorm_gov_beam_nomodel, pistorm_gov_beam_back,
 					        pistorm_gov_beam_polls);
+				if (pistorm_gov_lead_off)
+					fprintf(stderr, " | leads written off %lu (%lld us in all)",
+					        pistorm_gov_lead_off, (long long)(pistorm_gov_lead_off_ns / 1000));
 				fputc('\n', stderr);
 			}
 			win_ns0 = now;
@@ -796,6 +804,50 @@ static void pistorm_governor(int sync)
 	gov_hz_now = gov_hz;
 	int64_t virt_ns  = gov_cyc_ns(currcycle - gov_cyc0, unit, gov_hz);
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
+
+	/* A LEAD NO 68000 CAN HAVE (PISTORM_GOV_LEAD_MAX_US, default 1000;
+	 * 0 = off). A real CPU is never ahead of its clock. Here a lead is
+	 * normal only in small amounts: a handler runs unpaced for at most its
+	 * 2000-cycle window (~250 us of guest time), any other lead is waited
+	 * off at the next 4 us check. Turrican II, 18 Nov 2026 (interrupt
+	 * timeline at the crash): 10.7 ms of lead, parked and put back at every
+	 * Timer C tick, waited off at ~53 us per 77 us tick - the guest crawled
+	 * at a third of its speed for ~30 ms, so the music handler's sample
+	 * mixer (one sample per tick) was still running when its block ran
+	 * out: the handler re-entered itself, its saved registers were lost,
+	 * bombs. Over the limit is an accounting fault, not time the guest is
+	 * owed: it is written off, counted, and the first ones are printed
+	 * with what the governor thought was running. */
+	{
+		static int64_t lead_max = -1;
+		if (lead_max < 0) {
+			const char *e = getenv("PISTORM_GOV_LEAD_MAX_US");
+			lead_max = e ? atoll(e) * 1000LL : 1000000LL;
+			if (lead_max < 0)
+				lead_max = 0;
+		}
+		const int64_t lead = ahead_ns + gov_parked_ns;
+		if (lead_max && sync != 2 && lead > lead_max) {
+			static unsigned shown;
+			pistorm_gov_lead_off++;
+			pistorm_gov_lead_off_ns += lead;
+			if (shown < 20) {
+				shown++;
+				fprintf(stderr, "[GOV] lead of %lld us written off (ahead %lld, parked %lld) at pc "
+				        "%06X sp %06X sr %04X: window %d, beam handler %d (its sp %06X)%s\n",
+				        (long long)(lead / 1000), (long long)(ahead_ns / 1000),
+				        (long long)(gov_parked_ns / 1000), (unsigned)(pistorm_cur_pc() & 0xFFFFFFu),
+				        (unsigned)(pistorm_cur_ssp() & 0xFFFFFFu), (unsigned)pistorm_cur_sr(),
+				        pistorm_handler_running(), beam_live(), (unsigned)(gov_beam_sp & 0xFFFFFFu),
+				        shown == 20 ? " - no more of these printed" : "");
+			}
+			pistorm_irqtl_lead();
+			gov_ns0 += ahead_ns;            /* the guest back on real time */
+			gov_parked_ns = 0;
+			ahead_ns = 0;
+			virt_ns = now - gov_ns0;
+		}
+	}
 
 	if (irq_entry) {
 		/* BEAM-TIMED HANDLERS: a Timer B event-count interrupt starts on
