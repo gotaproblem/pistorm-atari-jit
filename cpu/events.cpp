@@ -598,11 +598,41 @@ extern "C" int      pistorm_sp_live(uint32_t sp);
  * jumping). The handler is over when its RTE has taken the stack above
  * where it started; until then it is on the beam's clock whatever the
  * window says. */
+/* ... and the stack alone cannot say when it is over. Turrican II, 18 Nov
+ * 2026 ([GOV] lead write-offs): a beam-timed handler started with the
+ * stack at $2A2D8 (title screen); the game then moved its supervisor
+ * stack to $F9F0 - below - and the test above held the handler "live" for
+ * good: no governor pause anywhere, the guest ran unpaced and built up
+ * leads of whole milliseconds, waited off later at a crawl, and the music
+ * handler's mixer, which keeps pace with Timer C sample by sample, missed
+ * its block's end: it re-entered itself and the game bombed. Code that
+ * uses A7 as a table pointer below the stack (Turrican's mixer) fools it
+ * the same way. So the handler ends at the RTE that pops ITS frame (A7
+ * at the frame it pushed - newcpu.cpp, pistorm_gov_rte), when the stack
+ * is above it, or at the latest GOV_BEAM_MAX_CYC guest cycles after it
+ * started (~5 ms; a border routine waits a few lines at most). */
+static const evt_t GOV_BEAM_MAX_CYC = 40000;
+static evt_t gov_beam_cyc0;
+unsigned long pistorm_gov_beam_by_rte, pistorm_gov_beam_by_cap;   /* [GOV] report */
 static inline int beam_live(void)
 {
-	if (gov_beam_handler && !pistorm_sp_live(gov_beam_sp))
-		gov_beam_handler = 0;
+	if (gov_beam_handler) {
+		if (!pistorm_sp_live(gov_beam_sp))
+			gov_beam_handler = 0;
+		else if (currcycle - gov_beam_cyc0 > GOV_BEAM_MAX_CYC * (CYCLE_UNIT / 2)) {
+			gov_beam_handler = 0;
+			pistorm_gov_beam_by_cap++;
+		}
+	}
 	return gov_beam_handler;
+}
+/* newcpu.cpp: an RTE is about to pop the frame at sp */
+extern "C" void pistorm_gov_rte(uint32_t sp)
+{
+	if (gov_beam_handler && sp == gov_beam_sp) {
+		gov_beam_handler = 0;
+		pistorm_gov_beam_by_rte++;
+	}
 }
 extern "C" int pistorm_gov_beam_live(void) { return beam_live(); }   /* newcpu.cpp timeline */
 unsigned long  pistorm_gov_beam_n, pistorm_gov_beam_rej, pistorm_gov_beam_back;   /* [GOV] report */
@@ -757,6 +787,9 @@ static void pistorm_governor(int sync)
 					        pistorm_gov_beam_n, pistorm_gov_beam_rej,
 					        pistorm_gov_beam_nomodel, pistorm_gov_beam_back,
 					        pistorm_gov_beam_polls);
+				if (pistorm_gov_beam_n)
+					fprintf(stderr, " | beam handlers ended by their RTE %lu, by the %lld-cycle cap %lu",
+					        pistorm_gov_beam_by_rte, (long long)GOV_BEAM_MAX_CYC, pistorm_gov_beam_by_cap);
 				if (pistorm_gov_lead_off)
 					fprintf(stderr, " | leads written off %lu (%lld us in all)",
 					        pistorm_gov_lead_off, (long long)(pistorm_gov_lead_off_ns / 1000));
@@ -842,7 +875,7 @@ static void pistorm_governor(int sync)
 				        shown == 20 ? " - no more of these printed" : "");
 			}
 			pistorm_irqtl_lead();
-			gov_ns0 += ahead_ns;            /* the guest back on real time */
+			gov_ns0 -= ahead_ns;            /* the guest back on real time */
 			gov_parked_ns = 0;
 			ahead_ns = 0;
 			virt_ns = now - gov_ns0;
@@ -884,6 +917,7 @@ static void pistorm_governor(int sync)
 					gov_beam_late = late_ns;
 					gov_beam_read_pc = 0;
 					gov_beam_sp = pistorm_cur_ssp();
+					gov_beam_cyc0 = currcycle;
 					pistorm_gov_beam_n++;
 					{
 						gov_beam_e *r = &gov_beam_ring[gov_beam_ring_i++ & 15];

@@ -279,10 +279,13 @@ static void pistorm_irqtl_dump(void)
 	}
 }
 
+extern "C" void pistorm_gov_rte(uint32_t sp);   /* events.cpp, BEAM-TIMED HANDLERS */
 static void pistorm_compat_op(unsigned slot_before, uaecptr pc, uae_u16 op)
 {
 	if (pistorm_pc_ring_i != slot_before)
 		pistorm_op_ring[(pistorm_pc_ring_i - 1) & 255] = op;
+	if (__builtin_expect(op == 0x4E73u, 0) && regs.s)
+		pistorm_gov_rte((uint32_t)m68k_areg(regs, 7));
 	if (!pistorm_cpu_diag())
 		return;
 	if (__builtin_expect((op & 0xFFF0u) == 0x4E70u, 0) || (op & 0xFFF0u) == 0x4E40u) {
