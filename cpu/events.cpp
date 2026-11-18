@@ -614,6 +614,22 @@ extern "C" uint8_t mfp_hub_tbcr(void);
 
 /* mode 0: a normal check; 1: see pistorm_gov_sync(); 2: an interrupt
  * handler is starting (pistorm_gov_irq_entry); 3: pistorm_gov_sync_read() */
+/* newcpu.cpp's interrupt timeline (PISTORM_CPU_DIAG): where the governor
+ * has the guest against real time right now, and the lead parked */
+static evt_t   *gov_cyc0_p;
+static int64_t *gov_ns0_p;
+static int64_t  gov_hz_now = 8021247;
+extern "C" long long pistorm_gov_ahead_now(long long *parked)
+{
+	if (parked)
+		*parked = gov_parked_ns;
+	if (!gov_cyc0_p || !gov_ns0_p)
+		return 0;
+	const evt_t unit = CYCLE_UNIT / 2;
+	const int64_t now = gov_now_ns();
+	return gov_cyc_ns(get_cycles() - *gov_cyc0_p, unit, gov_hz_now) - (now - *gov_ns0_p);
+}
+
 static void pistorm_governor(int sync)
 {
 	const int irq_entry = (sync == 2);
@@ -634,6 +650,7 @@ static void pistorm_governor(int sync)
 	static int64_t gov_catchup_x;               /* catch-up cap, x target    */
 	static evt_t   gov_cyc0;                    /* anchor: guest cycles ...  */
 	static int64_t gov_ns0;                     /* ... and real time         */
+	gov_cyc0_p = &gov_cyc0; gov_ns0_p = &gov_ns0;
 	static evt_t   gov_next;                    /* next check, guest cycles  */
 	static evt_t   step_cyc;                    /* last check: guest cycles  */
 	static int64_t step_ns;                     /* ... and real time         */
@@ -776,6 +793,7 @@ static void pistorm_governor(int sync)
 		}
 	}
 
+	gov_hz_now = gov_hz;
 	int64_t virt_ns  = gov_cyc_ns(currcycle - gov_cyc0, unit, gov_hz);
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 

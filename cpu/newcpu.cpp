@@ -202,12 +202,95 @@ static void pistorm_pc_ring_zero_slide(uaecptr pc)
  * (field case 23 Oct: EmuTOS slid through the ROM's zero padding two
  * bytes at a time - a one-word opcode, not the ori.b #0,d0 in memory). */
 static uae_u16 pistorm_op_ring[256];
+
+/* INTERRUPT TIMELINE (PISTORM_CPU_DIAG=1). The PC ring says in what order
+ * code ran; this says WHEN. Every interrupt taken, RTE, STOP and TRAP, with
+ * the real time (arch timer), the guest's 8 MHz clock and where the
+ * governor had the guest against real time - the last 1024, dumped with the
+ * crash capture. Written for Turrican II's music crash (18 Nov 2026): the
+ * Timer C handler mixes the next sample block with the mask down, one
+ * sample per Timer C tick, and must be back out before the block now
+ * playing ends; whether it is late, and by what, is a question of when. */
+struct pistorm_irqtl_e {
+	uint64_t t;             /* cntvct ticks                         */
+	uint32_t cyc;           /* guest 8 MHz cycles (low 32 bits)     */
+	int32_t  ahead_ns;      /* governor: guest ahead (+) / behind   */
+	int32_t  parked_ns;     /* governor: lead parked for a handler  */
+	uint32_t pc, sp;        /* I: handler, R: return pc, S/T: pc     */
+	uint16_t sr;            /* I: sr now, R: sr restored, S: new sr  */
+	char     k;             /* I interrupt, R rte, S stop, T trap    */
+	uint8_t  lvl, vec;
+};
+static pistorm_irqtl_e pistorm_irqtl[1024];
+static unsigned pistorm_irqtl_i;
+extern "C" long long pistorm_gov_ahead_now(long long *parked);   /* events.cpp */
+static void pistorm_irqtl_rec(char k, int lvl, int vec, uae_u32 pc, uae_u32 sp, uae_u16 sr)
+{
+	pistorm_irqtl_e *e = &pistorm_irqtl[pistorm_irqtl_i++ & 1023];
+	uint64_t t;
+	__asm__ volatile("mrs %0, cntvct_el0" : "=r"(t));
+	long long parked = 0;
+	const long long ah = pistorm_gov_ahead_now(&parked);
+	e->t = t;
+	e->cyc = (uint32_t)(get_cycles() / (CYCLE_UNIT / 2));
+	e->ahead_ns = (int32_t)(ah > 2000000000LL ? 2000000000LL : ah < -2000000000LL ? -2000000000LL : ah);
+	e->parked_ns = (int32_t)parked;
+	e->pc = pc; e->sp = sp; e->sr = sr;
+	e->k = k; e->lvl = (uint8_t)lvl; e->vec = (uint8_t)vec;
+}
+static void pistorm_irqtl_dump(void)
+{
+	const unsigned n = pistorm_irqtl_i < 1024 ? pistorm_irqtl_i : 1024;
+	if (!n)
+		return;
+	uint64_t f;
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+	if (!f)
+		f = 54000000ULL;
+	const pistorm_irqtl_e *last = &pistorm_irqtl[(pistorm_irqtl_i - 1) & 1023];
+	fprintf(stderr, "[IRQTL] last %u interrupts / RTEs / STOPs / TRAPs, oldest first:\n"
+	        "[IRQTL]  t_us(to the last) dt_us dcyc kind lvl vec pc sp sr ahead_us parked_us\n", n);
+	const pistorm_irqtl_e *prev = 0;
+	for (unsigned k = 0; k < n; k++) {
+		const pistorm_irqtl_e *e = &pistorm_irqtl[(pistorm_irqtl_i - n + k) & 1023];
+		const double t_us  = -(double)(last->t - e->t) * 1e6 / (double)f;
+		const double dt_us = prev ? (double)(e->t - prev->t) * 1e6 / (double)f : 0.0;
+		const uint32_t dcyc = prev ? e->cyc - prev->cyc : 0;
+		fprintf(stderr, "[IRQTL] %10.1f %7.1f %6u %c %u %02X %06X %06X %04X %8.1f %7.1f\n",
+		        t_us, dt_us, (unsigned)dcyc, e->k, e->lvl, e->vec,
+		        (unsigned)(e->pc & 0xFFFFFFu), (unsigned)(e->sp & 0xFFFFFFu), e->sr,
+		        e->ahead_ns / 1000.0, e->parked_ns / 1000.0);
+		prev = e;
+	}
+}
+
 static void pistorm_compat_op(unsigned slot_before, uaecptr pc, uae_u16 op)
 {
 	if (pistorm_pc_ring_i != slot_before)
 		pistorm_op_ring[(pistorm_pc_ring_i - 1) & 255] = op;
 	if (!pistorm_cpu_diag())
 		return;
+	if (__builtin_expect((op & 0xFFF0u) == 0x4E70u, 0) || (op & 0xFFF0u) == 0x4E40u) {
+		extern uae_u8 *natmem_offset;
+		const uae_u32 sp = m68k_areg(regs, 7);
+		if (op == 0x4E73u) {                /* RTE: where it goes back to */
+			uae_u32 rpc = 0; uae_u16 rsr = 0;
+			if (natmem_offset && sp + 6 < 0x00400000u) {
+				const uae_u8 *m = natmem_offset + sp;
+				rsr = (uae_u16)(m[0] << 8 | m[1]);
+				rpc = (uae_u32)m[2] << 24 | (uae_u32)m[3] << 16 | (uae_u32)m[4] << 8 | m[5];
+			}
+			pistorm_irqtl_rec('R', (rsr >> 8) & 7, 0, rpc, sp, rsr);
+		} else if (op == 0x4E72u) {         /* STOP #imm */
+			uae_u16 imm = 0;
+			const uae_u32 a = (pc + 2) & 0x00FFFFFEu;
+			if (natmem_offset && a < 0x00400000u)
+				imm = (uae_u16)(natmem_offset[a] << 8 | natmem_offset[a + 1]);
+			pistorm_irqtl_rec('S', (imm >> 8) & 7, 0, pc, sp, imm);
+		} else if ((op & 0xFFF0u) == 0x4E40u) {
+			pistorm_irqtl_rec('T', 0, op & 15, pc, sp, regs.sr);
+		}
+	}
 	static int said;
 	if (said)
 		return;
@@ -5150,6 +5233,23 @@ static void pistorm_crash_capture(void)
 			mem(w, t, 96);
 		}
 	}
+	/* the code the last 256 pcs ran through, 64-byte blocks (RAM only) -
+	 * enough to disassemble what led here, not only the crash site */
+	{
+		uae_u32 blk[32]; int nb = 0;
+		for (unsigned k = 0; k < 256 && nb < 32; k++) {
+			const uae_u32 a = pistorm_pc_ring[(pistorm_pc_ring_i + k) & 255] & 0x00FFFFC0u;
+			if (a < 0x400u || a >= 0x00400000u)
+				continue;
+			bool dup = false;
+			for (int i = 0; i < nb; i++) dup |= blk[i] == a;
+			if (!dup)
+				blk[nb++] = a;
+		}
+		for (int i = 0; i < nb; i++)
+			mem("ring", blk[i], 64);
+	}
+	pistorm_irqtl_dump();
 	pistorm_vcr_dump();
 	pistorm_gov_beam_dump();
 	fprintf(stderr, "[CRASH] ===== end =====\n");
@@ -6042,6 +6142,9 @@ static void do_interrupt (int nr)
 		               m68k_getpc() & 0x00FFFFFFu);
 	if (interrupt_taken) {
 		Exception (exception_nr);
+		if (pistorm_cpu_diag())
+			pistorm_irqtl_rec('I', nr, pistorm_iack_vector & 0xFF, m68k_getpc(),
+			                  m68k_areg(regs, 7), regs.sr);
 		pistorm_handler_post();
 		pistorm_handler_enter();            /* governor: no pauses in here */
 	}
