@@ -132,6 +132,15 @@ uninstall() {
   else
     warn "No config-bak.txt — leaving config.txt as-is"
   fi
+  # the tickless kernel's files (config.txt above no longer selects them)
+  if [ -d "$BOOT/nohz" ] || [ -d /lib/modules/6.18.50-v8-nohz ]; then
+    say "Removing the tickless kernel ($BOOT/nohz, /lib/modules/6.18.50-v8-nohz)"
+    if [ "$(uname -r)" = 6.18.50-v8-nohz ]; then
+      warn "it is the running kernel - its files are kept until after the reboot; run --uninstall again then"
+    else
+      sudo rm -rf "$BOOT/nohz" /lib/modules/6.18.50-v8-nohz
+    fi
+  fi
   if [ -e "$BOOT/cmdline-bak.txt" ]; then
     say "Restoring cmdline.txt from backup"
     sudo cp "$BOOT/cmdline-bak.txt" "$BOOT/cmdline.txt"
@@ -164,6 +173,10 @@ Non-interactive env overrides (1/y/yes = yes, anything else = no):
   CADGUARD=1  mask Ctrl+Alt+Del console reboot (default yes)
   WEB=1       psweb + WPE WebKit browser engine
   DOS=1       psdos + DOSBox Pure (DOS games in DOSGEM, ~30 min build)
+  NOHZ=1      boot the tickless kernel (6.18.50-v8-nohz, tools/nohz-kernel)
+              from a built package - default yes when one is found
+  NOHZ_PKG=/path/nohz-kernel-6.18.50.tar.gz   that package (default: looked
+              for in ../nohz-build/, tools/nohz-kernel/ and ../)
   MACFIX=1    atariclean + nightly timer + Samba Apple settings (default yes)
   SAMBA=1     guest [pistorm] Samba share
   KILLGUI=1   disable a desktop environment if one is found
@@ -465,6 +478,42 @@ if [ -e "$HERE/configs/cmdline.txt" ]; then
     sudo sed -i "s|[[:space:]]*\$|${CMDADD}|" "$BOOT/cmdline.txt"
   fi
 fi
+
+# --------------------------------------------------------------------------
+# 3b. Optional: the tickless kernel (tools/nohz-kernel/). The stock kernel's
+#     250 Hz tick lands on the emulation cores (2-3) and shows as raster
+#     jitter (Defender of the Crown's bottom lines); a kernel built with
+#     nohz_full stops it - cmdline.txt above already asks for nohz_full=2,3.
+#     The kernel is built in an arm64 VM (build-nohz-kernel.sh, about an
+#     hour); this installs the package it makes. Pi 3 / 3A+ / Zero 2 W /
+#     Pi 4 - the Pi 5 keeps its own kernel.
+# --------------------------------------------------------------------------
+NOHZ_REL=6.18.50-v8-nohz
+nohz_pkg="${NOHZ_PKG:-}"
+if [ -z "$nohz_pkg" ]; then
+  for c in "$ROOT/nohz-build/nohz-kernel-6.18.50.tar.gz" \
+           "$HERE/tools/nohz-kernel/nohz-kernel-6.18.50.tar.gz" \
+           "$ROOT/nohz-kernel-6.18.50.tar.gz"; do
+    [ -f "$c" ] && { nohz_pkg="$c"; break; }
+  done
+fi
+nohz_model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
+case "$nohz_model" in
+  *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*)
+    say "Pi 5: the tickless kernel is for Pi 3 / Zero 2 W / Pi 4 - skipped" ;;
+  *)
+    if [ -n "$nohz_pkg" ] && [ -f "$nohz_pkg" ]; then
+      if ask NOHZ "Boot the tickless kernel $NOHZ_REL (from $nohz_pkg)?" y; then
+        say "Installing the tickless kernel $NOHZ_REL"
+        sudo bash "$HERE/tools/nohz-kernel/install-nohz-kernel.sh" "$nohz_pkg"
+      fi
+    elif case "${NOHZ:-}" in 1|y|Y|yes) true ;; *) false ;; esac; then
+      warn "NOHZ=1 but no kernel package found (NOHZ_PKG, ../nohz-build/, tools/nohz-kernel/, ../)"
+      warn "build it in an arm64 Debian VM: bash tools/nohz-kernel/build-nohz-kernel.sh"
+    else
+      say "No tickless kernel package found - stock kernel kept (tools/nohz-kernel/ builds one)"
+    fi ;;
+esac
 
 # --------------------------------------------------------------------------
 # 4. Optional: build the emulator
