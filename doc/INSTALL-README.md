@@ -12,14 +12,21 @@ clean **`--uninstall`** that reverses every system change.
 
 ## Requirements
 
+> **⚠ APJ-OS is not for the Pi 3 (3B, 3B+, 3A+) or the Pi Zero 2 W.** These
+> boards run the emulator - TOS/EmuTOS, games and demos - but not the APJ-OS
+> distribution (FreeMiNT/XaAES, the `[apj-os]` build). Use a Pi 4.
+
 - **64-bit OS (aarch64).** The JIT backend is AArch64-only — a 32-bit OS can
   neither build nor run it. **The installer aborts if the OS isn't 64-bit.**
 - **Raspberry Pi 4 or Raspberry Pi 5.**[^pi5] The Pi 5 is tested and works (CoreMark
   about 2700 at its stock 2.4 GHz); the installer builds it with
   `PIMODEL=PI5` and the shipped `config.txt` block boots it on the 4K-page
   kernel the JIT needs.
-- **Raspberry Pi 3B / 3B+** are supported too (1 GB RAM). The Pi 3A+ and Pi Zero 2 W
-  are not: they have 512 MB.
+- **Raspberry Pi 3B / 3B+** (1 GB RAM), **Pi 3A+ and Pi Zero 2 W** (512 MB) are
+  supported too. The 3A+ is tested, in a Mega ST; the 512 MB boards have limits
+  (see [SMALL-BOARDS.md](SMALL-BOARDS.md)) and must not build the emulator
+  themselves - build it on a Pi 4 and copy `emulator` across (`BUILD=0`).
+  **They cannot run APJ-OS** (see the notice above).
 - **Raspberry Pi OS Lite (64-bit)** — a fresh install is fine and recommended.
 - **No desktop environment.** PiSTorm JIT can't run with a desktop: the
   compositor holds the display/DRM master (so `native_hdmi`/KMSDRM can't get the

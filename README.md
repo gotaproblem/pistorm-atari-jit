@@ -55,7 +55,7 @@ Development has been done on a Raspberry Pi4 with 2GB and various ATARI platform
 
 **Raspberry Pi 3B and 3B+ are supported** - both have 1 GB RAM. Build it with `make PIMODEL=PI3` (install-full.sh does this for you).
 
-**Raspberry Pi 3A+ and Zero 2 W (512 MB) work**, with limits - see [SMALL-BOARDS.md](doc/SMALL-BOARDS.md). Tested on a 3A+ in a Mega ST.
+**Raspberry Pi 3A+ and Zero 2 W (512 MB) work**, with limits - see [SMALL-BOARDS.md](doc/SMALL-BOARDS.md). **APJ-OS is not for the Pi 3 or the Zero 2 W.** Tested on a 3A+ in a Mega ST.
 
 **The tickless kernel.** On a Pi 4, 3B, 3A+ and Zero 2 W, `install-full.sh` also tunes the OS (`tools/pi4-tune.sh`) and boots a tickless (`nohz_full`) build of Raspberry Pi OS's own kernel, downloaded from this repo's release `nohz-kernel-6.18.50`, beside the stock one. It keeps the kernel's timer tick off the emulator's cores; `NOHZ=0` skips it. See [INSTALL-README.md](doc/INSTALL-README.md).
 You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
@@ -135,6 +135,10 @@ See **[doc/VIDEO.md](doc/VIDEO.md)** for the full story, including how to publis
 ## Configuring
 Run the installer to build the file tree and copy files into place (see **[doc/INSTALL-README.md](doc/INSTALL-README.md)**)
 >./install-full.sh
+
+> **⚠ APJ-OS is not for the Pi 3 (3B, 3B+, 3A+) or the Pi Zero 2 W.** These
+> boards run the emulator - TOS/EmuTOS, games and demos - but not the APJ-OS
+> distribution (FreeMiNT/XaAES, the `[apj-os]` build). Use a Pi 4.
 
 For the complete **APJ-OS** distribution (this emulator plus FreeMiNT/XaAES, the Bespoke Desktop, the PS GEM apps and a ready Atari boot disk) see [gotaproblem/apj-os](https://github.com/gotaproblem/apj-os): a flashable SD-card image, or `install.sh` on stock Raspberry Pi OS Lite, which runs this installer for you.
 

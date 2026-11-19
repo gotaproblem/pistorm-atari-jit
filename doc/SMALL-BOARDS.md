@@ -4,6 +4,10 @@ Verified on a Pi 3A+ on an H5 Phoenix board, 18 Oct 2026. One SD card and one
 `emulator` binary (built on the Pi 4 with the default `PIMODEL=PI4`) run on the
 Pi 4, 3B, 3A+ and Zero 2 W. Branch `small-boards`.
 
+> **⚠ APJ-OS is not for the Pi 3 (3B, 3B+, 3A+) or the Pi Zero 2 W.** These
+> boards run the emulator - TOS/EmuTOS, games and demos - but not the APJ-OS
+> distribution (FreeMiNT/XaAES, the `[apj-os]` build). Use a Pi 4.
+
 ## Code
 
 | Change | Why |
@@ -46,6 +50,8 @@ Measured on the 3A+ in a Mega ST (HDMI only), Nov 2026, `systemd-analyze`:
   clean with the live capture (see `dma_sound` in PSCTRL-CFG.md).
 
 ## Memory budget at the APJ-OS desktop (3A+, 1080p HDMI, ttram 256M)
+
+A development measurement only - APJ-OS is not supported on these boards.
 
     kernel sees 287 MB; emulator RSS 120 MB (all mlocked); available 131 MB
 
