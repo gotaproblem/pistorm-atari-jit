@@ -174,9 +174,12 @@ Non-interactive env overrides (1/y/yes = yes, anything else = no):
   WEB=1       psweb + WPE WebKit browser engine
   DOS=1       psdos + DOSBox Pure (DOS games in DOSGEM, ~30 min build)
   NOHZ=1      boot the tickless kernel (6.18.50-v8-nohz, tools/nohz-kernel)
-              from a built package - default yes when one is found
-  NOHZ_PKG=/path/nohz-kernel-6.18.50.tar.gz   that package (default: looked
-              for in ../nohz-build/, tools/nohz-kernel/ and ../)
+              - default yes; NOHZ=0 keeps the stock kernel
+  NOHZ_PKG=/path/nohz-kernel-6.18.50.tar.gz   a local package (default:
+              looked for in ../nohz-build/, tools/nohz-kernel/ and ../;
+              none there: downloaded from the GitHub release and checked
+              against its .sha256)
+  NOHZ_URL=https://.../nohz-kernel-6.18.50.tar.gz   download from here
   MACFIX=1    atariclean + nightly timer + Samba Apple settings (default yes)
   SAMBA=1     guest [pistorm] Samba share
   KILLGUI=1   disable a desktop environment if one is found
@@ -281,7 +284,7 @@ sudo apt-get install -y \
   libavformat-dev libavcodec-dev libavutil-dev \
   libswscale-dev libswresample-dev \
   libpoppler-glib-dev libcairo2-dev poppler-data fonts-urw-base35 \
-  libasound2-dev ffmpeg cifs-utils
+  libasound2-dev ffmpeg cifs-utils curl
 
 # ---- SDL3 -----------------------------------------------------------------
 # Debian ships libsdl3-dev from trixie (Raspberry Pi OS 13) onwards. On a
@@ -485,8 +488,11 @@ fi
 #     jitter (Defender of the Crown's bottom lines); a kernel built with
 #     nohz_full stops it - cmdline.txt above already asks for nohz_full=2,3.
 #     The kernel is built in an arm64 VM (build-nohz-kernel.sh, about an
-#     hour); this installs the package it makes. Pi 3 / 3A+ / Zero 2 W /
-#     Pi 4 - the Pi 5 keeps its own kernel.
+#     hour); this installs the package it makes - a local one if there is
+#     one (NOHZ_PKG, ../nohz-build/, tools/nohz-kernel/, ../: so a new build
+#     can be tried before it is published), else the one on the GitHub
+#     release, refused unless it matches the release's .sha256. Pi 3 / 3A+ /
+#     Zero 2 W / Pi 4 - the Pi 5 keeps its own kernel.
 # --------------------------------------------------------------------------
 NOHZ_REL=6.18.50-v8-nohz
 nohz_pkg="${NOHZ_PKG:-}"
@@ -497,21 +503,44 @@ if [ -z "$nohz_pkg" ]; then
     [ -f "$c" ] && { nohz_pkg="$c"; break; }
   done
 fi
+# The release asset: nohz-kernel-6.18.50.tar.gz + nohz-kernel-6.18.50.tar.gz.sha256
+# (sha256sum output) on the release tagged nohz-kernel-6.18.50.
+NOHZ_URL="${NOHZ_URL:-https://github.com/gotaproblem/pistorm-atari-jit/releases/download/nohz-kernel-6.18.50/nohz-kernel-6.18.50.tar.gz}"
+nohz_fetch() {                                   # -> sets nohz_pkg, or returns 1
+  local d="$ROOT/nohz-build" f=nohz-kernel-6.18.50.tar.gz
+  mkdir -p "$d"
+  say "Downloading the tickless kernel: $NOHZ_URL"
+  if ! curl -fL --retry 2 -o "$d/$f.part" "$NOHZ_URL" ||
+     ! curl -fsL --retry 2 -o "$d/$f.sha256" "$NOHZ_URL.sha256"; then
+    rm -f "$d/$f.part" "$d/$f.sha256"
+    warn "download failed - stock kernel kept (NOHZ_PKG= a local package, or build one: tools/nohz-kernel/)"
+    return 1
+  fi
+  local want got
+  want="$(awk '{print $1; exit}' "$d/$f.sha256")"
+  got="$(sha256sum "$d/$f.part" | awk '{print $1}')"
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    rm -f "$d/$f.part"
+    warn "checksum mismatch (release ${want:-none}, download $got) - refused, stock kernel kept"
+    return 1
+  fi
+  mv "$d/$f.part" "$d/$f"
+  say "SHA-256 OK: $got"
+  nohz_pkg="$d/$f"
+}
 nohz_model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 case "$nohz_model" in
   *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*)
     say "Pi 5: the tickless kernel is for Pi 3 / Zero 2 W / Pi 4 - skipped" ;;
   *)
-    if [ -n "$nohz_pkg" ] && [ -f "$nohz_pkg" ]; then
-      if ask NOHZ "Boot the tickless kernel $NOHZ_REL (from $nohz_pkg)?" y; then
-        say "Installing the tickless kernel $NOHZ_REL"
-        sudo bash "$HERE/tools/nohz-kernel/install-nohz-kernel.sh" "$nohz_pkg"
+    if [ "$(uname -r)" = "$NOHZ_REL" ] && grep -qx "os_prefix=nohz/" "$BOOT/config.txt"; then
+      say "The tickless kernel $NOHZ_REL is already the running kernel - left as it is"
+    elif ask NOHZ "Boot the tickless kernel $NOHZ_REL (${nohz_pkg:-downloaded from the GitHub release})?" y; then
+      if [ -n "$nohz_pkg" ] && [ -f "$nohz_pkg" ] || nohz_fetch; then
+        say "Installing the tickless kernel $NOHZ_REL from $nohz_pkg"
+        sudo bash "$HERE/tools/nohz-kernel/install-nohz-kernel.sh" "$nohz_pkg" ||
+          warn "tickless kernel not installed (see above) - stock kernel kept"
       fi
-    elif case "${NOHZ:-}" in 1|y|Y|yes) true ;; *) false ;; esac; then
-      warn "NOHZ=1 but no kernel package found (NOHZ_PKG, ../nohz-build/, tools/nohz-kernel/, ../)"
-      warn "build it in an arm64 Debian VM: bash tools/nohz-kernel/build-nohz-kernel.sh"
-    else
-      say "No tickless kernel package found - stock kernel kept (tools/nohz-kernel/ builds one)"
     fi ;;
 esac
 
