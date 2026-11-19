@@ -31,6 +31,7 @@ Everything beyond this README is in [`doc/`](doc/):
 | [INSTALL-README.md](doc/INSTALL-README.md) | the installer (`install-full.sh`), file layout, the setup page |
 | [PSCTRL-CFG.md](doc/PSCTRL-CFG.md) | `psctrl.cfg`, key by key |
 | [PERF-TUNING.md](doc/PERF-TUNING.md) | performance tuning |
+| [GAME-TIMING.md](doc/GAME-TIMING.md) | Games and demos timed to the 68000: the `[games]` build, the governor, beam-timed raster handlers, diagnostics |
 | [SMALL-BOARDS.md](doc/SMALL-BOARDS.md) | Pi 3A+ / Zero 2 W (512 MB, BCM2837): findings, budget, recovery |
 | [VIDEO.md](doc/VIDEO.md) | host video playback (VIDPLAY NatFeat) |
 | [PSVIDEL.md](doc/PSVIDEL.md) | Falcon Videl and SuperVidel on HDMI |
@@ -54,7 +55,9 @@ Development has been done on a Raspberry Pi4 with 2GB and various ATARI platform
 
 **Raspberry Pi 3B and 3B+ are supported** - both have 1 GB RAM. Build it with `make PIMODEL=PI3` (install-full.sh does this for you).
 
-In theory, this should work on Pi3A+ and PiZero2W, but I haven't tried. ***Update Pi3A+ and Pi02w only have 512MB RAM. As things are, this build will not work on either of these parts. I may get around to looking in to it, but cannot say when.***
+**Raspberry Pi 3A+ and Zero 2 W (512 MB) work**, with limits - see [SMALL-BOARDS.md](doc/SMALL-BOARDS.md). Tested on a 3A+ in a Mega ST.
+
+**The tickless kernel.** On a Pi 4, 3B, 3A+ and Zero 2 W, `install-full.sh` also tunes the OS (`tools/pi4-tune.sh`) and boots a tickless (`nohz_full`) build of Raspberry Pi OS's own kernel, downloaded from this repo's release `nohz-kernel-6.18.50`, beside the stock one. It keeps the kernel's timer tick off the emulator's cores; `NOHZ=0` skips it. See [INSTALL-README.md](doc/INSTALL-README.md).
 You will need either a PiSTorm board (Amiga A500) for DIL 68pin CPUs (STfm, MST) or a custom designed STe board available online or from Discord pistorm atari channel Users.
 ### CPLD firmware - 0.83a or later required, 1.1b recommended
 > **This tree needs PiSTorm CPLD firmware 0.83a (rev $253) or later. Older firmware is obsolete and will not work.**

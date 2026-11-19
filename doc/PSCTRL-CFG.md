@@ -115,7 +115,7 @@ image picker lists.
 | `falcon_stram` | `14M` | `machine falcon` only: a 14 MB Falcon. `$400000`-`$DFFFFF` becomes ST-RAM backed by Pi memory (Mxalloc mode 0 finds it). Falcon TOS 4.0x sizes it from `$FF8006` and puts its screen at the top, so the display must be PSVIDEL/fVDI on HDMI - the real Shifter, and real FDC/ACSI DMA on the board, only reach the first 4 MB. Ignored with `vga` (the ET4000 windows are at `$A00000`-`$DFFFFF`) or `stram_size`. EmuTOS (ST builds) still sizes 4 MB. For programs built for 14 MB Falcons (BadMood 2.01 `base030.14m`) |
 | `stram_cache` | boolean | keep a copy of ST-RAM in the Pi and satisfy the CPU's reads from it, writing through to the board only what the real hardware must see (low memory, the screen). Much faster. Off unless given; the setup page writes `stram_cache disabled` into every build that has no line |
 | `stram_direct` | boolean | let the JIT read and write the ST-RAM copy inline. Faster again. Experimental: stupid fast for some software, breaks some. Off unless given; the setup page writes `stram_direct disabled` into every build that has no line |
-| `cpu_speed` | `8mhz` `16mhz` | run the interpreter at a real 68000 clock - for games and demos timed to the CPU. There is no 32mhz: a Pi 4's interpreter tops out near 20 MHz (measured with the governor asking for 32), so no key is already about as fast as it gets. JIT off only (`jit_power 0`): with the JIT on it is ignored with a warning. No key: as fast as the Pi goes. If the interpreter cannot keep up the emulator says so once (`[GOV] reaching N kHz of the M kHz target`). The setup page adds `cpu_speed 8mhz` when `cpu_compatible` is ticked. `PISTORM_GOV_KHZ=n` overrides the rate |
+| `cpu_speed` | `8mhz` `16mhz` | run the interpreter at a real 68000 clock - for games and demos timed to the CPU. There is no 32mhz: a Pi 4's interpreter tops out near 20 MHz (measured with the governor asking for 32), so no key is already about as fast as it gets. JIT off only (`jit_power 0`): with the JIT on it is ignored with a warning. No key: as fast as the Pi goes. If the interpreter cannot keep up the emulator says so once (`[GOV] reaching N kHz of the M kHz target`). The setup page adds `cpu_speed 8mhz` when `cpu_compatible` is ticked. At `8mhz` the governor paces at the board's own 68000 clock (a PAL ST is 8.021247 MHz), measured from the real Shifter, not 8.000 MHz - see [GAME-TIMING.md](GAME-TIMING.md). `PISTORM_GOV_KHZ=n` sets a rate by hand, taken as given |
 | `cpu_clock_multiplier`, `m68k_speed` | - | redundant: the UAE knobs `cpu_speed` replaced. Ignored with a console line saying so, never a row |
 
 ## Video
@@ -140,7 +140,7 @@ All HDMI sound shares one audio device; any one of these brings it up.
 | key | values | |
 |---|---|---|
 | `ym2149` | boolean | the PSG on HDMI: shadows the register writes the real chip still gets, so chip music, key clicks and effects play on HDMI too. Any machine |
-| `dma_sound` | boolean | the STE DMA sound on HDMI. `machine ste` and `falcon` only: on there with no line, `dma_sound disabled` turns it off. Ignored on any other machine. Tuned for MOD and MP3 playback; system sounds may lag |
+| `dma_sound` | boolean | the STE DMA sound on HDMI. `machine ste` and `falcon` only: on there with no line, `dma_sound disabled` turns it off. Ignored on any other machine. Tuned for MOD and MP3 playback; system sounds may lag. The bytes are taken from ST-RAM as the real DMA plays them, so a player that refills the buffer behind the play position is heard as written; `PISTORM_DMASND_LIVE=0` goes back to a snapshot of the frame |
 | `falcon_dsp` | boolean | the Falcon's DSP56001, host port, SSI, sound matrix, 16-bit sound DMA and CODEC, sound on HDMI. Armed by the same `PSVIDEL.PRG`. See `platforms/atari/falcon/README.md`. Env: `PISTORM_DSP_TURBO`, `PISTORM_FALCON_VBLSYNC`, `PISTORM_FALCON_STATS` |
 
 ## Input
@@ -160,6 +160,7 @@ All HDMI sound shares one audio device; any one of these brings it up.
 
 | key | values | |
 |---|---|---|
+| `fastboot` | boolean | skip TOS 2.06's cold-boot ROM check, memory test and 80 s hard-disk wait (the path a warm reset takes). Found by pattern, so a ROM without them (TOS 1.0x, EmuTOS) is left alone and says so |
 | `rom` | image file | the TOS. 256K and larger images load at `$E00000` (TOS 2/3/4, EmuTOS 256K and up), 192K images at `$FC0000` (TOS 1.x, EmuTOS 192K). `emutos-aranym.rom` is installed under `rom_path` |
 
 ## Drives
@@ -229,7 +230,19 @@ set them in `run-pistorm.sh` or with `sudo env VAR=... sh run-pistorm.sh`.
 | | |
 |---|---|
 | `PISTORM_JIT=0` (or `touch /tmp/pistorm_jit_off`) | JIT off without editing the cfg |
-| `PISTORM_CPU_DIAG=1` | exception and bus-error traces, PC history at a reset |
+| `PISTORM_CPU_DIAG=1` | exception and bus-error traces, PC history at a reset; at a crash also the last 8192 interrupts / RTEs / STOPs / TRAPs with their times and the governor's lead (`[IRQTL]`), and the code the PC ring ran through |
+| `PISTORM_GOV_KHZ=n` | the governor's rate by hand (1000..64000), instead of following the board's clock |
+| `PISTORM_GOV_REPORT=1` | the `[GOV]` line every 5 s (rate reached, beam-timed handlers, leads written off), not only when the rate is short |
+| `PISTORM_GOV_LEAD_MAX_US=n` | write off a lead over the real clock larger than n us (default 1000; 0 = never) |
+| `PISTORM_GOV_BEAM=0`, `PISTORM_GOV_BEAM_CYC=n` | turn off beam-timed Timer B handlers / the cycles from the line's end to the handler's start (default 28) |
+| `PISTORM_IPL_PASS_NS=n` | IPL sampling period while the CPU thread runs (250..100000, default 15000) |
+| `PISTORM_IPL_IDLE_NS=n` | IPL sampling period while the CPU thread waits for an interrupt (0 = off, or 250..100000; default 1000) |
+| `PISTORM_WRBEHIND=1` | experimental, off: RAM writes made in an interrupt handler reach the bus when it ends |
+| `PISTORM_RASTER_TRACE=file` | log every palette write with the real Shifter's video counter, every interrupt, and the Timer B writes; written when the emulator stops. `tools/raster-trace/analyse.py file` reads it |
+| `PISTORM_PC_PROFILE=file` | the guest pc every 1 ms, with the CPU thread's bus traffic |
+| `PISTORM_IPL_STATS=1` | IPL and VBL counts once a second |
+| `PISTORM_DMASND_LIVE=0`, `PISTORM_DMASND_DEBUG=1/2` | see `dma_sound`; debug prints the capture's `SUM` lines (`live=`, `drop=`) |
+| `PISTORM_IKBD_DEBUG=1` | keyboard ACIA / IKBD traffic |
 | `PISTORM_MMU=1/0`, `PISTORM_MMU_DEBUG=1` | see `mmu` |
 | `PISTORM_CPU_COMPAT=1` | see `cpu_compatible` |
 | `PISTORM_VID_FOLLOW=1` | HDMI follows the guest's refresh rate (50 Hz for a 50 Hz screen) |

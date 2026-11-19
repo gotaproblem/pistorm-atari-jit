@@ -27,6 +27,24 @@ Pi 4, 3B, 3A+ and Zero 2 W. Branch `small-boards`.
   once per board section, never in `[all]`: loading it twice = 7 green flashes.
   Before: 150 MB for Linux. After: 287 MB.
 
+## Boot time, the tickless kernel, HDMI only
+
+Measured on the 3A+ in a Mega ST (HDMI only), Nov 2026, `systemd-analyze`:
+
+* `pistorm.service` used to wait for `multi-user.target` (NetworkManager,
+  Samba): 28.6 s into userspace before the emulator started. It now starts
+  after `sound.target bluetooth.target`: 8.1 s. The network and the share come
+  up while it runs.
+* `tools/pi4-tune.sh --apply` (run by `install-full.sh`) accepts the 3A+ and
+  Zero 2 W. What it saved here: cloud-init after first boot (4-5 s), nmbd
+  (3.5 s), e2scrub_reap (1.6 s), samba-ad-dc (1.4 s), and the serial console.
+  The share still shows on the Mac (avahi).
+* The tickless kernel (`tools/nohz-kernel/`, the release
+  `nohz-kernel-6.18.50`) has a `[pi3]` block and the BCM2837 device trees, so
+  the 3A+ boots it: `uname -r` = `6.18.50-v8-nohz`, `nohz_full` = `2-3`.
+* STE DMA sound needs HDMI audio; on this board MOD playback through it is
+  clean with the live capture (see `dma_sound` in PSCTRL-CFG.md).
+
 ## Memory budget at the APJ-OS desktop (3A+, 1080p HDMI, ttram 256M)
 
     kernel sees 287 MB; emulator RSS 120 MB (all mlocked); available 131 MB

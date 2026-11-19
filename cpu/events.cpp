@@ -387,7 +387,7 @@ static int cycles_to_add_remain;
  *                           (default 2, 0 = unlimited, i.e. flat out).
  *   PISTORM_GOV_BEAM=0      no beam-timed Timer B handlers (see BEAM-TIMED
  *                           HANDLERS); PISTORM_GOV_BEAM_CYC=n moves their
- *                           start (cycles after the display end, default 40).
+ *                           start (cycles after the display end, default 28).
  *   A report steady near the target with audio/timing still wrong means
  *   the problem is not CPU speed (look at interrupt delivery instead).
  * ======================================================================== */

@@ -70,8 +70,9 @@ chmod +x install-full.sh
 ./install-full.sh
 ```
 
-You'll be asked whether to build the emulator, install the auto-start service,
-and create a Samba share. Then:
+You'll be asked whether to tune the OS for the emulator, boot the tickless
+kernel, build the emulator, install the auto-start service, and create a Samba
+share. Then:
 
 ```bash
 sudo reboot
@@ -87,6 +88,10 @@ BUILD=1 SERVICE=1 SAMBA=0 ./install-full.sh
 
 | Variable       | Effect                                              | Default |
 |----------------|-----------------------------------------------------|---------|
+| `TUNE=1`       | Tune the OS for the emulator (`tools/pi4-tune.sh`, see below) | prompt (yes) |
+| `NOHZ=1`       | Boot the tickless kernel (see below); `NOHZ=0` keeps the stock kernel | prompt (yes) |
+| `NOHZ_PKG=`    | A local tickless-kernel package to install instead of downloading it | looked for in `../nohz-build/`, `tools/nohz-kernel/`, `../` |
+| `NOHZ_URL=`, `NOHZ_SHA256=` | Download it from elsewhere / expect another checksum | the GitHub release / the pinned value |
 | `BUILD=1`      | Run `make` (auto-detects Pi model)                  | prompt  |
 | `SERVICE=1`    | Install the systemd auto-start unit                 | prompt  |
 | `SAMBA=1`      | Install + configure the Samba share                 | prompt  |
@@ -220,6 +225,75 @@ none exist).
 
 Nothing you had in those files is discarded.
 
+### 3a. OS tuning — `tools/pi4-tune.sh` (Pi 3 / 3A+ / Zero 2 W / Pi 4)
+
+Linux keeps cores 0-1 and the emulator gets cores 2-3 to itself: interrupts
+and kernel work are moved off them at every boot (`pi4-tune-runtime.service`),
+a few kernel arguments are added (`irqaffinity`, `nosoftlockup`, `audit=0`),
+and services nothing here uses are disabled. The ones that held up the boot
+were measured with `systemd-analyze` on a Pi 4 and a Pi 3A+:
+
+| Turned off | What it cost at boot | Keep it with |
+|---|---|---|
+| cloud-init, once first boot has run | 4-5 s | `KEEP_CLOUDINIT=1` |
+| nmbd (NetBIOS names; the Mac finds the share through avahi) | 3.5 s | `KEEP_NMBD=1` |
+| e2scrub_reap (LVM snapshot clean-up) | 1.6 s | - |
+| samba-ad-dc (AD domain controller) | 1.4 s | - |
+| the serial console (`console=serial0,…`) | slows the kernel's boot | `KEEP_SERIAL=1` |
+
+The full list, and the other `KEEP_*` switches (`KEEP_AVAHI`, `KEEP_SWAP`,
+`KEEP_DOCKER`, `KEEP_WINBIND`, `KEEP_WIFI`), are at the top of the script.
+The installer passes `KEEP_WIFI=1`, so an install never turns Wi-Fi off.
+Inside a chroot (an SD image still to be flashed) cloud-init is kept, so the
+Imager's first-boot setup (user, Wi-Fi, ssh) still happens on the card.
+
+```bash
+sudo tools/pi4-tune.sh            # dry run: shows what would change
+sudo tools/pi4-tune.sh --apply    # apply, then reboot
+sudo tools/pi4-tune.sh --status   # check the result after the reboot
+sudo tools/pi4-tune.sh --revert   # put everything back, then reboot
+```
+
+### 3b. The tickless kernel — `tools/nohz-kernel/` (Pi 3 / 3A+ / Zero 2 W / Pi 4)
+
+The stock kernel's 250 Hz timer tick lands on the emulation cores too, and it
+shows: Defender of the Crown's bottom lines jittered until it was gone. The
+tickless kernel is Raspberry Pi OS's own 6.18.50 kernel
+(raspberrypi/linux `stable_20260911`), built with the Pi's own config and one
+change, `NO_HZ_FULL` + `RCU_NOCB_CPU`; `nohz_full=2,3` in `cmdline.txt` (from
+the shipped `configs/cmdline.txt`) then keeps the tick off cores 2-3. It is
+tested on a Pi 4 and a Pi 3A+.
+
+The installer downloads it from the GitHub release `nohz-kernel-6.18.50` and
+installs it only if its SHA-256 matches the one pinned in `install-full.sh`;
+a local package (`NOHZ_PKG`, `../nohz-build/`, `tools/nohz-kernel/`, `../`)
+is used first. A download or install failure keeps the stock kernel and the
+install carries on. It goes in beside the stock kernel, not over it:
+
+- `/boot/firmware/nohz/` - `kernel8.img`, the device trees, `overlays/`;
+- `/lib/modules/6.18.50-v8-nohz/`;
+- a `[pi4]` / `[pi3]` / `[pi02]` block at the end of `config.txt`
+  (`os_prefix=nohz/`, `kernel=kernel8.img`, `arm_64bit=1`,
+  `cmdline=/cmdline.txt`), for each board the package has a device tree for.
+  Any other board - and the Pi 5, which keeps its own kernel - boots stock.
+
+After the reboot, `uname -r` says `6.18.50-v8-nohz` and
+`cat /sys/devices/system/cpu/nohz_full` says `2-3`. To go back to the stock
+kernel: `sudo tools/nohz-kernel/make-nohz-permanent.sh revert`, then reboot.
+
+To build it yourself (in an arm64 Debian VM; about an hour), try it once
+without touching `config.txt`, and make it permanent:
+
+```bash
+bash tools/nohz-kernel/build-nohz-kernel.sh           # in the VM
+tar xzf nohz-kernel-6.18.50.tar.gz                     # on the Pi
+sudo nohz-kernel-6.18.50/tryboot-nohz3.sh              # boots it once; power-cycle = stock again
+sudo nohz-kernel-6.18.50/make-nohz-permanent.sh install
+```
+
+A new build is published by attaching its `.tar.gz` to the release and putting
+the SHA-256 the build prints into `NOHZ_SHA256` in `install-full.sh`.
+
 > **Pi 5: `kernel=kernel8.img`** (set under `[pi5]` in the shipped block). The
 > Pi 5 boots a 16K-page kernel by default; the JIT protects its memory in 4K
 > pages and needs the 4K-page kernel. If the PiStorm block was appended before
@@ -262,7 +336,13 @@ burying you in compiler errors.
 Installs `/etc/systemd/system/pistorm.service`, which launches the emulator on
 **tty1 as root** (the GPIO/DMA bus needs root; KMSDRM/`native_hdmi` needs the
 console) and takes tty1 from the login prompt, appliance-style. It restarts on
-failure. It runs `../configs/psctrl.cfg`, so the **setup page** comes up on
+failure. It runs `run-pistorm.sh`, so the emulator's exit codes act as when it
+is started by hand: 42 (Restart, Ctrl+Alt+Undo, the ST's reset) relaunches it,
+43 (Ctrl+Alt+Shift+Undo) shuts Linux down, 0 stops it. It starts as soon as
+sound and Bluetooth are up - **not** after `multi-user.target`, which waits for
+NetworkManager and Samba: on a Pi 3A+ that was 28.6 s into userspace, against
+8.1 s now. Networking and the share come up while the emulator runs.
+It uses `../configs/psctrl.cfg`, so the **setup page** comes up on
 the ST monitor at every power-on and boots the last build after its countdown
 (see below). To boot with no page, set `countdown 0` in the `[psctrl]` block,
 or add `--no-setup` to `ExecStart` in the unit. `PISTORM_CFG=` at install
@@ -539,6 +619,12 @@ sudo reboot
 This:
 
 - stops, disables and removes `pistorm.service`, and restores the tty1 login;
+- reverts the OS tuning (`tools/pi4-tune.sh --revert`: services, cloud-init,
+  the runtime unit, sysctl);
+- removes the tickless kernel's files (`/boot/firmware/nohz/`,
+  `/lib/modules/6.18.50-v8-nohz`) once it is no longer the running kernel -
+  right after the restore below it still is, so run `--uninstall` again after
+  the reboot;
 - removes the `psweb`, `atariclean`, `apj-wifi` and `apj-sshkeys` units and
   their programs in `/usr/local`;
 - removes just the `[pistorm]` stanza from `smb.conf` and restarts Samba;
