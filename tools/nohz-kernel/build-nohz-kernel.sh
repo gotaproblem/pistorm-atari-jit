@@ -98,8 +98,9 @@ grep -a -m1 -o "Linux version $REL [^)]*)" "$P/nohz/kernel8.img" || true
 step "6/6 archive next to this script"
 tar czf "$SHARE/nohz-kernel-6.18.50.tar.gz" -C "$W/pkg" nohz-kernel-6.18.50
 ls -la "$SHARE/nohz-kernel-6.18.50.tar.gz"
-# the checksum install-full.sh checks a downloaded package against: upload
-# both files to the GitHub release tagged nohz-kernel-6.18.50
+# the checksum install-full.sh checks a downloaded package against: it is
+# pinned there (NOHZ_SHA256) - put this value in when publishing a new build;
+# only the .tar.gz goes on the GitHub release tagged nohz-kernel-6.18.50
 (cd "$SHARE" && sha256sum nohz-kernel-6.18.50.tar.gz > nohz-kernel-6.18.50.tar.gz.sha256)
 cat "$SHARE/nohz-kernel-6.18.50.tar.gz.sha256"
-printf '\n\033[1;32mDONE.\033[0m On the Pi (any Pi 3 / 3A+ / Zero 2 W / Pi 4), in the folder holding the archive:\n  tar xzf nohz-kernel-6.18.50.tar.gz && sudo nohz-kernel-6.18.50/tryboot-nohz3.sh\n  then, if it boots right:  sudo nohz-kernel-6.18.50/make-nohz-permanent.sh install\nTo publish it (install-full.sh downloads it from there): release tag nohz-kernel-6.18.50,\n  assets nohz-kernel-6.18.50.tar.gz and nohz-kernel-6.18.50.tar.gz.sha256\n'
+printf '\n\033[1;32mDONE.\033[0m On the Pi (any Pi 3 / 3A+ / Zero 2 W / Pi 4), in the folder holding the archive:\n  tar xzf nohz-kernel-6.18.50.tar.gz && sudo nohz-kernel-6.18.50/tryboot-nohz3.sh\n  then, if it boots right:  sudo nohz-kernel-6.18.50/make-nohz-permanent.sh install\nTo publish it (install-full.sh downloads it from there): release tag nohz-kernel-6.18.50,\n  asset nohz-kernel-6.18.50.tar.gz; and the SHA-256 above as NOHZ_SHA256 in install-full.sh\n'

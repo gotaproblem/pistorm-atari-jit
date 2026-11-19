@@ -178,7 +178,7 @@ Non-interactive env overrides (1/y/yes = yes, anything else = no):
   NOHZ_PKG=/path/nohz-kernel-6.18.50.tar.gz   a local package (default:
               looked for in ../nohz-build/, tools/nohz-kernel/ and ../;
               none there: downloaded from the GitHub release and checked
-              against its .sha256)
+              against the SHA-256 pinned here, NOHZ_SHA256)
   NOHZ_URL=https://.../nohz-kernel-6.18.50.tar.gz   download from here
   MACFIX=1    atariclean + nightly timer + Samba Apple settings (default yes)
   SAMBA=1     guest [pistorm] Samba share
@@ -491,8 +491,10 @@ fi
 #     hour); this installs the package it makes - a local one if there is
 #     one (NOHZ_PKG, ../nohz-build/, tools/nohz-kernel/, ../: so a new build
 #     can be tried before it is published), else the one on the GitHub
-#     release, refused unless it matches the release's .sha256. Pi 3 / 3A+ /
-#     Zero 2 W / Pi 4 - the Pi 5 keeps its own kernel.
+#     release, refused unless it matches the SHA-256 pinned below - kept in
+#     the repo, not next to the download, so a swapped file on the release
+#     cannot pass. Pi 3 / 3A+ / Zero 2 W / Pi 4 - the Pi 5 keeps its own
+#     kernel.
 # --------------------------------------------------------------------------
 NOHZ_REL=6.18.50-v8-nohz
 nohz_pkg="${NOHZ_PKG:-}"
@@ -503,25 +505,26 @@ if [ -z "$nohz_pkg" ]; then
     [ -f "$c" ] && { nohz_pkg="$c"; break; }
   done
 fi
-# The release asset: nohz-kernel-6.18.50.tar.gz + nohz-kernel-6.18.50.tar.gz.sha256
-# (sha256sum output) on the release tagged nohz-kernel-6.18.50.
+# The release asset: nohz-kernel-6.18.50.tar.gz on the release tagged
+# nohz-kernel-6.18.50. Its SHA-256 (build-nohz-kernel.sh prints it; a new
+# build means a new value here): built 19 Nov 2026, tested on the Pi 4 and
+# the Pi 3A+.
+NOHZ_SHA256="${NOHZ_SHA256:-17b31e08f59dc02998b41896dddce53206f628073ff8ff73e6f2376b04ef5dfe}"
 NOHZ_URL="${NOHZ_URL:-https://github.com/gotaproblem/pistorm-atari-jit/releases/download/nohz-kernel-6.18.50/nohz-kernel-6.18.50.tar.gz}"
 nohz_fetch() {                                   # -> sets nohz_pkg, or returns 1
   local d="$ROOT/nohz-build" f=nohz-kernel-6.18.50.tar.gz
   mkdir -p "$d"
   say "Downloading the tickless kernel: $NOHZ_URL"
-  if ! curl -fL --retry 2 -o "$d/$f.part" "$NOHZ_URL" ||
-     ! curl -fsL --retry 2 -o "$d/$f.sha256" "$NOHZ_URL.sha256"; then
-    rm -f "$d/$f.part" "$d/$f.sha256"
+  if ! curl -fL --retry 2 -o "$d/$f.part" "$NOHZ_URL"; then
+    rm -f "$d/$f.part"
     warn "download failed - stock kernel kept (NOHZ_PKG= a local package, or build one: tools/nohz-kernel/)"
     return 1
   fi
-  local want got
-  want="$(awk '{print $1; exit}' "$d/$f.sha256")"
+  local got
   got="$(sha256sum "$d/$f.part" | awk '{print $1}')"
-  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+  if [ "$got" != "$NOHZ_SHA256" ]; then
     rm -f "$d/$f.part"
-    warn "checksum mismatch (release ${want:-none}, download $got) - refused, stock kernel kept"
+    warn "checksum mismatch (expected $NOHZ_SHA256, download $got) - refused, stock kernel kept"
     return 1
   fi
   mv "$d/$f.part" "$d/$f"
