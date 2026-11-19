@@ -66,6 +66,9 @@ int  dmasnd_capture_start(void);                    /* spawns the pump thread */
 void dmasnd_capture_stop(void);
 void dmasnd_pump(void);                             /* one pump step (pump thread only) */
 void dmasnd_capture_reset(void);                    /* call on machine reset */
+void dmasnd_live_tick(void);        /* CPU thread: interrupt taken / governor check -
+                                       take the DMA bytes that have played (LIVE CAPTURE) */
+extern volatile int dmasnd_live_run;
 
 #ifdef __cplusplus
 }

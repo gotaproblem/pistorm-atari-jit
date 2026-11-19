@@ -649,6 +649,9 @@ extern "C" uint8_t mfp_hub_tbcr(void);
 
 /* mode 0: a normal check; 1: see pistorm_gov_sync(); 2: an interrupt
  * handler is starting (pistorm_gov_irq_entry); 3: pistorm_gov_sync_read() */
+extern "C" void dmasnd_live_tick(void);          /* platforms/atari/audio/dmasnd_capture.c */
+extern "C" volatile int dmasnd_live_run;
+
 /* newcpu.cpp's interrupt timeline (PISTORM_CPU_DIAG): where the governor
  * has the guest against real time right now, and the lead parked */
 static evt_t   *gov_cyc0_p;
@@ -835,6 +838,14 @@ static void pistorm_governor(int sync)
 	}
 
 	gov_hz_now = gov_hz;
+	/* STE DMA sound, LIVE CAPTURE: every ~1 ms (256 checks x 32 cycles)
+	 * take the bytes that have played, for players that read nothing back */
+	{
+		static unsigned live_n;
+		if (__builtin_expect(dmasnd_live_run, 0) && !(++live_n & 255u))
+			dmasnd_live_tick();
+	}
+
 	int64_t virt_ns  = gov_cyc_ns(currcycle - gov_cyc0, unit, gov_hz);
 	int64_t ahead_ns = virt_ns - (now - gov_ns0);
 

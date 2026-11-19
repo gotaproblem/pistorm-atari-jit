@@ -220,6 +220,150 @@ static void pump_wake(void)
     }
 }
 
+/* =================== LIVE CAPTURE (default) ============================
+ *
+ * A real STE's DMA reads each byte from RAM as it plays it. Whatever the
+ * guest wrote there before that moment is heard; what it writes after is
+ * not. The snapshot models below approximate that by copying a frame at
+ * one instant - at the enable edge, or whole at each boundary - and that
+ * is wrong for any player that refills ONE repeating buffer behind the
+ * play position it reads back. Field case, 19 Nov 2026 (EmuTOS, STE build
+ * on an ST board, a MOD over HDMI; PISTORM_DMASND_DEBUG=2): one 8064-byte
+ * stereo 50 kHz repeat frame ($52F36..$54EB6, 80.5 ms), never restaged
+ * (stg=0, rep=13/s), the frame counter read ~105 times a second (rda=315
+ * bytes/s), i.e. refilled up to the counter about twice a VBL. Copied
+ * whole at the boundary, the part the player had not yet refilled - up to
+ * a VBL's worth, a quarter of the buffer - was the pass just heard: it
+ * played again 80 ms later. Distortion and an echo.
+ *
+ * So the bytes are taken as they play: from the latched frame, up to the
+ * play position by the same clock the guest's counter reads come from
+ * (g_ft0, bps). Taken on the CPU THREAD - the only writer of guest RAM -
+ * and always BEFORE the guest can act on knowing the position: before
+ * every sound-register write and at every counter/ctrl read (it has not
+ * seen the new position yet), at every interrupt the CPU takes while
+ * playing (a frame-end or VBL handler about to refill), and every ~1 ms
+ * from the governor's checks (players that read nothing). Frame
+ * boundaries are followed here with the frame model's own rule (the
+ * staged start/end latch at the boundary; since every register write is
+ * captured up to before it lands, the staged registers here are the ones
+ * the boundary latched). The bytes go through a lock-free ring to the
+ * pump thread, which alone talks to SDL. PISTORM_DMASND_LIVE=0 restores
+ * the snapshot models. */
+static int live_mode(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PISTORM_DMASND_LIVE");
+        v = (e && *e == '0') ? 0 : 1;
+        if (!v)
+            fprintf(stderr, "[dmasnd] PISTORM_DMASND_LIVE=0: snapshot capture (old models)\n");
+    }
+    return v;
+}
+
+#define LQ_SIZE   (1u << 19)                 /* 512 KB: 5 s at 100 KB/s */
+#define LQ_CHUNK  4096u
+static uint8_t      lq[LQ_SIZE];
+static atomic_uint  lq_head, lq_tail;        /* pump pops head, CPU pushes tail */
+static atomic_uint  g_ct_live_drop;          /* bytes lost: ring full          */
+volatile int        dmasnd_live_run;         /* CPU thread: a frame is playing */
+static uint32_t     cs_, ce_, cbps_, coff_;  /* CPU thread only from here on   */
+static uint64_t     ct0_;
+static uint8_t      cmode_;
+
+static void lq_put(uint8_t mode, const uint8_t *src, uint32_t n)
+{
+    while (n) {
+        const uint32_t k = n > LQ_CHUNK ? LQ_CHUNK : n;
+        const unsigned t = atomic_load_explicit(&lq_tail, memory_order_relaxed);
+        const unsigned h = atomic_load_explicit(&lq_head, memory_order_acquire);
+        if (LQ_SIZE - (t - h) < k + 3u) {
+            atomic_fetch_add(&g_ct_live_drop, n);
+            return;
+        }
+        lq[t & (LQ_SIZE - 1u)]        = (uint8_t)(k & 0xFFu);
+        lq[(t + 1u) & (LQ_SIZE - 1u)] = (uint8_t)(k >> 8);
+        lq[(t + 2u) & (LQ_SIZE - 1u)] = mode;
+        for (uint32_t i = 0; i < k; i++)
+            lq[(t + 3u + i) & (LQ_SIZE - 1u)] = src[i];
+        atomic_store_explicit(&lq_tail, t + 3u + k, memory_order_release);
+        src += k;
+        n -= k;
+    }
+}
+
+/* pump thread: hand the captured bytes to the output, in order */
+static void lq_drain(uint8_t *last_mode)
+{
+    static uint8_t buf[LQ_CHUNK];
+    for (;;) {
+        const unsigned h = atomic_load_explicit(&lq_head, memory_order_relaxed);
+        const unsigned t = atomic_load_explicit(&lq_tail, memory_order_acquire);
+        if (t - h < 3u)
+            return;
+        const uint32_t k = (uint32_t)lq[h & (LQ_SIZE - 1u)] |
+                           ((uint32_t)lq[(h + 1u) & (LQ_SIZE - 1u)] << 8);
+        const uint8_t  m = lq[(h + 2u) & (LQ_SIZE - 1u)];
+        for (uint32_t i = 0; i < k; i++)
+            buf[i] = lq[(h + 3u + i) & (LQ_SIZE - 1u)];
+        atomic_store_explicit(&lq_head, h + 3u + k, memory_order_release);
+        if (m != *last_mode) {
+            dmasnd_set_mode(ste_rates[m & 3], (m & 0x80) ? 0 : 1);
+            *last_mode = m;
+        }
+        dmasnd_write_bytes(buf, k);
+    }
+}
+
+static int live_frame_ok(uint32_t s, uint32_t e, uint32_t bps)
+{
+    return e > s && (e - s) <= MAX_FRAME && e <= ST_RAM_SIZE && bps && natmem_offset;
+}
+
+static uint64_t now_ns(void);
+static uint32_t frame_bps(void);
+static uint32_t start_addr(void);
+static uint32_t end_addr(void);
+
+/* CPU thread: take what has played up to now */
+static void live_capture(uint64_t now)
+{
+    int guard = 0;
+    while (dmasnd_live_run && guard++ < 64) {
+        const uint32_t len = ce_ - cs_;
+        const uint64_t dur = (uint64_t)len * 1000000000ull / cbps_;
+        const uint64_t el  = now > ct0_ ? now - ct0_ : 0;
+        uint32_t upto = el >= dur ? len : (uint32_t)(el * cbps_ / 1000000000ull);
+        if (!(cmode_ & 0x80))
+            upto &= ~1u;                         /* stereo: whole L/R pairs */
+        if (upto > coff_) {
+            lq_put(cmode_, natmem_offset + cs_ + coff_, upto - coff_);
+            coff_ = upto;
+        }
+        if (el < dur)
+            return;
+        /* boundary: the frame model's rule (frames_advance) */
+        ct0_ += dur;
+        if (!atomic_load(&g_repeat)) {
+            dmasnd_live_run = 0;
+            return;
+        }
+        cs_ = start_addr(); ce_ = end_addr(); cbps_ = frame_bps(); cmode_ = reg[0x21];
+        coff_ = 0;
+        if (!live_frame_ok(cs_, ce_, cbps_))
+            dmasnd_live_run = 0;
+    }
+}
+
+/* CPU thread: an interrupt is being taken / a governor check (newcpu.cpp,
+ * events.cpp) - cheap when nothing plays */
+void dmasnd_live_tick(void)
+{
+    if (dmasnd_live_run)
+        live_capture(now_ns());
+}
+
 static atomic_int  g_g7_app;         /* guest vector $13C points into ST RAM */
 /* virtual MFP pending/in-service state moved to mfp_hub.c (the shadow
  * here set in-service at IACK but never CHECKED it before re-raising -
@@ -244,6 +388,12 @@ static void dmasnd_commit(const char *why, int is_enable)
         atomic_store(&g_act_bps, frame_bps());
         atomic_store(&g_ft0, now_ns());
         atomic_store(&g_parked, 0);
+        if (live_mode()) {
+            cs_ = atomic_load(&g_act_s); ce_ = atomic_load(&g_act_e);
+            cbps_ = atomic_load(&g_act_bps); ct0_ = atomic_load(&g_ft0);
+            cmode_ = reg[0x21]; coff_ = 0;
+            dmasnd_live_run = live_frame_ok(cs_, ce_, cbps_);
+        }
         if (dmasnd_dbg() && natmem_offset) {
             /* What will the next VBL run? Dump the interrupt vectors and
              * the whole VBL queue at the moment playback starts - the
@@ -309,6 +459,8 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
     uint32_t a = addr & 0x00FFFFFFu;
     if (a < SND_BASE || a > SND_TOP) return;
     uint32_t off = a - SND_BASE;
+    if (dmasnd_live_run)
+        live_capture(now_ns());          /* what played before this write */
     reg[off] = val;
     if (off == 0x07)
         atomic_fetch_add(&g_ct_stage, 1);
@@ -339,6 +491,7 @@ void dmasnd_snoop8(uint32_t addr, uint8_t val)
                 dmasnd_commit(off == 0x00 ? "ctrl0-enable" : "ctrl1-enable", 1);
         } else if (was_enabled) {
             atomic_store(&g_enabled, 0);
+            dmasnd_live_run = 0;          /* stopped: nothing more plays */
             /* stopped: the open frame played only until now */
             if (pend_finish(atomic_load(&g_parked), now_ns()))
                 pump_wake();
@@ -500,6 +653,8 @@ uint8_t dmasnd_reg_read8(uint32_t addr)
         }
     }
 
+    if (dmasnd_live_run && (off == 0x01 || off == 0x09 || off == 0x0B || off == 0x0D))
+        live_capture(now_ns());
     switch (off) {
     case 0x01:                  /* ctrl: live play bit, repeat as written */
         atomic_fetch_add(&g_ct_rd_ctrl, 1);
@@ -797,7 +952,7 @@ static void *pump_thread(void *arg)
                         "g7=%u rdc=%u rda=%u stg=%u rep=%u short=%u "
                         "i2=%u i4=%u i6=%u gp=%02X%s "
                         "act=%05X..%05X len=%u bps=%u dur=%uus "
-                        "mode=0x%02X %s %uHz en=%d parked=%d ring=%u\n",
+                        "mode=0x%02X %s %uHz en=%d parked=%d ring=%u live=%d drop=%u\n",
                         (unsigned long long)(t / 1000000000ull),
                         (unsigned long long)((t / 1000000ull) % 1000ull),
                         gen - sum_gen, g7 - sum_g7,
@@ -810,7 +965,8 @@ static void *pump_thread(void *arg)
                             (unsigned)((uint64_t)(e - s) * 1000000u / bps) : 0,
                         m, (m & 0x80) ? "mono" : "stereo", ste_rates[m & 3],
                         atomic_load(&g_enabled), atomic_load(&g_parked),
-                        dmasnd_ring_used());
+                        dmasnd_ring_used(), live_mode() ? (int)dmasnd_live_run : -1,
+                        atomic_load(&g_ct_live_drop));
                 sum_gen = gen;
                 sum_g7  = g7;
                 sum_rc  = rc;
@@ -827,6 +983,27 @@ static void *pump_thread(void *arg)
         /* gen first: a boundary pushes its emit job BEFORE bumping gen,
          * so seeing the new gen guarantees the job is in the queue */
         unsigned gen = atomic_load_explicit(&g_gen, memory_order_acquire);
+
+        if (live_mode()) {
+            /* LIVE CAPTURE: the CPU thread took the bytes as they played */
+            struct emit_job j;
+            while (emit_pop(&j))
+                ;                               /* snapshot jobs: unused */
+            last_gen = gen;
+            last_en_gen = atomic_load(&g_en_gen);
+            lq_drain(&last_mode);
+            if (pump_evfd >= 0) {
+                struct pollfd pf = { .fd = pump_evfd, .events = POLLIN, .revents = 0 };
+                if (poll(&pf, 1, dmasnd_live_run ? 5 : 100) > 0 && (pf.revents & POLLIN)) {
+                    uint64_t n;
+                    ssize_t r = read(pump_evfd, &n, sizeof n);
+                    (void)r;
+                }
+            } else {
+                usleep(PUMP_US);
+            }
+            continue;
+        }
 
         /* STOPPED EARLY: snapshot each enable-edge frame into a staging
          * slot at once, emit the played part when a job says how much */
@@ -1072,6 +1249,8 @@ void dmasnd_capture_reset(void)
     atomic_store(&g_act_s, 0);
     atomic_store(&g_act_e, 0);
     atomic_store(&pend_open, 0);         /* nothing left to emit         */
+    dmasnd_live_run = 0;
+    atomic_store(&lq_head, atomic_load(&lq_tail));
     mfp_hub_reset();                     /* no stale virtual interrupts */
     dmasnd_output_reset();
 }

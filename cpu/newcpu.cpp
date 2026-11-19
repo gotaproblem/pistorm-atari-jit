@@ -280,6 +280,8 @@ static void pistorm_irqtl_dump(void)
 }
 
 extern "C" void pistorm_gov_rte(uint32_t sp);   /* events.cpp, BEAM-TIMED HANDLERS */
+extern "C" void dmasnd_live_tick(void);          /* platforms/atari/audio/dmasnd_capture.c */
+extern "C" volatile int dmasnd_live_run;
 static void pistorm_compat_op(unsigned slot_before, uaecptr pc, uae_u16 op)
 {
 	if (pistorm_pc_ring_i != slot_before)
@@ -6159,6 +6161,10 @@ static void do_interrupt (int nr)
 		                         ((pistorm_iack_vector & 0xFFFFu) == 0xFFFEu ? 4 : 0)),
 		               m68k_getpc() & 0x00FFFFFFu);
 	if (interrupt_taken) {
+		/* STE DMA sound, LIVE CAPTURE: the bytes played so far are taken
+		 * before the handler can refill them (dmasnd_capture.c) */
+		if (__builtin_expect(dmasnd_live_run, 0))
+			dmasnd_live_tick();
 		Exception (exception_nr);
 		if (pistorm_cpu_diag())
 			pistorm_irqtl_rec('I', nr, pistorm_iack_vector & 0xFF, m68k_getpc(),
