@@ -125,6 +125,14 @@ uninstall() {
     warn "No [pistorm] Samba share — skipped"
   fi
 
+  # the OS tuning (tools/pi4-tune.sh): services, cloud-init, runtime unit,
+  # sysctl - before the boot files, which are restored from the older
+  # pre-install backups just below
+  if [ -d /var/backups/pi4-tune/orig ]; then
+    say "Reverting the OS tuning (tools/pi4-tune.sh --revert)"
+    sudo bash "$HERE/tools/pi4-tune.sh" --revert || warn "pi4-tune.sh --revert failed - see above"
+  fi
+
   # Boot files — restore the pre-install backups (exact inverse of the merge)
   if [ -e "$BOOT/config-bak.txt" ]; then
     say "Restoring config.txt from backup"
@@ -173,6 +181,9 @@ Non-interactive env overrides (1/y/yes = yes, anything else = no):
   CADGUARD=1  mask Ctrl+Alt+Del console reboot (default yes)
   WEB=1       psweb + WPE WebKit browser engine
   DOS=1       psdos + DOSBox Pure (DOS games in DOSGEM, ~30 min build)
+  TUNE=1      tools/pi4-tune.sh: Linux on cores 0-1, the emulator alone on
+              2-3; unused services, cloud-init (after first boot) and the
+              serial console off - default yes (Pi 3 / 3A+ / Zero 2 W / Pi 4)
   NOHZ=1      boot the tickless kernel (6.18.50-v8-nohz, tools/nohz-kernel)
               - default yes; NOHZ=0 keeps the stock kernel
   NOHZ_PKG=/path/nohz-kernel-6.18.50.tar.gz   a local package (default:
@@ -483,6 +494,28 @@ if [ -e "$HERE/configs/cmdline.txt" ]; then
 fi
 
 # --------------------------------------------------------------------------
+# 3a. Optional: tune the OS for the emulator (tools/pi4-tune.sh). Linux keeps
+#     cores 0-1, the emulator has 2-3 to itself; services nothing here uses
+#     go, and the ones that held up the boot (measured on the Pi 4 and the
+#     3A+: cloud-init after first boot ~5 s, nmbd 3.5 s, e2scrub_reap 1.6 s,
+#     samba-ad-dc 1.4 s, the serial console in the kernel's boot). Its own
+#     --revert undoes it; --uninstall below runs that.
+# --------------------------------------------------------------------------
+tune_model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
+case "$tune_model" in
+  *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*)
+    say "Pi 5: tools/pi4-tune.sh is for Pi 3 / Zero 2 W / Pi 4 - skipped" ;;
+  *)
+    if ask TUNE "Tune the OS for the emulator (tools/pi4-tune.sh)?" y; then
+      say "Tuning the OS (tools/pi4-tune.sh --apply)"
+      # KEEP_WIFI=1: its "auto" turns Wi-Fi off when wlan0 has no address
+      # yet - wrong during an install (apj-wifi may set it up at first boot)
+      sudo KEEP_WIFI="${KEEP_WIFI:-1}" bash "$HERE/tools/pi4-tune.sh" --apply ||
+        warn "tools/pi4-tune.sh failed (see above) - the OS is left as it was"
+    fi ;;
+esac
+
+# --------------------------------------------------------------------------
 # 3b. Optional: the tickless kernel (tools/nohz-kernel/). The stock kernel's
 #     250 Hz tick lands on the emulation cores (2-3) and shows as raster
 #     jitter (Defender of the Crown's bottom lines); a kernel built with
@@ -575,11 +608,20 @@ if ask SERVICE "Auto-start the emulator on boot (systemd)?" n; then
   # every boot, with its countdown; `countdown 0` in [psctrl], or adding
   # --no-setup to ExecStart, boots the last build with no page.
   CFG="${PISTORM_CFG:-psctrl.cfg}"
+  # run-pistorm.sh (it reads psctrl.cfg) acts on the emulator's exit codes:
+  # 42 relaunch, 43 shut Linux down, 0 stop - as when started by hand
+  if [ "$CFG" = psctrl.cfg ] && [ -f "$HERE/run-pistorm.sh" ]; then
+    EXEC="/bin/sh $HERE/run-pistorm.sh"
+  else
+    EXEC="$HERE/emulator --config ../configs/$CFG"
+  fi
   say "Installing pistorm.service (config: ../configs/$CFG)"
   sudo tee /etc/systemd/system/pistorm.service >/dev/null <<UNIT
 [Unit]
 Description=PiSTorm Atari emulator
-After=multi-user.target
+# not multi-user.target: that waits for NetworkManager and Samba (~20 s on
+# a Pi 3A+), and the emulator needs neither to start
+After=sound.target bluetooth.target
 Conflicts=getty@tty1.service
 
 [Service]
@@ -590,7 +632,7 @@ WorkingDirectory=$HERE
 # 192/256K EmuTOS image at this path - the Aranym EmuTOS in roms/ is for
 # the MAIN machine and will not work in the box)
 Environment=PISTORM_STBOX_TOS=$ROOT/roms/stbox-tos.rom
-ExecStart=$HERE/emulator --config ../configs/$CFG
+ExecStart=$EXEC
 Restart=on-failure
 RestartSec=2
 StandardInput=tty
