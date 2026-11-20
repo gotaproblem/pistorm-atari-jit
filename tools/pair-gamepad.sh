@@ -3,7 +3,7 @@
 #
 #   sudo tools/pair-gamepad.sh              # first "Xbox" pad it can find
 #   sudo tools/pair-gamepad.sh 14:CB:65:E6:41:92
-#   sudo tools/pair-gamepad.sh "8BitDo"     # any name substring
+#   sudo tools/pair-gamepad.sh "8BitDo"     # any part of its name, any case
 #   sudo tools/pair-gamepad.sh --fresh ...  # forget the old bond first
 #
 # Pairing is a one-off per pad: once paired and trusted it reconnects by
@@ -56,7 +56,7 @@ cmd()  { printf '%s\n' "$*" >&3; }
 waitfor() {
     local secs=$1 pat=$2 from=${3:-0} i line
     for ((i = 0; i < secs * 4; i++)); do
-        line=$(tail -c +$((from + 1)) "$LOG" | grep -m1 -E "$pat") && { printf '%s\n' "$line"; return 0; }
+        line=$(tail -c +$((from + 1)) "$LOG" | grep -m1 -iE "$pat") && { printf '%s\n' "$line"; return 0; }
         sleep 0.25
     done
     return 1
