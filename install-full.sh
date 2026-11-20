@@ -183,7 +183,9 @@ Non-interactive env overrides (1/y/yes = yes, anything else = no):
   DOS=1       psdos + DOSBox Pure (DOS games in DOSGEM, ~30 min build)
   TUNE=1      tools/pi4-tune.sh: Linux on cores 0-1, the emulator alone on
               2-3; unused services, cloud-init (after first boot) and the
-              serial console off - default yes (Pi 3 / 3A+ / Zero 2 W / Pi 4)
+              serial console off - default yes (Pi 3 / 3A+ / Zero 2 W / Pi 4);
+              its KEEP_AVAHI, KEEP_NMBD, KEEP_SWAP, KEEP_DOCKER, KEEP_WINBIND,
+              KEEP_CLOUDINIT, KEEP_SERIAL, KEEP_WIFI are passed on to it
   NOHZ=1      boot the tickless kernel (6.18.50-v8-nohz, tools/nohz-kernel)
               - default yes; NOHZ=0 keeps the stock kernel
   NOHZ_PKG=/path/nohz-kernel-6.18.50.tar.gz   a local package (default:
@@ -510,7 +512,14 @@ case "$tune_model" in
       say "Tuning the OS (tools/pi4-tune.sh --apply)"
       # KEEP_WIFI=1: its "auto" turns Wi-Fi off when wlan0 has no address
       # yet - wrong during an install (apj-wifi may set it up at first boot)
-      sudo KEEP_WIFI="${KEEP_WIFI:-1}" bash "$HERE/tools/pi4-tune.sh" --apply ||
+      # sudo starts from a clean environment: every KEEP_* the user set is
+      # passed on by name, or pi4-tune.sh would use its own defaults
+      tune_env=(KEEP_WIFI="${KEEP_WIFI:-1}")
+      for v in KEEP_AVAHI KEEP_SWAP KEEP_DOCKER KEEP_WINBIND KEEP_NMBD KEEP_CLOUDINIT KEEP_SERIAL; do
+        [ -n "${!v:-}" ] && tune_env+=("$v=${!v}")
+      done
+      say "  with ${tune_env[*]}"
+      sudo env "${tune_env[@]}" bash "$HERE/tools/pi4-tune.sh" --apply ||
         warn "tools/pi4-tune.sh failed (see above) - the OS is left as it was"
     fi ;;
 esac

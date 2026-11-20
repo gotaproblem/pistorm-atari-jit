@@ -269,6 +269,20 @@ else
 fi
 want_wifi_off && say "  Wi-Fi will be disabled (wlan0 has no address; KEEP_WIFI=1 to keep it)"
 
+# A service an earlier --apply disabled that is now to be kept (KEEP_NMBD=1
+# on a re-run, say) is enabled again and dropped from the record
+TO_ENABLE=()
+if [ -f "$SVC_STATE" ]; then
+    while read -r s; do
+        [ -n "$s" ] || continue
+        case " ${SERVICES[*]} " in *" $s "*) ;; *) TO_ENABLE+=("$s") ;; esac
+    done < <(sort -u "$SVC_STATE")
+fi
+if [ ${#TO_ENABLE[@]} -gt 0 ]; then
+    say "== services to enable again (disabled by an earlier run, now kept)"
+    for s in "${TO_ENABLE[@]}"; do say "  $s"; done
+fi
+
 say "== services to disable"
 TO_DISABLE=()
 for s in "${SERVICES[@]}"; do
@@ -296,6 +310,13 @@ mkdir -p "$ORIG"
 
 printf '%s\n' "$NEW_CMD" > "$CMDLINE"
 if [ "$ADD_CONFIG" = "1" ]; then { echo; config_block; } >> "$CONFIG"; fi
+
+for s in "${TO_ENABLE[@]}"; do
+    if in_chroot; then systemctl enable "$s" 2>/dev/null || true
+    else systemctl enable --now "$s" 2>/dev/null || true; fi
+    grep -vx "$s" "$SVC_STATE" > "$SVC_STATE.new" || true
+    mv "$SVC_STATE.new" "$SVC_STATE"
+done
 
 for s in "${TO_DISABLE[@]}"; do
     systemctl disable --now "$s" 2>/dev/null || true
