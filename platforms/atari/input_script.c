@@ -186,18 +186,21 @@ static void *player(void *arg)
             case EV_JOY:
                 joy = e->v;
                 joy_usb_script_set(1, (uint8_t)joy);
+                printf("[INPUT] %6.2f s joystick 1 $%02X\n", now, joy);
                 break;
             case EV_KD:
                 kbd_usb_script_key((uint8_t)e->v, 1);
+                printf("[INPUT] %6.2f s key $%02X down\n", now, e->v);
                 break;
             case EV_KU:
                 kbd_usb_script_key((uint8_t)e->v, 0);
+                printf("[INPUT] %6.2f s key $%02X up\n", now, e->v);
                 break;
             case EV_MARK:
                 printf("[INPUT] mark %s at %.1f s\n", e->label, now);
-                fflush(stdout);
                 break;
             }
+            fflush(stdout);
         }
         usleep(5000);
     }
