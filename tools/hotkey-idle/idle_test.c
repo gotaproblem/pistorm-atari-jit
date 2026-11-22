@@ -210,6 +210,17 @@ int main(void)
     rasters = 0;
     CHECK(taken == 0 && req_next == 0, "beam-timed rasters running: %u taken, %d next", taken, req_next);
 
+    /* 9. before the guest's first keyboard read: hands off (TOS boot) */
+    {
+        unsigned keep = ps_acia_kbd_guest_access;
+        reset();
+        ps_acia_kbd_guest_access = (unsigned)-1;   /* run() adds one: 0 */
+        key(2000000, 0xF1);
+        run(4000000, 0);
+        CHECK(taken == 0, "before the first guest read: %u taken", taken);
+        ps_acia_kbd_guest_access = keep + 1;
+    }
+
     printf(fails ? "%d CHECK(S) FAILED\n" : "all checks passed\n", fails);
     return fails != 0;
 }

@@ -1481,6 +1481,11 @@ void kbd_hotkey_idle_poll(unsigned long beam_n)
         return;
     const uint64_t now = now_us();
     const unsigned a = ps_acia_kbd_guest_access;
+    /* not before the guest has read the keyboard once: at start-up the
+     * IKBD's reset answer ($F1) is TOS's to read, and the watch took it
+     * (22 Nov 2026, every boot: $FF $FF $FF $F1 "unread by the guest") */
+    if (!a)
+        return;
     if (a != seen || beam_n != beam_seen || !quiet_since) {
         seen = a;
         beam_seen = beam_n;
