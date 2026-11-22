@@ -2509,6 +2509,10 @@ int stbox_core_take_halt_report(void)
 }
 uint32_t stbox_core_cps(void){ return g_stat_cps; }
 uint64_t stbox_core_total_cyc(void) { return g_total_cyc; }
+/* METAL: cold reset now, with the engine disarmed (the box's cycle count
+ * restarts at 0 before stboxmetal maps it onto the real beam again) */
+static void machine_cold_reset(void);
+void stbox_core_cold_reset_now(void) { g_reset_req = 0; machine_cold_reset(); }
 void stbox_core_sched_stats(uint32_t out[5])
 {
     out[0] = g_pub_calls; out[1] = g_pub_slices;

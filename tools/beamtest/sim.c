@@ -44,7 +44,14 @@ static double now_ns(void) { return raw_ns() - paused_ns; }
 uint64_t sim_ticks(void) { return (uint64_t)(now_ns() * 0.054); }
 uint64_t sim_hz(void)    { return 54000000u; }
 static void spin_until(double ns) { while (now_ns() < ns) ; }
-static inline double abs_cyc(double ns) { return (ns - org_ns) * st_hz * 1e-9; }
+/* SIM_JUMP_S=n: n seconds in, the real frame jumps one line ahead (what a
+ * late write can do to the real GLUE) - for stboxmetal's re-sync */
+static double jump_at_ns;
+static inline double abs_cyc(double ns)
+{
+    if (jump_at_ns > 0 && ns > jump_at_ns) { org_ns -= 512.0 / st_hz * 1e9; jump_at_ns = 0; }
+    return (ns - org_ns) * st_hz * 1e-9;
+}
 
 /* register histories: (abs cycle, value), in landing order */
 typedef struct { int64_t c; uint8_t v; } chg_t;
@@ -213,6 +220,7 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     if ((e = getenv("SIM_JIT_NS"))) jit_ns = atof(e);
     if ((e = getenv("SIM_DUR_NS"))) dur_ns = atof(e);
     srand((unsigned)now_ns());
+    if ((e = getenv("SIM_JUMP_S"))) jump_at_ns = now_ns() + atof(e) * 1e9;
     st_hz = 8021247.0 * (1.0 + ppm * 1e-6);
     org_ns = now_ns() - (double)(rand() % 20000000);
     syn = malloc(NCH * sizeof *syn); rez = malloc(NCH * sizeof *rez);

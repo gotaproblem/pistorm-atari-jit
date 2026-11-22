@@ -348,6 +348,7 @@ extern uint64_t *stbox_metal_dirty;
 extern uint8_t  *stbox_metal_blk;
 extern volatile uint8_t stbox_metal_any;
 uint64_t stbox_core_total_cyc(void);
+void stbox_core_cold_reset_now(void);   /* METAL: engine disarmed */
 
 #ifdef STBOX_LINE_LOG
 /* harness builds only (-DSTBOX_LINE_LOG): the GLUE's decision per line */

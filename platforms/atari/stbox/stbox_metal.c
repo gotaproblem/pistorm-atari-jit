@@ -123,7 +123,8 @@ static struct {
     uint64_t abs;                           /* where                      */
     mline_t  ln;                            /* the line it is on          */
     uint64_t last_abs;                      /* last good read             */
-    int      rej_run;
+    int      rej_run, coarse_n;
+    double   coarse_e;
     uint32_t frame_seen;                    /* box frame of the last one  */
 } P1;
 
@@ -157,7 +158,28 @@ static void m_probe(void)
     if (!read_counter(&cnt, &t)) { M.probe_rej++; P1.rej_run++; return; }
     if (((double)t - due) * NSPT > 2000.0) { M.probe_late++; return; }
     const long off = (long)cnt - (long)P1.ln.vcnt;
-    if (off <= 0 || off >= (long)P1.ln.bytes) { M.probe_rej++; P1.rej_run++; return; }
+    if (off <= 0 || off >= (long)P1.ln.bytes) {
+        /* The real beam is not on the box's line: a late write made the
+         * real GLUE do something the box's didn't (run 3: one did, and
+         * the lock never came back - every write after it landed lines
+         * away). Take whole lines of the box's width from the byte
+         * difference; four reads in a row within 32 cycles of each other
+         * move the map there, and the fine loop takes over. */
+        M.probe_rej++; P1.rej_run++;
+        const long B = (long)P1.ln.bytes;
+        const long ln = off >= 0 ? off / B : -((-off + B - 1) / B), rem = off - ln * B;
+        const double abs_r = (double)P1.ln.abs_line + P1.ln.fstart + 2.0 * rem + 2.0 + (double)ln * 512.0;
+        const double ec = m_abs((double)t) - abs_r;
+        if (P1.coarse_n && fabs(ec - P1.coarse_e) < 32.0) P1.coarse_n++;
+        else { P1.coarse_n = 1; P1.coarse_e = ec; }
+        if (P1.coarse_n >= 4 && fabs(ec) < 160256.0) {
+            mT0 += ec * TPC;
+            P1.coarse_n = 0; P1.rej_run = 0; P1.last_abs = 0;
+            M.relocks++;
+        }
+        return;
+    }
+    P1.coarse_n = 0;
     const double abs_true = (double)P1.ln.abs_line + P1.ln.fstart + 2.0 * off + 2.0;
     const double e = m_abs((double)t) - abs_true;      /* + = map runs early */
     if (fabs(e) > 64.0) {
@@ -573,7 +595,7 @@ static void *reporter(void *arg)
             printf("[METAL]   frame %u: real ST differs at line %u (%s border, box %s, box's first displayed line %u):"
                    " real counter %+d bytes into the line, box says %+d\n",
                    c->frame, c->line, c->tag == V_TOP ? "top" : "bottom",
-                   c->box_open ? "open" : "shut", c->first, c->real_off, c->model_off);
+                   (c->tag == V_BOT || c->box_open) ? "open" : "shut", c->first, c->real_off, c->model_off);
             printf("[METAL]     writes:");
             for (int i = 0; i < c->nw; i++)
                 printf(" L%d c%d %s=%02X (+%dns)", c->w[i].line, c->w[i].cyc,
@@ -615,7 +637,8 @@ static int m_start_box(void)
     long n = (long)floor(((double)ticks() - O) / P) + 2;
     mA0 = 0;
     mT0 = O + (double)n * P;                   /* box cycle 0 = that frame */
-    stbox_request_reset();
+    stbox_core_disarm();
+    stbox_core_cold_reset_now();               /* its cycle count is 0 now */
     g_synth = 0;
     stbox_core_arm(0, ST_HZ);                  /* 1 synthetic tick = 1 cycle */
     return 0;
@@ -715,11 +738,17 @@ int main(int argc, char **argv)
     const uint64_t poll_every = (uint64_t)(ACIA_POLL_US * 1000.0 / NSPT);
     uint64_t next_poll = ticks();
 
+#ifdef BEAMTEST_SIM
+    const char *trs = getenv("SIM_RESET_S");          /* test the reset path */
+    uint64_t test_reset_at = trs ? ticks() + (uint64_t)(atof(trs) * HZ) : 0;
+#endif
     while (!g_stop && !g_want_quit) {
+#ifdef BEAMTEST_SIM
+        if (test_reset_at && ticks() > test_reset_at) { test_reset_at = 0; g_want_reset = 1; }
+#endif
         if (g_want_reset) {
             g_want_reset = 0; M.resets++;
             printf("[METAL] cold reset\n");
-            stbox_core_disarm();
             if (m_start_box() != 0) break;
             continue;
         }
