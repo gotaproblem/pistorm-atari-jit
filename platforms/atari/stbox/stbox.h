@@ -335,7 +335,8 @@ extern stbox_cap_t stbox_cap[STBOX_CAP_BUFS];
 /* ------------------------------------------------------------------ */
 /* abs = box cycle (stbox_core_total_cyc() units) the access lands at;
  * every guest write to $FF8200-$FF82FF and $FF8800-$FF88FF, as made */
-extern void (*stbox_metal_hw)(uint64_t abs, uint32_t a, uint32_t v, int size);
+extern void (*stbox_metal_hw)(uint64_t abs, uint32_t a, uint32_t v, int size,
+                              unsigned line, int lcyc);
 /* every displayed line as the box's GLUE decided it: where it began, its
  * first fetch cycle, bytes fetched, video counter at the first fetch */
 extern void (*stbox_metal_line)(uint64_t abs_line, unsigned line, int fstart,

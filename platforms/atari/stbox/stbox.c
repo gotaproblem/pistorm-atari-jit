@@ -87,7 +87,8 @@ volatile int stbox_core_armed_flag; /* slice engine may run (exported for the in
 /* METAL (stbox_metal.c): the box drives the real ST's Shifter, YM and
  * IKBD instead of the host's screen and sound. All NULL in the emulator,
  * so every hook below is one predictable branch there. */
-void (*stbox_metal_hw)(uint64_t abs, uint32_t a, uint32_t v, int size);
+void (*stbox_metal_hw)(uint64_t abs, uint32_t a, uint32_t v, int size,
+                       unsigned line, int lcyc);
 void (*stbox_metal_line)(uint64_t abs_line, unsigned line, int fstart,
                          unsigned bytes, uint32_t vcnt);
 void (*stbox_metal_ikbd)(const uint8_t *cmd, int len);
@@ -2196,7 +2197,12 @@ static inline void metal_hw(uint32_t a, uint32_t v, int size)
     if (blk != 0xFF8200 && blk != 0xFF8800) return;
     uint64_t abs = g_total_cyc;
     if (g_in_exec) { int c = m68k_cycles_to_instr_end() - 4; if (c > 0) abs += (uint64_t)c; }
-    stbox_metal_hw(abs, a, v, size);
+    /* and where that is on the box's beam: line, cycle into it */
+    uint32_t fc = beam_now(), ls = g_line_start;
+    const uint32_t len = g_line_len ? g_line_len : 512u;
+    unsigned line = g_line;
+    while (fc >= ls + len) { ls += len; line++; }
+    stbox_metal_hw(abs, a, v, size, line, (int)(fc - ls));
 }
 
 static inline int rom_hit(uint32_t a)

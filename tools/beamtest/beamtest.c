@@ -38,7 +38,12 @@
  *             and 300 plain, for the counter reads). The counter says how many of lines 81..299
  *             came out at 230 bytes; on the monitor, a steady solid
  *             screen edge to edge.
- *   F  left border sweep: hi res for 8 cycles from cycle 0 + offset
+ *   F  vertical decision sweep: 60 Hz from cycle 440 of lines 33 and
+ *             262, back to 50 Hz at 496..508 (one cycle more each
+ *             frame); the counter says whether each border opened. The
+ *             first cycle that opens it is one past where the real GLUE
+ *             decides (the box's model: 502).
+ *   G  left border sweep: hi res for 8 cycles from cycle 0 + offset
  *             (a demo's pulse). Hi res at cycle 4 and low again by 16
  *             opens the border (186 bytes); otherwise the line is normal
  *             or blank. Measured the same way.
@@ -239,6 +244,7 @@ static int ev_cmp(const void *a, const void *b)
 }
 
 /* ---- the sweep ----------------------------------------------------------- */
+#define VS_N      13                     /* F: 50 Hz back at 496..508 */
 #define NBAND     9
 #define BAND_L0   100               /* first band's clean (read) line      */
 #define BAND_H    16                /* 1 clean line + 15 trick lines        */
@@ -263,6 +269,7 @@ typedef struct {
     /* phase F */
     uint64_t full_frames, full_exact, full_lines_short;
     uint32_t sec_frames[64], sec_exact[64];
+    uint32_t vs_n[VS_N], vs_top[VS_N], vs_bot[VS_N];
     /* E: 20-line segments, failures by kind */
     uint64_t seg_n, seg_bad, seg_kind[6], seg_at[NSEG], seg_late, seg_badframes;
     double   e_bad_sum, e_good_sum;
@@ -358,7 +365,8 @@ static int decode(int delta, int right, int *h, int *e, int *l)
 }
 
 /* ---- running a phase ----------------------------------------------------- */
-enum { PH_EDGE, PH_TOPBOT, PH_RIGHT, PH_LEFT, PH_FULL };
+enum { PH_EDGE, PH_TOPBOT, PH_RIGHT, PH_LEFT, PH_FULL, PH_VSWEEP };
+static int vs_top_i = -1, vs_bot_i = -1, vs_k;
 
 static void build(int ph)
 {
@@ -371,6 +379,17 @@ static void build(int ph)
             add(L * LINE_CYC + 244, EV_W16, R_PAL15, C_YELLOW, 1, 0);
             add(L * LINE_CYC + 440, EV_W16, R_PAL15, C_BLUE, 0, 0);
         }
+        break;
+    case PH_VSWEEP:
+        /* where does the real GLUE take the vertical decision? 60 Hz from
+         * cycle 440 of line 33 and 262, back to 50 Hz at 496 + k, k
+         * stepping 0..12 frame by frame: the border opens when the 50 Hz
+         * write comes after the decision */
+        add(33 * LINE_CYC + 440, EV_W8, R_SYNC, 0, 1, 0);
+        add(33 * LINE_CYC + 496, EV_W8, R_SYNC, 2, 1, 7);
+        add(262 * LINE_CYC + 440, EV_W8, R_SYNC, 0, 1, 0);
+        add(262 * LINE_CYC + 496, EV_W8, R_SYNC, 2, 1, 8);
+        add(290 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_BOT);
         break;
     case PH_TOPBOT:
         add(33 * LINE_CYC + 400, EV_W8, R_SYNC, 0, 1, 0);
@@ -424,6 +443,11 @@ static void build(int ph)
         break;
     }
     qsort(ev, (size_t)nev, sizeof ev[0], ev_cmp);
+    vs_top_i = vs_bot_i = -1;
+    for (int i = 0; i < nev; i++) {          /* the two moving writes      */
+        if (ev[i].kind != EV_READ && ev[i].slot == 7) vs_top_i = i;
+        if (ev[i].kind != EV_READ && ev[i].slot == 8) vs_bot_i = i;
+    }
 }
 
 /* worst issue lateness of the timed writes on each line, this frame */
@@ -432,8 +456,10 @@ static float line_late[FRAME_LINES + 1];
 static void frame_result(int ph, long n)
 {
     int de_first = DE_FIRST;
-    if (ph == PH_TOPBOT && !rd_ok[RD_TRACK]) { R.top_bad++; R.bot_bad++; }
-    else if (ph == PH_TOPBOT) {
+    const int tb = ph == PH_TOPBOT || ph == PH_VSWEEP;
+    const uint64_t t_open0 = R.top_open, b_open0 = R.bot_open;
+    if (tb && !rd_ok[RD_TRACK]) { R.top_bad++; R.bot_bad++; }
+    else if (tb) {
         /* which first line fits the counter better: that is the top border */
         double cm = frame_cyc(rd_t[RD_TRACK], n);
         long o63 = (long)rd_cnt[RD_TRACK] - BASE - (80 - DE_FIRST) * 160;
@@ -497,6 +523,11 @@ static void frame_result(int ph, long n)
         }
         return;
     }
+    if (ph == PH_VSWEEP && rd_ok[RD_TRACK]) {
+        R.vs_n[vs_k]++;
+        R.vs_top[vs_k] += R.top_open - t_open0;
+        R.vs_bot[vs_k] += R.bot_open - b_open0;
+    }
     track(n, de_first);
     if (ph == PH_RIGHT || ph == PH_LEFT) {
         int bb[NBAND + 1];
@@ -536,6 +567,11 @@ static void run_phase(int ph, double secs)
         }
         memset(rd_ok, 0, sizeof rd_ok);
         memset(line_late, 0, sizeof line_late);
+        if (ph == PH_VSWEEP && vs_top_i >= 0 && vs_bot_i >= 0) {
+            vs_k = (int)(f % VS_N);
+            ev[vs_top_i].cyc = 33 * LINE_CYC + 496 + vs_k;
+            ev[vs_bot_i].cyc = 262 * LINE_CYC + 496 + vs_k;
+        }
         for (int i = 0; i < nev; i++) {
             const ev_t *e = &ev[i];
             double lead = e->kind == EV_W8 ? LEAD8 : e->kind == EV_W16 ? LEAD16 : 0.0;
@@ -823,7 +859,7 @@ static void bt_calibrate_from_sweep(double secs)
 int main(int argc, char **argv)
 {
     double secs = 10.0, only_secs = 0;
-    const char *only = "BCDEF";
+    const char *only = "BCDEFG";
     int core = 3;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--secs") && i + 1 < argc)      secs = atof(argv[++i]);
@@ -857,22 +893,31 @@ int main(int argc, char **argv)
           "white from the top of the monitor to the bottom, steady. The top part\n"
           "      (lines 34..80) keeps its side borders, so does one line near the bottom\n"
           "      (300) - for the counter reads; everything else edge to edge." },
+        { PH_VSWEEP, "VERTICAL DECISION SWEEP (top and bottom border, 1-cycle steps)",
+          "the picture opening and closing at top and bottom, frame by frame." },
         { PH_LEFT,   "LEFT BORDER SWEEP",
           "the same 9 bands, each pulsing hi res for 8 cycles at a different offset\n"
           "      from the line start. Bands reaching the monitor's left edge opened; black\n"
           "      lines in a band = blank lines." },
     };
-    for (int k = 0; k < 5 && !g_stop; k++) {
+    for (int k = 0; k < 6 && !g_stop; k++) {
         if (!strchr(only, 'B' + k)) continue;
         printf("\n[%c] %s - on the monitor: %s\n", 'B' + k, phases[k].name, phases[k].look);
         if (phases[k].ph == PH_EDGE)   ps_write_16(R_PAL15, C_BLUE);
-        if (phases[k].ph == PH_TOPBOT) ps_write_16(R_PAL15, C_GREEN);
+        if (phases[k].ph == PH_TOPBOT || phases[k].ph == PH_VSWEEP) ps_write_16(R_PAL15, C_GREEN);
         if (phases[k].ph == PH_FULL)   ps_write_16(R_PAL15, 0x777);
         /* a fresh lock for each test: one that lost it must not hand a
          * drifted clock to the next (run 3's F) */
         if (k > 0 && lock(1) != 0) break;
         run_phase(phases[k].ph, (k == 0 || only_secs <= 0) ? secs : only_secs);
         report_common();
+        if (phases[k].ph == PH_VSWEEP) {
+            printf("  50 Hz back at cycle   top border opened   bottom border opened   (box model: open from 503)\n");
+            for (int i = 0; i < VS_N; i++)
+                printf("        %3d             %5.1f %%             %5.1f %%   (%u frames)\n", 496 + i,
+                       R.vs_n[i] ? 100.0 * R.vs_top[i] / R.vs_n[i] : 0.0,
+                       R.vs_n[i] ? 100.0 * R.vs_bot[i] / R.vs_n[i] : 0.0, R.vs_n[i]);
+        }
         if (phases[k].ph == PH_TOPBOT) {
             printf("  top border:    opened %llu, shut %llu, unreadable %llu frames\n",
                    (unsigned long long)R.top_open, (unsigned long long)R.top_shut,

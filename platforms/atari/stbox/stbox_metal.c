@@ -93,7 +93,10 @@ static struct {
     double   e_sum, e_sq, e_max, late_max_ns, slice_max_ns, box_ns, flush_ns, wait_ns;
     uint64_t relocks, resets;
     /* top/bottom border checks: [0] box shut, [1] box open */
-    uint64_t top_n[2], top_ok[2], bot_n, bot_ok, case_n;
+    uint64_t top_n[2], top_ok[2], bot_n, bot_ok, case_n[2];
+    /* what ran just before a write that went out over 1 us late */
+    uint64_t late_by[6];
+    double   late_by_ns[6], flush_max_ns, poll_max_ns, probe_max_ns;
 } M;
 #define M_INIT() memset(&M, 0, sizeof M)
 
@@ -103,9 +106,30 @@ typedef struct { uint64_t abs; uint32_t a; uint16_t v; uint8_t size, pad; } mev_
 static mev_t    mq[MQ];
 static unsigned mq_r, mq_w;
 
+/* The vertical border decision (cycle 502 of lines 33, 62, 233, 262 in
+ * the box's GLUE): a sync/resolution write a few cycles either side of it
+ * opens or keeps a border, and a landing error of a cycle or two puts it
+ * on the wrong side on the real GLUE (run 4: Defender's 50 Hz write at
+ * cycle 504 of line 262 kept the bottom border open on only 90 % of
+ * frames). Such a write is moved, if need be, to land at least
+ * VMARGIN cycles on the same side of the REAL decision as it is of the
+ * box's: g_vdec = the last cycle that still counts as before it on the
+ * real ST (measured at start-up, beamtest's F sweep). */
+#define VMARGIN 3
+static double g_vdec = 502.0;
+static int    vdec_forced;
+static uint64_t g_vmoved;
+
 static uint64_t g_last_abs;
-static void m_hw(uint64_t abs, uint32_t a, uint32_t v, int size)
+static void m_hw(uint64_t abs, uint32_t a, uint32_t v, int size, unsigned line, int lcyc)
 {
+    if ((a == 0xFF820A || a == 0xFF8260) && (line == 33 || line == 62 || line == 233 || line == 262) &&
+        lcyc >= 502 - 32 && lcyc <= 502 + 32) {
+        double tgt = lcyc;
+        if (lcyc <= 502) { if (tgt > g_vdec - VMARGIN) tgt = floor(g_vdec - VMARGIN); }
+        else             { if (tgt < g_vdec + 1 + VMARGIN) tgt = ceil(g_vdec + 1 + VMARGIN); }
+        if (tgt != lcyc) { abs = (uint64_t)((int64_t)abs + (int64_t)(tgt - lcyc)); g_vmoved++; }
+    }
     /* writes are at least a bus cycle apart: Musashi stamps every write
      * of one instruction (movem to the palette) with the same cycle */
     if (abs < g_last_abs + 4 && g_last_abs - abs < 1024) abs = g_last_abs + 4;
@@ -273,8 +297,8 @@ static void v_probe(int k)
     if (k == V_TOP) { M.top_n[PV[k].box_open]++; M.top_ok[PV[k].box_open] += ok; }
     else            { M.bot_n++; M.bot_ok += ok; }
     if (ok) return;
-    M.case_n++;
-    if (M.case_n > 8 && M.case_n % 250) return;     /* the first 8, then 1 in 250 */
+    /* the first 8 of each kind since the last reset, then 1 in 250 */
+    if (++M.case_n[k] > 8 && M.case_n[k] % 250) return;
     if (vc_w - vc_r >= VC) return;
     vcase_t *c = &vc[vc_w & (VC - 1)];
     memset(c, 0, sizeof *c);
@@ -451,6 +475,18 @@ static void ym_silence(void)
     }
 }
 
+/* what the bus thread did last, and for how long: a late write is put
+ * down to it (0 waiting, 1 box slice, 2 RAM copy, 3 ACIA, 4 counter
+ * read, 5 the write before) */
+static int    g_act;
+static double g_act_ns;
+static const char *act_name[6] = { "nothing", "box slice", "RAM copy", "IKBD poll", "counter read", "previous write" };
+static inline void act(int a, uint64_t t0)
+{
+    g_act = a;
+    g_act_ns = (double)(ticks() - t0) * NSPT;
+}
+
 /* ---- USB / Bluetooth gamepads (joy_usb.c, as the emulator's) ----------
  * A thread on core 1 reads the pads through evdev; joy_usb.c maps them
  * (pad 0 = joystick 1, the game port; pad 1 = joystick 0; Start = Space).
@@ -584,6 +620,19 @@ static void *reporter(void *arg)
                M.box_ns / 5e7, M.slice_max_ns, (unsigned long long)M.box_behind,
                M.flush_ns / 5e7, M.wait_ns / 5e7,
                (unsigned long long)M.acia_in, (unsigned long long)M.acia_out, (unsigned long long)M.acia_ovr);
+        if (M.late1us) {
+            printf("[METAL]       late writes came after:");
+            for (int i = 0; i < 6; i++)
+                if (M.late_by[i]) printf(" %s %llu (longest %.0f ns)", act_name[i],
+                                         (unsigned long long)M.late_by[i], M.late_by_ns[i]);
+            printf(" | longest RAM copy %.0f ns, IKBD poll %.0f ns, counter read %.0f ns\n",
+                   M.flush_max_ns, M.poll_max_ns, M.probe_max_ns);
+            M.flush_max_ns = M.poll_max_ns = M.probe_max_ns = 0;
+        }
+        if (g_vmoved) printf("[METAL]       writes moved off the vertical decision: %llu\n", (unsigned long long)g_vmoved);
+        if (stbox_core_take_halt_report())
+            printf("[METAL] guest HALTED (double bus fault) at pc %06X: Ctrl+Alt+Undo to restart\n",
+                   stbox_halt_info.ppc);
         printf("[METAL]       top border: box shut %llu/%llu frames real agrees, box open %llu/%llu"
                " | bottom border (box open): %llu/%llu\n",
                (unsigned long long)M.top_ok[0], (unsigned long long)M.top_n[0],
@@ -633,6 +682,7 @@ static int m_start_box(void)
     memset(&P1, 0, sizeof P1);
     memset(PV, 0, sizeof PV);
     v_frame = 0xFFFFFFFFu; xw_n = 0;
+    M.case_n[0] = M.case_n[1] = 0;
     P1.frame_seen = 0xFFFFFFFFu;
     long n = (long)floor(((double)ticks() - O) / P) + 2;
     mA0 = 0;
@@ -667,10 +717,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) { if (g_ndisks < 10) g_disks[g_ndisks++] = argv[++i]; else i++; }
         else if (!strcmp(argv[i], "--cal") && i + 1 < argc) { g_cal = atof(argv[++i]); cal_forced = 1; }
         else if (!strcmp(argv[i], "--cal-secs") && i + 1 < argc) cal_secs = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--vdec") && i + 1 < argc) { g_vdec = atof(argv[++i]); vdec_forced = 1; }
         else if (!strcmp(argv[i], "--ahead") && i + 1 < argc) g_ahead = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else {
-            fprintf(stderr, "usage: %s [--tos ROM] [--disk IMG]... [--cal CYCLES | --cal-secs S]"
+            fprintf(stderr, "usage: %s [--tos ROM] [--disk IMG]... [--cal CYCLES | --cal-secs S] [--vdec CYCLE]"
                             " [--ahead CYCLES] [--core N]\n", argv[0]);
             return 2;
         }
@@ -717,6 +768,29 @@ int main(int argc, char **argv)
         bt_calibrate_from_sweep(cal_secs);
     } else
         printf("calibration %+.2f cycles (--cal)\n", g_cal);
+    if (!vdec_forced) {
+        printf("\n[F] VERTICAL DECISION SWEEP (%.0f s)\n", cal_secs);
+        lock(1);
+        run_phase(PH_VSWEEP, cal_secs);
+        /* the first 50 Hz cycle from which top and bottom together open
+         * at least half the time, every later one too (the 50 % point of
+         * the step): the decision is the cycle before it */
+        int first = -1;
+        for (int i = VS_N - 1; i >= 0; i--) {
+            const double t = R.vs_n[i] ? (double)R.vs_top[i] / R.vs_n[i] : 0.0;
+            const double b = R.vs_n[i] ? (double)R.vs_bot[i] / R.vs_n[i] : 0.0;
+            if (t + b >= 1.0) first = 496 + i; else break;
+        }
+        for (int i = 0; i < VS_N; i++)
+            printf("  50 Hz back at %d: top opened %5.1f %%, bottom %5.1f %% (%u frames)\n", 496 + i,
+                   R.vs_n[i] ? 100.0 * R.vs_top[i] / R.vs_n[i] : 0.0,
+                   R.vs_n[i] ? 100.0 * R.vs_bot[i] / R.vs_n[i] : 0.0, R.vs_n[i]);
+        if (first > 496) g_vdec = first - 1;
+        printf("  vertical decision: %s cycle %.0f (box model 502)\n",
+               first > 496 ? "real ST at" : "NOT FOUND - using", g_vdec);
+        bt_plain_screen();
+    } else
+        printf("vertical decision %.0f (--vdec)\n", g_vdec);
 
     /* hand the machine to the box */
     M_INIT();
@@ -774,10 +848,16 @@ int main(int argc, char **argv)
 
         if (gap < guard) {
             const uint64_t w0 = ticks();
+            if ((double)w0 < tn) g_act = 0;
             while ((double)ticks() < tn) ;
             M.wait_ns += (double)(ticks() - w0) * NSPT;
-            if (is_probe == 1) { m_probe(); continue; }
-            if (is_probe >= 2) { v_probe(is_probe - 2); continue; }
+            if (is_probe) {
+                const uint64_t p0 = ticks();
+                if (is_probe == 1) m_probe(); else v_probe(is_probe - 2);
+                act(4, p0);
+                if (g_act_ns > M.probe_max_ns) M.probe_max_ns = g_act_ns;
+                continue;
+            }
             const mev_t *e = &mq[mq_r & (MQ - 1)];
             const uint64_t t0 = ticks();
             if (e->size == 1) ps_write_8(e->a, e->v);
@@ -792,7 +872,11 @@ int main(int argc, char **argv)
                 M.burst++;
                 if (late > M.burst_late_max_ns) M.burst_late_max_ns = late;
             } else {
-                if (late > 1000.0) M.late1us++;
+                if (late > 1000.0) {
+                    M.late1us++;
+                    M.late_by[g_act]++;
+                    if (g_act_ns > M.late_by_ns[g_act]) M.late_by_ns[g_act] = g_act_ns;
+                }
                 if (late > M.late_max_ns) M.late_max_ns = late;
             }
             prev_abs = e->abs;
@@ -803,6 +887,7 @@ int main(int argc, char **argv)
             }
             M.writes++;
             mq_r++;
+            act(5, t0);
             continue;
         }
 
@@ -818,6 +903,7 @@ int main(int argc, char **argv)
             if (box + 64 > g_synth) g_synth = box + 64;
             stbox_slice(g_synth);
             const double ns = (double)(ticks() - s0) * NSPT;
+            g_act = 1; g_act_ns = ns;
             if (ns > M.slice_max_ns) M.slice_max_ns = ns;
             M.box_ns += ns;
             M.box_slices++;
@@ -825,8 +911,11 @@ int main(int argc, char **argv)
         }
 
         if ((uint64_t)now >= next_poll && gap > pollg) {
+            const uint64_t a0 = ticks();
             padq_drain();
             acia_poll();
+            act(3, a0);
+            if (g_act_ns > M.poll_max_ns) M.poll_max_ns = g_act_ns;
             next_poll = (uint64_t)now + poll_every;
             continue;
         }
@@ -835,6 +924,10 @@ int main(int argc, char **argv)
             const uint64_t f0 = ticks();
             const int did = flush_one();
             M.flush_ns += (double)(ticks() - f0) * NSPT;
+            if (did) {
+                act(2, f0);
+                if (g_act_ns > M.flush_max_ns) M.flush_max_ns = g_act_ns;
+            }
             if (did) continue;
         }
     }
