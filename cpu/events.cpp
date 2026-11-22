@@ -688,10 +688,20 @@ extern "C" long long pistorm_gov_ahead_now(long long *parked)
 	return gov_cyc_ns(get_cycles() - *gov_cyc0_p, unit, gov_hz_now) - (now - *gov_ns0_p);
 }
 
+extern "C" volatile int kbd_hotkey_idle_due;                    /* platforms/atari/kbd_usb.c */
+extern "C" void kbd_hotkey_idle_poll(unsigned long beam_n);
 static void pistorm_governor(int sync)
 {
 	const int irq_entry = (sync == 2);
 	const int sync_read = (sync == 3);
+	/* the native hotkeys' look at an unread keyboard (kbd_usb.c): made
+	 * here, by the thread that owns the bus, between instructions and
+	 * never inside a handler - JIT or governed, both pass through here */
+	if (__builtin_expect(kbd_hotkey_idle_due, 0) && !irq_entry && !sync_read &&
+	    !pistorm_handler_running() && !beam_live()) {
+		kbd_hotkey_idle_due = 0;
+		kbd_hotkey_idle_poll(pistorm_gov_beam_n);
+	}
 	if (irq_entry || sync_read)
 		sync = 1;                               /* evaluate now, whatever gov_next says */
 	if (sync_read)

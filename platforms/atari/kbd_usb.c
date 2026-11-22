@@ -1408,8 +1408,10 @@ void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
         hk_key(&st, v & 0x7F, !(v & 0x80), "ST");
 }
 
-/* NATIVE HOTKEYS WHILE THE GUEST IS NOT READING THE KEYBOARD. Main
- * thread, every 10 ms (emulator.c). The native combination is seen in the
+/* NATIVE HOTKEYS WHILE THE GUEST IS NOT READING THE KEYBOARD. CPU
+ * thread, between instructions and outside every interrupt handler
+ * (cpu/events.cpp, when the main thread's 10 ms tick has set
+ * kbd_hotkey_idle_due). The native combination is seen in the
  * bytes the guest reads, so a guest that stops reading the keyboard stops
  * them too.
  *
@@ -1428,8 +1430,17 @@ void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
  *
  * Once the guest has made no keyboard ACIA access for a second, every
  * 50 ms it looks at the receiver (ps_acia_kbd_idle_look: one status read,
- * under the bus lock, refused the moment the guest reads - a bus hand-off
- * from this thread costs the CPU thread an IPI, so not more often). A
+ * refused the moment the guest reads).
+ *
+ * NOT FROM ANOTHER THREAD, AND NOT UNDER A RASTER. The first version
+ * looked from the main thread: each look a bus hand-off, an IPI that
+ * stops the CPU thread wherever it is. Jim Power, 22 Nov 2026: its
+ * background bands jittered again with it, and were steady with
+ * PISTORM_HOTKEYS=0 (whole chain on its line in 1036 of 1043 frames, as
+ * with 8f000d8). So the look is made by the CPU thread itself, which owns
+ * the bus, never inside a handler, and not at all while the guest runs
+ * beam-timed Timer B handlers: a second with none is part of "quiet". A
+ * game drawing rasters is not a game stuck waiting for a disk. A
  * byte that is still there at the next look, with the guest still silent, is
  * nobody's: a listening guest takes a byte within microseconds of its
  * interrupt. That byte is taken and watched for the hotkeys, and is gone -
@@ -1445,9 +1456,20 @@ void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
 extern volatile unsigned ps_acia_kbd_guest_access;
 extern int ps_acia_kbd_idle_look(unsigned access, int take, uint8_t *v);
 
-void kbd_hotkey_idle_poll(void)
+volatile int kbd_hotkey_idle_due;         /* main thread sets, CPU thread clears */
+
+/* main thread, every 10 ms */
+void kbd_hotkey_idle_tick(void)
+{
+    if (kbd_hotkeys_on())
+        kbd_hotkey_idle_due = 1;
+}
+
+/* CPU thread, outside handlers; beam_n: beam-timed handlers so far */
+void kbd_hotkey_idle_poll(unsigned long beam_n)
 {
     static unsigned seen;
+    static unsigned long beam_seen;
     static uint64_t quiet_since;
     static uint64_t last_look;
     static int waiting, synced, left;
@@ -1459,8 +1481,9 @@ void kbd_hotkey_idle_poll(void)
         return;
     const uint64_t now = now_us();
     const unsigned a = ps_acia_kbd_guest_access;
-    if (a != seen || !quiet_since) {
+    if (a != seen || beam_n != beam_seen || !quiet_since) {
         seen = a;
+        beam_seen = beam_n;
         quiet_since = now;
         waiting = synced = left = 0;
         memset(&st, 0, sizeof st);

@@ -16,7 +16,9 @@
 #include <string.h>
 #include <time.h>
 
-void kbd_hotkey_idle_poll(void);
+void kbd_hotkey_idle_poll(unsigned long beam_n);
+static unsigned long beam_n;          /* beam-timed handlers so far */
+static int rasters;                   /* the guest runs one a frame */
 
 /* ---- clock ---- */
 static uint64_t t_us;
@@ -132,7 +134,8 @@ static void run(uint64_t end, int listening)
             guest_pending = (status() & 0x01) != 0;
             guest_due = t + 50;
         }
-        if (t >= next_poll) { kbd_hotkey_idle_poll(); next_poll += 10000; }
+        if (rasters && t % 20000 == 0) beam_n++;
+        if (t >= next_poll) { kbd_hotkey_idle_poll(beam_n); next_poll += 10000; }
     }
     base += end + 1000000;
 }
@@ -199,6 +202,13 @@ int main(void)
     key(500000, 0x1D); key(600000, 0x38); key(700000, 0x52);
     run(900000, 0);
     CHECK(taken == 0 && req_next == 0, "under a second of silence: %u taken", taken);
+
+    /* 8. a guest drawing beam-timed rasters is left alone (Jim Power) */
+    reset(); rasters = 1;
+    key(2000000, 0x1D); key(2300000, 0x38); key(2600000, 0x52);
+    run(4000000, 0);
+    rasters = 0;
+    CHECK(taken == 0 && req_next == 0, "beam-timed rasters running: %u taken, %d next", taken, req_next);
 
     printf(fails ? "%d CHECK(S) FAILED\n" : "all checks passed\n", fails);
     return fails != 0;

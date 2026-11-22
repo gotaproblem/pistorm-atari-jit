@@ -3562,7 +3562,7 @@ int main (int argc, char *argv[])
           sense && cpu_emulation_running && ps_power_poll() > 0)
         pistorm_power_lost();           /* exits 42 */
       if (cpu_emulation_running)
-        kbd_hotkey_idle_poll();         /* hotkeys on an unread keyboard */
+        kbd_hotkey_idle_tick();         /* hotkeys on an unread keyboard (CPU thread) */
     }
   }
 
