@@ -92,6 +92,8 @@ static struct {
     uint64_t probes, probe_ok, probe_rej, probe_late, probe_skip;
     double   e_sum, e_sq, e_max, late_max_ns, slice_max_ns, box_ns, flush_ns, wait_ns;
     uint64_t relocks, resets;
+    /* top/bottom border checks: [0] box shut, [1] box open */
+    uint64_t top_n[2], top_ok[2], bot_n, bot_ok, case_n;
 } M;
 #define M_INIT() memset(&M, 0, sizeof M)
 
@@ -125,8 +127,10 @@ static struct {
     uint32_t frame_seen;                    /* box frame of the last one  */
 } P1;
 
+static void v_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes, uint32_t vcnt);
 static void m_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes, uint32_t vcnt)
 {
+    v_line(abs_line, line, fstart, bytes, vcnt);
     /* one read a box frame, mid-line on a plain-ish displayed line, where
      * no timed write is queued within 64 cycles of it */
     if (P1.pending || P1.frame_seen == stbox_shared.frame) return;
@@ -177,6 +181,105 @@ static void m_probe(void)
     mA0 = (uint64_t)abs_true;
     mT0 = Tn - (abs_true - (double)mA0) * TPC;
     P1.last_abs = (uint64_t)abs_true;
+}
+
+/* ---- top/bottom border checks ------------------------------------------
+ * Twice a frame the real counter is read on a line where the box's GLUE
+ * says the real one must be displaying: two lines into the box's first
+ * displayed line (its top border open or not) and line 268 when the box
+ * opened the bottom border. A mismatch is a frame where the real ST did
+ * not do what the box did; the reporter prints, for the first ones, the
+ * sync/resolution writes made around those lines and how late each
+ * landed - the data for whatever window the real GLUE has there. */
+enum { V_TOP, V_BOT };
+static struct { int pending; uint64_t abs; mline_t ln; int tag, box_open; } PV[2];
+static uint32_t v_frame = 0xFFFFFFFFu;
+static unsigned v_first;                     /* box's first DE line      */
+static uint64_t v_frame_abs;
+
+/* executed sync/resolution writes, for the reports */
+typedef struct { uint64_t abs; uint8_t a, v; int16_t late10; } xw_t;
+#define XW 1024
+static xw_t xw[XW];
+static unsigned xw_n;
+
+typedef struct {
+    uint32_t frame; uint8_t tag, box_open, nw; uint16_t first, line;
+    int32_t real_off, model_off;
+    struct { int16_t line, cyc, late10; uint8_t a, v; } w[16];
+} vcase_t;
+#define VC 16
+static vcase_t vc[VC];
+static volatile unsigned vc_w, vc_r;
+
+static int v_free(uint64_t at)               /* no queued write near it  */
+{
+    for (unsigned j = mq_w; j != mq_r; ) {
+        j--;
+        const mev_t *e = &mq[j & (MQ - 1)];
+        if (e->abs + 64 < at) break;
+        if (e->abs <= at + 64) return 0;
+    }
+    return 1;
+}
+
+static void v_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes, uint32_t vcnt)
+{
+    if (stbox_shared.frame != v_frame) {     /* first displayed line     */
+        v_frame = stbox_shared.frame;
+        v_first = line;
+        v_frame_abs = abs_line - (uint64_t)line * 512u;
+    }
+    const int top = line == v_first + 2, bot = line == 268;
+    if (!top && !bot) return;
+    const int k = top ? V_TOP : V_BOT;
+    if (PV[k].pending || bytes < 160) return;
+    const uint64_t at = abs_line + (uint64_t)fstart + 72u;
+    if (!v_free(at)) { M.probe_skip++; return; }
+    PV[k] = (typeof(PV[k])){ 1, at, { abs_line, line, fstart, bytes, vcnt }, k, v_first < 63 };
+}
+
+static void v_probe(int k)
+{
+    PV[k].pending = 0;
+    uint32_t cnt; uint64_t t;
+    if (!read_counter(&cnt, &t)) return;
+    const double cin = m_abs((double)t) - (double)PV[k].ln.abs_line;
+    const long model = lround((cin - PV[k].ln.fstart - 2.0) / 2.0) & ~1L;
+    const long off = (long)cnt - (long)PV[k].ln.vcnt;
+    const int ok = off > 0 && off < (long)PV[k].ln.bytes && labs(off - model) <= 8;
+    if (k == V_TOP) { M.top_n[PV[k].box_open]++; M.top_ok[PV[k].box_open] += ok; }
+    else            { M.bot_n++; M.bot_ok += ok; }
+    if (ok) return;
+    M.case_n++;
+    if (M.case_n > 8 && M.case_n % 250) return;     /* the first 8, then 1 in 250 */
+    if (vc_w - vc_r >= VC) return;
+    vcase_t *c = &vc[vc_w & (VC - 1)];
+    memset(c, 0, sizeof *c);
+    c->frame = v_frame; c->tag = (uint8_t)k; c->box_open = (uint8_t)PV[k].box_open;
+    c->first = (uint16_t)v_first; c->line = (uint16_t)PV[k].ln.line;
+    c->real_off = (int32_t)off; c->model_off = (int32_t)model;
+    /* the writes around the decision (vertical DE is decided at cycle
+     * 502 of line 33 / 262), oldest first: back to the window's start,
+     * then forward */
+    const int l0 = k == V_TOP ? 31 : 260, l1 = k == V_TOP ? 34 : 263;
+    unsigned j = xw_n;
+    while (j != xw_n - XW) {
+        const xw_t *x = &xw[(j - 1) & (XW - 1)];
+        if (x->abs < v_frame_abs || (x->abs - v_frame_abs) / 512u < (uint64_t)l0) break;
+        j--;
+    }
+    for (; j != xw_n && c->nw < 16; j++) {
+        const xw_t *x = &xw[j & (XW - 1)];
+        const uint64_t d = x->abs - v_frame_abs;
+        const int L = (int)(d / 512u), cy = (int)(d % 512u);
+        if (L < l0 || L > l1 || (L == l1 && cy > 100)) continue;
+        c->w[c->nw].line = (int16_t)L; c->w[c->nw].cyc = (int16_t)cy;
+        c->w[c->nw].a = x->a; c->w[c->nw].v = x->v; c->w[c->nw].late10 = x->late10;
+        c->nw++;
+    }
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    vc_w++;
 }
 
 /* ---- RAM: the box's writes, copied to the real ST-RAM ------------------ */
@@ -459,6 +562,26 @@ static void *reporter(void *arg)
                M.box_ns / 5e7, M.slice_max_ns, (unsigned long long)M.box_behind,
                M.flush_ns / 5e7, M.wait_ns / 5e7,
                (unsigned long long)M.acia_in, (unsigned long long)M.acia_out, (unsigned long long)M.acia_ovr);
+        printf("[METAL]       top border: box shut %llu/%llu frames real agrees, box open %llu/%llu"
+               " | bottom border (box open): %llu/%llu\n",
+               (unsigned long long)M.top_ok[0], (unsigned long long)M.top_n[0],
+               (unsigned long long)M.top_ok[1], (unsigned long long)M.top_n[1],
+               (unsigned long long)M.bot_ok, (unsigned long long)M.bot_n);
+        while (vc_r != vc_w) {
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            const vcase_t *c = &vc[vc_r & (VC - 1)];
+            printf("[METAL]   frame %u: real ST differs at line %u (%s border, box %s, box's first displayed line %u):"
+                   " real counter %+d bytes into the line, box says %+d\n",
+                   c->frame, c->line, c->tag == V_TOP ? "top" : "bottom",
+                   c->box_open ? "open" : "shut", c->first, c->real_off, c->model_off);
+            printf("[METAL]     writes:");
+            for (int i = 0; i < c->nw; i++)
+                printf(" L%d c%d %s=%02X (+%dns)", c->w[i].line, c->w[i].cyc,
+                       c->w[i].a == 0x0A ? "sync" : "rez", c->w[i].v, c->w[i].late10 * 10);
+            if (!c->nw) printf(" none");
+            printf("\n");
+            vc_r++;
+        }
         lw = M.writes; lf = M.flushed; lfr = stbox_shared.frame;
         M.late_max_ns = 0; M.slice_max_ns = 0; M.q_max = 0; M.e_max = 0; M.burst_late_max_ns = 0;
         M.box_ns = M.flush_ns = M.wait_ns = 0; M.box_behind = 0;
@@ -486,6 +609,8 @@ static int m_start_box(void)
     mq_r = mq_w = 0;
     g_last_abs = 0;
     memset(&P1, 0, sizeof P1);
+    memset(PV, 0, sizeof PV);
+    v_frame = 0xFFFFFFFFu; xw_n = 0;
     P1.frame_seen = 0xFFFFFFFFu;
     long n = (long)floor(((double)ticks() - O) / P) + 2;
     mA0 = 0;
@@ -611,13 +736,19 @@ int main(int argc, char **argv)
             const double tp = m_time((double)P1.abs);
             if (tp < tn) { tn = tp; is_probe = 1; }
         }
+        for (int k = 0; k < 2; k++)
+            if (PV[k].pending) {
+                const double tp = m_time((double)PV[k].abs);
+                if (tp < tn) { tn = tp; is_probe = 2 + k; }
+            }
         const double gap = tn - now;
 
         if (gap < guard) {
             const uint64_t w0 = ticks();
             while ((double)ticks() < tn) ;
             M.wait_ns += (double)(ticks() - w0) * NSPT;
-            if (is_probe) { m_probe(); continue; }
+            if (is_probe == 1) { m_probe(); continue; }
+            if (is_probe >= 2) { v_probe(is_probe - 2); continue; }
             const mev_t *e = &mq[mq_r & (MQ - 1)];
             const uint64_t t0 = ticks();
             if (e->size == 1) ps_write_8(e->a, e->v);
@@ -636,6 +767,11 @@ int main(int argc, char **argv)
                 if (late > M.late_max_ns) M.late_max_ns = late;
             }
             prev_abs = e->abs;
+            if (e->a == 0xFF820A || e->a == 0xFF8260) {
+                xw_t *x = &xw[xw_n++ & (XW - 1)];
+                x->abs = e->abs; x->a = (uint8_t)e->a; x->v = (uint8_t)e->v;
+                x->late10 = (int16_t)(late / 10.0 > 32000 ? 32000 : late / 10.0);
+            }
             M.writes++;
             mq_r++;
             continue;
