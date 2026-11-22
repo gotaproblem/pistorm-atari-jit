@@ -1,0 +1,24 @@
+# The regression game disk (mkgamesimg.py): one line a game.
+#
+#   folder | source image | kind | partition | path in the source
+#
+# folder     the game's folder in the root of the regression disk's D:
+# source     an image, relative to the home directory (~)
+# kind       ide    - an AHDI hard disk image stored word-swapped, as
+#                     dkimages' IDE images are (ide_byteorder native)
+#            floppy - a .st floppy image; the whole disk is copied
+# partition  the source drive letter (C = first partition), - for floppy
+# path       the folder in that partition (\ for a floppy's whole disk)
+#
+# The hard disk installs are Petari's (gamex/HAGA adaptations, which run
+# from hard disk on any TOS); Defender is the ST/STE homebrew port, off its
+# own floppy. Wrath of the Demon's five floppies stay in games-share: the
+# disk-swap hotkey test needs the floppy version.
+WRATHOD  | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | G | \W\WRATHOD
+JIMPOWER | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | E | \J\JIMPOWER
+XENON2   | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | G | \X\XENON2
+TURRIC2  | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | G | \T\TURRIC2
+DEFENDER | games-share/defender.st                                      | floppy | - | \
+RISKYW   | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | F | \R\RISKYW
+SHADBE2  | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | F | \S\SHADBE2
+ROBOCOP2 | dkimages/Atari_ST_Games_Petari_IDE_1_6GB_4+4x400MB_AHDI.img | ide    | F | \R\ROBOCOP2
