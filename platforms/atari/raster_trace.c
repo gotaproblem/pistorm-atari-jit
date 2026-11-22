@@ -56,7 +56,10 @@ uint64_t ps_rt_now(void);
 uint64_t pistorm_guest_clocks(void);          /* cpu/events.cpp */
 uint32_t pistorm_cur_pc(void);                /* cpu/newcpu.cpp */
 
-#define RT_MAX (1u << 21)                     /* events, 16 bytes each: 32 MB */
+/* events, 16 bytes each: 64 MB. 2M (32 MB) held 45 s of Jim Power's level
+ * (44k events a second); the regression play traces a minute of it. Only
+ * allocated with PISTORM_RASTER_TRACE set. */
+#define RT_MAX (1u << 22)
 
 typedef struct {
     uint64_t t;                               /* arch timer ticks      */
