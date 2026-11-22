@@ -21,6 +21,9 @@
  *   sudo ./stboxmetal --tos /home/pistorm/roms/tos104uk.rom \
  *        --disk "/home/pistorm/games-share/Xenon2.st" 2>&1 | tee stboxmetal.log
  *
+ * USB / Bluetooth gamepads (Xbox pads) work as in the emulator: the first
+ * is joystick 1, the second joystick 0, Start is the Space bar.
+ *
  * Keys (real keyboard): Ctrl+Alt+Undo = cold reset the box,
  * Ctrl+Alt+F1..F10 = put --disk 1..10 in drive A, Ctrl+Alt+Shift+Undo =
  * quit (so does Ctrl+C on the console).
@@ -54,7 +57,11 @@
 #include <dirent.h>
 #include <strings.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <linux/input.h>
 #include "stbox.h"
+#include "../joy_usb.h"
 #include "../../../third_party/musashi/m68k.h"
 
 volatile int stbox_errand_active;           /* real-FDC bridge: not here */
@@ -319,6 +326,113 @@ static void ym_silence(void)
     }
 }
 
+/* ---- USB / Bluetooth gamepads (joy_usb.c, as the emulator's) ----------
+ * A thread on core 1 reads the pads through evdev; joy_usb.c maps them
+ * (pad 0 = joystick 1, the game port; pad 1 = joystick 0; Start = Space).
+ * The box's input ring has one producer - the bus thread - so the pad
+ * thread posts here and the bus thread passes it on. */
+#define PADQ 256
+static volatile uint32_t padq[PADQ];
+static volatile unsigned padq_w, padq_r;
+static void padq_put(uint32_t v)
+{
+    unsigned w = padq_w;
+    if (w - padq_r >= PADQ) return;
+    padq[w & (PADQ - 1)] = v;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    padq_w = w + 1;
+}
+static int  pad_send_joy(int st_port, uint8_t state, uint8_t pad_buttons)
+{
+    (void)pad_buttons;
+    padq_put(0x01000000u | ((uint32_t)st_port << 8) | state);
+    return 1;
+}
+static void pad_send_key(uint8_t sc, int down) { padq_put(0x02000000u | ((uint32_t)(down != 0) << 8) | sc); }
+static int  pad_standalone(void) { return 0; }
+static void padq_drain(void)                   /* bus thread */
+{
+    while (padq_r != padq_w) {
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        const uint32_t v = padq[padq_r & (PADQ - 1)];
+        padq_r++;
+        if ((v >> 24) == 1) stbox_joy_event((v >> 8) & 1, (uint8_t)v);
+        else                stbox_key_event((uint8_t)v, (v >> 8) & 1);
+    }
+}
+
+static volatile int g_pad_stop;
+static void *pad_thread(void *arg)
+{
+    (void)arg;
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(1, &cs);
+    sched_setaffinity(0, sizeof cs, &cs);
+    static const joy_usb_emit_hooks h = {
+        .send_joy = pad_send_joy, .send_key = pad_send_key, .standalone = pad_standalone,
+    };
+    JOY_USB_enabled = true;
+    joy_usb_set_hooks(&h);
+    struct { int fd, pad; char node[32]; } dev[8];
+    int nd = 0;
+    uint64_t next_scan = 0;
+    while (!g_pad_stop) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        const uint64_t now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+        if (now >= next_scan) {                 /* hotplug: look once a second */
+            next_scan = now + 1000;
+            DIR *d = opendir("/dev/input");
+            struct dirent *de;
+            while (d && (de = readdir(d)) && nd < 8) {
+                if (strncmp(de->d_name, "event", 5)) continue;
+                char path[32];
+                snprintf(path, sizeof path, "/dev/input/%.20s", de->d_name);
+                int have = 0;
+                for (int i = 0; i < nd; i++) if (!strcmp(dev[i].node, path)) have = 1;
+                if (have) continue;
+                int fd = open(path, O_RDONLY | O_NONBLOCK);
+                if (fd < 0) continue;
+                unsigned long ev[(EV_MAX / (8 * sizeof(long))) + 1] = {0};
+                unsigned long key[(KEY_MAX / (8 * sizeof(long))) + 1] = {0};
+                unsigned long ab[(ABS_MAX / (8 * sizeof(long))) + 1] = {0};
+                ioctl(fd, EVIOCGBIT(0, sizeof ev), ev);
+                ioctl(fd, EVIOCGBIT(EV_KEY, sizeof key), key);
+                ioctl(fd, EVIOCGBIT(EV_ABS, sizeof ab), ab);
+                int pad = -1;
+                char name[64] = "?";
+                if (joy_usb_is_gamepad(ev, key, ab)) {
+                    ioctl(fd, EVIOCGNAME(sizeof name), name);
+                    pad = joy_usb_dev_open(fd, name);
+                }
+                if (pad < 0) { close(fd); continue; }
+                printf("[METAL] gamepad %d: %s (%s) = ST joystick %d\n", pad, name, path, pad == 0 ? 1 : 0);
+                dev[nd].fd = fd; dev[nd].pad = pad;
+                snprintf(dev[nd].node, sizeof dev[nd].node, "%s", path);
+                nd++;
+            }
+            if (d) closedir(d);
+        }
+        struct pollfd pf[8];
+        for (int i = 0; i < nd; i++) { pf[i].fd = dev[i].fd; pf[i].events = POLLIN; }
+        poll(pf, (nfds_t)nd, 10);
+        for (int i = 0; i < nd; i++) {
+            struct input_event e;
+            for (;;) {
+                ssize_t r = read(dev[i].fd, &e, sizeof e);
+                if (r == (ssize_t)sizeof e) { joy_usb_handle_event(dev[i].pad, &e); continue; }
+                if (r < 0 && errno == EAGAIN) break;
+                printf("[METAL] gamepad %d gone\n", dev[i].pad);
+                joy_usb_dev_close(dev[i].pad);
+                close(dev[i].fd);
+                dev[i] = dev[--nd];
+                i--;
+                break;
+            }
+        }
+        joy_usb_tick();
+    }
+    return NULL;
+}
+
 /* ---- the reporter (core 0: printf stays off the bus core) ------------- */
 static volatile int g_report_stop;
 static void *reporter(void *arg)
@@ -467,8 +581,9 @@ int main(int argc, char **argv)
     if (m_start_box() != 0) return 1;
     printf("\n[METAL] running: Ctrl+Alt+Undo reset, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Shift+Undo quit\n",
            g_ndisks ? g_ndisks : 1);
-    pthread_t rep;
+    pthread_t rep, padt;
     pthread_create(&rep, NULL, reporter, NULL);
+    pthread_create(&padt, NULL, pad_thread, NULL);
 
     const double guard = GUARD_NS / NSPT, boxrun = BOXRUN_NS / NSPT,
                  flushg = FLUSH_NS / NSPT, pollg = POLL_NS / NSPT;
@@ -545,6 +660,7 @@ int main(int argc, char **argv)
         }
 
         if ((uint64_t)now >= next_poll && gap > pollg) {
+            padq_drain();
             acia_poll();
             next_poll = (uint64_t)now + poll_every;
             continue;
@@ -558,8 +674,9 @@ int main(int argc, char **argv)
         }
     }
 
-    g_report_stop = 1;
+    g_report_stop = 1; g_pad_stop = 1;
     pthread_join(rep, NULL);
+    pthread_join(padt, NULL);
     stbox_metal_hw = NULL; stbox_metal_line = NULL; stbox_metal_ikbd = NULL;
     stbox_core_disarm();
     ym_silence();

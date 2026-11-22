@@ -475,7 +475,8 @@ METAL_SRC = platforms/atari/stbox/stbox_metal.c platforms/atari/stbox/stbox.c \
             platforms/atari/stbox/stbox_blit.c platforms/atari/psctrl/psctrl_tunables.c \
             third_party/musashi/m68kcpu.c third_party/musashi/m68kops.c \
             third_party/musashi/m68kdasm.c third_party/musashi/softfloat/softfloat.c \
-            platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c
+            platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c \
+            platforms/atari/joy_usb.c
 platforms/atari/stbox/stbox_metal_diskload.inc: platforms/atari/stbox/stbox_host.c
 	awk '/^static FILE \*fopen_ci/,/^int stbox_disk_insert_path/' $< | sed '$$d' > $@
 stboxmetal: $(METAL_SRC) tools/beamtest/beamtest.c platforms/atari/stbox/stbox_metal_diskload.inc
