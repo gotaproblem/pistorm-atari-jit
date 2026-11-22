@@ -1457,6 +1457,15 @@ extern volatile unsigned ps_acia_kbd_guest_access;
 extern int ps_acia_kbd_idle_look(unsigned access, int take, uint8_t *v);
 
 volatile int kbd_hotkey_idle_due;         /* main thread sets, CPU thread clears */
+static unsigned idle_looks, idle_taken;   /* for kbd_hotkey_idle_report */
+
+/* at exit: whether the watch touched the keyboard at all this run */
+void kbd_hotkey_idle_report(void)
+{
+    if (kbd_hotkeys_on())
+        fprintf(stderr, "[KBD] keyboard watch: %u looks, %u bytes taken\n",
+                idle_looks, idle_taken);
+}
 
 /* main thread, every 10 ms */
 void kbd_hotkey_idle_tick(void)
@@ -1497,6 +1506,7 @@ void kbd_hotkey_idle_poll(unsigned long beam_n)
     if (now - quiet_since < 1000000 || now - last_look < 50000)
         return;
     last_look = now;
+    idle_looks++;
     r = ps_acia_kbd_idle_look(a, 0, &v);
     if (r < 0) {                         /* the guest read it: hands off */
         quiet_since = 0;
@@ -1522,6 +1532,7 @@ void kbd_hotkey_idle_poll(unsigned long beam_n)
         synced = left = 0;
     if (!(r & 4))
         return;
+    idle_taken++;
     if (hk_trace) {
         printf("[KBD] hk: unread by the guest $%02X %s left=%d ctrl=%u alt=%u\n",
                v, synced ? "" : "(skipped: framing lost)", left, st.ctrl, st.alt);

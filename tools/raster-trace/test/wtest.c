@@ -11,6 +11,7 @@
 
 static uint64_t clocks;
 uint64_t pistorm_guest_clocks(void) { return clocks; }
+uint32_t pistorm_cur_pc(void) { return 0; }
 
 static void spin_us(double us)
 {

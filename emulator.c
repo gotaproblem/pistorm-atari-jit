@@ -2530,6 +2530,7 @@ static void orderly_teardown(void)
   pistorm_exit_state_dump();    /* PISTORM_CPU_DIAG=1: where the CPU was */
   ram_dump_at_exit();           /* PISTORM_RAM_DUMP=file: the guest's ST RAM */
   rt_dump();                    /* PISTORM_RASTER_TRACE: write the file   */
+  kbd_hotkey_idle_report();     /* did the keyboard watch touch anything  */
 
   /* JIT statistics (PROFILE_UNTRANSLATED_INSNS: top-50 interpreted opcodes) */
   compiler_dump_stats();

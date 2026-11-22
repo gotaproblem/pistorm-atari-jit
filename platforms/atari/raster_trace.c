@@ -38,6 +38,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
@@ -416,9 +417,16 @@ void rt_dump(void)
     if (!rt_on || !rt_buf)
         return;
     rt_on = 0;
-    f = fopen(rt_path, "w");
+    /* never over an earlier trace: run-pistorm.sh relaunches the emulator
+     * with the same environment (Ctrl+Alt+Undo, the reset button), so a
+     * session with several boots leaves FILE, FILE.1, FILE.2 ... in order */
+    static char path[512];
+    snprintf(path, sizeof path, "%s", rt_path);
+    for (int n = 1; n < 100 && access(path, F_OK) == 0; n++)
+        snprintf(path, sizeof path, "%s.%d", rt_path, n);
+    f = fopen(path, "w");
     if (!f) {
-        fprintf(stderr, "[RASTER] cannot write %s\n", rt_path);
+        fprintf(stderr, "[RASTER] cannot write %s\n", path);
         return;
     }
     hz = rt_hz();
@@ -508,5 +516,5 @@ void rt_dump(void)
     }
     fclose(f);
     fprintf(stderr, "[RASTER] last %llu of %llu events written to %s\n",
-            (unsigned long long)(total - first), (unsigned long long)total, rt_path);
+            (unsigned long long)(total - first), (unsigned long long)total, path);
 }
