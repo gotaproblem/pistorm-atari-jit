@@ -39,17 +39,80 @@ command -v sudo >/dev/null || die "sudo is required but not installed."
 
 # ask VAR "Prompt" DEFAULT(y|n)
 #   honours env var $VAR (1/y/yes = yes); else prompts on a TTY; else uses default.
+# Every answer is recorded (step_note) for the summary at the end - and,
+# if the script stops early, for the one printed then (on_exit) - with
+# where it came from: asked, a VAR= setting, or the default.
+STEPS=()
+NO_TTY_SAID=
+step_note() { STEPS+=("$1|$2|$3"); }    # VAR yes|no|skip source
 ask() {
   local var="$1" prompt="$2" def="${3:-n}" ans
   if [ -n "${!var:-}" ]; then
-    case "${!var}" in 1|y|Y|yes) return 0 ;; *) return 1 ;; esac
+    case "${!var}" in
+      1|y|Y|yes) step_note "$var" yes "set: $var=${!var}"; return 0 ;;
+      *)         step_note "$var" no  "set: $var=${!var}"; return 1 ;;
+    esac
   fi
   if [ -t 0 ]; then
     read -r -p "$prompt [$([ "$def" = y ] && echo 'Y/n' || echo 'y/N')] " ans || true
-    case "${ans:-$def}" in y|Y|yes) return 0 ;; *) return 1 ;; esac
+    local src=asked
+    [ -z "$ans" ] && src="asked, Enter = default"
+    case "${ans:-$def}" in
+      y|Y|yes) step_note "$var" yes "$src"; return 0 ;;
+      *)       step_note "$var" no  "$src"; return 1 ;;
+    esac
   fi
-  [ "$def" = y ]
+  # no terminal (ssh without -t, input piped or redirected): say so once,
+  # or every question silently takes its default
+  if [ -z "$NO_TTY_SAID" ]; then
+    NO_TTY_SAID=1
+    warn "No terminal to ask in (the input is not a terminal): every question takes its default."
+    warn "Choose with settings instead, e.g.  SERVICE=1 BUILD=1 ./install-full.sh  (see --help)"
+  fi
+  if [ "$def" = y ]; then step_note "$var" yes "default, no terminal"; return 0; fi
+  step_note "$var" no "default, no terminal"
+  return 1
 }
+step_label() {
+  case "$1" in
+    KILLGUI)  echo "desktop off, console boot" ;;
+    TUNE)     echo "OS tuning (tools/pi4-tune.sh)" ;;
+    NOHZ)     echo "tickless kernel" ;;
+    BUILD)    echo "build the emulator" ;;
+    SERVICE)  echo "auto-start on boot (pistorm.service)" ;;
+    CADGUARD) echo "Ctrl+Alt+Del reboot off" ;;
+    WEB)      echo "web browser engine (psweb)" ;;
+    DOS)      echo "DOS games (psdos)" ;;
+    SAMBA)    echo "Samba share" ;;
+    MACFIX)   echo "atariclean + Samba for Macs" ;;
+    *)        echo "$1" ;;
+  esac
+}
+summary() {
+  [ ${#STEPS[@]} -gt 0 ] || return 0
+  echo "  Steps:"
+  local e v a src
+  for e in "${STEPS[@]}"; do
+    IFS='|' read -r v a src <<<"$e"
+    printf '    %-4s %-38s (%s)\n' "$a" "$(step_label "$v")" "$src"
+  done
+}
+# A failing command stops the script (set -e) - often without an obvious
+# message, and every step after it is silently not done. Say so, and what
+# was reached.
+INSTALL_MAIN=
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && [ -n "$INSTALL_MAIN" ]; then
+    {
+      echo
+      printf '\033[1;31m[x]\033[0m %s\n' "The installer stopped before the end (exit $rc): see the error above."
+      echo "  The steps after the last one below were not reached - nothing after it was done."
+      summary
+    } >&2
+  fi
+}
+trap on_exit EXIT
 
 # Inside a chroot (the APJ-OS SD-image build) systemd is not running and
 # `systemctl enable --now` refuses outright, so there units are only
@@ -203,6 +266,8 @@ EOF
   "") ;;
   *) die "Unknown argument '$1' (try --help)" ;;
 esac
+
+INSTALL_MAIN=1                               # on_exit reports an early stop from here
 
 # --------------------------------------------------------------------------
 # 0. Pre-flight (install path only): JIT requirements + no desktop environment
@@ -506,7 +571,8 @@ fi
 tune_model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 case "$tune_model" in
   *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*)
-    say "Pi 5: tools/pi4-tune.sh is for Pi 3 / Zero 2 W / Pi 4 - skipped" ;;
+    say "Pi 5: tools/pi4-tune.sh is for Pi 3 / Zero 2 W / Pi 4 - skipped"
+    step_note TUNE skip "Pi 5" ;;
   *)
     if ask TUNE "Tune the OS for the emulator (tools/pi4-tune.sh)?" y; then
       say "Tuning the OS (tools/pi4-tune.sh --apply)"
@@ -576,10 +642,12 @@ nohz_fetch() {                                   # -> sets nohz_pkg, or returns 
 nohz_model="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 case "$nohz_model" in
   *"Pi 5"*|*"Pi 500"*|*"Compute Module 5"*)
-    say "Pi 5: the tickless kernel is for Pi 3 / Zero 2 W / Pi 4 - skipped" ;;
+    say "Pi 5: the tickless kernel is for Pi 3 / Zero 2 W / Pi 4 - skipped"
+    step_note NOHZ skip "Pi 5" ;;
   *)
     if [ "$(uname -r)" = "$NOHZ_REL" ] && grep -qx "os_prefix=nohz/" "$BOOT/config.txt"; then
       say "The tickless kernel $NOHZ_REL is already the running kernel - left as it is"
+      step_note NOHZ skip "already the running kernel"
     elif ask NOHZ "Boot the tickless kernel $NOHZ_REL (${nohz_pkg:-downloaded from the GitHub release})?" y; then
       if [ -n "$nohz_pkg" ] && [ -f "$nohz_pkg" ] || nohz_fetch; then
         say "Installing the tickless kernel $NOHZ_REL from $nohz_pkg"
@@ -995,6 +1063,8 @@ fi
 
 # --------------------------------------------------------------------------
 say "Done."
+echo
+summary
 echo
 echo "  Runtime tree : $ROOT"
 if [ -x "$HERE/emulator" ]; then

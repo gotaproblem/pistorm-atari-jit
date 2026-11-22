@@ -93,6 +93,13 @@ Answer the optional prompts up front with environment variables:
 BUILD=1 SERVICE=1 SAMBA=0 ./install-full.sh
 ```
 
+A question with no variable set and no terminal to ask in (run over `ssh host
+'./install-full.sh'` without `-t`, or with its input piped) takes its default;
+the installer says so once at the first one. At the end it lists every
+optional step with its answer and where the answer came from (asked, set, or
+the default). If a step fails and the installer stops early, it prints that
+list then too - the last line is how far it got.
+
 | Variable       | Effect                                              | Default |
 |----------------|-----------------------------------------------------|---------|
 | `TUNE=1`       | Tune the OS for the emulator (`tools/pi4-tune.sh`, see below) | prompt (yes) |
