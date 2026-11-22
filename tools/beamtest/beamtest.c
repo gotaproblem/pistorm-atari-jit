@@ -31,15 +31,28 @@
  *             step = 4 pixels = one bus slot). Visual only.
  *   D  top/bottom border: 60 Hz on line 33 and line 262. The video
  *             counter says, every frame, whether each border opened.
- *   E  left border sweep: hi res for 8 cycles from cycle 0 + offset
+ *   E  full overscan: all four borders open on every line 34..309 at the
+ *             calibrated positions (lines 80 and 300 left plain for the
+ *             counter reads). The counter says how many of lines 81..299
+ *             came out at 230 bytes; on the monitor, a steady solid
+ *             screen edge to edge.
+ *   F  left border sweep: hi res for 8 cycles from cycle 0 + offset
  *             (a demo's pulse). Hi res at cycle 4 and low again by 16
  *             opens the border (186 bytes); otherwise the line is normal
  *             or blank. Measured the same way.
+ *
+ * The sweeps write at wrong positions on purpose: their off-target bands
+ * jitter, stretch or go black on the monitor. Only the bands the log
+ * reports opened are meant to look right.
  *
  * Run 1 on the Pi 4 (22 Nov 2026): right sweep 100 % in one band, 0 % in
  * every other, the writes landing 8 cycles after where they were aimed;
  * top and bottom open in every frame; the left sweep blanked every line,
  * because it held hi res from cycle 470 of the line before.
+ * Run 2 (calibrated, 8-cycle pulse): right sweep 99.6 % in the -8 band,
+ * left sweep 100 % in the 0 and +4 bands exactly as predicted; hi res
+ * pulsed across the line boundary (-12, -8) blanks the line on the real
+ * GLUE (Hatari's table says normal).
  *
  * Options: --secs N (per phase, default 10), --core N (default 3),
  *          --lead NS (override the measured write lead),
@@ -222,6 +235,9 @@ typedef struct {
     double trk_sum, trk_sq, trk_min, trk_max;
     /* phase C */
     uint64_t top_open, top_shut, top_bad, bot_open, bot_shut, bot_bad;
+    /* phase F */
+    uint64_t full_frames, full_exact, full_lines_short;
+    double   full_bytes;
     /* phases D/E, per band */
     uint64_t hit[NBAND], early[NBAND], late_[NBAND], undec[NBAND];
     double   dsum[NBAND];
@@ -241,10 +257,10 @@ static inline double frame_cyc(uint64_t t, long n) { return ((double)t - (O + (d
  * (a quarter of the error, all of it beyond 8 cycles), the period a
  * sixteenth - shifter_mirror.c's second-order loop. de_first = the line
  * display starts on (63, or 34 with the top border open). */
-static double track(long n, int de_first)
+static double track(long n, int de_first, int bpl)
 {
     double cm = frame_cyc(rd_t[RD_TRACK], n);
-    long off = (long)rd_cnt[RD_TRACK] - (long)BASE - (long)(80 - de_first) * 160;
+    long off = (long)rd_cnt[RD_TRACK] - (long)BASE - (long)(80 - de_first) * bpl;
     if (off <= 0 || off >= 160) {
         R.trk_rej++;
         return 1e9;
@@ -297,7 +313,7 @@ static int decode(int delta, int right, int *h, int *e, int *l)
 }
 
 /* ---- running a phase ----------------------------------------------------- */
-enum { PH_EDGE, PH_TOPBOT, PH_RIGHT, PH_LEFT };
+enum { PH_EDGE, PH_TOPBOT, PH_RIGHT, PH_LEFT, PH_FULL };
 
 static void build(int ph)
 {
@@ -316,6 +332,23 @@ static void build(int ph)
         add(262 * LINE_CYC + 440, EV_W8, R_SYNC, 0, 1, 0);
         add(263 * LINE_CYC + 16,  EV_W8, R_SYNC, 2, 1, 0);
         add(290 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_BOT);
+        break;
+    case PH_FULL:
+        /* full overscan: top and bottom open, then every line 34..309 with
+         * the left pulse and the right switch, except lines 80 and 300,
+         * left plain for the counter reads */
+        add(33 * LINE_CYC + 400, EV_W8, R_SYNC, 0, 1, 0);
+        add(34 * LINE_CYC + 16,  EV_W8, R_SYNC, 2, 1, 0);
+        add(262 * LINE_CYC + 440, EV_W8, R_SYNC, 0, 1, 0);
+        add(263 * LINE_CYC + 16,  EV_W8, R_SYNC, 2, 1, 0);
+        add(300 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_BOT);
+        for (int L = DE_FIRST_TOP; L < 310; L++) {
+            if (L == 80 || L == 300) continue;
+            add(L * LINE_CYC + 0,   EV_W8, R_REZ, 2, 1, 0);
+            add(L * LINE_CYC + 8,   EV_W8, R_REZ, 0, 1, 0);
+            add(L * LINE_CYC + 376, EV_W8, R_SYNC, 0, 1, 0);
+            add(L * LINE_CYC + 420, EV_W8, R_SYNC, 2, 1, 0);
+        }
         break;
     case PH_RIGHT:
     case PH_LEFT:
@@ -368,7 +401,20 @@ static void frame_result(int ph, long n)
         } else
             R.bot_bad++;
     }
-    track(n, de_first);
+    if (ph == PH_FULL) {
+        /* lines 34..79 are 230 bytes each when every trick works; line 80
+         * is clean. Line 300 (clean) less line 80 = lines 80..299. */
+        track(n, DE_FIRST_TOP, 230);
+        if (rd_ok[RD_BOT]) {
+            long d = (long)rd_cnt[RD_BOT] - (long)rd_cnt[RD_TRACK];
+            R.full_frames++;
+            R.full_bytes += (double)d;
+            if (d == 160 + 219L * 230) R.full_exact++;
+            R.full_lines_short += (uint64_t)((219L * 230 + 160 - d) > 0 ? (219L * 230 + 160 - d) : 0);
+        }
+        return;
+    }
+    track(n, de_first, 160);
     if (ph == PH_RIGHT || ph == PH_LEFT) {
         int bb[NBAND + 1];
         for (int b = 0; b <= NBAND; b++) {
@@ -622,15 +668,19 @@ int main(int argc, char **argv)
           "      a ragged edge is jitter (one step = 4 pixels = one bus slot)." },
         { PH_TOPBOT, "TOP + BOTTOM BORDER",
           "green from near the top of the monitor to near the bottom." },
+        { PH_FULL,   "FULL OVERSCAN (all four borders, every line, calibrated)",
+          "the whole monitor solid white, edge to edge and top to bottom, steady; two\n"
+          "      lines (80 and 300) keep their side borders, for the counter reads." },
         { PH_LEFT,   "LEFT BORDER SWEEP",
           "the same 9 bands, each pulsing hi res for 8 cycles at a different offset\n"
           "      from the line start. Bands reaching the monitor's left edge opened; black\n"
           "      lines in a band = blank lines." },
     };
-    for (int k = 0; k < 4 && !g_stop; k++) {
+    for (int k = 0; k < 5 && !g_stop; k++) {
         printf("\n[%c] %s - on the monitor: %s\n", 'B' + k, phases[k].name, phases[k].look);
         if (phases[k].ph == PH_EDGE)   ps_write_16(R_PAL15, C_BLUE);
         if (phases[k].ph == PH_TOPBOT) ps_write_16(R_PAL15, C_GREEN);
+        if (phases[k].ph == PH_FULL)   ps_write_16(R_PAL15, 0x777);
         run_phase(phases[k].ph, secs);
         report_common();
         if (phases[k].ph == PH_TOPBOT) {
@@ -661,6 +711,13 @@ int main(int argc, char **argv)
                 printf("  calibration: NO single band opened cleanly - the tests below are uncorrected\n");
         }
         if (phases[k].ph == PH_LEFT)  report_sweep(0);
+        if (phases[k].ph == PH_FULL) {
+            double bpl = R.full_frames ? (R.full_bytes / R.full_frames - 160.0) / 219.0 : 0;
+            printf("  lines 81..299: %.2f bytes a line on average (230 = all four borders open);\n"
+                   "  every one of them 230 bytes in %llu of %llu frames; bytes missing in all %llu\n",
+                   bpl, (unsigned long long)R.full_exact, (unsigned long long)R.full_frames,
+                   (unsigned long long)R.full_lines_short);
+        }
     }
 
     ps_write_16(R_PAL15, C_BLUE);
