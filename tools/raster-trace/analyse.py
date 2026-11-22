@@ -35,6 +35,7 @@ def load(path):
         if p[1] == 'I' and p[2] == '4':
             cur = {'t': t, 'base': int(p[3], 16) if len(p) > 3 else None,
                    'tb': (int(p[4], 16), int(p[5], 16)) if len(p) > 5 else None,
+                   'aer': int(p[6], 16) if len(p) > 6 else None,
                    'w': [], 'i6': [], 'v6': [], 'm': []}
             frames.append(cur)
         elif cur is None:
@@ -102,6 +103,12 @@ def main(path):
     print(f"frames {len(frames)}, VBL interval us min {min(gaps):.0f} median "
           f"{statistics.median(gaps):.0f} max {max(gaps):.0f} (50 Hz = 20032); "
           f"screen bases " + ' '.join('%06X' % b for b in bases))
+    aers = collections.Counter(f['aer'] for f in frames if f.get('aer') is not None)
+    if aers:
+        print("AER at the VBLs (bit 3: Timer B counts the START of each line's display; "
+              "clear: its end, as TOS sets it): " +
+              ' '.join(f"${a:02X} (bit 3 {'SET' if a & 8 else 'clear'}) x{c}"
+                       for a, c in aers.most_common()))
 
     lat = []
     for f in frames:

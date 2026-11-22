@@ -250,8 +250,12 @@ void rt_irq_slow(int level)
     e->c = 0;
     rt_last_irq = level == 4 ? NULL : e;
     if (level == 4 && rt_vc) {
+        /* the screen base, and in its low byte (always 0 on an ST)
+         * AER: its bit 3 says whether Timer B's event count fires at the
+         * end of each line's display (0, TOS) or at its start (1) */
         e->c = ((uint32_t)ps_read_8(0x00FF8201u) << 16) |
-               ((uint32_t)ps_read_8(0x00FF8203u) << 8);
+               ((uint32_t)ps_read_8(0x00FF8203u) << 8) |
+                (uint32_t)ps_read_8(0x00FFFA03u);
         e->v = (uint16_t)(((uint16_t)ps_read_8(0x00FFFA1Bu) << 8) |
                           ps_read_8(0x00FFFA21u));
     }
@@ -334,6 +338,7 @@ void rt_gap_slow(int kind, int64_t ns, uint32_t pc)
 static int rt_mfp_reg(uint32_t a)
 {
     switch (a) {
+    case 0x00FFFA03u:                     /* AER: bit 3 = the edge Timer B counts */
     case 0x00FFFA07u: case 0x00FFFA0Bu: case 0x00FFFA0Fu: case 0x00FFFA13u:
                                           /* IERA IPRA ISRA IMRA (bit 0 = Timer B) */
     case 0x00FFFA17u:                     /* VR (end-of-interrupt mode)        */
@@ -432,7 +437,7 @@ void rt_dump(void)
     fprintf(f, "# raster trace: t_us kind ...\n"
                "#   P idx value video_counter   (palette write, real counter after it)\n"
                "#   I level vector              (interrupt taken, vector from the IACK)\n"
-               "#   I 4 screen_base TBCR TBDR   (VBL: base, Timer B control and count)\n"
+               "#   I 4 screen_base TBCR TBDR AER   (VBL: base, Timer B control and count, AER)\n"
                "#   M FAxx value video_counter  (guest write to an MFP register)\n"
             "#   R FA21 value                (guest read of Timer B's count)\n"
             "#   V raw given ns              (guest read of $FF8209: bus value, value given, bus read time)\n"
@@ -496,7 +501,8 @@ void rt_dump(void)
         else if (e->a == 4 && !rt_vc)
             fprintf(f, "%.1f I 4\n", us);
         else if (e->a == 4)
-            fprintf(f, "%.1f I 4 %06X %02X %02X\n", us, e->c, e->v >> 8, e->v & 0xFFu);
+            fprintf(f, "%.1f I 4 %06X %02X %02X %02X\n", us, e->c & 0xFFFF00u,
+                    e->v >> 8, e->v & 0xFFu, e->c & 0xFFu);
         else
             fprintf(f, "%.1f I %u %02X\n", us, e->a, e->c & 0xFFu);
     }
