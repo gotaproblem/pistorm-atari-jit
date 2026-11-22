@@ -1,0 +1,26 @@
+# Played games - run by tools/regress/run.sh (`play` runs them all, or name
+# one). Each boots the [regress-games] machine of psctrl.cfg on a scratch
+# copy of dkimages/regress-games.img whose C:\RUN.INF names the game, so
+# C:\AUTO\LAUNCH.PRG starts it, and PISTORM_INPUT_SCRIPT plays its input
+# (games/<name>.in, worked out in Hatari: tools/regress/hatari/drive.py).
+#
+#   name | checks
+#
+# checks (host side, from the emulator's log and traces):
+#   start      the script's program was started (its Pexec seen)
+#   play       after the script's "mark play": at least 8 screen reports,
+#              the screen changing, the pc out of TOS, VBLs taken
+#   kbd        the guest read input (keys or joystick packets) after the
+#              start, and the keyboard watch never had to take a byte
+#              after "mark play" (a keyboard the game stopped reading)
+#   jitter>=P  raster trace: the game's commonest palette chain on its
+#              usual lines in at least P% of its frames (analyse.py,
+#              "whole-chain shift" +0 share)
+jimpower | start play kbd jitter>=97
+wrathod  | start play kbd
+xenon2   | start play kbd
+turric2  | start play kbd jitter>=97
+defender | start play kbd
+riskyw   | start play kbd
+robocop2 | start play kbd
+shadbe2  | start play kbd

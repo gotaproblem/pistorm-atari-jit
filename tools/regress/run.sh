@@ -5,6 +5,8 @@
 #   tools/regress/run.sh core-206 sndh44 just these (names from either file)
 #   REGRESS_GAMES=1 tools/regress/run.sh everything AND the games (games.txt)
 #   tools/regress/run.sh games            the games only
+#   tools/regress/run.sh play             the played games (plays.txt)
+#   tools/regress/run.sh jimpower         one of them
 #   nohup tools/regress/run.sh >/dev/null 2>&1 &     and walk away
 #
 # Run from inside the repo after `make`, as the normal user: only the
@@ -603,9 +605,128 @@ PY
 	rm -f "$out/.games"
 }
 
+# ---------------------------------------------------------------- plays.txt
+want_play() {                     # `play`, or this game's name
+	local n
+	for n in "${names[@]}"; do [ "$n" = play ] || [ "$n" = "$1" ] && return 0; done
+	return 1
+}
+run_plays() {
+	local name checks
+	[ -f "$here/plays.txt" ] || return 0
+	local disk_src
+	disk_src=$(psctrl_paths | awk '$1 == "disk_path" { print $2 }')/regress-games.img
+	while IFS='|' read -r name checks; do
+		name=$(echo $name)
+		want_play "$name" || continue
+		local script="$here/games/$name.in"
+		[ -f "$script" ] || { record "$name" start FAIL "no games/$name.in"; continue; }
+		grep -q '^\[regress-games\]' "$cfg_src" || { echo "$name: SKIP - no [regress-games] in $cfg_src"; continue; }
+		[ -f "$disk_src" ] || { echo "$name: SKIP - $disk_src not found"; continue; }
+		local tname="$name${REGRESS_TAG:+-$REGRESS_TAG}"
+		local cfg="$out/$tname.cfg" log="$out/$tname.log" disk="$out/.$tname.img" rt="$out/$tname.raster"
+		local start secs
+		start=$(awk '$1 == "start" { print $2 }' "$script")
+		secs=$(awk '$1 == "seconds" { print $2 }' "$script")
+		cp -f "$disk_src" "$disk" &&
+			python3 "$here/games-img/mkgamesimg.py" --set-start "$disk" "$start" > /dev/null ||
+			{ record "$tname" start FAIL "cannot make the scratch disk"; continue; }
+		{
+			psctrl_paths
+			awk '/^\[/ { on = ($0 == "[regress-games]"); next }
+			     on && $1 != "hdd" { print }' "$cfg_src"
+			echo "hdd 0:$disk"
+		} > "$cfg"
+		rm -f "$rt" "$rt".[0-9]*
+		local RUN_ENVS=(PISTORM_INPUT_SCRIPT="$script" PISTORM_IPL_STATS=1 PISTORM_HOTKEYS=2
+		                PISTORM_GOV_REPORT=1 ${REGRESS_ENV:-})
+		case " $checks " in *" jitter>="*) RUN_ENVS+=(PISTORM_RASTER_TRACE="$rt" PISTORM_RASTER_VCOUNT=1) ;; esac
+		echo "$tname: playing $start for ${secs}s on $commit ..."
+		run_emulator "$cfg" "$((${secs%.*} + 90))" "$log" 0
+		local rc=$? why
+		rm -f "$disk"
+		why=$(crash_reason "$log")
+		[ -z "$why" ] && [ $rc -ne 0 ] && why="emulator stopped with rc=$rc before the script ended"
+		[ -n "$why" ] && record "$tname" run FAIL "$why"
+		play_checks "$tname" "$log" "$rt" "$checks"
+	done < <(grep -v '^[[:space:]]*#' "$here/plays.txt" | grep '|')
+}
+play_checks() {
+	local name=$1 log=$2 rt=$3 checks=$4 c v n
+	for c in $checks; do
+		case "$c" in
+		start)
+			if grep -q '^\[INPUT\] .* started - playing' "$log"; then
+				record "$name" start PASS "$(grep -m1 '^\[INPUT\] .* started' "$log" | cut -c9-90)"
+			else
+				record "$name" start FAIL "the game was never started (no Pexec of it: boot, RUN.INF or LAUNCH)"
+			fi ;;
+		play)
+			# the screen reports after the mark: count, distinct screens,
+			# pc in TOS, seconds with no VBL taken
+			read -r n d r z <<<"$(awk '
+				/^\[INPUT\] mark play/ { on = 1; next }
+				!on { next }
+				/^\[ipl\]   vbl: taken=/ { t = $0; sub(/.*taken=/, "", t); if (t + 0 == 0) z++; next }
+				/^\[ipl\]   screen: / { c = $4; p = $5; sub(/pc=/, "", p); n++
+					if (!(c in s)) { s[c] = 1; d++ }
+					if ((p >= "E00000" && p < "F00000") || p >= "FC0000") r++ }
+				END { print n + 0, d + 0, r + 0, z + 0 }' "$log")"
+			metric "$name" play_screens "$d"
+			if ! grep -q '^\[INPUT\] mark play' "$log"; then
+				record "$name" play FAIL "the script never reached its mark play"
+			elif [ "$n" -lt 8 ]; then
+				record "$name" play FAIL "$n screen reports after the mark (PISTORM_IPL_STATS) - stopped early?"
+			elif [ "$z" -gt 0 ]; then
+				record "$name" play FAIL "$z of $n seconds after the mark with no VBL taken"
+			elif [ "$r" -gt $((n / 2)) ]; then
+				record "$name" play FAIL "pc in TOS in $r of $n seconds after the mark: back at the desktop or bombs"
+			elif [ "$d" -lt 2 ]; then
+				record "$name" play FAIL "the screen did not change in $n seconds after the mark"
+			else
+				record "$name" play PASS "$d different screens in $n s after the mark"
+			fi ;;
+		kbd)
+			read -r n t <<<"$(awk '
+				/^\[INPUT\] .* started - playing/ { on = 1; next }
+				/^\[INPUT\] mark play/ { after = 1 }
+				on && /^\[KBD\] hk: data read/ { n++ }
+				after && /^\[KBD\] hk: unread by the guest/ { t++ }
+				END { print n + 0, t + 0 }' "$log")"
+			metric "$name" kbd_reads "$n"; metric "$name" kbd_unread_in_play "$t"
+			if [ "$n" = 0 ]; then
+				record "$name" kbd FAIL "the guest read no input after the start"
+			elif [ "$t" != 0 ]; then
+				record "$name" kbd FAIL "$t bytes the guest left unread in play (the keyboard watch took them)"
+			else
+				record "$name" kbd PASS "$n input bytes read by the guest, none left unread in play"
+			fi ;;
+		jitter\>=*)
+			v=${c#jitter>=}
+			local f
+			f=$(ls -t "$rt" "$rt".[0-9]* 2>/dev/null | head -1)
+			if [ -z "$f" ]; then record "$name" jitter FAIL "no raster trace written"; continue; fi
+			python3 "$here/../raster-trace/analyse.py" "$f" > "$rt.txt" 2>&1
+			read -r n held <<<"$(sed -n 's/^whole-chain shift (lines:frames): //p' "$rt.txt" |
+				tr ' ' '\n' | awk -F: '{ n += $2; if ($1 == "+0") h = $2 } END { print n + 0, h + 0 }')"
+			gzip -f "$f"
+			if [ "$n" = 0 ]; then record "$name" jitter FAIL "analyse.py found no palette chain ($rt.txt)"; continue; fi
+			local pct; pct=$(awk -v h="$held" -v n="$n" 'BEGIN { printf "%.1f", 100 * h / n }')
+			metric "$name" jitter_held_pct "$pct"
+			if awk -v p="$pct" -v w="$v" 'BEGIN { exit !(p >= w) }'; then
+				record "$name" jitter PASS "chain on its lines in $held of $n frames ($pct% >= $v%)"
+			else
+				record "$name" jitter FAIL "chain on its lines in $held of $n frames ($pct% < $v%)"
+			fi ;;
+		*)	record "$name" "$c" FAIL "unknown check in plays.txt" ;;
+		esac
+	done
+}
+
 run_suite
 run_tests
 run_games
+run_plays
 
 # ---------------------------------------------------------------- summary
 # The previous result of each check (history.txt, before this run) tells
