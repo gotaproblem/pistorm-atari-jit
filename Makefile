@@ -468,6 +468,20 @@ SETUP_SRC = platforms/atari/setup/shifter_setup.c \
 setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -ldrm
 
+# STBOX on the metal: the sandbox ST in the Pi driving the real ST's Shifter,
+# YM and IKBD (platforms/atari/stbox/stbox_metal.c). Not part of `all`: stop
+# the emulator first, then sudo ./stboxmetal --tos ROM --disk IMG.
+METAL_SRC = platforms/atari/stbox/stbox_metal.c platforms/atari/stbox/stbox.c \
+            platforms/atari/stbox/stbox_blit.c platforms/atari/psctrl/psctrl_tunables.c \
+            third_party/musashi/m68kcpu.c third_party/musashi/m68kops.c \
+            third_party/musashi/m68kdasm.c third_party/musashi/softfloat/softfloat.c \
+            platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c
+platforms/atari/stbox/stbox_metal_diskload.inc: platforms/atari/stbox/stbox_host.c
+	awk '/^static FILE \*fopen_ci/,/^int stbox_disk_insert_path/' $< | sed '$$d' > $@
+stboxmetal: $(METAL_SRC) tools/beamtest/beamtest.c platforms/atari/stbox/stbox_metal_diskload.inc
+	$(CC) $(METAL_SRC) -o $@ $(CFLAGS) -Iplatforms/atari/setup -Iplatforms/atari \
+	      -Iplatforms/atari/stbox -Ithird_party/musashi -Ithird_party/musashi/softfloat -lm
+
 # Hybrid STBOX go/no-go: can timed writes hit the real beam to one bus slot?
 # Not part of `all`: stop the emulator first, then sudo ./beamtest.
 beamtest: tools/beamtest/beamtest.c platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c

@@ -83,6 +83,27 @@ static uint32_t g_rom_base;        /* 0xE00000 or 0xFC0000, from header */
 static uint32_t g_rom_size;
 
 volatile int stbox_core_armed_flag; /* slice engine may run (exported for the inline gate) */
+
+/* METAL (stbox_metal.c): the box drives the real ST's Shifter, YM and
+ * IKBD instead of the host's screen and sound. All NULL in the emulator,
+ * so every hook below is one predictable branch there. */
+void (*stbox_metal_hw)(uint64_t abs, uint32_t a, uint32_t v, int size);
+void (*stbox_metal_line)(uint64_t abs_line, unsigned line, int fstart,
+                         unsigned bytes, uint32_t vcnt);
+void (*stbox_metal_ikbd)(const uint8_t *cmd, int len);
+uint64_t *stbox_metal_dirty;        /* bit per long of RAM written       */
+uint8_t  *stbox_metal_blk;          /* byte per 16 KB block: any bit set */
+volatile uint8_t stbox_metal_any;   /* any bit set since the copier last
+                                       found none                        */
+static inline void metal_dirty(uint32_t off, unsigned n)
+{
+    if (!stbox_metal_dirty) return;
+    for (uint32_t o = off & ~3u; o < off + n && o < g_ram_size; o += 4) {
+        stbox_metal_dirty[o >> 8] |= 1ull << ((o >> 2) & 63);
+        stbox_metal_blk[o >> 14] = 1;
+    }
+    stbox_metal_any = 1;
+}
 #define g_armed stbox_core_armed_flag
 static volatile int g_reset_req;   /* cold reset on next slice          */
 
@@ -518,7 +539,7 @@ static uint16_t mfm_crc(const uint8_t *p, int n)
 static void fdc_ram_put(uint32_t *dst, uint8_t v)
 {
     uint32_t a = (*dst)++ & 0xFFFFFF;
-    if (a >= 8 && a < g_ram_size) g_ram[a] = v;
+    if (a >= 8 && a < g_ram_size) { g_ram[a] = v; metal_dirty(a, 1); }
 }
 
 /* side select: PSG port A bit 0, inverted (PA0 high = side 0) */
@@ -582,6 +603,7 @@ static void fdc_complete(void)
                     if (a >= 8 && a < g_ram_size)
                         g_ram[a] = diska.data[off + i];
                 }
+                metal_dirty(dst & 0xFFFFFF, 512);
             } else {                           /* write (image only)   */
                 for (int i = 0; i < 512; i++) {
                     uint32_t a = (dst + i) & 0xFFFFFF;
@@ -610,6 +632,7 @@ static void fdc_complete(void)
             uint32_t a = (fdc.dma_addr + i) & 0xFFFFFF;
             if (a >= 8 && a < g_ram_size) g_ram[a] = hdr[i];
         }
+        metal_dirty(fdc.dma_addr & 0xFFFFFF, 6);
         fdc.dma_addr += 6;
         fdc.sector = fdc.track;                /* WD1772 quirk         */
         fdc.status = 0x80;
@@ -866,6 +889,8 @@ static void joy_resend(void);
 
 static void ikbd_command(void)      /* complete command in acia.cmd */
 {
+    if (stbox_metal_ikbd)          /* the real IKBD follows the mode */
+        stbox_metal_ikbd(acia.cmd, acia.cmdlen);
 #ifdef STBOX_IKBD_DEBUG
     fprintf(stderr, "[ikbd] cmd %02x len %u mode=%u\n",
             acia.cmd[0], acia.cmdneed, acia.mouse_mode);
@@ -1441,6 +1466,12 @@ static void line_end(void)
 #else
     (void)left_in;
 #endif
+
+    if (stbox_metal_line && g_vde && l.bytes) {
+        /* g_total_cyc is where g_frame_cyc is; the line began g_line_start */
+        const uint64_t abs_line = g_total_cyc - (uint64_t)(g_frame_cyc - g_line_start);
+        stbox_metal_line(abs_line, g_line, l.fstart, l.bytes, g_vcnt);
+    }
 
     if (g_vde) {
         stbox_cap_t *cp = &stbox_cap[g_cap_w];
@@ -2155,6 +2186,19 @@ static void hw_write(uint32_t a, uint32_t v, int size)
 /* ================================================================== */
 /* Musashi bus interface (renamed via m68kconf.h)                     */
 /* ================================================================== */
+/* METAL: a guest write to the Shifter/GLUE video registers or the YM,
+ * as the CPU made it (address, size, value), at the cycle its bus access
+ * lands - the same place beam_now() puts it for the box's own GLUE. */
+static inline void metal_hw(uint32_t a, uint32_t v, int size)
+{
+    if (!stbox_metal_hw) return;
+    const uint32_t blk = a & 0xFFFF00;
+    if (blk != 0xFF8200 && blk != 0xFF8800) return;
+    uint64_t abs = g_total_cyc;
+    if (g_in_exec) { int c = m68k_cycles_to_instr_end() - 4; if (c > 0) abs += (uint64_t)c; }
+    stbox_metal_hw(abs, a, v, size);
+}
+
 static inline int rom_hit(uint32_t a)
 {
     return a >= g_rom_base && a < g_rom_base + g_rom_size;
@@ -2265,12 +2309,12 @@ void stbox_bus_w8(unsigned int address, unsigned int value)
         int ok; uint32_t m = ram_map(a, &ok);
         if (ok == 1) {
             if (stbox_watch_hi) watch_w(a, value, m68k_get_reg(NULL, M68K_REG_PPC));
-            if (a >= 8) g_ram[m] = (uint8_t)value;
+            if (a >= 8) { g_ram[m] = (uint8_t)value; metal_dirty(m, 1); }
             return;
         }
         if (ok == 0) return;                       /* open bus: sink      */
     }
-    if (a >= 0xFF8000) { hw_write(a, value, 1); return; }
+    if (a >= 0xFF8000) { metal_hw(a, value, 1); hw_write(a, value, 1); return; }
     if (rom_hit(a) || (a >= 0xFA0000 && a < 0xFC0000)) return; /* ROM: sink */
     m68k_pulse_bus_error();
 }
@@ -2283,12 +2327,12 @@ void stbox_bus_w16(unsigned int address, unsigned int value)
         if (ok == 1) {
             if (stbox_watch_hi) watch_w(a, value, m68k_get_reg(NULL, M68K_REG_PPC));
             if (a >= 8) { g_ram[m] = (uint8_t)(value >> 8);
-                          g_ram[m + 1] = (uint8_t)value; }
+                          g_ram[m + 1] = (uint8_t)value; metal_dirty(m, 2); }
             return;
         }
         if (ok == 0) return;
     }
-    if (a >= 0xFF8000) { hw_write(a, value, 2); return; }
+    if (a >= 0xFF8000) { metal_hw(a, value, 2); hw_write(a, value, 2); return; }
     if (rom_hit(a) || (a >= 0xFA0000 && a < 0xFC0000)) return;
     m68k_pulse_bus_error();
 }
@@ -2464,6 +2508,7 @@ int stbox_core_take_halt_report(void)
     return 0;
 }
 uint32_t stbox_core_cps(void){ return g_stat_cps; }
+uint64_t stbox_core_total_cyc(void) { return g_total_cyc; }
 void stbox_core_sched_stats(uint32_t out[5])
 {
     out[0] = g_pub_calls; out[1] = g_pub_slices;
@@ -2537,6 +2582,7 @@ void stbox_blit_mem_w16(uint32_t a, uint16_t v)
             if (stbox_watch_hi) watch_w(a, v, m68k_get_reg(NULL, M68K_REG_PPC));
             g_ram[m] = (uint8_t)(v >> 8);
             g_ram[m + 1] = (uint8_t)v;
+            metal_dirty(m, 2);
         }
     }
 }
@@ -2681,6 +2727,7 @@ void stbox_slice(uint64_t now)
                         if (a >= 8 && a < g_ram_size)
                             g_ram[a] = stbox_rfdc.staging[i];
                     }
+                    metal_dirty(fdc.dma_addr & 0xFFFFFF, bytes);
                     fdc.dma_addr += bytes;
                     if (fdc.sector_count >= stbox_rfdc.xferred)
                         fdc.sector_count -= stbox_rfdc.xferred;

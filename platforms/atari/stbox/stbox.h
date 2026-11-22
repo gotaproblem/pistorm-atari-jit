@@ -329,6 +329,26 @@ typedef struct {
 } stbox_cap_t;
 extern stbox_cap_t stbox_cap[STBOX_CAP_BUFS];
 
+/* ------------------------------------------------------------------ */
+/* METAL: the box drives the real ST (stbox_metal.c, its own binary). */
+/* All NULL in the emulator.                                          */
+/* ------------------------------------------------------------------ */
+/* abs = box cycle (stbox_core_total_cyc() units) the access lands at;
+ * every guest write to $FF8200-$FF82FF and $FF8800-$FF88FF, as made */
+extern void (*stbox_metal_hw)(uint64_t abs, uint32_t a, uint32_t v, int size);
+/* every displayed line as the box's GLUE decided it: where it began, its
+ * first fetch cycle, bytes fetched, video counter at the first fetch */
+extern void (*stbox_metal_line)(uint64_t abs_line, unsigned line, int fstart,
+                                unsigned bytes, uint32_t vcnt);
+/* every complete guest -> IKBD command */
+extern void (*stbox_metal_ikbd)(const uint8_t *cmd, int len);
+/* RAM written by the guest or the box's DMA: bit per long, word per 256
+ * bytes; byte per 16 KB block set when any of its bits is */
+extern uint64_t *stbox_metal_dirty;
+extern uint8_t  *stbox_metal_blk;
+extern volatile uint8_t stbox_metal_any;
+uint64_t stbox_core_total_cyc(void);
+
 #ifdef STBOX_LINE_LOG
 /* harness builds only (-DSTBOX_LINE_LOG): the GLUE's decision per line */
 typedef struct {

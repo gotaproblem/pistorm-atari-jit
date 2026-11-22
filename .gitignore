@@ -60,3 +60,6 @@ tools/stbox-harness/harness-*
 tools/stbox-harness/obj-*/
 tools/stbox-harness/rasters/out/
 stbox-diag-*
+/stboxmetal
+/beamtest
+platforms/atari/stbox/stbox_metal_diskload.inc

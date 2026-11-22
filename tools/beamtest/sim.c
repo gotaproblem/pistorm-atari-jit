@@ -49,8 +49,8 @@ static inline double abs_cyc(double ns) { return (ns - org_ns) * st_hz * 1e-9; }
 /* register histories: (abs cycle, value), in landing order */
 typedef struct { int64_t c; uint8_t v; } chg_t;
 #define NCH (1 << 22)
-static chg_t *syn, *rez;
-static int nsyn, nrez;
+static chg_t *syn, *rez, *bhi, *bmi;     /* sync, rez, video base hi/mid */
+static int nsyn, nrez, nbhi, nbmi;
 
 static uint8_t val_at(const chg_t *a, int n, int64_t c)
 {
@@ -144,7 +144,11 @@ static uint32_t counter_at(double ns)
             partial = (uint32_t)(p < bytes ? p : bytes);
         }
     }
-    return BASE + cur_acc + partial;
+    /* the counter restarts from the base 3 lines before the frame ends
+     * (line 310, cycle 56): this frame's base is the one set by then */
+    const int64_t rl = (frame * FRAME_LINES - 3) * (int64_t)LINE_CYC + 56;
+    const uint32_t base = ((uint32_t)val_at(bhi, nbhi, rl) << 16) | ((uint32_t)val_at(bmi, nbmi, rl) << 8);
+    return base + cur_acc + partial;
 }
 
 static double jitter(void) { return jit_ns * (2.0 * rand() / RAND_MAX - 1.0); }
@@ -162,6 +166,8 @@ void ps_write_8(uint32_t addr, uint16_t data)
     addr &= 0xFFFFFF;
     if (addr == 0xFF820A) land(syn, &nsyn, t, (uint8_t)data);
     if (addr == 0xFF8260) land(rez, &nrez, t, (uint8_t)data);
+    if (addr == 0xFF8201) land(bhi, &nbhi, t, (uint8_t)data);
+    if (addr == 0xFF8203) land(bmi, &nbmi, t, (uint8_t)data);
     spin_until(t + dur_ns);
 }
 void ps_write_16(uint32_t addr, uint16_t data) { (void)addr; (void)data; spin_until(now_ns() + dur_ns + 50); }
@@ -211,6 +217,9 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     org_ns = now_ns() - (double)(rand() % 20000000);
     syn = malloc(NCH * sizeof *syn); rez = malloc(NCH * sizeof *rez);
     syn[0] = (chg_t){ INT64_MIN, 2 }; nsyn = 1;
+    bhi = malloc(NCH * sizeof *bhi); bmi = malloc(NCH * sizeof *bmi);
+    bhi[0] = (chg_t){ INT64_MIN, (BASE >> 16) & 0xFF }; nbhi = 1;
+    bmi[0] = (chg_t){ INT64_MIN, (BASE >> 8) & 0xFF }; nbmi = 1;
     rez[0] = (chg_t){ INT64_MIN, 0 }; nrez = 1;
     ss->shifter = 1; ss->mode = SS_MODE_COLOUR;
     ss->bank0 = 2048u << 10; ss->bank1 = 2048u << 10; ss->memcfg = 0x0A;

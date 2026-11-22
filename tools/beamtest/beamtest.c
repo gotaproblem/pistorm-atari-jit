@@ -714,25 +714,11 @@ static void measure_writes(void)
 /* ---- main ---------------------------------------------------------------- */
 static struct ss_screen scr;
 
-int main(int argc, char **argv)
+/* Take the bus, pin to a core, bring the ST up with a plain 50 Hz
+ * low-res screen at BASE (solid colour 15, black border). 0 = ready. */
+static int bt_init(const char *who, int core)
 {
-    double secs = 10.0, only_secs = 0;
-    const char *only = "BCDEF";
-    int core = 3;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--secs") && i + 1 < argc)      secs = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--lead") && i + 1 < argc) lead_forced = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--cal") && i + 1 < argc)  { g_cal = atof(argv[++i]); cal_forced = 1; }
-        else if (!strcmp(argv[i], "--only") && i + 2 < argc) { only = argv[++i]; only_secs = atof(argv[++i]); }
-        else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS] [--cal CYCLES] [--only LETTERS SECS]\n", argv[0]); return 2; }
-    }
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    static char only_buf[16];
-    snprintf(only_buf, sizeof only_buf, "%s%s", (!cal_forced && !strchr(only, 'B')) ? "B" : "", only);
-    only = only_buf;
-
-    if (pistorm_bus_lock("beamtest") != 0) {
+    if (pistorm_bus_lock(who) != 0) {
         printf("the emulator owns the bus: sudo systemctl stop pistorm first\n");
         return 1;
     }
@@ -742,7 +728,7 @@ int main(int argc, char **argv)
     signal(SIGINT, on_sigint);
 
     HZ = (double)tick_hz(); NSPT = 1e9 / HZ;
-    printf("beamtest: core %d, Pi timer %.0f Hz (%.1f ns), %.0f s per phase\n", core, HZ, NSPT, secs);
+    printf("%s: core %d, Pi timer %.0f Hz (%.1f ns)\n", who, core, HZ, NSPT);
 
     ps_setup_protocol();
     ps_bus_cpu_thread(1);
@@ -767,49 +753,25 @@ int main(int argc, char **argv)
     for (uint32_t a = BASE; a < BASE + FILL_BYTES; a += 4) ps_write_32(a, 0xFFFFFFFFu);
     usleep(100000);
 
-    printf("\n[A] LOCK\n");
-    if (lock(0) != 0) return 1;
-    measure_writes();
+    return 0;
+}
 
-    static const struct { int ph; const char *name, *look; } phases[] = {
-        { PH_RIGHT,  "RIGHT BORDER SWEEP (calibrates the tests after it)",
-          "9 coloured bands (red, orange, yellow, green, cyan, blue, magenta, white, grey =\n"
-          "      offsets -16..+16). Bands reaching the monitor's right edge opened." },
-        { PH_EDGE,   "EDGE",
-          "blue screen, right half yellow. The edge should be one straight vertical line;\n"
-          "      a ragged edge is jitter (one step = 4 pixels = one bus slot)." },
-        { PH_TOPBOT, "TOP + BOTTOM BORDER",
-          "green from near the top of the monitor to near the bottom." },
-        { PH_FULL,   "FULL OVERSCAN (all four borders, every line, calibrated)",
-          "white from the top of the monitor to the bottom, steady. The top part\n"
-          "      (lines 34..80) keeps its side borders, so does one line near the bottom\n"
-          "      (300) - for the counter reads; everything else edge to edge." },
-        { PH_LEFT,   "LEFT BORDER SWEEP",
-          "the same 9 bands, each pulsing hi res for 8 cycles at a different offset\n"
-          "      from the line start. Bands reaching the monitor's left edge opened; black\n"
-          "      lines in a band = blank lines." },
-    };
-    for (int k = 0; k < 5 && !g_stop; k++) {
-        if (!strchr(only, 'B' + k)) continue;
-        printf("\n[%c] %s - on the monitor: %s\n", 'B' + k, phases[k].name, phases[k].look);
-        if (phases[k].ph == PH_EDGE)   ps_write_16(R_PAL15, C_BLUE);
-        if (phases[k].ph == PH_TOPBOT) ps_write_16(R_PAL15, C_GREEN);
-        if (phases[k].ph == PH_FULL)   ps_write_16(R_PAL15, 0x777);
-        /* a fresh lock for each test: one that lost it must not hand a
-         * drifted clock to the next (run 3's F) */
-        if (k > 0 && lock(1) != 0) break;
-        run_phase(phases[k].ph, (k == 0 || only_secs <= 0) ? secs : only_secs);
-        report_common();
-        if (phases[k].ph == PH_TOPBOT) {
-            printf("  top border:    opened %llu, shut %llu, unreadable %llu frames\n",
-                   (unsigned long long)R.top_open, (unsigned long long)R.top_shut,
-                   (unsigned long long)R.top_bad);
-            printf("  bottom border: opened %llu, shut %llu, unreadable %llu frames\n",
-                   (unsigned long long)R.bot_open, (unsigned long long)R.bot_shut,
-                   (unsigned long long)R.bot_bad);
-        }
-        if (phases[k].ph == PH_RIGHT) {
-            report_sweep(1);
+/* Back to the plain screen the lock reads (after a test or a box run). */
+static void __attribute__((unused)) bt_plain_screen(void)
+{
+    ps_write_8(R_SYNC, 2);
+    ps_write_8(R_REZ, 0);
+    ps_write_8(0x00FF8201u, (BASE >> 16) & 0xFF);
+    ps_write_8(0x00FF8203u, (BASE >> 8) & 0xFF);
+    ps_write_16(R_PAL0, C_BLACK);
+    for (int i = 1; i < 16; i++) ps_write_16(R_PAL0 + 2u * i, C_BLUE);
+    for (uint32_t a = BASE; a < BASE + FILL_BYTES; a += 4) ps_write_32(a, 0xFFFFFFFFu);
+}
+
+/* After the coarse right sweep has run (R holds it): find the slot, sweep
+ * it in 1-cycle steps and set g_cal to its middle. */
+static void bt_calibrate_from_sweep(double secs)
+{
             /* one band that always opens, with no neighbour that ever
              * does, gives the writes' landing error to the 4-cycle slot */
             int best = 0;
@@ -855,6 +817,73 @@ int main(int argc, char **argv)
                 printf("  the tests below aim %+.2f cycles from target (the hit-weighted middle)\n", g_cal);
                 g_band_base = -16; g_band_step = 4;
             }
+}
+
+#ifndef BEAMTEST_NO_MAIN
+int main(int argc, char **argv)
+{
+    double secs = 10.0, only_secs = 0;
+    const char *only = "BCDEF";
+    int core = 3;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--secs") && i + 1 < argc)      secs = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--lead") && i + 1 < argc) lead_forced = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--cal") && i + 1 < argc)  { g_cal = atof(argv[++i]); cal_forced = 1; }
+        else if (!strcmp(argv[i], "--only") && i + 2 < argc) { only = argv[++i]; only_secs = atof(argv[++i]); }
+        else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS] [--cal CYCLES] [--only LETTERS SECS]\n", argv[0]); return 2; }
+    }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    static char only_buf[16];
+    snprintf(only_buf, sizeof only_buf, "%s%s", (!cal_forced && !strchr(only, 'B')) ? "B" : "", only);
+    only = only_buf;
+
+    if (bt_init("beamtest", core)) return 1;
+
+    printf("\n[A] LOCK\n");
+    if (lock(0) != 0) return 1;
+    measure_writes();
+
+    static const struct { int ph; const char *name, *look; } phases[] = {
+        { PH_RIGHT,  "RIGHT BORDER SWEEP (calibrates the tests after it)",
+          "9 coloured bands (red, orange, yellow, green, cyan, blue, magenta, white, grey =\n"
+          "      offsets -16..+16). Bands reaching the monitor's right edge opened." },
+        { PH_EDGE,   "EDGE",
+          "blue screen, right half yellow. The edge should be one straight vertical line;\n"
+          "      a ragged edge is jitter (one step = 4 pixels = one bus slot)." },
+        { PH_TOPBOT, "TOP + BOTTOM BORDER",
+          "green from near the top of the monitor to near the bottom." },
+        { PH_FULL,   "FULL OVERSCAN (all four borders, every line, calibrated)",
+          "white from the top of the monitor to the bottom, steady. The top part\n"
+          "      (lines 34..80) keeps its side borders, so does one line near the bottom\n"
+          "      (300) - for the counter reads; everything else edge to edge." },
+        { PH_LEFT,   "LEFT BORDER SWEEP",
+          "the same 9 bands, each pulsing hi res for 8 cycles at a different offset\n"
+          "      from the line start. Bands reaching the monitor's left edge opened; black\n"
+          "      lines in a band = blank lines." },
+    };
+    for (int k = 0; k < 5 && !g_stop; k++) {
+        if (!strchr(only, 'B' + k)) continue;
+        printf("\n[%c] %s - on the monitor: %s\n", 'B' + k, phases[k].name, phases[k].look);
+        if (phases[k].ph == PH_EDGE)   ps_write_16(R_PAL15, C_BLUE);
+        if (phases[k].ph == PH_TOPBOT) ps_write_16(R_PAL15, C_GREEN);
+        if (phases[k].ph == PH_FULL)   ps_write_16(R_PAL15, 0x777);
+        /* a fresh lock for each test: one that lost it must not hand a
+         * drifted clock to the next (run 3's F) */
+        if (k > 0 && lock(1) != 0) break;
+        run_phase(phases[k].ph, (k == 0 || only_secs <= 0) ? secs : only_secs);
+        report_common();
+        if (phases[k].ph == PH_TOPBOT) {
+            printf("  top border:    opened %llu, shut %llu, unreadable %llu frames\n",
+                   (unsigned long long)R.top_open, (unsigned long long)R.top_shut,
+                   (unsigned long long)R.top_bad);
+            printf("  bottom border: opened %llu, shut %llu, unreadable %llu frames\n",
+                   (unsigned long long)R.bot_open, (unsigned long long)R.bot_shut,
+                   (unsigned long long)R.bot_bad);
+        }
+        if (phases[k].ph == PH_RIGHT) {
+            report_sweep(1);
+            bt_calibrate_from_sweep(secs);
         }
         if (phases[k].ph == PH_LEFT)  report_sweep(0);
         if (phases[k].ph == PH_FULL) {
@@ -888,3 +917,4 @@ int main(int argc, char **argv)
     printf("\nbeamtest done%s\n", g_stop ? " (stopped by Ctrl+C)" : "");
     return 0;
 }
+#endif /* BEAMTEST_NO_MAIN */
