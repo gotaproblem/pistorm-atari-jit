@@ -1,0 +1,37 @@
+diff --git a/src/control.c b/src/control.c
+index 35c8d64..2c622b8 100644
+--- a/src/control.c
++++ b/src/control.c
+@@ -130,6 +130,15 @@ static bool Control_InsertKey(const char *event)
+  */
+ static bool Control_InsertEvent(const char *event)
+ {
++	if (strncmp(event, "joy ", 4) == 0) {   /* joy <port> <bits> <0|1> */
++		extern void Joy_SetRemote(int id, int bits, bool down);
++		int id, bits, d;
++		if (sscanf(event + 4, "%d %i %d", &id, &bits, &d) == 3) {
++			Joy_SetRemote(id, bits, d != 0);
++			return true;
++		}
++		return false;
++	}
+ 	if (strcmp(event, "doubleclick") == 0) {
+ 		Keyboard.LButtonDblClk = 1;
+ 		return true;
+diff --git a/src/joy.c b/src/joy.c
+index 7c8de34..66b3203 100644
+--- a/src/joy.c
++++ b/src/joy.c
+@@ -445,6 +445,12 @@ bool Joy_SwitchMode(int port)
+  * A key has been pressed down, check if we use it for joystick emulation
+  * via keyboard.
+  */
++void Joy_SetRemote(int id, int bits, bool down)
++{
++	if (id < 0 || id >= JOYSTICK_COUNT) return;
++	if (down) nJoyKeyEmu[id] |= bits; else nJoyKeyEmu[id] &= ~bits;
++}
++
+ bool Joy_KeyDown(int symkey, int modkey)
+ {
+ 	int i;

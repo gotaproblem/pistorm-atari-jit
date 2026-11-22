@@ -1,0 +1,18 @@
+# Regression game input (tools/regress/hatari/drive.py format): times are
+# seconds from the program start. Worked out in Hatari 2.4.1, plain ST,
+# TOS 2.06, 4 MB, 22 Nov 2026; "mark play" is where gameplay was on screen.
+start D:\DEFENDER\DEFENDER.TOS
+seconds 80
+shots 4
+20 key 0x3B       # F1: one player
+25 key 0x3B
+30 key 0x3B
+32 mark play
+35 key 0x3B
+40 keydown 0x32   # M thrust
+40 keydown 0x26   # L fire
+55 keyup 0x26
+55 keyup 0x32
+60 key 0x39       # Space reverse
+62 keydown 0x32
+75 keyup 0x32
