@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 extern volatile int rt_on;
+void rt_start(void);   /* PISTORM_RASTER_FROM_MARK: begin recording (input_script.c) */
 void rt_palette_slow(unsigned idx, uint16_t val);
 void rt_irq_slow(int level);
 void rt_mfp_slow(uint32_t addr, uint32_t val, int word);

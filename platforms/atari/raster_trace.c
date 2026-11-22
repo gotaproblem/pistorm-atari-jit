@@ -75,6 +75,7 @@ static uint64_t rt_win_ticks;               /* 100 us in arch-timer ticks      *
 static volatile uint64_t rt_n;            /* events ever logged */
 static uint64_t rt_w_t0, rt_w_clk0, rt_w_gov;  /* the open Timer B window */
 static const char *rt_path;
+static int rt_from_mark;                    /* PISTORM_RASTER_FROM_MARK */
 
 static inline uint64_t rt_ticks(void)
 {
@@ -112,11 +113,28 @@ __attribute__((constructor)) static void rt_init(void)
         const char *v = getenv("PISTORM_RASTER_VCOUNT");
         rt_vc = v && *v == '1';
     }
-    rt_on = 1;
+    {
+        /* PISTORM_RASTER_FROM_MARK=1: record nothing until rt_start() -
+         * the regression input script calls it at its "mark play", so
+         * the trace (and the cost of its video counter reads) covers the
+         * gameplay only, not the menus and the loading before it */
+        const char *m = getenv("PISTORM_RASTER_FROM_MARK");
+        rt_from_mark = m && *m == '1';
+    }
+    rt_on = !rt_from_mark;
     fprintf(stderr, "[RASTER] tracing palette writes and interrupts -> %s "
-                    "(written when the emulator stops)%s\n", rt_path,
+                    "(written when the emulator stops)%s%s\n", rt_path,
             rt_vc ? "; reading the video counter at each write (bus reads)"
-                  : "; no bus reads");
+                  : "; no bus reads",
+            rt_from_mark ? "; from the input script's mark on" : "");
+}
+
+void rt_start(void)
+{
+    if (!rt_buf || rt_on)
+        return;
+    rt_on = 1;
+    fprintf(stderr, "[RASTER] recording from here\n");
 }
 
 /* Several threads log: the CPU thread (palette, interrupts, MFP writes,
@@ -414,8 +432,10 @@ void rt_dump(void)
     FILE *f;
     uint64_t hz, t0;
 
-    if (!rt_on || !rt_buf)
+    static int dumped;
+    if (!rt_buf || !rt_n || dumped)
         return;
+    dumped = 1;
     rt_on = 0;
     /* never over an earlier trace: run-pistorm.sh relaunches the emulator
      * with the same environment (Ctrl+Alt+Undo, the reset button), so a

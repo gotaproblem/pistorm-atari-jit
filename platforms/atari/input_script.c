@@ -36,6 +36,7 @@
 #include "platforms/atari/kbd_usb.h"
 
 extern void pistorm_request_exit(int mode);
+extern void rt_start(void);              /* raster_trace.c, PISTORM_RASTER_FROM_MARK */
 
 enum { EV_JOY, EV_KD, EV_KU, EV_MARK };
 typedef struct { double t; int kind; int v; char label[48]; } ev_t;
@@ -198,6 +199,8 @@ static void *player(void *arg)
                 break;
             case EV_MARK:
                 printf("[INPUT] mark %s at %.1f s\n", e->label, now);
+                if (!strncmp(e->label, "play", 4))
+                    rt_start();          /* PISTORM_RASTER_FROM_MARK traces from here */
                 break;
             }
             fflush(stdout);

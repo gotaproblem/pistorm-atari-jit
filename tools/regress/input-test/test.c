@@ -22,6 +22,8 @@ static int ng;
 static volatile int stopped;
 void joy_usb_script_set(int port, uint8_t s) { snprintf(got[ng], 64, "joy%d %02X", port, s); at[ng++] = now(); }
 void kbd_usb_script_key(uint8_t k, int d) { snprintf(got[ng], 64, "key %02X %d", k, d); at[ng++] = now(); }
+static int rt_started;
+void rt_start(void) { rt_started++; }
 void pistorm_request_exit(int m) { snprintf(got[ng], 64, "exit %d", m); at[ng++] = now(); stopped = 1; for (;;) pause(); }
 
 static int fails;
@@ -58,6 +60,7 @@ int main(void)
         CHECK(at[i] >= wt[i] - 0.01 && at[i] < wt[i] + 0.05, "event %d (%s) at %.3f s, want %.1f",
               i, got[i], at[i], wt[i]);
     }
+    CHECK(rt_started == 1, "rt_start called %d times at mark play, want 1", rt_started);
     printf(fails ? "%d CHECK(S) FAILED\n" : "all checks passed\n", fails);
     return fails != 0;
 }

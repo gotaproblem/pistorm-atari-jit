@@ -640,7 +640,11 @@ run_plays() {
 		rm -f "$rt" "$rt".[0-9]*
 		local RUN_ENVS=(PISTORM_INPUT_SCRIPT="$script" PISTORM_IPL_STATS=1 PISTORM_HOTKEYS=2
 		                PISTORM_GOV_REPORT=1 ${REGRESS_ENV:-})
-		case " $checks " in *" jitter>="*) RUN_ENVS+=(PISTORM_RASTER_TRACE="$rt" PISTORM_RASTER_VCOUNT=1) ;; esac
+		# the raster trace from "mark play" on only: the score is about
+		# the gameplay, and its video counter reads cost bus time on the
+		# screens before it (Jim Power ran at 4450 kHz for 35 s of its
+		# loading with the trace on from the start - 22 Nov)
+		case " $checks " in *" jitter>="*) RUN_ENVS+=(PISTORM_RASTER_TRACE="$rt" PISTORM_RASTER_VCOUNT=1 PISTORM_RASTER_FROM_MARK=1) ;; esac
 		echo "$tname: playing $start for ${secs}s on $commit ..."
 		run_emulator "$cfg" "$((${secs%.*} + 90))" "$log" 0
 		local rc=$? why

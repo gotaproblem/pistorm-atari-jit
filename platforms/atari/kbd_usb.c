@@ -2210,6 +2210,8 @@ static int joy_send(int st_port, uint8_t state, uint8_t pad_buttons)
 
 static void joy_set_rbutton(int down)
 {
+    if (pst_dbg_ikbd && atomic_load_explicit(&joy_rbutton, memory_order_relaxed) != down)
+        printf("[IKBD] pad 0 fire -> right mouse button %s\n", down ? "down" : "up");
     atomic_store_explicit(&joy_rbutton, down, memory_order_relaxed);
 }
 
@@ -2285,6 +2287,7 @@ static void mouse_flush(void)
      * mouse button (the IKBD wires them together - Hatari
      * IKBD_DuplicateMouseFireButtons), so pad 0's fire rides in the F8
      * header here and is stripped from its $FF packets in joy_send(). */
+    static uint8_t last_dbg_hdr = 0xF8;     /* debug: report button changes */
     const int buttons = in_state.buttons |
                         (atomic_load_explicit(&joy_rbutton, memory_order_relaxed) ? 0x01 : 0);
 
@@ -2292,6 +2295,9 @@ static void mouse_flush(void)
     {
         /* not injectable in keycode/off modes - drop deltas so they
          * don't burst out when relative mode returns */
+        if (pst_dbg_ikbd && buttons != in_state.last_sent_buttons)
+            printf("[IKBD] mouse buttons $%X not sent (%s)\n", buttons,
+                   paused ? "paused" : mode == MOUSE_OFF ? "mouse off" : "keycode mode");
         in_state.dx = in_state.dy = 0;
         in_state.last_sent_buttons = buttons;
         return;
@@ -2374,6 +2380,10 @@ static void mouse_flush(void)
         pkt[1] = (uint8_t)(int8_t)sx;
         pkt[2] = (uint8_t)(int8_t)sy;
         ring_push_packet(pkt, 3);
+        if (pst_dbg_ikbd && (pkt[0] & 3) != (last_dbg_hdr & 3))
+            printf("[IKBD] mouse $%02X %d %d queued (ring %u)\n", pkt[0], sx, sy,
+                   (unsigned)ring_used());
+        last_dbg_hdr = pkt[0];
     }
 }
 
