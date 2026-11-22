@@ -32,6 +32,7 @@ void pistorm_dma_write_stram(uint32_t a, const uint8_t *b, uint32_t n)
 { if (a + n <= sizeof ram) memcpy(ram + a, b, n); }
 uint32_t pistorm_stram_top(void)      { return 0x400000u; }
 uint32_t pistorm_stram_phys_top(void) { return 0x400000u; }
+uint32_t pistorm_guest_pc(void)       { return 0; }
 void     ps_write_8(uint32_t a, uint32_t v)  { (void)a; (void)v; }
 void     ps_write_16(uint32_t a, uint32_t v) { (void)a; (void)v; }
 uint32_t ps_read_8(uint32_t a)  { (void)a; return 0xFF; }
@@ -288,6 +289,25 @@ int main(void)
 			out[0] = 0;
 			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 1 of 2)"),
 			      "keys: Insert again should wrap to disk 1, has '%s'", out);
+			/* from another thread: queued, done at the next floppy access */
+			fdd_hotkey_request(0);
+			out[0] = 0;
+			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 1 of 2)"),
+			      "keys: a request must wait for the next floppy access, has '%s'", out);
+			(void)fdd_gpip(0xFF);
+			out[0] = 0;
+			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 2 of 2)[cr Elite]"),
+			      "keys: request carried out at the GPIP read, has '%s'", out);
+			fdd_hotkey_request(1);
+			fdd_hotkey_request(0);
+			(void)fdd_gpip(0xFF);
+			out[0] = 0;
+			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 1 of 2)"),
+			      "keys: eject + Insert requests should leave disk 1 in, has '%s'", out);
+			(void)fdd_gpip(0xFF);
+			out[0] = 0;
+			CHECK(fdd_query(0, out, sizeof out, NULL, NULL) == 1 && strstr(out, "(Disk 1 of 2)"),
+			      "keys: a request is carried out once, has '%s'", out);
 			snprintf(p, sizeof p, "rm -rf '%s'", dir);
 			if (system(p)) {}
 		}

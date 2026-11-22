@@ -1319,10 +1319,10 @@ static int stbox_divert_real_byte(uint8_t v)
  * alone. TOS uses Ctrl+Alt+Del (warm) and Ctrl+Alt+RShift+Del (cold). The native
  * keyboard is watched at the ACIA: every FRESH byte the guest reads off
  * the real IKBD (kbd_hotkey_ikbd_byte, called from natmem's data read and
- * the USB data shim) - so the native combination needs the guest to be
- * reading the keyboard. USB keys are watched where they arrive, so the
- * USB combination works whatever the guest is doing. PISTORM_HOTKEYS=0
- * turns both off. */
+ * the USB data shim) - and, when the guest has stopped reading the
+ * keyboard, from the main thread (kbd_hotkey_idle_poll below), so the
+ * native combination works whatever the guest is doing too. USB keys are
+ * watched where they arrive. PISTORM_HOTKEYS=0 turns both off. */
 extern void pistorm_request_exit(int mode);   /* emulator.c: 1 restart, 0 stop, 2 halt */
 
 struct hk_state { uint8_t ctrl, alt, lsh, rsh; };
@@ -1338,14 +1338,15 @@ static void hk_key(struct hk_state *h, uint8_t sc, int down, const char *src)
     }
     /* floppy A: inside any game: Clr/Home ejects, Insert puts in the
      * next disk of the set (atari_fdd.c) */
+    /* queued: carried out on the CPU thread at the guest's next floppy
+     * access (fdd_hotkey_request) - this runs on the CPU, USB or main
+     * thread depending on where the keys were seen */
     if (sc == 0x47 && down && h->ctrl && h->alt) {  /* Clr/Home    */
-        fdd_hotkey_eject(0);
-        fflush(stdout);
+        fdd_hotkey_request(1);
         return;
     }
     if (sc == 0x52 && down && h->ctrl && h->alt) {  /* Insert      */
-        fdd_hotkey_next(0);
-        fflush(stdout);
+        fdd_hotkey_request(0);
         return;
     }
     if (sc == 0x61 && down && h->ctrl && h->alt) {  /* Undo        */
@@ -1387,9 +1388,9 @@ void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
     static uint64_t last;
     if (!kbd_hotkeys_on())
         return;
-    if (hk_trace) {
-        printf("[KBD] hk: data read $%02X %s left=%d ctrl=%u alt=%u\n", v,
-               fresh ? "FRESH" : "stale", left, st.ctrl, st.alt);
+    if (hk_trace && fresh) {             /* repeated (stale) reads: not shown */
+        printf("[KBD] hk: data read $%02X left=%d ctrl=%u alt=%u\n", v,
+               left, st.ctrl, st.alt);
         fflush(stdout);
     }
     if (!fresh)
@@ -1398,6 +1399,97 @@ void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
     if (left && now - last > 4000)
         left = 0;
     last = now;
+    if (left) {
+        left--;
+        return;
+    }
+    left = stbox_raw_pkt_len(v);
+    if (left == 0)
+        hk_key(&st, v & 0x7F, !(v & 0x80), "ST");
+}
+
+/* NATIVE HOTKEYS WHILE THE GUEST IS NOT READING THE KEYBOARD. Main
+ * thread, every 10 ms (emulator.c). The native combination is seen in the
+ * bytes the guest reads, so a guest that leaves the keyboard alone - Wrath
+ * of the Demon waiting for its next disk: every MFP channel off, the drive
+ * polled, the ACIA never read - left the hotkeys dead exactly when a disk
+ * had to go in.
+ *
+ * Once the guest has made no keyboard ACIA access for a second, every
+ * 50 ms it looks at the receiver (ps_acia_kbd_idle_look: one status read,
+ * under the bus lock, refused the moment the guest reads - a bus hand-off
+ * from this thread costs the CPU thread an IPI, so not more often). A
+ * byte that is still there at the next look, with the guest still silent, is
+ * nobody's: a listening guest takes a byte within microseconds of its
+ * interrupt. That byte is taken and watched for the hotkeys, and is gone -
+ * as it would be on an ST, where a receiver nobody empties overruns.
+ *
+ * Bytes are taken one per two looks, so packet bytes behind the first are
+ * lost to overruns, and a byte after a loss may be the middle of a mouse
+ * packet. So a byte only counts while the framing is known: from an
+ * empty receiver (nothing arrived since the last byte taken - a gap far
+ * longer than a packet's 1.28 ms byte spacing) until the chip reports an
+ * overrun. Key presses come one at a time and are always seen; a moving
+ * mouse makes the watch skip bytes, never misread them. */
+extern volatile unsigned ps_acia_kbd_guest_access;
+extern int ps_acia_kbd_idle_look(unsigned access, int take, uint8_t *v);
+
+void kbd_hotkey_idle_poll(void)
+{
+    static unsigned seen;
+    static uint64_t quiet_since;
+    static uint64_t last_look;
+    static int waiting, synced, left;
+    static struct hk_state st;
+    uint8_t v = 0;
+    int r;
+
+    if (!kbd_hotkeys_on())
+        return;
+    const uint64_t now = now_us();
+    const unsigned a = ps_acia_kbd_guest_access;
+    if (a != seen || !quiet_since) {
+        seen = a;
+        quiet_since = now;
+        waiting = synced = left = 0;
+        memset(&st, 0, sizeof st);
+        return;
+    }
+    if (now - quiet_since < 1000000 || now - last_look < 50000)
+        return;
+    last_look = now;
+    r = ps_acia_kbd_idle_look(a, 0, &v);
+    if (r < 0) {                         /* the guest read it: hands off */
+        quiet_since = 0;
+        return;
+    }
+    if (!(r & 3)) {                      /* empty: the next byte starts a packet */
+        synced = 1;
+        left = 0;
+        waiting = 0;
+        return;
+    }
+    if (!waiting) {                      /* give a listening guest the byte first */
+        waiting = 1;
+        return;
+    }
+    waiting = 0;
+    r = ps_acia_kbd_idle_look(a, 1, &v);
+    if (r < 0) {
+        quiet_since = 0;
+        return;
+    }
+    if (r & 2)                           /* bytes lost before this one */
+        synced = left = 0;
+    if (!(r & 4))
+        return;
+    if (hk_trace) {
+        printf("[KBD] hk: unread by the guest $%02X %s left=%d ctrl=%u alt=%u\n",
+               v, synced ? "" : "(skipped: framing lost)", left, st.ctrl, st.alt);
+        fflush(stdout);
+    }
+    if (!synced)
+        return;
     if (left) {
         left--;
         return;

@@ -235,6 +235,11 @@ void     fdd_toggle_disk(int drive);   /* runtime eject/re-insert (F11) */
  *                      the disk after the one last ejected */
 void     fdd_hotkey_eject(int drive);
 void     fdd_hotkey_next(int drive);
+/* The same two, from any thread: queued, and carried out on the CPU
+ * thread at the guest's next floppy register or GPIP access - the only
+ * place the swap can be seen from, and the thread the floppy emulation
+ * runs on. eject = 1 for Clr/Home, 0 for Insert. Drive A. */
+void     fdd_hotkey_request(int eject);
 
 /* The next disk of a set, as a full path into out. 1 found, 0 not. Pure
  * (reads the folder only), so the host test can call it. */

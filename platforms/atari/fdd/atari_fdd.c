@@ -975,6 +975,42 @@ void fdd_hotkey_eject(int drive)
            "in the next disk\n", 'A' + drive);
 }
 
+/* Hotkey requests (fdd_hotkey_request): counted in by whichever thread
+ * saw the keys, carried out here, on the CPU thread, before the guest's
+ * next floppy access - never under the floppy emulation's feet. The
+ * native keyboard is now also watched from the main thread while the
+ * guest is not reading it (kbd_usb.c), and USB keys arrive on the USB
+ * thread; neither may touch fdc.drives while a command is running. */
+static unsigned fdd_req_eject, fdd_req_next;     /* __atomic, any thread  */
+static unsigned fdd_done_eject, fdd_done_next;   /* CPU thread only       */
+
+void fdd_hotkey_request(int eject)
+{
+    __atomic_fetch_add(eject ? &fdd_req_eject : &fdd_req_next, 1u,
+                       __ATOMIC_RELEASE);
+}
+
+static void fdd_hotkey_apply_slow(void)
+{
+    while (fdd_done_eject != __atomic_load_n(&fdd_req_eject, __ATOMIC_ACQUIRE)) {
+        fdd_done_eject++;
+        fdd_hotkey_eject(0);
+    }
+    while (fdd_done_next != __atomic_load_n(&fdd_req_next, __ATOMIC_ACQUIRE)) {
+        fdd_done_next++;
+        fdd_hotkey_next(0);
+    }
+    fflush(stdout);
+}
+
+static inline void fdd_hotkey_apply(void)
+{
+    if (__builtin_expect(
+            __atomic_load_n(&fdd_req_eject, __ATOMIC_RELAXED) != fdd_done_eject ||
+            __atomic_load_n(&fdd_req_next,  __ATOMIC_RELAXED) != fdd_done_next, 0))
+        fdd_hotkey_apply_slow();
+}
+
 void fdd_hotkey_next(int drive)
 {
     fdd_drive_t *drv;
@@ -1127,6 +1163,7 @@ static bool fdd_drive_answers(int drv)
 
 uint8_t fdd_gpip(uint8_t other_gpip)
 {
+    fdd_hotkey_apply();
     /* GPIP bit 5 is the SHARED disk interrupt: WD1772 INTRQ and the ACSI
      * port's /IRQ are combined onto it. The emulated FDC may only ADD its
      * own assertion (pull the bit low); it must never force the bit high,
@@ -1805,6 +1842,7 @@ static void hdc_claim_count(bool first)
 
 uint32_t fdd_io_read(uint32_t addr, int size)
 {
+    fdd_hotkey_apply();
     uint32_t val;
 
     if (acsi_dbg_on() && addr >= 0xFF8600u && addr <= 0xFF860Fu &&
@@ -1881,6 +1919,7 @@ uint32_t fdd_io_read(uint32_t addr, int size)
 
 void fdd_io_write(uint32_t addr, uint32_t val, int size)
 {
+    fdd_hotkey_apply();
     if (acsi_dbg_on() && addr >= 0xFF8600u && addr <= 0xFF860Fu &&
         acsi_dbg_count < ACSI_DBG_LIMIT) {
         acsi_dbg_count++;

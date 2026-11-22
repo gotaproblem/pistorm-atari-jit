@@ -1622,6 +1622,10 @@ static volatile unsigned acia_kq_head;     /* next to pop (CPU thread)   */
 static volatile unsigned acia_kq_tail;     /* next to push (ipl_task)    */
 volatile unsigned ps_acia_kbd_rescued = 0; /* bytes taken by ipl_task    */
 volatile unsigned ps_acia_kbd_dropped = 0; /* FIFO full: byte lost       */
+/* Guest reads of $FFFC00/$FFFC02, counted under the bus lock: tells the
+ * idle keyboard watch (ps_acia_kbd_idle_look) whether the guest is
+ * reading the keyboard at all. */
+volatile unsigned ps_acia_kbd_guest_access = 0;
 
 int ps_acia_kbd_pending (void)
 {
@@ -1637,6 +1641,7 @@ uint8_t ps_acia_kbd_read8 (uint32_t addr)
   uint8_t v;
 
   ps_lock_bus ();
+  ps_acia_kbd_guest_access++;
   if (a == ACIA_KBD_DATA && acia_kq_head != acia_kq_tail)
   {
     v = acia_kq[acia_kq_head & (ACIA_KQ_SIZE - 1u)];
@@ -1670,6 +1675,7 @@ uint16_t ps_acia_kbd_read16 (uint32_t addr)
   uint16_t v;
 
   ps_lock_bus ();
+  ps_acia_kbd_guest_access++;
   if (a == ACIA_KBD_DATA && acia_kq_head != acia_kq_tail)
   {
     v = (uint16_t)((acia_kq[acia_kq_head & (ACIA_KQ_SIZE - 1u)] << 8) | 0xFFu);
@@ -1792,6 +1798,76 @@ int ps_acia_kbd_ierb_enabled (void)
   ps_write (&ps_io);
   ps_acia_kbd_reedged++;
   return 1;
+}
+
+/* THE KEYBOARD WHILE THE GUEST IS NOT READING IT (main thread, through
+ * kbd_usb.c's kbd_hotkey_idle_poll). The hotkeys on the ST's own keyboard
+ * are seen in the bytes the guest reads, so a guest that stops reading
+ * the keyboard also stops them. Wrath of the Demon, 22 Nov 2026: waiting
+ * for its next disk it polls the drive with every MFP channel off and
+ * never touches the ACIA - Ctrl+Alt+Insert sat unread in the chip, and
+ * the disk it was waiting for could never be put in.
+ *
+ * One look at the receiver, under the bus lock, and only if the guest
+ * has made no keyboard ACIA access since `access` was sampled - else -1
+ * and nothing is touched. The FIFO (bytes rescued for the guest) comes
+ * before the chip, as in the guest's own reads. Returns bit 0: a byte is
+ * waiting; bit 1: the chip reports an overrun (bytes were lost after the
+ * last byte read); bit 2: a byte was taken into *v (take = 1 only). With
+ * take = 1 an overrun with no byte is cleared by the data read, which
+ * returns nothing new. Supervisor function code, never touches g_buserr. */
+int ps_acia_kbd_idle_look (unsigned access, int take, uint8_t *v)
+{
+  ps_io_t ps_io;
+  int r = 0;
+  uint8_t st;
+
+  ps_lock_bus ();
+  if (ps_acia_kbd_guest_access != access)
+  {
+    ps_unlock_bus ();
+    return -1;
+  }
+  if (acia_kq_head != acia_kq_tail)
+  {
+    r = 1;
+    if (take)
+    {
+      *v = acia_kq[acia_kq_head & (ACIA_KQ_SIZE - 1u)];
+      acia_kq_head = acia_kq_head + 1u;
+      r |= 4;
+    }
+    ps_unlock_bus ();
+    return r;
+  }
+  ps_io.data = 0;
+  ps_io.addr = ACIA_KBD_CTRL;
+  ps_io.fc = 5;
+  ps_io.io_type = READ_BYTE;
+  ps_read_txn (&ps_io);
+  st = (uint8_t)(ps_io.data >> 8);           /* ACIA on D8-D15 */
+  if (!ps_io.berr)
+  {
+    if (st & 0x01u)                          /* RDRF */
+      r |= 1;
+    if (st & 0x20u)                          /* OVRN */
+      r |= 2;
+    if (take && (st & 0x21u))
+    {
+      ps_io.data = 0;
+      ps_io.addr = ACIA_KBD_DATA;
+      ps_io.fc = 5;
+      ps_io.io_type = READ_BYTE;
+      ps_read_txn (&ps_io);
+      if (!ps_io.berr && (st & 0x01u))
+      {
+        *v = (uint8_t)(ps_io.data >> 8);
+        r |= 4;
+      }
+    }
+  }
+  ps_unlock_bus ();
+  return r;
 }
 
 /* ipl_task: if the keyboard ACIA holds a byte, move it into the FIFO.

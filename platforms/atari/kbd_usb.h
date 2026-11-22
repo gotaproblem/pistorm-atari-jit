@@ -135,6 +135,7 @@ void    kbd_native_tx_snoop(uint8_t v);   /* guest -> IKBD byte        */
 uint8_t kbd_native_rx_filter(uint8_t v);  /* IKBD -> guest byte        */
 int     kbd_hotkeys_on(void);             /* emulator hotkeys enabled  */
 void    kbd_hotkey_ikbd_byte(uint8_t v, int fresh); /* a byte the guest read off the IKBD; acted on only when fresh (RDRF was set) */
+void    kbd_hotkey_idle_poll(void);       /* main thread, every 10 ms: the IKBD while the guest is not reading it */
 
 #ifdef __cplusplus
 }

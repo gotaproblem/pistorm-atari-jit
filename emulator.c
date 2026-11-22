@@ -3561,6 +3561,8 @@ int main (int argc, char *argv[])
       if (++tick % 25 == 0 &&
           sense && cpu_emulation_running && ps_power_poll() > 0)
         pistorm_power_lost();           /* exits 42 */
+      if (cpu_emulation_running)
+        kbd_hotkey_idle_poll();         /* hotkeys on an unread keyboard */
     }
   }
 
@@ -4120,6 +4122,7 @@ extern "C"
       cpu_data_fc();
       /* hotkeys see only FRESH bytes - status (RDRF) sampled first, a
        * status read clears nothing; same as natmem's kbd_acia_data_read */
+      ps_acia_kbd_guest_access++;     /* kbd_hotkey_idle_poll: the guest reads */
       int fresh = kbd_hotkeys_on () && (ps_read_8 (0x00FFFC00) & 0x01);
       uint8_t v = ps_read_8 (address);
       if (kbd_hotkeys_on ())
@@ -4243,6 +4246,7 @@ extern "C"
     else if (address == 0x00FFFC02 &&
              (kbd_native_mouse_enabled () || kbd_ikbd_divert_active ())) {
       cpu_data_fc();
+      ps_acia_kbd_guest_access++;     /* kbd_hotkey_idle_poll: the guest reads */
       int fresh = kbd_hotkeys_on () && (ps_read_8 (0x00FFFC00) & 0x01);
       uint8_t v = ps_read_8 (address);
       if (kbd_hotkeys_on ())
