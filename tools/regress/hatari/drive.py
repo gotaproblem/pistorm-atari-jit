@@ -27,7 +27,7 @@ Needs Hatari 2.4.1 with hatari-2.4.1-joy.patch (the control socket's
 joystick from outside). Runs at real speed, so script seconds are guest
 seconds. The disk is a copy of the regression disk (RG_IMG, default
 regress-games.img beside this script: dkimages' word-swapped image) with
-RUN.INF set to the script's start, booted as on the PiStorm - C:\AUTO\
+RUN.INF set to the script's start, booted as on the PiStorm - C:\\AUTO\\
 LAUNCH.PRG starts the game - and time 0 is that program's Pexec (Hatari's
 GEMDOS trace). Machine: plain ST, TOS 2.06, 4 MB (tos.rom beside this).
 """
