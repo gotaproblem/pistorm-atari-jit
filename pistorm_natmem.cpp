@@ -3294,6 +3294,10 @@ static uae_u32 beam_lo_read(uaecptr a)
     static int on = -1;
     static int64_t dur_min = 0, last_t = 0;
     static uae_u8 last_raw;
+    /* the last back-dated read: its guest time, what it was given, when */
+    static uint64_t bd_tg;
+    static uae_u8 bd_v;
+    static int64_t bd_wall;
     if (on < 0) {
         const char *e = getenv("PISTORM_BEAM_BACKDATE");
         on = !(e && *e == '0');
@@ -3324,6 +3328,29 @@ static uae_u32 beam_lo_read(uaecptr a)
         const int adv = bc_counter_advance(tg, ts);
         if (adv >= 0) {
             v = (uae_u8)(raw - (uae_u8)adv);
+            /* BACK-DATED READS AGREE WITH EACH OTHER. Each read's value
+             * comes from its own sample time, and that is known to about a
+             * word (the bus read's length varies 0.7-1.8 us): two reads in
+             * the same border, where the real counter stands still, came
+             * out $A0 and $9E - as if it were still counting. Jim Power's
+             * Timer B handler (22 Nov 2026) waits with two reads a pass
+             * for the counter to MOVE (the next line's display), then for
+             * it to stop: told it moved, it went straight on, wrote its
+             * colour mid-line one line early and restarted Timer B there -
+             * in 5204 of 9440 handlers, the background's bands jumping a
+             * line or more. A read after a back-dated one, under 64 us
+             * later on the guest's clock, is now given the last value plus
+             * what the beam model says was fetched in between - 0 in a
+             * border - so the reads of one handler differ exactly as the
+             * real counter's would. */
+            if (bd_wall && t1 - bd_wall < 64000 && tg >= bd_tg) {
+                const int d = bc_counter_advance(bd_tg, tg);
+                if (d >= 0)
+                    v = (uae_u8)(bd_v + (uae_u8)d);
+            }
+            bd_tg = tg;
+            bd_v = v;
+            bd_wall = t1;
             last_t = t1;
             last_raw = raw;
             rt_beam_read(raw, v, (uint32_t)dur);
@@ -3331,6 +3358,7 @@ static uae_u32 beam_lo_read(uaecptr a)
             return v;
         }
     }
+    bd_wall = 0;                            /* a read as read ends the chain */
     char why = '-';
     if (on && pistorm_gov_running && last_t && t1 - last_t < 40000) {
         const int64_t late = dur - dur_min;
