@@ -44,6 +44,7 @@
 #include <string.h>
 
 #include "platforms/atari/raster_trace.h"
+#include "platforms/atari/video/beam_clock.h"
 
 uint8_t ps_read_8(uint32_t address);          /* gpio/ps_protocol.c */
 
@@ -114,7 +115,11 @@ __attribute__((constructor)) static void rt_init(void)
     }
     {
         const char *v = getenv("PISTORM_RASTER_VCOUNT");
-        rt_vc = v && *v == '1';
+        /* 1: read the real counter after each write (3 bus reads - which
+         *    MOVE the guest's timing: Jim Power's bands were steady with
+         *    them and jittered without, 22 Nov 2026);
+         * 2: the beam model's counter at the write's time, no bus access */
+        rt_vc = !v ? 0 : *v == '1' ? 1 : *v == '2' ? 2 : 0;
     }
     {
         /* PISTORM_RASTER_FROM_MARK=1: record nothing until rt_start() -
@@ -127,8 +132,9 @@ __attribute__((constructor)) static void rt_init(void)
     rt_on = !rt_from_mark;
     fprintf(stderr, "[RASTER] tracing palette writes and interrupts -> %s "
                     "(written when the emulator stops)%s%s\n", rt_path,
-            rt_vc ? "; reading the video counter at each write (bus reads)"
-                  : "; no bus reads",
+            rt_vc == 1 ? "; reading the video counter at each write (bus reads)"
+            : rt_vc == 2 ? "; the beam model's video counter at each write (no bus reads)"
+                         : "; no bus reads",
             rt_from_mark ? "; from the input script's mark on" : "");
 }
 
@@ -233,8 +239,12 @@ static void rt_win_close(void)
     e[3].c = rt_w_gov > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)rt_w_gov;
 }
 
-static uint32_t rt_vcount(void)
+static uint32_t rt_vcount_at(uint64_t t)
 {
+    if (rt_vc == 2) {
+        uint32_t c;
+        return bc_model_counter(t, &c) ? c : 0xFFFFFFFFu;
+    }
     return ((uint32_t)ps_read_8(0x00FF8205u) << 16) |
            ((uint32_t)ps_read_8(0x00FF8207u) << 8) |
             (uint32_t)ps_read_8(0x00FF8209u);
@@ -254,7 +264,7 @@ void rt_palette_slow(unsigned idx, uint16_t val)
     e->kind = 'P';
     e->a = (uint8_t)idx;
     e->v = val;
-    e->c = rt_vc ? rt_vcount() : 0xFFFFFFFFu;
+    e->c = rt_vc ? rt_vcount_at(e->t) : 0xFFFFFFFFu;
 }
 
 void rt_irq_slow(int level)
@@ -271,7 +281,13 @@ void rt_irq_slow(int level)
     e->v = 0;
     e->c = 0;
     rt_last_irq = level == 4 ? NULL : e;
-    if (level == 4 && rt_vc) {
+    if (level == 4 && rt_vc == 2) {
+        /* no bus reads: the base the guest wrote, Timer B's control as the
+         * hub holds it; count and AER unknown (0) */
+        extern uint8_t mfp_hub_tbcr(void);
+        e->c = bc_guest_base() & 0xFFFF00u;
+        e->v = (uint16_t)((uint16_t)mfp_hub_tbcr() << 8);
+    } else if (level == 4 && rt_vc) {
         /* the screen base, and in its low byte (always 0 on an ST)
          * AER: its bit 3 says whether Timer B's event count fires at the
          * end of each line's display (0, TOS) or at its start (1) */
@@ -427,7 +443,7 @@ void rt_mfp_slow(uint32_t addr, uint32_t val, int word)
     e->kind = 'M';
     e->a = (uint8_t)(a & 0xFFu);
     e->v = (uint16_t)(val & 0xFFu);
-    e->c = rt_vc ? rt_vcount() : 0xFFFFFFFFu;
+    e->c = rt_vc ? rt_vcount_at(e->t) : 0xFFFFFFFFu;
 }
 
 void rt_dump(void)

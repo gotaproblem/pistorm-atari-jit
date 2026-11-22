@@ -488,6 +488,57 @@ static double de_cycles_to(double c, int cls)
     return d;
 }
 
+/* The video counter the beam model says the Shifter held at tick t: the
+ * base the guest wrote plus the display bytes fetched so far this frame.
+ * No bus access - for the raster trace's PISTORM_RASTER_VCOUNT=2, which
+ * must not move the timing it measures. 1 with *cnt set, 0 without a
+ * trusted calibration. */
+uint32_t bc_guest_base(void)
+{
+    return in_base();
+}
+
+/* The guest's screen base writes, timed: the Shifter shows the base it
+ * latched at the previous frame's counter reload (line 310 / 260, cycle
+ * 56), not the one last written - a double-buffered game writes the next
+ * frame's mid-frame. CPU thread (natmem's / emulator.c's base snoop). */
+static struct { uint64_t t; uint32_t b; } bh[16];
+static unsigned bh_n;
+void bc_base_written(void)
+{
+    bh[bh_n & 15u].t = bc_ticks();
+    bh[bh_n & 15u].b = in_base();
+    bh_n++;
+}
+static uint32_t base_latched_at(uint64_t r)
+{
+    for (unsigned i = 0; i < 16u && i < bh_n; i++) {
+        const unsigned j = (bh_n - 1u - i) & 15u;
+        if (bh[j].t <= r)
+            return bh[j].b;
+    }
+    return bh_n ? bh[(bh_n - (bh_n < 16u ? bh_n : 16u)) & 15u].b : in_base();
+}
+
+int bc_model_counter(uint64_t t, uint32_t *cnt)
+{
+    double O, k;
+    int cls;
+    if (!model(t, &O, &k, &cls))
+        return 0;
+    double c = ((double)t - O) / k;
+    const double fc = frame_cycles(cls);
+    if (c < 0.0 || c >= fc) {
+        O += floor(c / fc) * fc * k;
+        c -= floor(c / fc) * fc;
+    }
+    const double lc = cls == 50 ? 512.0 : 508.0;
+    const int total = cls == 50 ? 313 : 263, restart = cls == 50 ? 310 : 260;
+    const double reload = O - ((double)(total - restart) * lc - 56.0) * k;
+    *cnt = base_latched_at((uint64_t)reload) + 2u * (uint32_t)floor(de_cycles_to(c, cls) / 4.0);
+    return 1;
+}
+
 int bc_counter_advance(uint64_t t0, uint64_t t1)
 {
     double O, k;

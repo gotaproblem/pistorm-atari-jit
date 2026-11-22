@@ -110,10 +110,14 @@ static void run(int k0, int k1, double lag_us_max)
             if (dbuf == 1 && !wrote150 && L >= 150) {
                 wrote150 = 1;
                 base_reg = base_reg == 0x078000u ? 0x070000u : 0x078000u;
+                fake_t = (uint64_t)t;
+                bc_base_written();
             }
             if (dbuf == 2 && !wrote312 && L >= RESTART + 2) {
                 wrote312 = 1;
                 base_reg = base_reg == 0x078000u ? 0x070000u : 0x078000u;
+                fake_t = (uint64_t)t;
+                bc_base_written();
             }
             if (L == RESTART && fc - (double)L * LC >= 56 && base_latched[k + 1] == 0xFFFFFFFFu)
                 base_latched[k + 1] = base_reg;
@@ -171,6 +175,31 @@ static void probes(int k, const char *tag)
     a = bc_counter_advance(tick(k - 1, TOTAL - 1, 100), tick(k, 0, 200));
     snprintf(w, sizeof w, "%s: advance from the frame before, after the reload = 0 (got %d)", tag, a);
     expect(w, a == 0);
+    /* bc_model_counter: the counter the model says, against the simulated
+     * Shifter's, at points through the display (the raster trace's
+     * PISTORM_RASTER_VCOUNT=2 puts palette writes on lines with it) */
+    {
+        static const int pts[][2] = { { 0, 100 }, { 10, 200 }, { 57, 300 }, { 120, 80 }, { 199, 340 } };
+        int worst = 0, lines_ok = 1;
+        for (unsigned i = 0; i < sizeof pts / sizeof *pts; i++) {
+            uint32_t m = 0, r = 0;
+            uint64_t tr;
+            const uint64_t t = tick(k, L0 + pts[i][0], pts[i][1]);
+            const uint64_t keep = fake_t;
+            fake_t = t;
+            const int got_r = bc_test_read_counter(&r, &tr);
+            fake_t = keep;
+            const int got_m = bc_model_counter(t, &m);
+            if (!got_r || !got_m) { worst = 9999; continue; }
+            const int d = (int)m - (int)r;
+            if (abs(d) > worst) worst = abs(d);
+            if ((m - base_latched[k]) / 160u != (r - base_latched[k]) / 160u) lines_ok = 0;
+        }
+        snprintf(w, sizeof w, "%s: model counter within 4 bytes of the Shifter's (worst %d)", tag, worst);
+        expect(w, worst <= 4);
+        snprintf(w, sizeof w, "%s: model counter on the Shifter's line", tag);
+        expect(w, lines_ok);
+    }
 }
 
 static void setup(int hz, double ppm)

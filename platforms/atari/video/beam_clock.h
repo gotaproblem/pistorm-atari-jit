@@ -78,6 +78,9 @@ int bc_locked_hz(void);
  * runs at 8.021247 MHz (32.084988 MHz / 4), not 8 MHz. */
 double bc_cpu_hz(void);
 
+int bc_model_counter(uint64_t t, uint32_t *cnt);   /* PISTORM_RASTER_VCOUNT=2 */
+uint32_t bc_guest_base(void);                      /* the screen base the guest wrote */
+void     bc_base_written(void);                    /* the guest wrote the base (snoop) */
 #ifdef __cplusplus
 }
 #endif

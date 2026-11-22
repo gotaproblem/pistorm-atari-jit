@@ -81,6 +81,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/network/platform_atari_network.h"
 #include "platforms/atari/kbd_usb.h"
 #include "platforms/atari/input_script.h"
+#include "platforms/atari/video/beam_clock.h"
 #include "platforms/atari/joy_usb.h"
 #include "gpio/bus_lock.h"
 #include "pistorm_hugepage.h"
@@ -3835,6 +3836,7 @@ static inline uint32_t check_ff_st(uint32_t add)
 static inline void st_video_ste_base_written(void)
 {
   rtg.low = 0;
+  bc_base_written();                   /* beam_clock.c: which base each frame showed */
 }
 
 static inline void st_video_ste_extras_clear(void)

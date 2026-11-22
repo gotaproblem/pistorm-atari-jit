@@ -12,6 +12,9 @@
 static uint64_t clocks;
 uint64_t pistorm_guest_clocks(void) { return clocks; }
 uint32_t pistorm_cur_pc(void) { return 0; }
+int bc_model_counter(uint64_t t, uint32_t *c) { (void)t; *c = 0; return 0; }
+uint32_t bc_guest_base(void) { return 0; }
+uint8_t mfp_hub_tbcr(void) { return 0; }
 
 static void spin_us(double us)
 {

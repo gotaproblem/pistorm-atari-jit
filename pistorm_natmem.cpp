@@ -1399,6 +1399,7 @@ static inline void vid_dbg_w(uint32_t a, uint32_t value)
 static inline void st_video_ste_extras_clear(void)
 {
     rtg.low = 0;
+    bc_base_written();                 /* beam_clock.c: which base each frame showed */
 }
 
 static void st_rez_sync_trace(uint32_t a, uint8_t v);
