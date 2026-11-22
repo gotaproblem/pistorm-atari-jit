@@ -515,8 +515,14 @@ void joy_usb_tick(void)
             hooks.send_key(0x39, start);
             p->start_sent = start;
         }
-        if (p->fd < 0)
-            p->last_sent = 0;              /* release flushed, slot idle */
+        /* release flushed, slot idle - but not while the input script
+         * holds the port: resetting last_sent then made the script's own
+         * release look like no change (key 0 == last_sent 0), so it was
+         * never sent, and the next press equalled the stuck one and was
+         * dropped too (Jim Power, regression run 6477286: one fire, then
+         * nothing until a direction) */
+        if (p->fd < 0 && !scr)
+            p->last_sent = 0;
     }
 }
 
