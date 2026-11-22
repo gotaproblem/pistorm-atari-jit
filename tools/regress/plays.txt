@@ -13,9 +13,10 @@
 #   kbd        the guest read input (keys or joystick packets) after the
 #              start, and the keyboard watch never had to take a byte
 #              after "mark play" (a keyboard the game stopped reading)
-#   jitter>=P  raster trace: the game's commonest palette chain on its
-#              usual lines in at least P% of its frames (analyse.py,
-#              "whole-chain shift" +0 share)
+#   jitter>=P  raster trace from the mark on (jitter.py): the game's
+#              commonest palette chain with every write on its usual line
+#              in at least P% of the frames, and in no 5 s window under
+#              P-5%
 jimpower | start play kbd jitter>=97
 wrathod  | start play kbd
 xenon2   | start play kbd

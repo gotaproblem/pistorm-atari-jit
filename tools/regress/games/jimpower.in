@@ -2,7 +2,7 @@
 # seconds from the program start. Worked out in Hatari 2.4.1, plain ST,
 # TOS 2.06, 4 MB, 22 Nov 2026; "mark play" is where gameplay was on screen.
 start D:\JIMPOWER\START.TOS
-seconds 110
+seconds 125
 shots 4
 4 key 0x39        # gamex trainer menu: Space to continue
 40 fire
@@ -11,6 +11,7 @@ shots 4
 55 fire
 60 fire
 65 fire
-70 joy1 right
-72 mark play      # level 1, banded pink sky
-90 joy1 -
+64 mark play      # level 1, banded pink sky: standing still until 85 s,
+                  # then walking right - the trace covers both
+85 joy1 right
+105 joy1 -

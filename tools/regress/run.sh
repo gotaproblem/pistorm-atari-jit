@@ -670,6 +670,7 @@ play_checks() {
 			# pc in TOS, seconds with no VBL taken
 			read -r n d r z <<<"$(awk '
 				/^\[INPUT\] mark play/ { on = 1; next }
+				/^\[INPUT\] script done/ { on = 0 }     # the stop is not play
 				!on { next }
 				/^\[ipl\]   vbl: taken=/ { t = $0; sub(/.*taken=/, "", t); if (t + 0 == 0) z++; next }
 				/^\[ipl\]   screen: / { c = $4; p = $5; sub(/pc=/, "", p); n++
@@ -710,17 +711,26 @@ play_checks() {
 			local f
 			f=$(ls -t "$rt" "$rt".[0-9]* 2>/dev/null | head -1)
 			if [ -z "$f" ]; then record "$name" jitter FAIL "no raster trace written"; continue; fi
+			# jitter.py: a frame is held when every write of the game's
+			# palette chain is on its usual line. Pass: P% of all frames
+			# held, and no 5 s window under P-5% (a stretch of jitter -
+			# Jim Power before its scroll starts - must not hide in the mean)
 			python3 "$here/../raster-trace/analyse.py" "$f" > "$rt.txt" 2>&1
-			read -r n held <<<"$(sed -n 's/^whole-chain shift (lines:frames): //p' "$rt.txt" |
-				tr ' ' '\n' | awk -F: '{ n += $2; if ($1 == "+0") h = $2 } END { print n + 0, h + 0 }')"
+			python3 "$here/jitter.py" "$f" 5 >> "$rt.txt" 2>&1
+			local pct worst at n held
+			read -r n held pct <<<"$(sed -n 's/^frames \([0-9]*\) held \([0-9]*\) pct \([0-9.]*\).*/\1 \2 \3/p' "$rt.txt")"
+			read -r worst at <<<"$(sed -n 's/^window 5 s: worst \([0-9.]*\)% at \([0-9.]*\) s.*/\1 \2/p' "$rt.txt")"
 			gzip -f "$f"
-			if [ "$n" = 0 ]; then record "$name" jitter FAIL "analyse.py found no palette chain ($rt.txt)"; continue; fi
-			local pct; pct=$(awk -v h="$held" -v n="$n" 'BEGIN { printf "%.1f", 100 * h / n }')
+			if [ -z "$n" ] || [ "$n" = 0 ]; then record "$name" jitter FAIL "no palette chain in the trace ($rt.txt)"; continue; fi
 			metric "$name" jitter_held_pct "$pct"
-			if awk -v p="$pct" -v w="$v" 'BEGIN { exit !(p >= w) }'; then
-				record "$name" jitter PASS "chain on its lines in $held of $n frames ($pct% >= $v%)"
-			else
+			[ -n "$worst" ] && metric "$name" jitter_worst5s_pct "$worst"
+			local floor; floor=$(awk -v w="$v" 'BEGIN { print w - 5 }')
+			if ! awk -v p="$pct" -v w="$v" 'BEGIN { exit !(p >= w) }'; then
 				record "$name" jitter FAIL "chain on its lines in $held of $n frames ($pct% < $v%)"
+			elif [ -n "$worst" ] && ! awk -v p="$worst" -v w="$floor" 'BEGIN { exit !(p >= w) }'; then
+				record "$name" jitter FAIL "$pct% overall, but $worst% in the 5 s from ${at} s after the mark (< $floor%)"
+			else
+				record "$name" jitter PASS "chain on its lines in $held of $n frames ($pct% >= $v%; worst 5 s ${worst:-?}%)"
 			fi ;;
 		*)	record "$name" "$c" FAIL "unknown check in plays.txt" ;;
 		esac
