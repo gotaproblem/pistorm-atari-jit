@@ -468,6 +468,11 @@ SETUP_SRC = platforms/atari/setup/shifter_setup.c \
 setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -ldrm
 
+# Hybrid STBOX go/no-go: can timed writes hit the real beam to one bus slot?
+# Not part of `all`: stop the emulator first, then sudo ./beamtest.
+beamtest: tools/beamtest/beamtest.c platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c
+	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -lm
+
 # GCC 14 ICEs in the second scheduling pass (sched-deps.cc add_dependence_1)
 # on ps_acia_kbd_rescue() with the cortex-a53 pipeline model, i.e. only on
 # PI3 / PI02W builds. The pass is a minor win in bit-bang GPIO code anyway.
