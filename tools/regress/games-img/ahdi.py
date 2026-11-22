@@ -77,7 +77,10 @@ class Fat:
         s.data_lba = s.root_lba + (s.nroot * 32 + s.bps - 1) // s.bps * s.ls
         s.fat = img.rd(s.fat_lba, s.spf * s.ls)
         tot = ts if ts else struct.unpack('<I', bs[32:36])[0]
-        s.fat12 = (tot * s.ls - (s.data_lba - start)) // (s.spc * s.ls) < 4085
+        # GEMDOS: hard disk partitions are always FAT16 (the driver says
+        # so in the BPB flags), however few clusters - the Petari C: has
+        # 4063; a floppy (the whole image, start 0) is FAT12 below 4085
+        s.fat12 = start == 0 and (tot * s.ls - (s.data_lba - start)) // (s.spc * s.ls) < 4085
 
     def chain(s, c):
         end = 0xFF0 if s.fat12 else 0xFFF0

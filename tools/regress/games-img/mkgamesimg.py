@@ -110,7 +110,7 @@ class FatRW:
         s.data_off = s.root_off + s.nroot * 32
         s.csize = s.spc * s.bps
         s.nclus = (tot * s.bps - (s.data_off - lba * 512)) // s.csize
-        s.fat12 = s.nclus < 4085
+        s.fat12 = False                   # GEMDOS hard disk partition: FAT16 (see ahdi.Fat)
         s.fat = bytearray(buf[s.fat_off:s.fat_off + s.spf * s.bps])
 
     def get(s, c):
