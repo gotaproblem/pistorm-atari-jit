@@ -6,7 +6,8 @@ holding the regression games (games.txt), bootable by TOS 2.06.
     python3 tools/regress/games-img/mkgamesimg.py --set-start IMAGE 'D:\\XENON2\\RUNME.TOS'
 
 C: also gets \\AUTO\\LAUNCH.PRG and \\RUN.INF: the disk boots straight into
-one game (Jim Power as built; --set-start names another, in place).
+the game RUN.INF names. As built it names none, so the disk boots to the
+desktop for use by hand; the runner names each test's game with --set-start.
 
 Layout, as dkimages' Petari IDE image, which TOS 2.06 boots on the games
 machine: its root sector (AHDI boot code), bad-sector list and C: (the
@@ -317,7 +318,7 @@ def build_d(tree):
     return bytes(out), clusters, nxt[0] - 2
 
 
-START_DEFAULT = 'D:\\JIMPOWER\\START.TOS'
+START_DEFAULT = ''           # empty: LAUNCH finds nothing to run, TOS goes to the desktop
 
 
 def main():
