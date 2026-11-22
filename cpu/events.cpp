@@ -580,7 +580,27 @@ static int64_t gov_beam_irq_cyc = 28;
 static int     gov_beam_handler;            /* this handler's clock is the beam's */
 static int64_t gov_beam_late;               /* ... set this far behind (part of the park) */
 static uint32_t gov_beam_sp;                /* ... its stack at the start */
-static uint32_t gov_beam_read_pc;           /* ... the instruction of its last kept-debt read */
+/* ... the instructions of its kept-debt reads so far: a read by one of
+ * them again is a poll. Jim Power (22 Nov 2026) polls $FF8209 with TWO
+ * reads a pass ($4D6E, $4D72): testing only the last read's pc never saw
+ * a repeat, so all ~11 reads of every handler were back-dated, the guest
+ * stayed as far behind the beam as the interrupt was late (up to ~27 us
+ * when it came out of a STOP) and the colours its poll times landed that
+ * much late - a different amount each line: the background jittered. */
+#define GOV_BEAM_READ_PCS 8
+static uint32_t gov_beam_read_pcs[GOV_BEAM_READ_PCS];
+static unsigned gov_beam_read_n;
+static int gov_beam_read_seen(uint32_t pc)
+{
+	for (unsigned i = 0; i < gov_beam_read_n; i++)
+		if (gov_beam_read_pcs[i] == pc)
+			return 1;
+	if (gov_beam_read_n < GOV_BEAM_READ_PCS)
+		gov_beam_read_pcs[gov_beam_read_n++] = pc;
+	else
+		return 1;                           /* more reads than that: a poll anyway */
+	return 0;
+}
 unsigned long  pistorm_gov_beam_polls;      /* [GOV] report: reads answered as read (a poll) */
 /* the last 16 handlers put on the beam's clock, for the CPU_DIAG crash
  * capture (cpu/newcpu.cpp pistorm_crash_capture) */
@@ -926,7 +946,7 @@ static void pistorm_governor(int sync)
 					gov_parked_ns += shift;     /* put back when the handler is over */
 					gov_beam_handler = 1;
 					gov_beam_late = late_ns;
-					gov_beam_read_pc = 0;
+					gov_beam_read_n = 0;
 					gov_beam_sp = pistorm_cur_ssp();
 					gov_beam_cyc0 = currcycle;
 					pistorm_gov_beam_n++;
@@ -972,10 +992,9 @@ static void pistorm_governor(int sync)
 			now = gov_wait_until(now, now + (ahead_ns < GOV_WAIT_MAX ? ahead_ns : GOV_WAIT_MAX));
 			if (now - w0 > 2000)
 				rt_gap(1, now - w0, pistorm_cur_pc());
-		} else if (sync_read && beam_live() && pistorm_cur_pc() != gov_beam_read_pc) {
+		} else if (sync_read && beam_live() && !gov_beam_read_seen(pistorm_cur_pc())) {
 			/* BEAM-TIMED HANDLER, a read reached late: keep the beam's
 			 * clock, the read is answered as at the guest's time */
-			gov_beam_read_pc = pistorm_cur_pc();
 			pistorm_gov_read_behind_ns = -ahead_ns;
 			pistorm_gov_read_behind_at = now;   /* CLOCK_MONOTONIC: only for the read that follows */
 			pistorm_gov_beam_back++;
