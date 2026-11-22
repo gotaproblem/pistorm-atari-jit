@@ -24,8 +24,10 @@
  *             counter, read between bands, says how many lines of each
  *             band opened, landed early or landed late. One band at
  *             100 % with its neighbours at 0 % is the pass mark, and its
- *             offset is the writes' landing error: the tests after this
- *             one are corrected by it.
+ *             offset is the writes' landing error to the slot. The same
+ *             sweep then runs again in 1-cycle steps about that slot; the
+ *             hit-weighted middle of the offsets that open it corrects
+ *             every test after this one.
  *   C  edge   every line turns colour 15 from blue to yellow at cycle
  *             244: a straight edge mid-screen. Ragged = jitter (one
  *             step = 4 pixels = one bus slot). Visual only.
@@ -57,6 +59,14 @@
  * and the lock went untracked: 2 good frames, then drift (the ST's
  * crystal moves ~0.6 ppm against the Pi's, ~5 cycles a second), and F
  * inherited the lost lock. Each test now starts from a fresh lock.
+ * Run 4 (E alone, 60 s): 97 % of frames perfect for 32 s, the misses
+ * momentary; then the lock was lost (an 8-reject jump moved it to a wrong
+ * guess) and never came back - the photos of a desynchronised screen.
+ * Now: the lock follows the mean of five reads a frame, three frames
+ * without one stop the test for a full re-lock, the calibration aims at
+ * the middle of the slot (1-cycle sweep), and E says which segment of
+ * the screen lost bytes, what kind of miss it was, whether a write on
+ * those lines was late, and the lock error in good and bad frames.
  *
  * Options: --secs N (per phase, default 10), --core N (default 3),
  *          --lead NS (override the measured write lead),
@@ -146,7 +156,7 @@ static double O;            /* tick of frame 0, line 0, cycle 0            */
 static double P;            /* ticks per frame                             */
 static double LEAD8, LEAD16;/* issue a write this many ticks early         */
 static int    lead_forced = -1;
-static int    g_cal;        /* cycles: aim writes this far from target   */
+static double g_cal;        /* cycles: aim writes this far from target   */
 static int    cal_forced;
 static volatile sig_atomic_t g_stop;
 
@@ -205,8 +215,14 @@ static inline double cnt_cycle(int line, int off)
 
 /* ---- events -------------------------------------------------------------- */
 enum { EV_W8, EV_W16, EV_READ };
-enum { RD_TRACK = 0, RD_BOT = 1, RD_BAND0 = 2 };   /* read slots          */
-#define NRD 16
+enum { RD_TRACK = 0, RD_BOT = 1, RD_BAND0 = 2,     /* read slots          */
+       RD_TX0 = 12,                     /* 4 more lock reads, lines 64..76  */
+       RD_SEG0 = 16 };                  /* E: lines 100, 120 .. 280         */
+#define NRD 32
+#define NTX 5                           /* lock reads: lines 64,68,72,76,80 */
+#define NSEG 9                          /* E: 9 segments of 20 lines        */
+#define SEG_L0 100
+#define SEG_H 20
 typedef struct { int32_t cyc; uint8_t kind, timed; uint16_t slot; uint32_t addr; uint16_t val; } ev_t;
 #define NEV 4096
 static ev_t ev[NEV];
@@ -231,20 +247,26 @@ static const uint16_t band_col[NBAND] =
     { 0x700, 0x740, 0x770, 0x070, 0x077, 0x007, 0x707, 0x777, 0x444 };
 static const char *band_name[NBAND] =
     { "red", "orange", "yellow", "green", "cyan", "blue", "magenta", "white", "grey" };
-static inline int band_ofs(int b) { return -16 + 4 * b; }
+static int g_band_base = -16, g_band_step = 4;   /* fine sweep: step 1   */
+static inline int band_ofs(int b) { return g_band_base + g_band_step * b; }
 
 /* ---- per-phase results --------------------------------------------------- */
 typedef struct {
     hist_t late, dur8, dur16;       /* timed writes: issue lateness, time  */
     uint64_t frames, skipped, gaps, late1us;
     /* lock tracking (cycles) */
-    uint64_t trk_n, trk_rej, trk_relock;
+    uint64_t trk_n, trk_rej, trk_relock, recover;
+    uint32_t recover_sec[16];
     double trk_sum, trk_sq, trk_min, trk_max;
     /* phase C */
     uint64_t top_open, top_shut, top_bad, bot_open, bot_shut, bot_bad;
     /* phase F */
     uint64_t full_frames, full_exact, full_lines_short;
     uint32_t sec_frames[64], sec_exact[64];
+    /* E: 20-line segments, failures by kind */
+    uint64_t seg_n, seg_bad, seg_kind[6], seg_at[NSEG], seg_late, seg_badframes;
+    double   e_bad_sum, e_good_sum;
+    uint64_t e_bad_n, e_good_n;
     double   sec_bytes[64];
     double   full_bytes;
     /* phases D/E, per band */
@@ -262,25 +284,38 @@ static uint8_t  rd_ok[NRD];
 /* where in the frame a tick is, in cycles, for frame n */
 static inline double frame_cyc(uint64_t t, long n) { return ((double)t - (O + (double)n * P)) / TPC; }
 
-/* Lock tracking from the line-80 read: the frame origin follows each read
- * (a quarter of the error, all of it beyond 8 cycles), the period a
- * sixteenth - shifter_mirror.c's second-order loop. de_first = the line
- * display starts on (63, or 34 with the top border open). */
-static double track(long n, int de_first, int bpl)
+/* Lock tracking from five reads on plain lines (64, 68, 72, 76, 80, at
+ * cycles 4k+1..4k+4 apart so the counter's 4-cycle step averages out):
+ * the frame origin follows the mean error (a quarter of it, all of it
+ * beyond 8 cycles), the period a sixteenth - shifter_mirror.c's
+ * second-order loop. de_first = the line display starts on (63, or 34
+ * with the top border open). A frame with no usable read counts towards
+ * a re-lock (run_phase). */
+static int    g_rej_run;
+static double g_last_e;
+static const int tx_line[NTX] = { 64, 68, 72, 76, 80 };
+static const int tx_cyc[NTX]  = { 121, 126, 131, 136, 120 };
+static inline int tx_slot(int i) { return i == NTX - 1 ? RD_TRACK : RD_TX0 + i; }
+
+static double track(long n, int de_first)
 {
-    double cm = frame_cyc(rd_t[RD_TRACK], n);
-    long off = (long)rd_cnt[RD_TRACK] - (long)BASE - (long)(80 - de_first) * bpl;
-    if (off <= 0 || off >= 160) {
-        R.trk_rej++;
+    double sum = 0;
+    int k = 0;
+    for (int i = 0; i < NTX; i++) {
+        int sl = tx_slot(i);
+        if (!rd_ok[sl]) continue;
+        long off = (long)rd_cnt[sl] - (long)BASE - (long)(tx_line[i] - de_first) * 160;
+        if (off <= 0 || off >= 160) continue;
+        double e = frame_cyc(rd_t[sl], n) - cnt_cycle(tx_line[i], (int)off);
+        if (fabs(e) > 64.0) continue;
+        sum += e; k++;
+    }
+    if (k < 3) {
+        R.trk_rej++; g_rej_run++;
         return 1e9;
     }
-    double e = cm - cnt_cycle(80, (int)off);    /* + = model is late        */
-    if (fabs(e) > 64.0) {
-        R.trk_rej++;
-        static int run;
-        if (++run >= 8) { O += e * TPC; run = 0; R.trk_relock++; }
-        return e;
-    }
+    g_rej_run = 0;
+    double e = sum / k;                         /* + = model is late        */
     /* move this frame's origin, then change the period about it: O is
      * frame 0's origin, so a new P must not move frame n's */
     double On = O + (double)n * P + (fabs(e) > 8.0 ? e : e / 4.0) * TPC;
@@ -290,6 +325,7 @@ static double track(long n, int de_first, int bpl)
     R.trk_n++; R.trk_sum += e; R.trk_sq += e * e;
     if (R.trk_n == 1 || e < R.trk_min) R.trk_min = e;
     if (R.trk_n == 1 || e > R.trk_max) R.trk_max = e;
+    g_last_e = e;
     return e;
 }
 
@@ -327,7 +363,8 @@ enum { PH_EDGE, PH_TOPBOT, PH_RIGHT, PH_LEFT, PH_FULL };
 static void build(int ph)
 {
     nev = 0;
-    add(80 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_TRACK);
+    for (int i = 0; i < NTX; i++)
+        add(tx_line[i] * LINE_CYC + tx_cyc[i], EV_READ, 0, 0, 0, tx_slot(i));
     switch (ph) {
     case PH_EDGE:
         for (int L = DE_FIRST; L <= DE_LAST; L++) {
@@ -353,6 +390,8 @@ static void build(int ph)
         add(262 * LINE_CYC + 440, EV_W8, R_SYNC, 0, 1, 0);
         add(263 * LINE_CYC + 16,  EV_W8, R_SYNC, 2, 1, 0);
         add(300 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_BOT);
+        for (int k = 0; k <= NSEG; k++)
+            add((SEG_L0 + k * SEG_H) * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_SEG0 + k);
         for (int L = 81; L < 310; L++) {
             if (L == 300) continue;
             add(L * LINE_CYC + 0,   EV_W8, R_REZ, 2, 1, 0);
@@ -387,11 +426,14 @@ static void build(int ph)
     qsort(ev, (size_t)nev, sizeof ev[0], ev_cmp);
 }
 
+/* worst issue lateness of the timed writes on each line, this frame */
+static float line_late[FRAME_LINES + 1];
+
 static void frame_result(int ph, long n)
 {
     int de_first = DE_FIRST;
-    if (!rd_ok[RD_TRACK]) { R.trk_rej++; return; }
-    if (ph == PH_TOPBOT) {
+    if (ph == PH_TOPBOT && !rd_ok[RD_TRACK]) { R.top_bad++; R.bot_bad++; }
+    else if (ph == PH_TOPBOT) {
         /* which first line fits the counter better: that is the top border */
         double cm = frame_cyc(rd_t[RD_TRACK], n);
         long o63 = (long)rd_cnt[RD_TRACK] - BASE - (80 - DE_FIRST) * 160;
@@ -415,8 +457,8 @@ static void frame_result(int ph, long n)
     if (ph == PH_FULL) {
         /* lines 34..80 plain; line 300 (plain) less line 80 = lines
          * 80..299 */
-        track(n, DE_FIRST_TOP, 160);
-        if (rd_ok[RD_BOT]) {
+        double e = track(n, DE_FIRST_TOP);
+        if (rd_ok[RD_BOT] && rd_ok[RD_TRACK]) {
             long d = (long)rd_cnt[RD_BOT] - (long)rd_cnt[RD_TRACK];
             R.full_frames++;
             int sec = (int)(R.frames / 50);
@@ -429,9 +471,33 @@ static void frame_result(int ph, long n)
             if (d == 160 + 219L * 230) R.full_exact++;
             R.full_lines_short += (uint64_t)((219L * 230 + 160 - d) > 0 ? (219L * 230 + 160 - d) : 0);
         }
+        /* where the bytes went missing: 20-line segments between reads on
+         * trick lines (both reads see the same partial line, so it
+         * cancels), each failure kind by the bytes it costs a line */
+        int bad = 0;
+        for (int k = 0; k < NSEG; k++) {
+            if (!rd_ok[RD_SEG0 + k] || !rd_ok[RD_SEG0 + k + 1]) continue;
+            long def = (long)SEG_H * 230 - ((long)rd_cnt[RD_SEG0 + k + 1] - (long)rd_cnt[RD_SEG0 + k]);
+            R.seg_n++;
+            if (def == 0) continue;
+            bad = 1;
+            R.seg_bad++; R.seg_at[k]++;
+            int kind = def == 44 ? 0 : def == 46 ? 1 : def == 26 ? 2 : def == 230 ? 3 :
+                       (def == 70 || def == 72) ? 4 : 5;
+            R.seg_kind[kind]++;
+            float lm = 0;
+            for (int L = SEG_L0 + k * SEG_H; L < SEG_L0 + (k + 1) * SEG_H; L++)
+                if (line_late[L] > lm) lm = line_late[L];
+            if (lm > 250.0f) R.seg_late++;
+        }
+        if (bad) R.seg_badframes++;
+        if (e < 1e8) {
+            if (bad) { R.e_bad_sum += fabs(e); R.e_bad_n++; }
+            else     { R.e_good_sum += fabs(e); R.e_good_n++; }
+        }
         return;
     }
-    track(n, de_first, 160);
+    track(n, de_first);
     if (ph == PH_RIGHT || ph == PH_LEFT) {
         int bb[NBAND + 1];
         for (int b = 0; b <= NBAND; b++) {
@@ -450,6 +516,8 @@ static void frame_result(int ph, long n)
     }
 }
 
+static int lock(int quiet);
+
 static void run_phase(int ph, double secs)
 {
     build(ph);
@@ -467,6 +535,7 @@ static void run_phase(int ph, double secs)
             n = m;
         }
         memset(rd_ok, 0, sizeof rd_ok);
+        memset(line_late, 0, sizeof line_late);
         for (int i = 0; i < nev; i++) {
             const ev_t *e = &ev[i];
             double lead = e->kind == EV_W8 ? LEAD8 : e->kind == EV_W16 ? LEAD16 : 0.0;
@@ -487,12 +556,25 @@ static void run_phase(int ph, double secs)
             if (e->timed) {
                 double late = ((double)t - T) * NSPT;
                 h_add(&R.late, late);
+                int L = e->cyc / LINE_CYC;
+                if (L >= 0 && L <= FRAME_LINES && late > line_late[L]) line_late[L] = (float)late;
                 if (late > 1000.0) R.late1us++;
                 h_add(e->kind == EV_W8 ? &R.dur8 : &R.dur16, (double)(t1 - t) * NSPT);
             }
         }
         frame_result(ph, n);
         R.frames++;
+        /* three frames with no usable lock read: the beam is lost (run 4
+         * never came back from it). Stop, lock afresh, carry on. */
+        if (g_rej_run >= 3) {
+            ps_write_8(R_SYNC, 2);
+            ps_write_8(R_REZ, 0);
+            if (R.recover < 16) R.recover_sec[R.recover] = (uint32_t)(R.frames / 50);
+            R.recover++;
+            g_rej_run = 0;
+            if (lock(2) != 0) break;
+            n = (long)floor(((double)ticks() - O) / P);   /* n++ follows */
+        }
     }
     /* leave the machine plain */
     ps_write_8(R_SYNC, 2);
@@ -516,6 +598,11 @@ static void report_common(void)
     } else
         printf("  lock: NO counter read accepted (rejected %llu)\n", (unsigned long long)R.trk_rej);
     printf("  ST clock now %.1f Hz\n", FRAME_CYC * HZ / P);
+    if (R.recover) {
+        printf("  LOCK LOST %llu times, re-locked at second:", (unsigned long long)R.recover);
+        for (unsigned i = 0; i < R.recover && i < 16; i++) printf(" %u", R.recover_sec[i]);
+        printf("\n");
+    }
 }
 
 static void report_sweep(int right)
@@ -597,6 +684,7 @@ static int lock(int quiet)
         return -1;
     }
     O = ref + a; P = slope; TPC = P / FRAME_CYC;
+    if (quiet < 2)
     printf(quiet ? "  re-lock: ST clock %.1f Hz, frame %.3f ms, fit residual sd %.2f cycles\n"
                  : "  ST clock %.1f Hz (PAL ST nominal 8021247), frame %.3f ms, fit residual sd %.2f cycles\n",
            FRAME_CYC * HZ / P, P * NSPT / 1e6, sd);
@@ -635,7 +723,7 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--secs") && i + 1 < argc)      secs = atof(argv[++i]);
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lead") && i + 1 < argc) lead_forced = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--cal") && i + 1 < argc)  { g_cal = atoi(argv[++i]); cal_forced = 1; }
+        else if (!strcmp(argv[i], "--cal") && i + 1 < argc)  { g_cal = atof(argv[++i]); cal_forced = 1; }
         else if (!strcmp(argv[i], "--only") && i + 2 < argc) { only = argv[++i]; only_secs = atof(argv[++i]); }
         else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS] [--cal CYCLES] [--only LETTERS SECS]\n", argv[0]); return 2; }
     }
@@ -723,7 +811,7 @@ int main(int argc, char **argv)
         if (phases[k].ph == PH_RIGHT) {
             report_sweep(1);
             /* one band that always opens, with no neighbour that ever
-             * does, gives the writes' landing error: correct for it */
+             * does, gives the writes' landing error to the 4-cycle slot */
             int best = 0;
             for (int b = 1; b < NBAND; b++) if (R.hit[b] > R.hit[best]) best = b;
             double tot = (double)(R.hit[best] + R.early[best] + R.late_[best]);
@@ -731,13 +819,42 @@ int main(int argc, char **argv)
             for (int b = 0; b < NBAND; b++)
                 if (b != best && R.hit[b] > 0.1 * tot) clean = 0;
             if (cal_forced)
-                printf("  calibration: %+d cycles (--cal)\n", g_cal);
-            else if (clean) {
-                g_cal = band_ofs(best);
-                printf("  calibration: writes land %d cycles %s aimed; the tests below aim %+d\n",
-                       abs(g_cal), g_cal <= 0 ? "after where they are" : "before where they are", g_cal);
-            } else
+                printf("  calibration: %+.2f cycles (--cal)\n", g_cal);
+            else if (!clean)
                 printf("  calibration: NO single band opened cleanly - the tests below are uncorrected\n");
+            else {
+                /* then the same sweep in 1-cycle steps about that slot: the
+                 * run of offsets that open it is the slot; aim at its
+                 * middle (run 4 missed ~3 % of frames aiming at its edge) */
+                int coarse = band_ofs(best);
+                g_band_base = coarse - 4; g_band_step = 1;
+                printf("\n[B] RIGHT BORDER, FINE (1-cycle steps about %+d)\n", coarse);
+                lock(1);
+                run_phase(PH_RIGHT, secs);
+                report_common();
+                report_sweep(1);
+                /* aim at the middle of the slot: the hit-weighted mean
+                 * offset (one run of ~4 offsets that open it) */
+                double sum = 0, wsum = 0; int nok = 0, first = 99, last = -99;
+                for (int b = 0; b < NBAND; b++) {
+                    double t = (double)(R.hit[b] + R.early[b] + R.late_[b]);
+                    if (t <= 0) continue;
+                    double h = (double)R.hit[b] / t;
+                    sum += h * band_ofs(b); wsum += h;
+                    if (h >= 0.97) {
+                        nok++;
+                        if (band_ofs(b) < first) first = band_ofs(b);
+                        if (band_ofs(b) > last) last = band_ofs(b);
+                    }
+                }
+                g_cal = wsum > 0.5 ? sum / wsum : coarse;
+                if (nok)
+                    printf("  calibration: offsets %+d..%+d open the border 97 %%+ of the time;\n", first, last);
+                else
+                    printf("  calibration: no offset opened the border 97 %% of the time;\n");
+                printf("  the tests below aim %+.2f cycles from target (the hit-weighted middle)\n", g_cal);
+                g_band_base = -16; g_band_step = 4;
+            }
         }
         if (phases[k].ph == PH_LEFT)  report_sweep(0);
         if (phases[k].ph == PH_FULL) {
@@ -746,6 +863,19 @@ int main(int argc, char **argv)
                    "  every one of them 230 bytes in %llu of %llu frames; bytes missing in all %llu\n",
                    bpl, (unsigned long long)R.full_exact, (unsigned long long)R.full_frames,
                    (unsigned long long)R.full_lines_short);
+            static const char *kn[6] = { "right missed, late (-44)", "right missed, early (-46)",
+                                         "left missed (-26)", "blank line (-230)",
+                                         "left and right (-70/-72)", "other" };
+            printf("  20-line segments 100..279: %llu measured, %llu short, in %llu frames\n",
+                   (unsigned long long)R.seg_n, (unsigned long long)R.seg_bad,
+                   (unsigned long long)R.seg_badframes);
+            for (int i = 0; i < 6; i++)
+                if (R.seg_kind[i]) printf("    %-28s %llu\n", kn[i], (unsigned long long)R.seg_kind[i]);
+            printf("    short segments with a write over 250 ns late: %llu\n", (unsigned long long)R.seg_late);
+            printf("    by segment (top to bottom):");
+            for (int k = 0; k < NSEG; k++) printf(" %llu", (unsigned long long)R.seg_at[k]);
+            printf("\n    mean |lock error|: frames with a short segment %.2f, without %.2f cycles\n",
+                   R.e_bad_n ? R.e_bad_sum / R.e_bad_n : 0.0, R.e_good_n ? R.e_good_sum / R.e_good_n : 0.0);
             printf("  second by second (frames all 230 / frames, mean bytes a line):\n ");
             for (int i = 0; i < 64 && R.sec_frames[i]; i++)
                 printf(" %u/%u %.0f%s", R.sec_exact[i], R.sec_frames[i],
