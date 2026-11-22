@@ -58,6 +58,7 @@ CFILES = config_file/config_file.c \
          platforms/atari/video/shifter_mirror.c \
          platforms/atari/video/beam_clock.c \
          platforms/atari/kbd_usb.c \
+         platforms/atari/input_script.c \
          platforms/atari/joy_usb.c \
          platforms/atari/web/psweb_client.c \
          platforms/atari/dos/psdos_client.c \

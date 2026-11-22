@@ -4822,9 +4822,33 @@ static uae_u32 pistorm_cur_basepage(void)
 extern "C" void pistorm_fvdi_linea_restore(void);
 extern "C" void pistorm_fvdi_set_st_yield(int on);
 extern "C" void pistorm_ste_extras_reset(void);
+extern "C" int  input_script_armed(void);              /* platforms/atari/input_script.c */
+extern "C" void input_script_pexec(const char *name);
 static void pistorm_gemdos_hook(void)
 {
 	uae_u16 op = get_word(m68k_areg(regs, 7));
+	/* PISTORM_INPUT_SCRIPT: time 0 is the start program's Pexec (mode 0
+	 * load and go, 3 load) - read the name off the mirror, which cannot
+	 * fault */
+	if (op == 0x4B && __builtin_expect(input_script_armed(), 0)) {
+		extern uae_u8 *natmem_offset;
+		const uaecptr sp = m68k_areg(regs, 7);
+		const uae_u16 mode = get_word(sp + 2);
+		uae_u32 np = get_long(sp + 4) & 0x00FFFFFFu;
+		if ((mode == 0 || mode == 3) && natmem_offset && np < 0x00400000u - 128u) {
+			char nm[128];
+			int i;
+			for (i = 0; i < 127; i++) {
+				const uae_u8 c = natmem_offset[np + i];
+				if (c < 0x20 || c > 0x7E)
+					break;
+				nm[i] = (char)c;
+			}
+			nm[i] = 0;
+			input_script_pexec(nm);
+		}
+		return;
+	}
 	if (op != 0x00 && op != 0x4C)
 		return;
 	/* Any program ending (Pterm0/Pterm): drop the STE-only screen

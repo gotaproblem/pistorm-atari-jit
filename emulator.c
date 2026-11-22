@@ -80,6 +80,7 @@ extern uae_sem_t cpu_wakeup_sema;
 #include "platforms/atari/fdd/platform_atari_fdd.h"
 #include "platforms/atari/network/platform_atari_network.h"
 #include "platforms/atari/kbd_usb.h"
+#include "platforms/atari/input_script.h"
 #include "platforms/atari/joy_usb.h"
 #include "gpio/bus_lock.h"
 #include "pistorm_hugepage.h"
@@ -3231,19 +3232,25 @@ int main (int argc, char *argv[])
     printf ("[INIT] Real floppy / ACSI passthrough\n");
   }
 
-  if (config->kbd_usb || config->usb_gamepad)
+  /* PISTORM_INPUT_SCRIPT plays its keys and joystick through the same
+   * injection layer, so it turns the layer on as "usb gamepad" would */
+  if (config->kbd_usb || config->usb_gamepad || input_script_wanted())
   {
     /* "kbd usb" and/or "usb gamepad": both ride on the same ACIA/IKBD
      * injection layer (real-IKBD detection included), the mask only
      * says which evdev devices feed it. */
     const int devs = (config->kbd_usb     ? KBD_USB_DEV_KBDMOUSE : 0) |
-                     (config->usb_gamepad ? KBD_USB_DEV_GAMEPAD  : 0);
+                     (config->usb_gamepad || input_script_wanted() ? KBD_USB_DEV_GAMEPAD : 0);
     KBD_USB_enabled = true;
-    JOY_USB_enabled = config->usb_gamepad;
+    JOY_USB_enabled = config->usb_gamepad || input_script_wanted();
     kbd_usb_force_mode = config->kbd_mode;
     kbd_usb_mouse_div  = config->kbd_mouse_div > 0 ? config->kbd_mouse_div : 1;
     if (kbd_usb_init (config->kbd_grab || !config->kbd_usb ? 1 : 0, devs) != 0)
       KBD_USB_enabled = JOY_USB_enabled = false;
+    if (KBD_USB_enabled)
+      input_script_init ();
+    else if (input_script_wanted ())
+      fprintf (stderr, "[INPUT] no injection layer - PISTORM_INPUT_SCRIPT not played\n");
   }
 
   if (platform_network_init_from_config(config) != 0)

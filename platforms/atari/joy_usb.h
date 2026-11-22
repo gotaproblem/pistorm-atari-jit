@@ -114,6 +114,9 @@ void joy_usb_resend(void);
 /* ---- CPU thread ----------------------------------------------------- */
 /* Current ST joystick byte for a port (0 = mouse port, 1 = game port). */
 uint8_t joy_usb_state(int st_port);
+/* A joystick state held by PISTORM_INPUT_SCRIPT, merged into the port's
+ * pad (input_script.c). Any thread. */
+void    joy_usb_script_set(int st_port, uint8_t state);
 /* Number of pads attached (for status displays). */
 int     joy_usb_count(void);
 

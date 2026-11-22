@@ -2149,6 +2149,14 @@ static void send_key_main(uint8_t scan, int pressed)
     ring_push_packet(&b, 1);
 }
 
+/* PISTORM_INPUT_SCRIPT (input_script.c): a key on the main machine's IKBD,
+ * queued like a USB keyboard's - the guest reads it from the ACIA, so the
+ * native hotkeys see it as they see the ST's own keyboard. Any thread. */
+void kbd_usb_script_key(uint8_t scan, int pressed)
+{
+    send_key_main(scan, pressed);
+}
+
 /* ---- gamepad -> IKBD (joy_usb.c emit hooks) ------------------------
  * All IKBD-mode gating lives here, next to the keyboard/mouse rules, so
  * joy_usb.c never has to know what mode the guest put the IKBD in.

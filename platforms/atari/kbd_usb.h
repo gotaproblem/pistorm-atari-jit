@@ -139,6 +139,7 @@ void    kbd_hotkey_idle_tick(void);       /* main thread, every 10 ms: asks the 
 void    kbd_hotkey_idle_poll(unsigned long beam_n); /* CPU thread, outside handlers: the IKBD while the guest is not reading it */
 extern volatile int kbd_hotkey_idle_due;
 void    kbd_hotkey_idle_report(void);     /* at exit: looks and bytes taken */
+void    kbd_usb_script_key(uint8_t scan, int pressed);  /* PISTORM_INPUT_SCRIPT */
 
 #ifdef __cplusplus
 }

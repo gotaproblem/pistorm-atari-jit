@@ -89,6 +89,8 @@ typedef struct {
     int16_t  dos_ax[AX_N];
 } joypad;
 
+static _Atomic int script_joy[JOY_USB_MAX_PADS];   /* joy_usb_script_set */
+
 static joypad pads[JOY_USB_MAX_PADS] = {
     { .fd = -1, .last_sent = -1 }, { .fd = -1, .last_sent = -1 },
 };
@@ -481,7 +483,8 @@ void joy_usb_tick(void)
     for (int i = 0; i < JOY_USB_MAX_PADS; i++)
     {
         joypad *p = &pads[i];
-        if (p->fd < 0 && p->last_sent <= 0 && !p->dos)
+        const int scr = atomic_load_explicit(&script_joy[i], memory_order_relaxed);
+        if (p->fd < 0 && p->last_sent <= 0 && !p->dos && !scr)
             continue;                      /* free and already released */
         if (p->dirty)
             publish(p);                    /* SYN-less device           */
@@ -489,7 +492,7 @@ void joy_usb_tick(void)
         if (dos_tick(p, i, dos))
             continue;                      /* the DOS window has it     */
 
-        const int joy = atomic_load_explicit(&p->joy, memory_order_relaxed);
+        const int joy = atomic_load_explicit(&p->joy, memory_order_relaxed) | scr;
         const int pad = atomic_load_explicit(&p->pad, memory_order_relaxed);
         const int st_port = (i == 0) ? 1 : 0;
         /* the STE extras (B/C/OPTION/PAUSE) only matter to the STBOX STE
@@ -523,8 +526,18 @@ void joy_usb_tick(void)
 
 uint8_t joy_usb_state(int st_port)
 {
-    const joypad *p = &pads[st_port == 1 ? 0 : 1];
-    return atomic_load_explicit(&p->joy, memory_order_relaxed);
+    const int i = st_port == 1 ? 0 : 1;
+    const joypad *p = &pads[i];
+    return (uint8_t)(atomic_load_explicit(&p->joy, memory_order_relaxed) |
+                     atomic_load_explicit(&script_joy[i], memory_order_relaxed));
+}
+
+/* PISTORM_INPUT_SCRIPT (input_script.c): a joystick held by the script,
+ * merged into the pad on that port exactly as a pad's own state - the
+ * same packets, the same IKBD-mode gating. Any thread. */
+void joy_usb_script_set(int st_port, uint8_t state)
+{
+    atomic_store_explicit(&script_joy[st_port == 1 ? 0 : 1], state, memory_order_relaxed);
 }
 
 int joy_usb_count(void)
