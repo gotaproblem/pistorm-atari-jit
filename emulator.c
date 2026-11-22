@@ -2484,6 +2484,37 @@ void *foldchk_thread(void *arg)
   return NULL;
 }
 
+/* PISTORM_RAM_DUMP=file: write the guest's ST RAM ($000000 up, as the
+ * emulator holds it) to file on an orderly exit (Ctrl-C, SIGTERM, the
+ * PSCTRL / hotkey restart and stop). For finding out what a guest that
+ * has stopped doing something is executing instead: the pc profile says
+ * where, this has the code and data it is running on. */
+static void ram_dump_at_exit(void)
+{
+  const char *p = getenv("PISTORM_RAM_DUMP");
+  extern uint32_t emulator_config_stram_size(void);
+  uint32_t n;
+  FILE *f;
+
+  if (!p || !*p || !natmem_offset)
+    return;
+  n = emulator_config_stram_size();
+  if (!n || n > 0x00400000u)
+    n = 0x00400000u;                   /* the flat 4MB guest model */
+  if (pistorm_stram_top() > n)
+    n = pistorm_stram_top();
+  f = fopen(p, "wb");
+  if (!f) {
+    fprintf(stderr, "[MAIN] PISTORM_RAM_DUMP: cannot write %s\n", p);
+    return;
+  }
+  if (fwrite(natmem_offset, 1, n, f) != n)
+    fprintf(stderr, "[MAIN] PISTORM_RAM_DUMP: short write to %s\n", p);
+  else
+    fprintf(stderr, "[MAIN] ST RAM $000000-$%06X written to %s\n", n - 1, p);
+  fclose(f);
+}
+
 /*
  * The orderly teardown, without the _exit - shared by the Ctrl-C / SIGTERM
  * handler and the PSCTRL restart/shutdown actions, so all three quit the
@@ -2497,6 +2528,7 @@ static void orderly_teardown(void)
 
   usleep(20000);                /* let the CPU thread leave its loop */
   pistorm_exit_state_dump();    /* PISTORM_CPU_DIAG=1: where the CPU was */
+  ram_dump_at_exit();           /* PISTORM_RAM_DUMP=file: the guest's ST RAM */
   rt_dump();                    /* PISTORM_RASTER_TRACE: write the file   */
 
   /* JIT statistics (PROFILE_UNTRANSLATED_INSNS: top-50 interpreted opcodes) */

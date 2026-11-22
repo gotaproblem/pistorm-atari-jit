@@ -84,6 +84,28 @@ static int hdc_trace_on(void)
     return hdc_trc;
 }
 
+/* PISTORM_FDC_TRACE=1: the emulated WD1772 as the guest drives it - every
+ * command with the drive, side, registers, DMA address and count it ran
+ * with and the status it left, and every CHANGE in what a status read
+ * returns (with how many identical reads came before it). Each line
+ * carries the guest pc. Silent and free when unset. */
+static int fdc_trc = -1;
+#ifdef __cplusplus
+extern "C"
+#endif
+uint32_t pistorm_guest_pc(void);              /* cpu/newcpu.cpp */
+
+static int fdc_trace_on(void)
+{
+    if (fdc_trc < 0) {
+        const char *e = getenv("PISTORM_FDC_TRACE");
+        fdc_trc = (e && *e && *e != '0') ? 1 : 0;
+        if (fdc_trc)
+            FDD_LOG("FDC trace on (PISTORM_FDC_TRACE=1)");
+    }
+    return fdc_trc;
+}
+
 static uint64_t ht_now_us(void)
 {
     struct timespec ts;
@@ -2217,6 +2239,24 @@ static uint32_t fdc_read_addr(uint32_t addr, int size)
             if (sd->media_changed) {
                 val ^= FDC_STATUS_WRTPROT;
                 sd->media_changed = false;
+                if (fdc_trace_on())
+                    fprintf(stderr, "[FDC] media-change flip: WP reads %d "
+                            "once pc=$%06X\n", !!(val & FDC_STATUS_WRTPROT),
+                            pistorm_guest_pc() & 0xFFFFFFu);
+            }
+        }
+        if (fdc_trace_on()) {
+            static int last = -1;
+            static unsigned same;
+            if ((int)val != last) {
+                fprintf(stderr, "[FDC] status $%02X (was $%02X x%u) cmd=$%02X "
+                        "drv=%d pc=$%06X\n", val & 0xFF, last & 0xFF, same,
+                        fdc.command, fdc.selected_drive,
+                        pistorm_guest_pc() & 0xFFFFFFu);
+                last = (int)val;
+                same = 0;
+            } else {
+                same++;
             }
         }
 
@@ -2276,6 +2316,16 @@ static void fdc_write_addr(uint32_t addr, uint32_t val, int size)
             }
 
             fdc_exec_command(v);
+            if (fdc_trace_on())
+                fprintf(stderr, "[FDC] cmd $%02X drv=%d side=%d trk=%d sec=%d "
+                        "dat=%d dma=$%06X cnt=%d disk=%d -> st=$%02X dmast=$%02X "
+                        "pc=$%06X\n", v, fdc.selected_drive, fdc.selected_side,
+                        fdc.track_reg, fdc.sector_reg, fdc.data_reg,
+                        fdc.dma_addr & 0xFFFFFFu, fdc.dma_sector_count,
+                        (fdc.selected_drive >= 0 && fdc.selected_drive < FDD_MAX_DRIVES)
+                            ? fdc.drives[fdc.selected_drive].disk_inserted : -1,
+                        fdc.status, fdc.dma_status,
+                        pistorm_guest_pc() & 0xFFFFFFu);
             usleep (2000);
             break;
         case FDC_REG_TRACK:
