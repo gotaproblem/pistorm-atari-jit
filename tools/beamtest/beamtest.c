@@ -31,9 +31,9 @@
  *             step = 4 pixels = one bus slot). Visual only.
  *   D  top/bottom border: 60 Hz on line 33 and line 262. The video
  *             counter says, every frame, whether each border opened.
- *   E  full overscan: all four borders open on every line 34..309 at the
- *             calibrated positions (lines 80 and 300 left plain for the
- *             counter reads). The counter says how many of lines 81..299
+ *   E  full overscan: top and bottom open, and left and right open on
+ *             every line 81..309 at the calibrated positions (lines 34..80
+ *             and 300 plain, for the counter reads). The counter says how many of lines 81..299
  *             came out at 230 bytes; on the monitor, a steady solid
  *             screen edge to edge.
  *   F  left border sweep: hi res for 8 cycles from cycle 0 + offset
@@ -53,10 +53,17 @@
  * left sweep 100 % in the 0 and +4 bands exactly as predicted; hi res
  * pulsed across the line boundary (-12, -8) blanks the line on the real
  * GLUE (Hatari's table says normal).
+ * Run 3: E opened lines 34..79 too, the line-80 read no longer matched
+ * and the lock went untracked: 2 good frames, then drift (the ST's
+ * crystal moves ~0.6 ppm against the Pi's, ~5 cycles a second), and F
+ * inherited the lost lock. Each test now starts from a fresh lock.
  *
  * Options: --secs N (per phase, default 10), --core N (default 3),
  *          --lead NS (override the measured write lead),
- *          --cal CYCLES (fix the correction instead of taking it from B).
+ *          --cal CYCLES (fix the correction instead of taking it from B),
+ *          --only LETTERS SECS (run only those tests, SECS each; B still
+ *          runs first, for --secs, to calibrate unless --cal is given:
+ *          --only E 60 holds the full overscan for a minute).
  *
  * tools/beamtest/sim.c runs the same code against a model ST on any host
  * (build line at its top): the lock, the scheduling and the counter
@@ -237,6 +244,8 @@ typedef struct {
     uint64_t top_open, top_shut, top_bad, bot_open, bot_shut, bot_bad;
     /* phase F */
     uint64_t full_frames, full_exact, full_lines_short;
+    uint32_t sec_frames[64], sec_exact[64];
+    double   sec_bytes[64];
     double   full_bytes;
     /* phases D/E, per band */
     uint64_t hit[NBAND], early[NBAND], late_[NBAND], undec[NBAND];
@@ -334,16 +343,18 @@ static void build(int ph)
         add(290 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_BOT);
         break;
     case PH_FULL:
-        /* full overscan: top and bottom open, then every line 34..309 with
-         * the left pulse and the right switch, except lines 80 and 300,
-         * left plain for the counter reads */
+        /* full overscan: top and bottom open, then every line 81..309 with
+         * the left pulse and the right switch, except line 300. Lines
+         * 34..80 stay plain: the line-80 read keeps the lock only while it
+         * knows what came before it (run 3, with them open too, lost the
+         * lock in a second and the picture with it). */
         add(33 * LINE_CYC + 400, EV_W8, R_SYNC, 0, 1, 0);
         add(34 * LINE_CYC + 16,  EV_W8, R_SYNC, 2, 1, 0);
         add(262 * LINE_CYC + 440, EV_W8, R_SYNC, 0, 1, 0);
         add(263 * LINE_CYC + 16,  EV_W8, R_SYNC, 2, 1, 0);
         add(300 * LINE_CYC + 120, EV_READ, 0, 0, 0, RD_BOT);
-        for (int L = DE_FIRST_TOP; L < 310; L++) {
-            if (L == 80 || L == 300) continue;
+        for (int L = 81; L < 310; L++) {
+            if (L == 300) continue;
             add(L * LINE_CYC + 0,   EV_W8, R_REZ, 2, 1, 0);
             add(L * LINE_CYC + 8,   EV_W8, R_REZ, 0, 1, 0);
             add(L * LINE_CYC + 376, EV_W8, R_SYNC, 0, 1, 0);
@@ -402,12 +413,18 @@ static void frame_result(int ph, long n)
             R.bot_bad++;
     }
     if (ph == PH_FULL) {
-        /* lines 34..79 are 230 bytes each when every trick works; line 80
-         * is clean. Line 300 (clean) less line 80 = lines 80..299. */
-        track(n, DE_FIRST_TOP, 230);
+        /* lines 34..80 plain; line 300 (plain) less line 80 = lines
+         * 80..299 */
+        track(n, DE_FIRST_TOP, 160);
         if (rd_ok[RD_BOT]) {
             long d = (long)rd_cnt[RD_BOT] - (long)rd_cnt[RD_TRACK];
             R.full_frames++;
+            int sec = (int)(R.frames / 50);
+            if (sec < 64) {
+                R.sec_frames[sec]++;
+                R.sec_bytes[sec] += (double)d;
+                if (d == 160 + 219L * 230) R.sec_exact[sec]++;
+            }
             R.full_bytes += (double)d;
             if (d == 160 + 219L * 230) R.full_exact++;
             R.full_lines_short += (uint64_t)((219L * 230 + 160 - d) > 0 ? (219L * 230 + 160 - d) : 0);
@@ -523,7 +540,7 @@ static void report_sweep(int right)
 }
 
 /* ---- the lock ------------------------------------------------------------ */
-static int lock(void)
+static int lock(int quiet)
 {
     enum { NS = 400000 };
     uint64_t *T = malloc(NS * sizeof *T);
@@ -572,14 +589,16 @@ static int lock(void)
         }
         sd = sqrt(s2 / used);
     }
-    printf("  counter reads %d (torn %d), used for the fit %d\n", ns, torn, used);
+    if (!quiet)
+        printf("  counter reads %d (torn %d), used for the fit %d\n", ns, torn, used);
     free(T); free(C); free(bad);
     if (used < 1000) {
         printf("  LOCK FAILED: too few reads on displayed lines - is the screen up at 50 Hz?\n");
         return -1;
     }
     O = ref + a; P = slope; TPC = P / FRAME_CYC;
-    printf("  ST clock %.1f Hz (PAL ST nominal 8021247), frame %.3f ms, fit residual sd %.2f cycles\n",
+    printf(quiet ? "  re-lock: ST clock %.1f Hz, frame %.3f ms, fit residual sd %.2f cycles\n"
+                 : "  ST clock %.1f Hz (PAL ST nominal 8021247), frame %.3f ms, fit residual sd %.2f cycles\n",
            FRAME_CYC * HZ / P, P * NSPT / 1e6, sd);
     return 0;
 }
@@ -609,16 +628,21 @@ static struct ss_screen scr;
 
 int main(int argc, char **argv)
 {
-    double secs = 10.0;
+    double secs = 10.0, only_secs = 0;
+    const char *only = "BCDEF";
     int core = 3;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--secs") && i + 1 < argc)      secs = atof(argv[++i]);
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lead") && i + 1 < argc) lead_forced = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cal") && i + 1 < argc)  { g_cal = atoi(argv[++i]); cal_forced = 1; }
-        else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS] [--cal CYCLES]\n", argv[0]); return 2; }
+        else if (!strcmp(argv[i], "--only") && i + 2 < argc) { only = argv[++i]; only_secs = atof(argv[++i]); }
+        else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS] [--cal CYCLES] [--only LETTERS SECS]\n", argv[0]); return 2; }
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
+    static char only_buf[16];
+    snprintf(only_buf, sizeof only_buf, "%s%s", (!cal_forced && !strchr(only, 'B')) ? "B" : "", only);
+    only = only_buf;
 
     if (pistorm_bus_lock("beamtest") != 0) {
         printf("the emulator owns the bus: sudo systemctl stop pistorm first\n");
@@ -656,7 +680,7 @@ int main(int argc, char **argv)
     usleep(100000);
 
     printf("\n[A] LOCK\n");
-    if (lock() != 0) return 1;
+    if (lock(0) != 0) return 1;
     measure_writes();
 
     static const struct { int ph; const char *name, *look; } phases[] = {
@@ -669,19 +693,24 @@ int main(int argc, char **argv)
         { PH_TOPBOT, "TOP + BOTTOM BORDER",
           "green from near the top of the monitor to near the bottom." },
         { PH_FULL,   "FULL OVERSCAN (all four borders, every line, calibrated)",
-          "the whole monitor solid white, edge to edge and top to bottom, steady; two\n"
-          "      lines (80 and 300) keep their side borders, for the counter reads." },
+          "white from the top of the monitor to the bottom, steady. The top part\n"
+          "      (lines 34..80) keeps its side borders, so does one line near the bottom\n"
+          "      (300) - for the counter reads; everything else edge to edge." },
         { PH_LEFT,   "LEFT BORDER SWEEP",
           "the same 9 bands, each pulsing hi res for 8 cycles at a different offset\n"
           "      from the line start. Bands reaching the monitor's left edge opened; black\n"
           "      lines in a band = blank lines." },
     };
     for (int k = 0; k < 5 && !g_stop; k++) {
+        if (!strchr(only, 'B' + k)) continue;
         printf("\n[%c] %s - on the monitor: %s\n", 'B' + k, phases[k].name, phases[k].look);
         if (phases[k].ph == PH_EDGE)   ps_write_16(R_PAL15, C_BLUE);
         if (phases[k].ph == PH_TOPBOT) ps_write_16(R_PAL15, C_GREEN);
         if (phases[k].ph == PH_FULL)   ps_write_16(R_PAL15, 0x777);
-        run_phase(phases[k].ph, secs);
+        /* a fresh lock for each test: one that lost it must not hand a
+         * drifted clock to the next (run 3's F) */
+        if (k > 0 && lock(1) != 0) break;
+        run_phase(phases[k].ph, (k == 0 || only_secs <= 0) ? secs : only_secs);
         report_common();
         if (phases[k].ph == PH_TOPBOT) {
             printf("  top border:    opened %llu, shut %llu, unreadable %llu frames\n",
@@ -717,6 +746,11 @@ int main(int argc, char **argv)
                    "  every one of them 230 bytes in %llu of %llu frames; bytes missing in all %llu\n",
                    bpl, (unsigned long long)R.full_exact, (unsigned long long)R.full_frames,
                    (unsigned long long)R.full_lines_short);
+            printf("  second by second (frames all 230 / frames, mean bytes a line):\n ");
+            for (int i = 0; i < 64 && R.sec_frames[i]; i++)
+                printf(" %u/%u %.0f%s", R.sec_exact[i], R.sec_frames[i],
+                       (R.sec_bytes[i] / R.sec_frames[i] - 160.0) / 219.0, (i % 6 == 5) ? "\n " : "");
+            printf("\n");
         }
     }
 
