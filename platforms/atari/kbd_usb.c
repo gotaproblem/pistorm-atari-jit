@@ -1410,10 +1410,21 @@ void kbd_hotkey_ikbd_byte(uint8_t v, int fresh)
 
 /* NATIVE HOTKEYS WHILE THE GUEST IS NOT READING THE KEYBOARD. Main
  * thread, every 10 ms (emulator.c). The native combination is seen in the
- * bytes the guest reads, so a guest that leaves the keyboard alone - Wrath
- * of the Demon waiting for its next disk: every MFP channel off, the drive
- * polled, the ACIA never read - left the hotkeys dead exactly when a disk
- * had to go in.
+ * bytes the guest reads, so a guest that stops reading the keyboard stops
+ * them too.
+ *
+ * Wrath of the Demon, 22 Nov 2026: after the first disk swap it waited for
+ * the next disk with no keyboard interrupt at all (the last 64 exceptions
+ * all VBL) and never touched the ACIA, so Ctrl+Alt+Insert sat unread. With
+ * this watch the run went: the watch took the one byte left in the
+ * receiver (a mouse byte, $08) and the game read the keyboard again at
+ * once - Ctrl, Alt, Insert by its own reads, every disk 2 to 5 and back.
+ * So its keyboard interrupt was enabled all along; the ACIA was holding
+ * IRQ low over an unread byte, and the MFP, which latches on the edge,
+ * never saw another one (the dead keyboard ps_acia_kbd_ierb_enabled
+ * describes, reached some other way - how is not known). Emptying the
+ * receiver lets the line go high, and the next byte is an edge. A guest
+ * that really has the keyboard off gets its hotkeys from the watch itself.
  *
  * Once the guest has made no keyboard ACIA access for a second, every
  * 50 ms it looks at the receiver (ps_acia_kbd_idle_look: one status read,

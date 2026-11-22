@@ -1803,10 +1803,9 @@ int ps_acia_kbd_ierb_enabled (void)
 /* THE KEYBOARD WHILE THE GUEST IS NOT READING IT (main thread, through
  * kbd_usb.c's kbd_hotkey_idle_poll). The hotkeys on the ST's own keyboard
  * are seen in the bytes the guest reads, so a guest that stops reading
- * the keyboard also stops them. Wrath of the Demon, 22 Nov 2026: waiting
- * for its next disk it polls the drive with every MFP channel off and
- * never touches the ACIA - Ctrl+Alt+Insert sat unread in the chip, and
- * the disk it was waiting for could never be put in.
+ * the keyboard also stops them - and a keyboard whose ACIA holds IRQ low
+ * over an unread byte gives the MFP no edge, so it stays dead (Wrath of
+ * the Demon, 22 Nov 2026: see kbd_hotkey_idle_poll).
  *
  * One look at the receiver, under the bus lock, and only if the guest
  * has made no keyboard ACIA access since `access` was sampled - else -1
