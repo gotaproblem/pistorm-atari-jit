@@ -17,33 +17,38 @@
  *   A  lock   1 s of video counter reads fix the beam's phase and the
  *             ST's crystal against the Pi's timer; the bus write time
  *             is measured.
- *   B  edge   every line turns colour 15 from blue to yellow at cycle
- *             244: a straight edge mid-screen. Ragged = jitter (one
- *             step = 4 pixels = one bus slot). Visual only.
- *   C  top/bottom border: 60 Hz on line 33 and line 262. The video
- *             counter says, every frame, whether each border opened.
- *   D  right border sweep: 9 bands of 15 lines, each band places the
+ *   B  right border sweep: 9 bands of 15 lines, each band places the
  *             60 Hz write at cycle 376 + offset, offsets -16..+16. Only
  *             cycle 376 itself opens the border (a one-slot window);
  *             early gives a 158-byte line, late a normal one. The video
  *             counter, read between bands, says how many lines of each
- *             band opened, landed early or landed late.
- *   E  left border sweep: hi res at cycle 470 of the line before, low
- *             res at cycle 12 + offset. Low at 8..16 opens the border
- *             (186 bytes), too early leaves it shut, too late blanks the
- *             line. Measured the same way.
+ *             band opened, landed early or landed late. One band at
+ *             100 % with its neighbours at 0 % is the pass mark, and its
+ *             offset is the writes' landing error: the tests after this
+ *             one are corrected by it.
+ *   C  edge   every line turns colour 15 from blue to yellow at cycle
+ *             244: a straight edge mid-screen. Ragged = jitter (one
+ *             step = 4 pixels = one bus slot). Visual only.
+ *   D  top/bottom border: 60 Hz on line 33 and line 262. The video
+ *             counter says, every frame, whether each border opened.
+ *   E  left border sweep: hi res for 8 cycles from cycle 0 + offset
+ *             (a demo's pulse). Hi res at cycle 4 and low again by 16
+ *             opens the border (186 bytes); otherwise the line is normal
+ *             or blank. Measured the same way.
  *
- * The pass mark is phase D: one band at 100 % hits with its neighbours at
- * 0 % means every write lands in its slot. The band tables and the lock
- * figures in the log are what to send back.
+ * Run 1 on the Pi 4 (22 Nov 2026): right sweep 100 % in one band, 0 % in
+ * every other, the writes landing 8 cycles after where they were aimed;
+ * top and bottom open in every frame; the left sweep blanked every line,
+ * because it held hi res from cycle 470 of the line before.
  *
  * Options: --secs N (per phase, default 10), --core N (default 3),
- *          --lead NS (override the measured write lead).
+ *          --lead NS (override the measured write lead),
+ *          --cal CYCLES (fix the correction instead of taking it from B).
  *
  * tools/beamtest/sim.c runs the same code against a model ST on any host
  * (build line at its top): the lock, the scheduling and the counter
  * decoding were checked there - right sweep opens at offset 0 only, left
- * at -4/0/+4, top and bottom open every frame.
+ * at 0/+4, top and bottom open every frame.
  *
  * GLUE positions are Hatari's STF table (wakestate 1), as stbox.c and
  * shifter_mirror.c use them; the counter model and its +2 cycle read
@@ -121,6 +126,8 @@ static double O;            /* tick of frame 0, line 0, cycle 0            */
 static double P;            /* ticks per frame                             */
 static double LEAD8, LEAD16;/* issue a write this many ticks early         */
 static int    lead_forced = -1;
+static int    g_cal;        /* cycles: aim writes this far from target   */
+static int    cal_forced;
 static volatile sig_atomic_t g_stop;
 
 static void on_sigint(int s) { (void)s; g_stop = 1; }
@@ -323,8 +330,11 @@ static void build(int ph)
                     add(L * LINE_CYC + 376 + band_ofs(b), EV_W8, R_SYNC, 0, 1, 0);
                     add(L * LINE_CYC + 420, EV_W8, R_SYNC, 2, 0, 0);
                 } else {
-                    add((L - 1) * LINE_CYC + 470, EV_W8, R_REZ, 2, 0, 0);
-                    add(L * LINE_CYC + 12 + band_ofs(b), EV_W8, R_REZ, 0, 1, 0);
+                    /* a demo's pulse: hi res for 8 cycles at the line
+                     * start (held from cycle 470 of the line before, as
+                     * the first Pi run did, blanked every line) */
+                    add(L * LINE_CYC + band_ofs(b), EV_W8, R_REZ, 2, 1, 0);
+                    add(L * LINE_CYC + band_ofs(b) + 8, EV_W8, R_REZ, 0, 1, 0);
                 }
             }
         }
@@ -397,7 +407,8 @@ static void run_phase(int ph, double secs)
         for (int i = 0; i < nev; i++) {
             const ev_t *e = &ev[i];
             double lead = e->kind == EV_W8 ? LEAD8 : e->kind == EV_W16 ? LEAD16 : 0.0;
-            double T = O + (double)n * P + e->cyc * TPC - lead;
+            double T = O + (double)n * P +
+                       (e->cyc + (e->kind == EV_READ ? 0 : g_cal)) * TPC - lead;
             uint64_t Ti = (uint64_t)T, t = ticks(), prev = t;
             while (t < Ti) {
                 prev = t; t = ticks();
@@ -446,19 +457,23 @@ static void report_common(void)
 
 static void report_sweep(int right)
 {
-    printf("  band     offset  cycle   opened   early    late   undecoded  mean surplus\n");
+    printf("  band     offset  cycle   opened  %s  %s   undecoded  mean surplus\n",
+           right ? " early " : "normal", right ? "normal" : " blank");
     for (int b = 0; b < NBAND; b++) {
         double tot = (double)(R.hit[b] + R.early[b] + R.late_[b]);
         if (tot < 1) tot = 1;
         printf("  %-8s  %+4d   %4d   %5.1f%%  %5.1f%%  %5.1f%%   %6llu    %+8.1f bytes\n",
-               band_name[b], band_ofs(b), (right ? 376 : 12) + band_ofs(b),
+               band_name[b], band_ofs(b), (right ? 376 : 0) + band_ofs(b),
                100.0 * R.hit[b] / tot, 100.0 * R.early[b] / tot, 100.0 * R.late_[b] / tot,
                (unsigned long long)R.undec[b], R.dn[b] ? R.dsum[b] / R.dn[b] : 0.0);
     }
-    printf("  (opened: %s border; early: %s; late: %s)\n",
-           right ? "right" : "left",
-           right ? "158-byte line, 60 Hz seen at 372" : "normal line",
-           right ? "normal line" : "blank line, hi res still on at 16");
+    if (right)
+        printf("  (cycle = where the 60 Hz write was aimed. opened: 204-byte line;\n"
+               "   early: 158-byte line, 60 Hz seen at 372; normal: 60 Hz came after 376)\n");
+    else
+        printf("  (cycle = where the hi res write was aimed, low res 8 later. opened:\n"
+               "   186-byte line, hi res at 4 and low again by 16; normal: hi res missed\n"
+               "   cycle 4; blank: hi res still on at 16 or seen at 28/56)\n");
 }
 
 /* ---- the lock ------------------------------------------------------------ */
@@ -554,7 +569,8 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--secs") && i + 1 < argc)      secs = atof(argv[++i]);
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--lead") && i + 1 < argc) lead_forced = atoi(argv[++i]);
-        else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS]\n", argv[0]); return 2; }
+        else if (!strcmp(argv[i], "--cal") && i + 1 < argc)  { g_cal = atoi(argv[++i]); cal_forced = 1; }
+        else { fprintf(stderr, "usage: %s [--secs N] [--core N] [--lead NS] [--cal CYCLES]\n", argv[0]); return 2; }
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -598,17 +614,18 @@ int main(int argc, char **argv)
     measure_writes();
 
     static const struct { int ph; const char *name, *look; } phases[] = {
+        { PH_RIGHT,  "RIGHT BORDER SWEEP (calibrates the tests after it)",
+          "9 coloured bands (red, orange, yellow, green, cyan, blue, magenta, white, grey =\n"
+          "      offsets -16..+16). Bands reaching the monitor's right edge opened." },
         { PH_EDGE,   "EDGE",
           "blue screen, right half yellow. The edge should be one straight vertical line;\n"
           "      a ragged edge is jitter (one step = 4 pixels = one bus slot)." },
         { PH_TOPBOT, "TOP + BOTTOM BORDER",
           "green from near the top of the monitor to near the bottom." },
-        { PH_RIGHT,  "RIGHT BORDER SWEEP",
-          "9 coloured bands (red, orange, yellow, green, cyan, blue, magenta, white, grey =\n"
-          "      offsets -16..+16). Bands reaching the monitor's right edge opened." },
         { PH_LEFT,   "LEFT BORDER SWEEP",
-          "the same 9 bands. Bands reaching the monitor's left edge opened; black lines\n"
-          "      in a band = hi res left on too long." },
+          "the same 9 bands, each pulsing hi res for 8 cycles at a different offset\n"
+          "      from the line start. Bands reaching the monitor's left edge opened; black\n"
+          "      lines in a band = blank lines." },
     };
     for (int k = 0; k < 4 && !g_stop; k++) {
         printf("\n[%c] %s - on the monitor: %s\n", 'B' + k, phases[k].name, phases[k].look);
@@ -624,7 +641,25 @@ int main(int argc, char **argv)
                    (unsigned long long)R.bot_open, (unsigned long long)R.bot_shut,
                    (unsigned long long)R.bot_bad);
         }
-        if (phases[k].ph == PH_RIGHT) report_sweep(1);
+        if (phases[k].ph == PH_RIGHT) {
+            report_sweep(1);
+            /* one band that always opens, with no neighbour that ever
+             * does, gives the writes' landing error: correct for it */
+            int best = 0;
+            for (int b = 1; b < NBAND; b++) if (R.hit[b] > R.hit[best]) best = b;
+            double tot = (double)(R.hit[best] + R.early[best] + R.late_[best]);
+            int clean = tot > 0 && R.hit[best] >= 0.9 * tot;
+            for (int b = 0; b < NBAND; b++)
+                if (b != best && R.hit[b] > 0.1 * tot) clean = 0;
+            if (cal_forced)
+                printf("  calibration: %+d cycles (--cal)\n", g_cal);
+            else if (clean) {
+                g_cal = band_ofs(best);
+                printf("  calibration: writes land %d cycles %s aimed; the tests below aim %+d\n",
+                       abs(g_cal), g_cal <= 0 ? "after where they are" : "before where they are", g_cal);
+            } else
+                printf("  calibration: NO single band opened cleanly - the tests below are uncorrected\n");
+        }
         if (phases[k].ph == PH_LEFT)  report_sweep(0);
     }
 
