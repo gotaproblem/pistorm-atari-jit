@@ -8,7 +8,7 @@ Layout, as dkimages' Petari IDE image, which TOS 2.06 boots on the games
 machine: its root sector (AHDI boot code), bad-sector list and C: (the
 AHDI driver, 4 MB) are copied as they are; the partition table is
 rewritten to C: plus one 32 MB GEMDOS partition, D:, holding one folder
-per game. Stored word-swapped like the source (psctrl.cfg ide_byteorder
+per game, with the byte patches in patches.txt. Stored word-swapped like the source (psctrl.cfg ide_byteorder
 native). Pure python3: no mtools, no root, the same bytes every run.
 The image is read back and every file compared with its source before
 the script says it is done.
@@ -54,6 +54,26 @@ def take(src, kind, letter, path):
     if not out:
         sys.exit('%s: nothing at %s %s' % (src, letter, path))
     return out
+
+
+def patches(tree):
+    """patches.txt: fixed bytes, checked before they are replaced"""
+    n = 0
+    for ln in open(os.path.join(HERE, 'patches.txt')):
+        ln = ln.split('#', 1)[0].strip()
+        if not ln:
+            continue
+        f, off, old, new, _why = [x.strip() for x in ln.split('|')]
+        off, old, new = int(off, 16), bytes.fromhex(old), bytes.fromhex(new)
+        if f not in tree or tree[f][1] is None:
+            sys.exit('patch: no file %s' % f)
+        a, d = tree[f]
+        if len(old) != len(new) or d[off:off + len(old)] != old:
+            sys.exit('patch: %s at %X does not hold %s - a different version?'
+                     % (f, off, old.hex().upper()))
+        tree[f] = (a, d[:off] + new + d[off + len(new):])
+        n += 1
+    return n
 
 
 def name83(n):
@@ -168,6 +188,7 @@ def main():
         tree[folder] = (0x10, None)
         for rel, v in take(src, kind, letter, path).items():
             tree[folder + '\\' + rel] = v
+    npatch = patches(tree)
     d, clusters, used = build_d(tree)
 
     head_src = None
@@ -217,8 +238,9 @@ def main():
         sys.exit('extra files on the new disk: %s' % sorted(set(got) - set(tree)))
     os.replace(tmp, dst)
     nfiles = sum(1 for v in tree.values() if v[1] is not None)
-    print('%s: %d MB, C: (AHDI driver) + D: %d games, %d files, %d of %d clusters used; '
-          'read back and checked' % (dst, len(img) >> 20, len(rows), nfiles, used, clusters))
+    print('%s: %d MB, C: (AHDI driver) + D: %d games, %d files, %d patch(es) (patches.txt), '
+          '%d of %d clusters used; read back and checked'
+          % (dst, len(img) >> 20, len(rows), nfiles, npatch, used, clusters))
     for folder, *_ in rows:
         print('  D:\\' + folder)
 

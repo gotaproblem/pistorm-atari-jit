@@ -1,0 +1,19 @@
+# Byte patches applied by mkgamesimg.py after copying the games: one a line.
+#
+#   file | offset | bytes there now | bytes to put there | why
+#
+# file is relative to D:'s root. Offsets and bytes are hex. The build stops
+# if the bytes there now are not what this says, so a patch can never land
+# on a different version of the file.
+#
+# WRATHOD (Petari's gamex version) clears the STE video registers $FF820C,
+# $FF820E and $FF8264 on entering each section, whatever machine it runs on:
+# the loader hands it A4 = 1 on an ST too. On a plain ST those addresses
+# bus-error, its bus-error vector points at nothing, and the screen goes
+# black at the first "disk change" - on this emulator (22 Nov 2026: the real
+# ST board answered the write with BERR) and in Hatari 2.4.1 the same
+# (--machine st, TOS 2.06: "Bus Error writing at address $ffff820c,
+# PC=$660"), while on an STE it plays. The three writes become NOPs: on an
+# ST they have nothing to clear. Checked in Hatari, plain ST: plays through
+# the first section, loses a life and restarts it.
+WRATHOD\FILES\200 | 51A | 117C0000000C117C0000000E117C00000064 | 4E714E714E714E714E714E714E714E714E71 | STE register writes bus-error on a plain ST
