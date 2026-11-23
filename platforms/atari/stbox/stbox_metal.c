@@ -606,6 +606,74 @@ static void *pad_thread(void *arg)
 }
 
 /* ---- the reporter (core 0: printf stays off the bus core) ------------- */
+/* A double bus fault: everything needed to find out why, in one go -
+ * the fault addresses, the head of the exception burst that led to it
+ * (registers, stack, the 512 instructions before its first exception),
+ * the instructions before the halt, and the whole of the box's RAM in
+ * stboxmetal-halt-N.ram (raw, $000000 up) beside the log. */
+static int g_ide_on, g_acsi_on;               /* hard disks, below */
+void ide_dump_stats(void);                     /* IDE.c */
+static void m_dis(uint32_t pc)
+{
+    char buf[128];
+    pc &= 0xFFFFFF;
+    m68k_disassemble(buf, pc, M68K_CPU_TYPE_68000);
+    printf("[HALT]     %06X  %s\n", pc, buf);
+}
+static void m_pcs(const uint32_t *pcs, int n)
+{
+    /* runs of a loop collapse: an address seen in the last 16 is not repeated */
+    int skipped = 0;
+    for (int i = 0; i < n; i++) {
+        int dup = 0;
+        for (int j = i - 1; j >= 0 && j >= i - 16; j--) if (pcs[j] == pcs[i]) { dup = 1; break; }
+        if (dup) { skipped++; continue; }
+        if (skipped) { printf("[HALT]       (%d repeats of the lines above)\n", skipped); skipped = 0; }
+        m_dis(pcs[i]);
+    }
+    if (skipped) printf("[HALT]       (%d repeats of the lines above)\n", skipped);
+}
+static void m_exc(const char *tag, const stbox_exc_info_t *e)
+{
+    printf("[HALT]   %s vec%u at pc %06X (next %06X) sr %04X sp %06X d0 %08X a0 %06X a1 %06X a6 %06X cyc %llu",
+           tag, e->vector, e->ppc, e->pc, e->sr, e->sp, e->d0, e->a0, e->a1, e->a6,
+           (unsigned long long)e->cycles);
+    if (e->vector == 2) printf(" fault $%06X", e->addr);
+    printf("\n[HALT]     stack:");
+    for (int i = 0; i < 8; i++) printf(" %08X", e->stack[i]);
+    printf("\n");
+}
+static void m_halt_report(void)
+{
+    static int nh;
+    const stbox_halt_info_t *h = &stbox_halt_info;
+    printf("[HALT] guest HALTED (double bus fault) at pc %06X (next %06X), sr %04X, sp %06X:"
+           " first fault $%06X, second $%06X\n", h->ppc, h->pc, h->sr, h->sp, h->fault1, h->fault2);
+    printf("[HALT] exceptions taken %u; the burst that led here started at exception %u:\n",
+           stbox_exc_count, stbox_exc_head_at);
+    printf("[HALT]   the %d instructions before its first exception (oldest first):\n", STBOX_HEAD_PCS);
+    m_pcs(stbox_exc_head_pcs, STBOX_HEAD_PCS);
+    for (unsigned i = 0; i < stbox_exc_head_n; i++) m_exc("burst", &stbox_exc_head[i]);
+    printf("[HALT]   the last exceptions:\n");
+    for (int i = STBOX_EXC_RING; i > 0; i--)
+        if (stbox_exc_count >= (unsigned)i)
+            m_exc("last", &stbox_exc_ring[(stbox_exc_count - i) & (STBOX_EXC_RING - 1)]);
+    printf("[HALT]   the 256 instructions before the halt:\n");
+    {
+        static uint32_t last[256];
+        const unsigned idx = stbox_pc_ring_idx;
+        for (int i = 0; i < 256; i++) last[i] = stbox_pc_ring[(idx - 256 + i) & (STBOX_PC_RING - 1)];
+        m_pcs(last, 256);
+    }
+    if (g_ide_on) { fflush(stdout); ide_dump_stats(); }
+    char fn[64];
+    snprintf(fn, sizeof fn, "stboxmetal-halt-%d.ram", ++nh);
+    FILE *f = fopen(fn, "wb");
+    if (f) { fwrite(stbox_shared.ram, 1, g_ram_bytes, f); fclose(f); }
+    printf("[HALT] RAM ($000000-$%06X) written to %s%s\n", g_ram_bytes - 1, fn, f ? "" : " - FAILED");
+    printf("[METAL] guest HALTED (double bus fault) at pc %06X: Ctrl+Alt+Undo to restart\n", h->ppc);
+}
+
 static volatile int g_report_stop;
 static void *reporter(void *arg)
 {
@@ -641,9 +709,7 @@ static void *reporter(void *arg)
             M.flush_max_ns = M.poll_max_ns = M.probe_max_ns = 0;
         }
         if (g_vmoved) printf("[METAL]       writes moved off the vertical decision: %llu\n", (unsigned long long)g_vmoved);
-        if (stbox_core_take_halt_report())
-            printf("[METAL] guest HALTED (double bus fault) at pc %06X: Ctrl+Alt+Undo to restart\n",
-                   stbox_halt_info.ppc);
+        if (stbox_core_take_halt_report()) m_halt_report();
         printf("[METAL]       top border: box shut %llu/%llu frames real agrees, box open %llu/%llu"
                " | bottom border (box open): %llu/%llu\n",
                (unsigned long long)M.top_ok[0], (unsigned long long)M.top_n[0],
@@ -669,9 +735,17 @@ static void *reporter(void *arg)
         M.box_ns = M.flush_ns = M.wait_ns = 0; M.box_behind = 0;
         if (stbox_exc_count) {
             static unsigned seen;
-            for (; seen != stbox_exc_count; seen++) {
+            const unsigned n = stbox_exc_count;
+            if (n - seen > STBOX_EXC_RING) {
+                printf("[METAL] guest exceptions: %u in 5 s, the last %d:\n", n - seen, STBOX_EXC_RING);
+                seen = n - STBOX_EXC_RING;
+            }
+            for (; seen != n; seen++) {
                 stbox_exc_info_t e = stbox_exc_ring[seen & (STBOX_EXC_RING - 1)];
-                if (e.vector != 2)
+                if (e.vector == 2)
+                    printf("[METAL] guest exception vec2 (bus error at $%06X) at pc %06X (sr %04X)\n",
+                           e.addr, e.ppc, e.sr);
+                else
                     printf("[METAL] guest exception vec%u at pc %06X (sr %04X)\n", e.vector, e.ppc, e.sr);
             }
         }
@@ -730,7 +804,6 @@ void     fdd_dma_note_ok(int count_zero)           { stbox_dma_count_zero(count_
 void     fdd_dma_copy_to_ram(uint32_t a, const uint8_t *b, uint32_t n) { stbox_dma_to_ram(a, b, n); }
 void     fdd_dma_copy_from_ram(uint32_t a, uint8_t *b, uint32_t n)     { stbox_dma_from_ram(a, b, n); }
 
-static int g_ide_on, g_acsi_on;
 static uint32_t m_ide_read(uint32_t a, int size)
 {
     return size == 1 ? readIDEB(a) : readIDE(a);
@@ -1086,12 +1159,37 @@ int main(int argc, char **argv)
 #ifdef BEAMTEST_SIM
     const char *trs = getenv("SIM_RESET_S");          /* test the reset path */
     uint64_t test_reset_at = trs ? ticks() + (uint64_t)(atof(trs) * HZ) : 0;
+    const char *tcr = getenv("SIM_CRASH_S");
+    uint64_t crash_at = tcr ? ticks() + (uint64_t)(atof(tcr) * HZ) : 0;
+    const char *sim_in = getenv("SIM_INPUT");
+    const uint64_t sim_t0 = ticks();
     const char *tsh = getenv("SIM_SHOT_S");           /* SIM_SHOT=file.pgm */
     uint64_t shot_at = (tsh && getenv("SIM_SHOT")) ? ticks() + (uint64_t)(atof(tsh) * HZ) : 0;
 #endif
     while (!g_stop && !g_want_quit) {
 #ifdef BEAMTEST_SIM
         if (test_reset_at && ticks() > test_reset_at) { test_reset_at = 0; g_want_reset = 1; }
+        if (sim_in && *sim_in) {                       /* SIM_INPUT="secs:j1=80 secs:k=39 ..." */
+            const double at = atof(sim_in);
+            if ((double)(ticks() - sim_t0) >= at * HZ) {
+                const char *c = strchr(sim_in, ':');
+                if (c) {
+                    unsigned v = 0;
+                    if (c[1] == 'j' && sscanf(c + 3, "=%x", &v) == 1) stbox_joy_event(c[2] - '0', (uint8_t)v);
+                    else if (c[1] == 'k' && sscanf(c + 2, "=%x", &v) == 1) {
+                        stbox_key_event(v & 0x7F, !(v & 0x80));
+                    }
+                    printf("[sim] input %.*s\n", (int)strcspn(sim_in, " "), sim_in);
+                }
+                sim_in += strcspn(sim_in, " ");
+                while (*sim_in == ' ') sim_in++;
+            }
+        }
+        if (crash_at && ticks() > crash_at) {          /* test the halt report */
+            crash_at = 0;
+            m68k_set_reg(M68K_REG_SP, 0xD00100);
+            m68k_set_reg(M68K_REG_PC, 0xD00000);
+        }
         if (shot_at && ticks() > shot_at) {           /* the box's screen, as a PGM */
             shot_at = 0;
             const uint32_t base = (stbox_bus_r8(0xFF8201) << 16) | (stbox_bus_r8(0xFF8203) << 8);

@@ -235,11 +235,20 @@ extern stbox_halt_info_t stbox_halt_info;
 /* last group-0/illegal/privilege exception taken (2/3 bombs etc.) */
 typedef struct {
     uint32_t vector, ppc, pc, sr, sp, a0, a1, a6, d0;
+    uint32_t addr;                   /* vector 2: the faulting address */
     uint64_t cycles;
     uint32_t stack[8];               /* longs from sp at the fault    */
 } stbox_exc_info_t;
 #define STBOX_EXC_RING 8
 extern stbox_exc_info_t stbox_exc_ring[STBOX_EXC_RING];
+/* the head of the latest burst of exceptions (first after >1 s quiet):
+ * its first STBOX_HEAD_EXC entries and the STBOX_HEAD_PCS instructions
+ * before the first one (oldest first) */
+#define STBOX_HEAD_EXC 32
+#define STBOX_HEAD_PCS 512
+extern stbox_exc_info_t stbox_exc_head[STBOX_HEAD_EXC];
+extern volatile unsigned stbox_exc_head_n, stbox_exc_head_seq, stbox_exc_head_at;
+extern uint32_t stbox_exc_head_pcs[STBOX_HEAD_PCS];
 extern volatile unsigned stbox_exc_count;      /* total taken; ring index */
 extern volatile unsigned stbox_trace_count;
 extern volatile uint32_t stbox_trace_first_ppc, stbox_trace_first_pc, stbox_trace_vec;

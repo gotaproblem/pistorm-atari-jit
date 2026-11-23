@@ -2325,6 +2325,9 @@ unsigned int stbox_bus_r16(unsigned int address)
  * would otherwise vanish into TOS's handler). */
 stbox_exc_info_t stbox_exc_ring[STBOX_EXC_RING];
 volatile unsigned stbox_exc_count;
+stbox_exc_info_t stbox_exc_head[STBOX_HEAD_EXC];
+volatile unsigned stbox_exc_head_n, stbox_exc_head_seq, stbox_exc_head_at;
+uint32_t stbox_exc_head_pcs[STBOX_HEAD_PCS];
 /* trace (vector 9) is taken per instruction by trace-based protections,
  * so it gets a counter, not a ring entry; the first one is recorded so
  * the host can say where trace was switched on and where its handler is */
@@ -2356,7 +2359,21 @@ unsigned int stbox_bus_r32(unsigned int address)
         }
     }
     if (a == 0x08 || a == 0x0C || a == 0x10 || a == 0x20) {
+        /* the head of a burst: the first exceptions after a quiet second,
+         * with the road the CPU took to the first one - a crash's storm
+         * overwrites the ring, never this */
+        static uint64_t last_exc_cyc;
+        if (g_total_cyc - last_exc_cyc > 8000000u || !stbox_exc_head_seq) {
+            stbox_exc_head_seq++;
+            stbox_exc_head_n = 0;
+            stbox_exc_head_at = stbox_exc_count;
+            const unsigned idx = stbox_pc_ring_idx;
+            for (int i = 0; i < STBOX_HEAD_PCS; i++)
+                stbox_exc_head_pcs[i] = stbox_pc_ring[(idx - STBOX_HEAD_PCS + i) & (STBOX_PC_RING - 1)];
+        }
+        last_exc_cyc = g_total_cyc;
         stbox_exc_info_t *e = &stbox_exc_ring[stbox_exc_count & (STBOX_EXC_RING - 1)];
+        e->addr = a == 0x08 ? stbox_halt_info.fault1 : 0;
         e->vector = a >> 2;
         e->ppc = m68k_get_reg(NULL, M68K_REG_PPC);
         e->pc  = m68k_get_reg(NULL, M68K_REG_PC);
@@ -2375,6 +2392,7 @@ unsigned int stbox_bus_r32(unsigned int address)
                   ((uint32_t)g_ram[m + 2] << 8) | g_ram[m + 3]
                 : 0xDEADBEEFu;
         }
+        if (stbox_exc_head_n < STBOX_HEAD_EXC) stbox_exc_head[stbox_exc_head_n++] = *e;
         __atomic_thread_fence(__ATOMIC_RELEASE);
         stbox_exc_count++;
     }
