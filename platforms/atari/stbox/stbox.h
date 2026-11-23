@@ -349,6 +349,29 @@ extern uint64_t *stbox_metal_dirty;
 extern uint8_t  *stbox_metal_blk;
 extern volatile uint8_t stbox_metal_any;
 uint64_t stbox_core_total_cyc(void);
+
+/* METAL hard disks: IDE at $F00000 and emulated ACSI on the DMA port.
+ * All NULL in the emulator. stbox_disk_irq is the disks' GPIP5 level. */
+#include <stdbool.h>
+typedef struct {
+    bool     (*cmd)(uint8_t v, bool first_byte);
+    uint8_t  (*status)(void);
+    bool     (*owns)(void);
+    uint16_t (*residual)(void);
+    void     (*release)(void);
+    void     (*fifo_reset)(void);
+} stbox_acsi_ops_t;
+extern uint32_t (*stbox_ide_read)(uint32_t a, int size);
+extern void     (*stbox_ide_write)(uint32_t a, uint32_t v, int size);
+extern const stbox_acsi_ops_t *stbox_acsi;
+extern int      (*stbox_disk_irq)(void);
+/* the box's DMA chip, for acsi.c */
+uint32_t stbox_dma_addr(void);
+void     stbox_dma_advance(uint32_t n);
+int      stbox_dma_write_dir(void);
+void     stbox_dma_count_zero(int zero);
+void     stbox_dma_to_ram(uint32_t a, const uint8_t *b, uint32_t n);
+void     stbox_dma_from_ram(uint32_t a, uint8_t *b, uint32_t n);
 void stbox_core_cold_reset_now(void);   /* METAL: engine disarmed */
 
 #ifdef STBOX_LINE_LOG

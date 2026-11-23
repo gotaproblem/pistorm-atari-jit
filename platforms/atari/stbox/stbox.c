@@ -467,6 +467,28 @@ static uint8_t * volatile g_disk_new;
 static volatile uint32_t  g_disk_new_size;
 static volatile int       g_disk_adopted;
 
+/* the DMA chip as acsi.c needs it (atari_fdd.c's fdd_dma_* in the
+ * emulator): live address counter, direction, sector count, RAM */
+uint32_t stbox_dma_addr(void)              { return fdc.dma_addr & 0xFFFFFF; }
+void     stbox_dma_advance(uint32_t n)     { fdc.dma_addr = (fdc.dma_addr + n) & 0xFFFFFF; }
+int      stbox_dma_write_dir(void)         { return (fdc.dma_mode & 0x100) != 0; }
+void     stbox_dma_count_zero(int z)       { if (z) fdc.sector_count = 0; }
+void     stbox_dma_to_ram(uint32_t a, const uint8_t *b, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t x = (a + i) & 0xFFFFFF;
+        if (x >= 8 && x < g_ram_size) g_ram[x] = b[i];
+    }
+    metal_dirty(a & 0xFFFFFF, n);
+}
+void     stbox_dma_from_ram(uint32_t a, uint8_t *b, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t x = (a + i) & 0xFFFFFF;
+        b[i] = x < g_ram_size ? g_ram[x] : 0xFF;
+    }
+}
+
 /* real-FDC bridge state (see stbox.h and stbox_realfdc.c) */
 stbox_rfdc_t stbox_rfdc;
 void (*stbox_cpu_kick)(void);
@@ -478,6 +500,28 @@ static uint64_t g_rfdc_next_kick;         /* pump poll cadence, cycles */
 #define SECT_CYC  22000u      /* rotational+transfer per sector        */
 
 static void mfp_raise(int ch);
+
+/* METAL disks (stbox_metal.c): hard disks for a box that runs on its own
+ * - IDE at $F00000 (platforms/atari/IDE.c) and emulated ACSI targets on
+ * the DMA port (platforms/atari/fdd/acsi.c, through the stbox_dma_*
+ * helpers below). NULL in the emulator, where $F00000 bus-errors in the
+ * box and ACSI command bytes go nowhere, as before. */
+uint32_t (*stbox_ide_read)(uint32_t a, int size);
+void     (*stbox_ide_write)(uint32_t a, uint32_t v, int size);
+const stbox_acsi_ops_t *stbox_acsi;
+int      (*stbox_disk_irq)(void);
+static int g_disk_irq_prev;
+
+/* GPIP5 is the FDC's and the hard disks' shared interrupt (active low):
+ * follow the hard disks' level, an edge into the MFP when it rises */
+static void disk_irq_poll(void)
+{
+    if (!stbox_disk_irq) return;
+    const int l = stbox_disk_irq() != 0;
+    if (l && !g_disk_irq_prev) { mfp.gpip &= (uint8_t)~0x20; mfp_raise(MFP_CH_GPIP5); }
+    else if (!l && g_disk_irq_prev) mfp.gpip |= 0x20;
+    g_disk_irq_prev = l;
+}
 
 static void fdc_intrq(void)
 {
@@ -1944,7 +1988,16 @@ static uint32_t hw_read(uint32_t a, int size)
 
     /* DMA/FDC */
     if (a == 0xFF8604) {                           /* disk controller / count */
-        if (fdc.dma_mode & 0x10) return fdc.sector_count;
+        if (fdc.dma_mode & 0x10)
+            return (stbox_acsi && stbox_acsi->owns()) ? stbox_acsi->residual() : fdc.sector_count;
+        if (fdc.dma_mode & 0x08) {                 /* HDC (ACSI) selected */
+            if (stbox_acsi && stbox_acsi->owns()) {
+                uint8_t st = stbox_acsi->status();
+                disk_irq_poll();
+                return st;
+            }
+            return 0xFF;                           /* nobody on the bus   */
+        }
         switch ((fdc.dma_mode >> 1) & 3) {
             case 0: {
                 /* status read releases INTRQ, like the real WD1772 */
@@ -2131,6 +2184,15 @@ static void hw_write(uint32_t a, uint32_t v, int size)
     /* DMA/FDC */
     if (a == 0xFF8604) {
         if (fdc.dma_mode & 0x10) { fdc.sector_count = (uint16_t)v; return; }
+        if (fdc.dma_mode & 0x08) {                 /* ACSI command byte   */
+            if (stbox_acsi) {
+                /* TOS writes mode $88 for a CDB's first byte, $8A after */
+                stbox_acsi->cmd((uint8_t)v, (fdc.dma_mode & 0x06) == 0);
+                disk_irq_poll();
+            }
+            return;
+        }
+        if (stbox_acsi) stbox_acsi->release();     /* the floppy's again  */
         switch ((fdc.dma_mode >> 1) & 3) {
             case 0: fdc_command((uint8_t)v); break;
             case 1: fdc.track  = (uint8_t)v; break;
@@ -2139,7 +2201,12 @@ static void hw_write(uint32_t a, uint32_t v, int size)
         }
         return;
     }
-    if (a == 0xFF8606) { fdc.dma_mode = (uint16_t)v; return; }
+    if (a == 0xFF8606) {
+        if (stbox_acsi && ((fdc.dma_mode ^ v) & 0x100))
+            stbox_acsi->fifo_reset();              /* direction toggle    */
+        fdc.dma_mode = (uint16_t)v;
+        return;
+    }
     if (a == 0xFF8609) { fdc.dma_addr = (fdc.dma_addr & 0x00FFFF) | ((v & 0xFF) << 16); return; }
     if (a == 0xFF860B) { fdc.dma_addr = (fdc.dma_addr & 0xFF00FF) | ((v & 0xFF) << 8); return; }
     if (a == 0xFF860D) { fdc.dma_addr = (fdc.dma_addr & 0xFFFF00) | (v & 0xFF); return; }
@@ -2223,6 +2290,9 @@ unsigned int stbox_bus_r8(unsigned int address)
     if (rom_hit(a)) return g_rom[a - g_rom_base];
     if (a >= 0xFA0000 && a < 0xFC0000) return 0xFF; /* empty cartridge   */
     if (a >= 0xFF8000) return hw_read(a, 1) & 0xFF;
+    if (a >= 0xF00000 && a < 0xF00100 && stbox_ide_read) {
+        uint32_t v = stbox_ide_read(a, 1); disk_irq_poll(); return v & 0xFF;
+    }
     m68k_pulse_bus_error();
     return 0;
 }
@@ -2240,6 +2310,9 @@ unsigned int stbox_bus_r16(unsigned int address)
                       return (g_rom[o] << 8) | g_rom[o + 1]; }
     if (a >= 0xFA0000 && a < 0xFC0000) return 0xFFFF;
     if (a >= 0xFF8000) return hw_read(a, 2) & 0xFFFF;
+    if (a >= 0xF00000 && a < 0xF00100 && stbox_ide_read) {
+        uint32_t v = stbox_ide_read(a, 2); disk_irq_poll(); return v & 0xFFFF;
+    }
     m68k_pulse_bus_error();
     return 0;
 }
@@ -2321,6 +2394,9 @@ void stbox_bus_w8(unsigned int address, unsigned int value)
         if (ok == 0) return;                       /* open bus: sink      */
     }
     if (a >= 0xFF8000) { metal_hw(a, value, 1); hw_write(a, value, 1); return; }
+    if (a >= 0xF00000 && a < 0xF00100 && stbox_ide_write) {
+        stbox_ide_write(a, value, 1); disk_irq_poll(); return;
+    }
     if (rom_hit(a) || (a >= 0xFA0000 && a < 0xFC0000)) return; /* ROM: sink */
     m68k_pulse_bus_error();
 }
@@ -2339,6 +2415,9 @@ void stbox_bus_w16(unsigned int address, unsigned int value)
         if (ok == 0) return;
     }
     if (a >= 0xFF8000) { metal_hw(a, value, 2); hw_write(a, value, 2); return; }
+    if (a >= 0xF00000 && a < 0xF00100 && stbox_ide_write) {
+        stbox_ide_write(a, value, 2); disk_irq_poll(); return;
+    }
     if (rom_hit(a) || (a >= 0xFA0000 && a < 0xFC0000)) return;
     m68k_pulse_bus_error();
 }
@@ -2552,6 +2631,7 @@ static void machine_cold_reset(void)
     stbox_shared.hscroll = 0;
     stbox_shared.vis_lines = 200;
     g_halted = 0;
+    g_disk_irq_prev = 0;
     g_berr_nest = 0;
     g_hbl_pending = g_vbl_pending = 0;
     g_total_cyc = 0; g_mfp_fp = 0;
@@ -2720,6 +2800,7 @@ void stbox_slice(uint64_t now)
         acia_pump();
         if (fdc.pending == 1 && g_total_cyc >= fdc.event_cyc)
             fdc_complete();
+        disk_irq_poll();                           /* METAL hard disks    */
         if (fdc.pending == 2) {                    /* real op in flight    */
             if (stbox_rfdc.done) {
                 __atomic_thread_fence(__ATOMIC_ACQUIRE);

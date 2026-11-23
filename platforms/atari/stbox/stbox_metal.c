@@ -21,12 +21,19 @@
  *   sudo ./stboxmetal --tos /home/pistorm/roms/tos104uk.rom \
  *        --disk "/home/pistorm/games-share/Xenon2.st" 2>&1 | tee stboxmetal.log
  *
+ * Normally it is started by the setup page: a psctrl.cfg build with
+ * `engine metal` (doc/PSCTRL-CFG.md) makes the emulator exec
+ *   ./stboxmetal --config ../configs/psctrl.cfg --build <section>
+ * which takes the build's rom, fastboot, IDE (hdd) and ACSI images and
+ * floppies from the file.
+ *
  * USB / Bluetooth gamepads (Xbox pads) work as in the emulator: the first
  * is joystick 1, the second joystick 0, Start is the Space bar.
  *
- * Keys (real keyboard): Ctrl+Alt+Undo = cold reset the box,
- * Ctrl+Alt+F1..F10 = put --disk 1..10 in drive A, Ctrl+Alt+Shift+Undo =
- * quit (so does Ctrl+C on the console).
+ * Keys (real keyboard): Ctrl+Alt+Undo = back to the setup page (exit 42,
+ * run-pistorm.sh relaunches the emulator) when started from a build, a
+ * cold reset of the box when started by hand; Ctrl+Alt+F1..F10 = put
+ * disk 1..10 in drive A, Ctrl+Alt+Shift+Undo = quit (so does Ctrl+C).
  *
  * HOW IT RUNS. One thread on an isolated core owns the bus and does
  * everything, in priority order:
@@ -47,6 +54,9 @@
  * FDC/DMA, the ACIA (the box emulates them; the real IKBD is read here
  * and its keys, mouse and joysticks fed to the box's IKBD model, which
  * answers the guest in whatever mode the guest asked for).
+ *
+ * Hard disks: IDE at $F00000 and emulated ACSI targets, the emulator's
+ * own IDE.c / acsi.c behind the box's address decode and DMA chip.
  *
  * Not yet: the real floppy drive (disk images only), HDMI, STE.
  */
@@ -403,6 +413,7 @@ static char    *g_disks[10];
 static int      g_ndisks;
 static int      g_kctrl, g_kalt, g_kshift;
 static volatile int g_want_reset, g_want_quit, g_want_disk = -1;
+static int g_relaunch;                      /* exit 42: run-pistorm.sh relaunches */
 
 static void key_in(uint8_t code)
 {
@@ -694,6 +705,255 @@ static int m_start_box(void)
     return 0;
 }
 
+/* ---- hard disks --------------------------------------------------------- */
+/* IDE at $F00000 is platforms/atari/IDE.c and ACSI on the DMA port is
+ * platforms/atari/fdd/acsi.c, the emulator's own code; the box decodes
+ * the addresses (stbox.c, stbox_ide_* / stbox_acsi) and owns the DMA
+ * chip they move data through (stbox_dma_*). Disk I/O runs inside a box
+ * slice: a sector from the page cache costs a few us, inside the AHEAD
+ * margin; a cold read from the SD card can make the writes after it
+ * late, which the late-write report shows as "box slice". */
+#include "../IDE.h"
+#include "../disk_order.h"
+#include "../fdd/acsi.h"
+#include "../psctrl/psctrl_tunables.h"
+#include <ctype.h>
+void set_hard_drive_image_file_atari(uint8_t index, char *filename);   /* IDE.c */
+extern bool IDE_enabled;
+
+int emulator_falcon_tos(void) { return 0; }        /* idedriver.c: never */
+
+uint32_t fdd_dma_base(void)                        { return stbox_dma_addr(); }
+void     fdd_dma_base_advance(uint32_t n)          { stbox_dma_advance(n); }
+int      fdd_dma_dir_is_write(void)                { return stbox_dma_write_dir(); }
+void     fdd_dma_note_ok(int count_zero)           { stbox_dma_count_zero(count_zero); }
+void     fdd_dma_copy_to_ram(uint32_t a, const uint8_t *b, uint32_t n) { stbox_dma_to_ram(a, b, n); }
+void     fdd_dma_copy_from_ram(uint32_t a, uint8_t *b, uint32_t n)     { stbox_dma_from_ram(a, b, n); }
+
+static int g_ide_on, g_acsi_on;
+static uint32_t m_ide_read(uint32_t a, int size)
+{
+    return size == 1 ? readIDEB(a) : readIDE(a);
+}
+static void m_ide_write(uint32_t a, uint32_t v, int size)
+{
+    if (size == 1) writeIDEB(a, v); else writeIDE(a, v);
+}
+static int m_disk_irq(void)
+{
+    return (g_ide_on && IDE_intrq_pending()) || (g_acsi_on && acsi_irq_active());
+}
+static const stbox_acsi_ops_t m_acsi_ops = {
+    acsi_cmd_byte, acsi_status_read, acsi_owns_dma, acsi_residual_count,
+    acsi_release, acsi_dma_fifo_reset,
+};
+
+/* TOS's cold-boot memory test and hard-disk spin-up wait, and the 2.06
+ * ROM CRC check: emulator.c's tos_fastboot_patch, same patterns */
+static void m_fastboot(uint8_t *rom, int size)
+{
+    static const uint8_t wait_pat[] = { 0x2E,0x3C,0x00,0x00,0x3E,0x80,
+                                        0xBE,0xB9,0x00,0x00,0x04,0xBA, 0x65,0x00 };
+    static const uint8_t crc_pat[]  = { 0x0C,0xB9,0x00,0x00,0x3E,0x80,
+                                        0x00,0x00,0x04,0xBA, 0x64,0x00 };
+    int n = 0;
+    for (int i = 0; i + (int)sizeof wait_pat <= size; i += 2) {
+        if (!memcmp(rom + i, wait_pat, sizeof wait_pat)) { rom[i + 12] = 0x60; n++; }
+        else if (!memcmp(rom + i, crc_pat, sizeof crc_pat)) { rom[i + 10] = 0x60; n++; }
+    }
+    printf("fastboot: %d patch%s\n", n, n == 1 ? "" : "es");
+}
+
+/* ---- psctrl.cfg --------------------------------------------------------- */
+/* A build is a section of psctrl.cfg with `engine metal`; the setup page
+ * starts this program for it (emulator.c) with --config and --build. The
+ * keys mean what they mean to the emulator, read with its rules
+ * (config_file.c): rom_path / disk_path / fdd_path wherever they sit,
+ * a bare file name under its path, / or ~ as given (~ = the invoking
+ * user's home). Keys the box has no use for are ignored. */
+#include "setup_cfg.h"
+#include <pwd.h>
+
+static struct sc_cfg g_cfg;
+static char g_rom_path[512], g_disk_path[512], g_fdd_path[512];
+static char g_tos_buf[512], g_disk_buf[10][512];
+static int  g_from_cfg, g_fastboot, g_pads = 1;
+
+static const char *m_home(void)
+{
+    static char home[512];
+    if (home[0]) return home;
+    const char *u = getenv("SUDO_USER");
+    const struct passwd *pw = (u && *u) ? getpwnam(u) : NULL;
+    const char *h = (pw && pw->pw_dir && *pw->pw_dir) ? pw->pw_dir : getenv("HOME");
+    snprintf(home, sizeof home, "%s", h ? h : ".");
+    return home;
+}
+static void m_resolve(const char *base, const char *file, char *out, size_t n)
+{
+    char b[512];
+    while (*file == ' ' || *file == '\t') file++;
+    if (file[0] == '~' && (file[1] == '/' || !file[1])) { snprintf(out, n, "%s%s", m_home(), file + 1); return; }
+    if (file[0] == '/' || !base[0]) { snprintf(out, n, "%s", file); return; }
+    if (base[0] == '~' && (base[1] == '/' || !base[1])) snprintf(b, sizeof b, "%s%s", m_home(), base + 1);
+    else snprintf(b, sizeof b, "%s", base);
+    const size_t L = strlen(b);
+    snprintf(out, n, "%s%s%s", b, (L && b[L - 1] == '/') ? "" : "/", file);
+}
+/* "3:img" / "3 img" -> 3; "A:img" / "B:img" too when letters is set */
+static const char *m_slot(const char *v, int *slot, int letters)
+{
+    *slot = -1;
+    while (*v == ' ' || *v == '\t') v++;
+    int d = -1;
+    if (v[0] >= '0' && v[0] <= '7') d = v[0] - '0';
+    else if (letters && (v[0] == 'A' || v[0] == 'a')) d = 0;
+    else if (letters && (v[0] == 'B' || v[0] == 'b')) d = 1;
+    if (d >= 0 && (v[1] == ':' || v[1] == ' ' || v[1] == '\t')) {
+        *slot = d; v += 2;
+        while (*v == ' ' || *v == '\t') v++;
+    }
+    return v;
+}
+static int m_word_is(const char *v, const char *const *w)
+{
+    char s[16]; int n = 0;
+    while (*v == ' ' || *v == '\t') v++;
+    while (v[n] && v[n] != ' ' && v[n] != '\t' && n < 15) { s[n] = (char)tolower((unsigned char)v[n]); n++; }
+    s[n] = 0;
+    for (; *w; w++) if (!strcmp(s, *w)) return 1;
+    return 0;
+}
+static const char *const k_true[]  = { "1", "on", "yes", "true", "enabled", "enable", NULL };
+static const char *const k_false[] = { "0", "off", "no", "false", "disabled", "disable", NULL };
+static int m_bool(const char *v)                   /* present = on, as the emulator */
+{
+    return v && !m_word_is(v, k_false);
+}
+
+/* 0 = loaded; prints why not */
+static int m_load_cfg(const char *path, const char *build, const char **tos)
+{
+    if (sc_load(&g_cfg, path) != 0) { printf("%s: cannot read\n", path); return -1; }
+    char sec[SC_SEC_LEN];
+    snprintf(sec, sizeof sec, "%s", build);
+    for (char *p = sec; *p; p++) *p = (char)tolower((unsigned char)*p);
+    int found = 0;
+    for (int i = 0; i < g_cfg.n; i++) {
+        const struct sc_line *l = &g_cfg.line[i];
+        if (!strcmp(l->sec, sec)) found = 1;
+        char *dst = !strcasecmp(l->key, "rom_path") ? g_rom_path :
+                    !strcasecmp(l->key, "disk_path") ? g_disk_path :
+                    !strcasecmp(l->key, "fdd_path") ? g_fdd_path : NULL;
+        if (dst) {                       /* the last one wins, as there */
+            const char *v = l->text;
+            while (*v == ' ' || *v == '\t') v++;
+            while (*v && *v != ' ' && *v != '\t') v++;
+            while (*v == ' ' || *v == '\t') v++;
+            snprintf(dst, 512, "%s", v);
+            size_t L = strlen(dst);
+            while (L && (dst[L - 1] == ' ' || dst[L - 1] == '\t' || dst[L - 1] == '\r')) dst[--L] = 0;
+        }
+    }
+    if (!found) { printf("%s: no build [%s]\n", path, sec); return -1; }
+    printf("config %s, build [%s]\n", path, sec);
+
+    const char *v;
+    if ((v = sc_get(&g_cfg, sec, "machine")) && !m_word_is(v, (const char *const[]){ "st", "stf", "stfm", NULL }))
+        printf("  machine %s: the metal box is a plain ST - running it as one\n", v);
+    if ((v = sc_get(&g_cfg, sec, "rom"))) { m_resolve(g_rom_path, v, g_tos_buf, sizeof g_tos_buf); *tos = g_tos_buf; }
+    g_fastboot = m_bool(sc_get(&g_cfg, sec, "fastboot"));
+    if ((v = sc_get(&g_cfg, sec, "usb")) && m_word_is(v, k_false)) g_pads = 0;
+    if ((v = sc_get(&g_cfg, sec, "metal_cal")))  { g_cal = atof(v);  cal_forced = 1; }
+    if ((v = sc_get(&g_cfg, sec, "metal_vdec"))) { g_vdec = atof(v); vdec_forced = 1; }
+    if ((v = sc_get(&g_cfg, sec, "stram_size")))
+        printf("  stram_size ignored: the box has the real ST's RAM\n");
+
+    /* floppies: every fdd line is a disk for Ctrl+Alt+F1..; drive A's first */
+    {
+        const int nf = sc_count(&g_cfg, sec, "fdd");
+        int a_first = -1;
+        for (int i = 0; i < nf && g_ndisks < 10; i++) {
+            int drv;
+            const char *img = m_slot(sc_get_n(&g_cfg, sec, "fdd", i), &drv, 1);
+            if (!*img) continue;
+            m_resolve(g_fdd_path, img, g_disk_buf[g_ndisks], sizeof g_disk_buf[0]);
+            if (drv == 0 && a_first < 0) a_first = g_ndisks;
+            g_disks[g_ndisks] = g_disk_buf[g_ndisks];
+            g_ndisks++;
+        }
+        if (a_first > 0) { char *t = g_disks[0]; g_disks[0] = g_disks[a_first]; g_disks[a_first] = t; }
+    }
+
+    /* IDE: `ide` switches it on, `hdd [N:]image` fills slots, `hdd_order` */
+    if (m_bool(sc_get(&g_cfg, sec, "ide"))) {
+        const int nh = sc_count(&g_cfg, sec, "hdd");
+        int next = 0, any = 0;
+        for (int i = 0; i < nh; i++) {
+            int slot;
+            const char *img = m_slot(sc_get_n(&g_cfg, sec, "hdd", i), &slot, 0);
+            if (slot < 0) slot = next < 8 ? next++ : -1;
+            if (slot < 0 || !*img) continue;
+            char p[512];
+            m_resolve(g_disk_path, img, p, sizeof p);
+            set_hard_drive_image_file_atari((uint8_t)slot, p);
+            printf("  IDE slot %d: %s\n", slot, p);
+            any = 1;
+        }
+        const int no = sc_count(&g_cfg, sec, "hdd_order");
+        for (int i = 0; i < no; i++) {
+            int slot;
+            const char *m = m_slot(sc_get_n(&g_cfg, sec, "hdd_order", i), &slot, 0);
+            const int mode = disk_order_parse_mode(m);
+            if (slot >= 0 && mode >= 0) disk_order_set_hdd(slot, mode);
+        }
+        if (any) g_ide_on = 1;
+    }
+
+    /* ACSI: `acsi enabled` is the switch; other acsi lines are [N:]images */
+    {
+        const int na = sc_count(&g_cfg, sec, "acsi");
+        int on = 0;
+        for (int i = 0; i < na; i++) {
+            const char *a = sc_get_n(&g_cfg, sec, "acsi", i);
+            if (m_word_is(a, k_true)) on = 1;
+            else if (m_word_is(a, k_false)) on = 0;
+        }
+        const int no = sc_count(&g_cfg, sec, "acsi_order");
+        for (int i = 0; i < no; i++) {
+            int id;
+            const char *m = m_slot(sc_get_n(&g_cfg, sec, "acsi_order", i), &id, 0);
+            const int mode = disk_order_parse_mode(m);
+            if (id >= 0 && mode >= 0) disk_order_set_acsi(id, mode);
+        }
+        if (on)
+            for (int i = 0; i < na; i++) {
+                const char *a = sc_get_n(&g_cfg, sec, "acsi", i);
+                if (m_word_is(a, k_true) || m_word_is(a, k_false)) continue;
+                int id;
+                const char *img = m_slot(a, &id, 0);
+                char p[512];
+                m_resolve(g_disk_path, img, p, sizeof p);
+                if (acsi_attach_at(id, p) == 0) printf("  ACSI %d: %s\n", id, p);
+                else                             printf("  ACSI %s: NOT attached\n", p);
+            }
+        if (on && acsi_enabled()) g_acsi_on = 1;
+    }
+    g_from_cfg = 1;
+    return 0;
+}
+
+static void m_disks_on(void)
+{
+    if (g_ide_on) {
+        InitIDE();
+        if (!IDE_enabled) { g_ide_on = 0; printf("IDE: no image attached\n"); }
+    }
+    if (g_ide_on) { stbox_ide_read = m_ide_read; stbox_ide_write = m_ide_write; }
+    if (g_acsi_on) stbox_acsi = &m_acsi_ops;
+    if (g_ide_on || g_acsi_on) stbox_disk_irq = m_disk_irq;
+}
+
 static void m_disk(int i)
 {
     if (i < 0 || i >= g_ndisks) return;
@@ -712,8 +972,11 @@ int main(int argc, char **argv)
     const char *tos = "/home/pistorm/roms/tos104uk.rom";
     double cal_secs = 5.0;
     int core = 3;
+    const char *cfg = NULL, *build = NULL;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--tos") && i + 1 < argc) tos = argv[++i];
+        if (!strcmp(argv[i], "--config") && i + 1 < argc) cfg = argv[++i];
+        else if (!strcmp(argv[i], "--build") && i + 1 < argc) build = argv[++i];
+        else if (!strcmp(argv[i], "--tos") && i + 1 < argc) tos = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) { if (g_ndisks < 10) g_disks[g_ndisks++] = argv[++i]; else i++; }
         else if (!strcmp(argv[i], "--cal") && i + 1 < argc) { g_cal = atof(argv[++i]); cal_forced = 1; }
         else if (!strcmp(argv[i], "--cal-secs") && i + 1 < argc) cal_secs = atof(argv[++i]);
@@ -721,12 +984,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--ahead") && i + 1 < argc) g_ahead = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else {
-            fprintf(stderr, "usage: %s [--tos ROM] [--disk IMG]... [--cal CYCLES | --cal-secs S] [--vdec CYCLE]"
-                            " [--ahead CYCLES] [--core N]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--config psctrl.cfg --build SECTION] [--tos ROM] [--disk IMG]...\n"
+                            "       [--cal CYCLES | --cal-secs S] [--vdec CYCLE] [--ahead CYCLES] [--core N]\n", argv[0]);
             return 2;
         }
     }
     setvbuf(stdout, NULL, _IOLBF, 0);
+    psctrl_tunables_init();                    /* PISTORM_IDE_TRACE, PISTORM_ACSI_DEBUG, ... */
+    if (cfg || build) {
+        if (!cfg || !build) { printf("--config and --build go together\n"); return 2; }
+        if (m_load_cfg(cfg, build, &tos) != 0) return 2;
+    }
 
     /* ROM and RAM before the bus: a bad path costs nothing */
     static uint8_t rom[512 * 1024];
@@ -734,6 +1002,8 @@ int main(int argc, char **argv)
     if (!f) { printf("%s: %s\n", tos, strerror(errno)); return 2; }
     size_t rsz = fread(rom, 1, sizeof rom, f);
     fclose(f);
+    if (g_fastboot) m_fastboot(rom, (int)rsz);
+    m_disks_on();
 
     if (bt_init("stboxmetal", core)) return 1;
     g_ram_bytes = scr.bank0 + scr.bank1;
@@ -801,11 +1071,12 @@ int main(int argc, char **argv)
     stbox_metal_blk = g_blk;
     acia_init();
     if (m_start_box() != 0) return 1;
-    printf("\n[METAL] running: Ctrl+Alt+Undo reset, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Shift+Undo quit\n",
-           g_ndisks ? g_ndisks : 1);
+    printf("\n[METAL] running: Ctrl+Alt+Undo %s, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Shift+Undo quit\n",
+           g_from_cfg ? "setup page" : "reset", g_ndisks ? g_ndisks : 1);
+    if (g_ide_on || g_acsi_on) printf("[METAL] hard disks:%s%s\n", g_ide_on ? " IDE" : "", g_acsi_on ? " ACSI" : "");
     pthread_t rep, padt;
     pthread_create(&rep, NULL, reporter, NULL);
-    pthread_create(&padt, NULL, pad_thread, NULL);
+    if (g_pads) pthread_create(&padt, NULL, pad_thread, NULL);
 
     const double guard = GUARD_NS / NSPT, boxrun = BOXRUN_NS / NSPT,
                  flushg = FLUSH_NS / NSPT, pollg = POLL_NS / NSPT;
@@ -815,11 +1086,37 @@ int main(int argc, char **argv)
 #ifdef BEAMTEST_SIM
     const char *trs = getenv("SIM_RESET_S");          /* test the reset path */
     uint64_t test_reset_at = trs ? ticks() + (uint64_t)(atof(trs) * HZ) : 0;
+    const char *tsh = getenv("SIM_SHOT_S");           /* SIM_SHOT=file.pgm */
+    uint64_t shot_at = (tsh && getenv("SIM_SHOT")) ? ticks() + (uint64_t)(atof(tsh) * HZ) : 0;
 #endif
     while (!g_stop && !g_want_quit) {
 #ifdef BEAMTEST_SIM
         if (test_reset_at && ticks() > test_reset_at) { test_reset_at = 0; g_want_reset = 1; }
+        if (shot_at && ticks() > shot_at) {           /* the box's screen, as a PGM */
+            shot_at = 0;
+            const uint32_t base = (stbox_bus_r8(0xFF8201) << 16) | (stbox_bus_r8(0xFF8203) << 8);
+            const int rez = stbox_bus_r8(0xFF8260) & 3;
+            const int w = rez ? 640 : 320, h = rez == 2 ? 400 : 200, planes = rez == 0 ? 4 : rez == 1 ? 2 : 1;
+            FILE *o = fopen(getenv("SIM_SHOT"), "wb");
+            fprintf(o, "P5 %d %d 15\n", w, h);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const uint32_t wa = base + (uint32_t)y * 160 + (uint32_t)(x / 16) * planes * 2;
+                    int c = 0;
+                    for (int pl = 0; pl < planes; pl++) {
+                        const uint16_t wd = (uint16_t)((stbox_shared.ram[wa + pl * 2] << 8) | stbox_shared.ram[wa + pl * 2 + 1]);
+                        c |= ((wd >> (15 - (x & 15))) & 1) << pl;
+                    }
+                    fputc(planes == 1 ? (c ? 0 : 15) : 15 - c * (planes == 2 ? 5 : 1), o);
+                }
+            fclose(o);
+            printf("[sim] screen base %06X rez %d -> %s\n", base, rez, getenv("SIM_SHOT"));
+        }
 #endif
+        if (g_want_reset && g_from_cfg) {        /* back to the setup page */
+            g_relaunch = 1;
+            break;
+        }
         if (g_want_reset) {
             g_want_reset = 0; M.resets++;
             printf("[METAL] cold reset\n");
@@ -934,7 +1231,7 @@ int main(int argc, char **argv)
 
     g_report_stop = 1; g_pad_stop = 1;
     pthread_join(rep, NULL);
-    pthread_join(padt, NULL);
+    if (g_pads) pthread_join(padt, NULL);
     stbox_metal_hw = NULL; stbox_metal_line = NULL; stbox_metal_ikbd = NULL;
     stbox_core_disarm();
     ym_silence();
@@ -942,5 +1239,6 @@ int main(int argc, char **argv)
     printf("\nstboxmetal done%s: %u frames, %llu writes (%llu over 1 us late), %llu RAM longs\n",
            g_stop ? " (Ctrl+C)" : "", stbox_shared.frame, (unsigned long long)M.writes,
            (unsigned long long)M.late1us, (unsigned long long)M.flushed);
+    if (g_relaunch) { printf("[METAL] Ctrl+Alt+Undo: back to the setup page (exit 42)\n"); return 42; }
     return 0;
 }

@@ -118,6 +118,31 @@ image picker lists.
 | `cpu_speed` | `8mhz` `16mhz` | run the interpreter at a real 68000 clock - for games and demos timed to the CPU. There is no 32mhz: a Pi 4's interpreter tops out near 20 MHz (measured with the governor asking for 32), so no key is already about as fast as it gets. JIT off only (`jit_power 0`): with the JIT on it is ignored with a warning. No key: as fast as the Pi goes. If the interpreter cannot keep up the emulator says so once (`[GOV] reaching N kHz of the M kHz target`). The setup page adds `cpu_speed 8mhz` when `cpu_compatible` is ticked. At `8mhz` the governor paces at the board's own 68000 clock (a PAL ST is 8.021247 MHz), measured from the real Shifter, not 8.000 MHz - see [GAME-TIMING.md](GAME-TIMING.md). `PISTORM_GOV_KHZ=n` sets a rate by hand, taken as given |
 | `cpu_clock_multiplier`, `m68k_speed` | - | redundant: the UAE knobs `cpu_speed` replaced. Ignored with a console line saying so, never a row |
 
+## Engine - `engine metal`
+
+| key | values | |
+|---|---|---|
+| `engine` | `emulator` `metal` | who runs the build. `emulator` (no key): this emulator. `metal`: **stboxmetal** - a plain 8 MHz ST emulated in the Pi (Musashi 68000, the box's own MFP, GLUE timing, ACIA, FDC/DMA) that drives the board's **real** Shifter, YM and IKBD, each video/sound write played onto the real bus at the cycle the box made it, against the real beam. For games and demos: no per-game timing tweaks. Picking such a build on the setup page starts `stboxmetal` in the emulator's place (same console, same exit codes) |
+| `metal_cal` | cycles, e.g. `-8.5` | stboxmetal only: the write-landing calibration. No key: measured at every start (a 5 s right-border sweep). Set it from the `calibration` line of a run to start faster |
+| `metal_vdec` | cycle, e.g. `502` | stboxmetal only: the real GLUE's vertical 50/60 Hz decision cycle. No key: measured at every start (the F sweep) |
+
+What a metal build reads: `rom` (TOS 1.0x or 2.06; 2.06 boots IDE), `fastboot`, `ide` + `hdd [N:]image`, `hdd_order`, `acsi enabled` + `acsi [N:]image`, `acsi_order`, `fdd` (every `fdd` line is a disk: the `A:` one, else the first, is in drive A at boot; Ctrl+Alt+F1..F10 put disk 1..10 in drive A), `usb` (`usb off` = no USB/Bluetooth pads; pads are on otherwise), `machine` (`st`; anything else is run as an ST, with a console line). `rom_path`, `disk_path` and `fdd_path` apply as they do for the emulator. Everything else - `cpu`, `jit_*`, `stram_*`, `native_hdmi`, `hostfs`, ... - is ignored: the box is an ST with the board's own RAM. Not yet: the real floppy drive, HDMI, STE.
+
+Keys: Ctrl+Alt+Undo = back to the setup page (exit 42, as the emulator), Ctrl+Alt+Shift+Undo = stop.
+
+```
+[metal-games]
+engine metal
+machine st
+rom tos206uk.rom
+fastboot
+ide enabled
+hdd 0:regress-games.img
+acsi disabled
+fdd A:Xenon2.st
+fdd Turrican II.st
+```
+
 ## Video
 
 | key | values | |

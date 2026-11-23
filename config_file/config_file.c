@@ -1563,6 +1563,11 @@ struct emulator_config *load_config_file_section(char *filename,
           cfg->lmc_set = true;          /* emulator.c: STE-class only */
         if (psctrl_settings_config_key(cur_cmd, parse_line + str_pos))
           break;
+        /* `engine metal` and its metal_* keys belong to stboxmetal
+         * (emulator.c starts it for such a build before this parser
+         * runs); `engine emulator` is this program, the default. */
+        if (!strcasecmp(cur_cmd, "engine") || !strncasecmp(cur_cmd, "metal_", 6))
+          break;
         if (!strcasecmp(cur_cmd, "vga_render") ||
             !strcasecmp(cur_cmd, "loopcycles") ||
             !strcasecmp(cur_cmd, "rtc")) {

@@ -378,7 +378,7 @@ DELETEFILES = $(COBJS) $(CPPOBJS) $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d) \
 # -----------------------------------------------------------------
 # Rules
 # -----------------------------------------------------------------
-all: $(TARGET) ataritest
+all: $(TARGET) ataritest stboxmetal
 
 # WHY THE STAMP FILE. Which FFmpeg gets linked is decided by an rpath, and an
 # rpath is baked in at LINK time - but nothing in the object files changes when
@@ -469,18 +469,20 @@ setupvtest: platforms/atari/setup/setupvtest.c $(SETUP_SRC) gpio/ps_protocol.c g
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -ldrm
 
 # STBOX on the metal: the sandbox ST in the Pi driving the real ST's Shifter,
-# YM and IKBD (platforms/atari/stbox/stbox_metal.c). Not part of `all`: stop
-# the emulator first, then sudo ./stboxmetal --tos ROM --disk IMG.
+# YM and IKBD (platforms/atari/stbox/stbox_metal.c). Built with `all`: the
+# setup page starts it for a psctrl.cfg build with `engine metal`. By hand:
+# stop the emulator first, then sudo ./stboxmetal --tos ROM --disk IMG.
 METAL_SRC = platforms/atari/stbox/stbox_metal.c platforms/atari/stbox/stbox.c \
             platforms/atari/stbox/stbox_blit.c platforms/atari/psctrl/psctrl_tunables.c \
             third_party/musashi/m68kcpu.c third_party/musashi/m68kops.c \
             third_party/musashi/m68kdasm.c third_party/musashi/softfloat/softfloat.c \
             platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c \
-            platforms/atari/joy_usb.c
+            platforms/atari/joy_usb.c platforms/atari/IDE.c platforms/atari/idedriver.c \
+            platforms/atari/disk_order.c platforms/atari/fdd/acsi.c platforms/atari/setup/setup_cfg.c
 platforms/atari/stbox/stbox_metal_diskload.inc: platforms/atari/stbox/stbox_host.c
 	awk '/^static FILE \*fopen_ci/,/^int stbox_disk_insert_path/' $< | sed '$$d' > $@
 stboxmetal: $(METAL_SRC) tools/beamtest/beamtest.c platforms/atari/stbox/stbox_metal_diskload.inc
-	$(CC) $(METAL_SRC) -o $@ $(CFLAGS) -Iplatforms/atari/setup -Iplatforms/atari \
+	$(CC) $(METAL_SRC) -o $@ $(CFLAGS) -I. -Iplatforms/atari/setup -Iplatforms/atari \
 	      -Iplatforms/atari/stbox -Ithird_party/musashi -Ithird_party/musashi/softfloat -lm
 
 # Hybrid STBOX go/no-go: can timed writes hit the real beam to one bus slot?

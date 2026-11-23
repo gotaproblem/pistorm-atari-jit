@@ -2992,6 +2992,41 @@ int main (int argc, char *argv[])
         }
       }
       printf("[CFG] booting section [%s]\n", boot_section);
+
+      /* `engine metal`: this build is run by stboxmetal (the box ST in the
+       * Pi, driving the real Shifter, YM and IKBD - stbox_metal.c), not by
+       * this emulator. It takes the process over: same PID, same console,
+       * and its exit code goes to run-pistorm.sh as ours would (42 from
+       * its Ctrl+Alt+Undo = back to this page). The bus lock is handed
+       * over first - stboxmetal takes its own. The file is re-read: the
+       * page may just have switched the engine. */
+      {
+        const char *eng;
+        if (sc_load(&probe, config_file) == 0 &&
+            (eng = sc_get(&probe, boot_section, "engine")) &&
+            !strncasecmp(eng, "metal", 5)) {
+          char self[512], prog[600];
+          ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+          if (n > 0) {
+            self[n] = '\0';
+            char *slash = strrchr(self, '/');
+            if (slash) *slash = '\0';
+            snprintf(prog, sizeof prog, "%s/stboxmetal", self);
+          } else
+            snprintf(prog, sizeof prog, "./stboxmetal");
+          printf("[CFG] [%s] has engine metal - starting %s\n", boot_section, prog);
+          fflush(stdout);
+          fflush(stderr);
+          pistorm_bus_unlock();
+          char *const args[] = { prog, (char *)"--config", (char *)config_file,
+                                 (char *)"--build", boot_section, NULL };
+          execv(prog, args);
+          fprintf(stderr, "[CFG] *** cannot start %s: %s - run make (it builds "
+                          "stboxmetal), or set the build's engine to emulator ***\n",
+                  prog, strerror(errno));
+          return 1;
+        }
+      }
     }
   }
 

@@ -38,6 +38,11 @@ static const char *cache[]   = { "2048", "4096", "8192", "16384" };
 static const char *ttram[]   = { "disabled", "32M", "64M", "128M", "256M" };
 /* CONFITEM_STBOX_MACHINE */
 static const char *stbox[]   = { "st", "ste" };
+/* engine: what runs the build - this emulator, or stboxmetal (the box
+ * ST in the Pi driving the real Shifter/YM/IKBD, stbox_metal.c) */
+static const char *engine[]   = { "emulator", "metal" };
+static const char *engine_l[] = { "emulator - JIT / 68000 core (default)",
+                                  "metal - box ST on the real chips (games)" };
 /* audio_frames: the SDL buffer ladder (psctrl_settings.cpp L_frames) */
 static const char *frames[]  = { "512", "1024", "2048", "4096", "8192" };
 /* fvdi_scale: how an fVDI screen fills HDMI (psctrl_settings.cpp L_fvdiscale) */
@@ -127,6 +132,7 @@ static const struct table tables[] = {
     TL("blitter", blitter, blitter_l), T("monitor", monitor), T("vga", vga),
     T("jit_cache", cache), T("ttram", ttram), T("stbox_machine", stbox),
     T("audio_frames", frames),
+    TL("engine", engine, engine_l),
     TL("fvdi_scale", fvdiscale, fvdiscale_l),
     TL("jit_power", jitpow, jitpow_l),
     TL("cpu_speed", cpuspeed, cpuspeed_l),
@@ -143,6 +149,7 @@ static const struct table tables[] = {
  * these shows its default until it is set, and setting it writes the key.
  */
 static const struct { const char *key, *dflt; } known[] = {
+    { "engine",       "emulator" },
     { "network",      "disabled" },
     { "jit_power",    "3"        },
     { "jit_cache",    "8192"     },   /* jit_glue.cpp: 8192 KB with no line */
@@ -201,6 +208,7 @@ static const struct { const char *key; int env; } env_of[] = {
     /* slow the machine down to ST speed - for ST software, not a desktop */
     { "cpu_compatible", SE_GEM },
     { "cpu_speed",      SE_GEM },
+    { "engine",         SE_GEM },
     /* vga is NOT here: a GEM build drives the ET4000 through NVDI.
      * native_hdmi is NOT here: it is the ST-screen mirror on HDMI
      * (config_file.c: "the native_hdmi ST-screen mirror"), which a GEM
@@ -278,6 +286,7 @@ const char *se_needs(const char *key)
  */
 static const struct { const char *key; int tab; int kind; const char *tick; } cat[] = {
     /* Machine */
+    { "engine",         SE_TAB_MACHINE, SE_K_LIST,   "metal"   },
     { "cpu",            SE_TAB_MACHINE, SE_K_LIST,   "68040"   },
     { "fpu",            SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
     { "mmu",            SE_TAB_MACHINE, SE_K_SWITCH, "enabled" },
