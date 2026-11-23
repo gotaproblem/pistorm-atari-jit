@@ -727,6 +727,7 @@ static int lock(int quiet)
     return 0;
 }
 
+static int bt_quiet;                 /* stboxmetal's quiet log: no tables */
 static void measure_writes(void)
 {
     hist_t h8, h16;
@@ -737,12 +738,15 @@ static void measure_writes(void)
         t0 = ticks(); ps_write_16(R_PAL0, C_BLACK); t1 = ticks();
         h_add(&h16, (double)(t1 - t0) * NSPT);
     }
-    h_print("byte write time", &h8);
-    h_print("word write time", &h16);
+    if (!bt_quiet) {
+        h_print("byte write time", &h8);
+        h_print("word write time", &h16);
+    }
     /* aim the middle of a write where the middle of a counter read was */
     LEAD8  = h_pct(&h8, 0.5)  / 2.0 / NSPT;
     LEAD16 = h_pct(&h16, 0.5) / 2.0 / NSPT;
     if (lead_forced >= 0) LEAD8 = LEAD16 = lead_forced / NSPT;
+    if (!bt_quiet)
     printf("  write lead: byte %.0f ns, word %.0f ns%s\n", LEAD8 * NSPT, LEAD16 * NSPT,
            lead_forced >= 0 ? " (--lead)" : "");
 }
@@ -826,11 +830,10 @@ static void bt_calibrate_from_sweep(double secs)
                  * middle (run 4 missed ~3 % of frames aiming at its edge) */
                 int coarse = band_ofs(best);
                 g_band_base = coarse - 4; g_band_step = 1;
-                printf("\n[B] RIGHT BORDER, FINE (1-cycle steps about %+d)\n", coarse);
-                lock(1);
+                if (!bt_quiet) printf("\n[B] RIGHT BORDER, FINE (1-cycle steps about %+d)\n", coarse);
+                lock(bt_quiet ? 2 : 1);
                 run_phase(PH_RIGHT, secs);
-                report_common();
-                report_sweep(1);
+                if (!bt_quiet) { report_common(); report_sweep(1); }
                 /* aim at the middle of the slot: the hit-weighted mean
                  * offset (one run of ~4 offsets that open it) */
                 double sum = 0, wsum = 0; int nok = 0, first = 99, last = -99;
@@ -846,11 +849,11 @@ static void bt_calibrate_from_sweep(double secs)
                     }
                 }
                 g_cal = wsum > 0.5 ? sum / wsum : coarse;
-                if (nok)
-                    printf("  calibration: offsets %+d..%+d open the border 97 %%+ of the time;\n", first, last);
-                else
+                if (nok) {
+                    if (!bt_quiet) printf("  calibration: offsets %+d..%+d open the border 97 %%+ of the time;\n", first, last);
+                } else
                     printf("  calibration: no offset opened the border 97 %% of the time;\n");
-                printf("  the tests below aim %+.2f cycles from target (the hit-weighted middle)\n", g_cal);
+                if (!bt_quiet || !nok) printf("  the tests below aim %+.2f cycles from target (the hit-weighted middle)\n", g_cal);
                 g_band_base = -16; g_band_step = 4;
             }
 }
