@@ -1850,15 +1850,22 @@ static void mfp_write(uint32_t a, uint8_t v)
         case 0x13: mfp.imra = v; break;
         case 0x15: mfp.imrb = v; break;
         case 0x17: mfp.vr   = v; break;
-        case 0x19: mfp.tacr = v & 0x0F;
-                   if (!(v & 7)) mfp.tamain = mfp.tadr;
-                   break;
-        case 0x1B: mfp.tbcr = v & 0x0F;
-                   if (!(v & 7)) mfp.tbmain = mfp.tbdr;
-                   break;
+        /* The data register reaches the main counter only while the timer
+         * is STOPPED (control 0) - or at a timeout. Event count mode (8)
+         * is running: a write then only sets the next reload, and the
+         * count in progress goes on (68901 data sheet; Hatari mfp.c,
+         * "Timer is off, store to main counter" for TBCR == 0). The old
+         * `!(ctrl & 7)` took event mode for stopped, so a Timer B chain
+         * that writes the next count in each handler (Shadow of the Beast
+         * II: VBL sets 4, the line-66 handler sets 24) restarted the
+         * count at every write and every split came 4 lines late. A
+         * control write never loads the counter: a stopped timer keeps
+         * its count. */
+        case 0x19: mfp.tacr = v & 0x0F; break;
+        case 0x1B: mfp.tbcr = v & 0x0F; break;
         case 0x1D: mfp.tcdcr = v & 0x77; break;
-        case 0x1F: mfp.tadr = v; if (!(mfp.tacr & 7)) mfp.tamain = v; break;
-        case 0x21: mfp.tbdr = v; if (!(mfp.tbcr & 7)) mfp.tbmain = v; break;
+        case 0x1F: mfp.tadr = v; if (!(mfp.tacr & 0x0F)) mfp.tamain = v; break;
+        case 0x21: mfp.tbdr = v; if (!(mfp.tbcr & 0x0F)) mfp.tbmain = v; break;
         case 0x23: mfp.tcdr = v; if (!((mfp.tcdcr >> 4) & 7)) mfp.tcmain = v; break;
         case 0x25: mfp.tddr = v; if (!(mfp.tcdcr & 7)) mfp.tdmain = v; break;
         case 0x27: mfp.scr = v; break;

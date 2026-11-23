@@ -33,7 +33,9 @@
  * Keys (real keyboard): Ctrl+Alt+Undo = back to the setup page (exit 42,
  * run-pistorm.sh relaunches the emulator) when started from a build, a
  * cold reset of the box when started by hand; Ctrl+Alt+F1..F10 = put
- * disk 1..10 in drive A, Ctrl+Alt+Shift+Undo = quit (so does Ctrl+C).
+ * disk 1..10 in drive A, Ctrl+Alt+Help = capture the next frame (its
+ * writes, stale RAM per line, the box's own picture - into the log and
+ * stboxmetal-frame-N.ppm), Ctrl+Alt+Shift+Undo = quit (so does Ctrl+C).
  *
  * HOW IT RUNS. One thread on an isolated core owns the bus and does
  * everything, in priority order:
@@ -111,7 +113,55 @@ static struct {
 #define M_INIT() memset(&M, 0, sizeof M)
 
 /* ---- timed writes ------------------------------------------------------ */
-typedef struct { uint64_t abs; uint32_t a; uint16_t v; uint8_t size, pad; } mev_t;
+typedef struct { uint64_t abs; uint32_t a; uint16_t v; uint8_t size, cap; uint16_t line; int16_t lcyc; uint32_t pc; } mev_t;
+
+/* ---- frame capture (Ctrl+Alt+Help) --------------------------------------
+ * One box frame, as it went out: every timed write with its line, cycle
+ * and how late it left; for every displayed line, how many longs of what
+ * it shows were still not copied to the real RAM when the real beam got
+ * there; and the box's own picture of the frame (stboxmetal-frame-N.ppm,
+ * borders included) - what the real monitor should have shown. */
+static uint64_t *g_dirty;                   /* RAM mirroring, below */
+static uint32_t  g_ram_bytes;
+#define CW 8192
+typedef struct { uint16_t line; int16_t lcyc; uint32_t a; uint16_t v; uint8_t burst; int32_t late_ns; uint32_t pc; } cw_t;
+typedef struct { uint64_t abs_line; uint32_t vcnt; uint16_t line, bytes; int16_t fstart; int16_t stale; } cl_t;
+static struct {
+    volatile int req;                       /* hotkey: capture next frame */
+    int      state;                         /* 0 idle, 1 armed, 2 on, 3 box
+                                               done, 4 picture taken, 5
+                                               all out: report             */
+    uint32_t frame, arm_frame;              /* box frame being captured   */
+    unsigned nw, nl, chk, n;
+    cw_t     w[CW];
+    cl_t     l[320];
+    stbox_cap_t pic;                        /* the box's picture of it    */
+    int      have_pic;
+} FC;
+static void fc_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes, uint32_t vcnt)
+{
+    if (FC.state == 1 && stbox_shared.frame != FC.arm_frame) {
+        FC.state = 2; FC.frame = stbox_shared.frame; FC.nw = FC.nl = FC.chk = 0;
+    }
+    if (FC.state != 2) return;
+    if (stbox_shared.frame != FC.frame) {   /* the next frame began: done */
+        FC.state = 3;
+        return;
+    }
+    if (FC.nl < 320)
+        FC.l[FC.nl++] = (cl_t){ abs_line, vcnt, (uint16_t)line, (uint16_t)bytes, (int16_t)fstart, -1 };
+}
+/* bus thread: the beam has reached the start of line k - what is stale? */
+static void fc_check(double now)
+{
+    while (FC.chk < FC.nl && m_time((double)(FC.l[FC.chk].abs_line + (uint64_t)FC.l[FC.chk].fstart) + g_cal) <= now) {
+        cl_t *c = &FC.l[FC.chk++];
+        int st = 0;
+        for (uint32_t o = c->vcnt & ~3u; o < c->vcnt + c->bytes && o < g_ram_bytes; o += 4)
+            if (g_dirty[o >> 8] & (1ull << ((o >> 2) & 63))) st++;
+        c->stale = (int16_t)st;
+    }
+}
 #define MQ (1u << 16)
 static mev_t    mq[MQ];
 static unsigned mq_r, mq_w;
@@ -145,7 +195,10 @@ static void m_hw(uint64_t abs, uint32_t a, uint32_t v, int size, unsigned line, 
     if (abs < g_last_abs + 4 && g_last_abs - abs < 1024) abs = g_last_abs + 4;
     g_last_abs = abs;
     if (mq_w - mq_r >= MQ) { M.q_drop++; return; }
-    mq[mq_w & (MQ - 1)] = (mev_t){ abs, a, (uint16_t)v, (uint8_t)size, 0 };
+    mq[mq_w & (MQ - 1)] = (mev_t){ abs, a, (uint16_t)v, (uint8_t)size,
+                                   (uint8_t)(FC.state == 2 && stbox_shared.frame == FC.frame),
+                                   (uint16_t)line, (int16_t)lcyc,
+                                   FC.state == 2 ? m68k_get_reg(NULL, M68K_REG_PPC) : 0 };
     mq_w++;
     if (mq_w - mq_r > M.q_max) M.q_max = mq_w - mq_r;
 }
@@ -166,6 +219,7 @@ static void v_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes,
 static void m_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes, uint32_t vcnt)
 {
     v_line(abs_line, line, fstart, bytes, vcnt);
+    if (FC.state) fc_line(abs_line, line, fstart, bytes, vcnt);
     /* one read a box frame, mid-line on a plain-ish displayed line, where
      * no timed write is queued within 64 cycles of it */
     if (P1.pending || P1.frame_seen == stbox_shared.frame) return;
@@ -425,6 +479,7 @@ static void key_in(uint8_t code)
     if (down && g_kctrl && g_kalt) {
         if (k == 0x61) { if (g_kshift) g_want_quit = 1; else g_want_reset = 1; return; }
         if (k >= 0x3B && k <= 0x44) { g_want_disk = k - 0x3B; return; }
+        if (k == 0x62) { FC.req = 1; return; }                 /* Help: capture a frame */
     }
     stbox_key_event(k, down);
 }
@@ -674,6 +729,74 @@ static void m_halt_report(void)
     printf("[METAL] guest HALTED (double bus fault) at pc %06X: Ctrl+Alt+Undo to restart\n", h->ppc);
 }
 
+/* the frame capture, written out by the reporter thread */
+#include "stbox_render.h"
+static const char *m_reg(uint32_t a)
+{
+    static char b[16];
+    if (a >= 0xFF8240 && a < 0xFF8260) { snprintf(b, sizeof b, "col%u", (a - 0xFF8240) / 2); return b; }
+    switch (a) {
+        case 0xFF820A: return "sync";  case 0xFF8260: return "rez";
+        case 0xFF8201: return "vbhi";  case 0xFF8203: return "vbmid";
+        case 0xFF8800: return "ymsel"; case 0xFF8802: return "ymdat";
+    }
+    snprintf(b, sizeof b, "%06X", a);
+    return b;
+}
+static void fc_report(void)
+{
+    FC.n++;
+    unsigned stale_lines = 0, stale_longs = 0, late = 0;
+    for (unsigned i = 0; i < FC.nl; i++) if (FC.l[i].stale > 0) { stale_lines++; stale_longs += FC.l[i].stale; }
+    for (unsigned i = 0; i < FC.nw; i++) if (FC.w[i].late_ns > 1000) late++;
+    printf("[FRAME %d] box frame %u: %u displayed lines, %u of them showed RAM not yet copied (%u longs);"
+           " %u timed writes, %u over 1 us late\n", FC.n, FC.frame, FC.nl, stale_lines, stale_longs, FC.nw, late);
+    printf("[FRAME %d] line bytes vcnt   stale | writes on the line: cycle reg=value +late_ns (b = in a burst) @pc\n", FC.n);
+    unsigned wi = 0;
+    for (unsigned i = 0; i < FC.nl || wi < FC.nw; ) {
+        /* writes before this line (borders, lines without DE) get their own rows */
+        const unsigned ln = i < FC.nl ? FC.l[i].line : 9999;
+        if (wi < FC.nw && FC.w[wi].line < ln) {
+            const unsigned wl = FC.w[wi].line;
+            printf("[FRAME %d] %4u      -        - |", FC.n, wl);
+            for (; wi < FC.nw && FC.w[wi].line == wl; wi++)
+                printf(" %d %s=%X +%d%s @%06X", FC.w[wi].lcyc, m_reg(FC.w[wi].a), FC.w[wi].v, FC.w[wi].late_ns,
+                       FC.w[wi].burst ? "b" : "", FC.w[wi].pc);
+            printf("\n");
+            continue;
+        }
+        if (i >= FC.nl) break;
+        const cl_t *c = &FC.l[i++];
+        printf("[FRAME %d] %4u %5u %06X %5d |", FC.n, c->line, c->bytes, c->vcnt, c->stale);
+        for (; wi < FC.nw && FC.w[wi].line == c->line; wi++)
+            printf(" %d %s=%X +%d%s @%06X", FC.w[wi].lcyc, m_reg(FC.w[wi].a), FC.w[wi].v, FC.w[wi].late_ns,
+                   FC.w[wi].burst ? "b" : "", FC.w[wi].pc);
+        printf("\n");
+    }
+    if (FC.have_pic) {
+        static uint32_t px[1024 * 512];
+        int w = 0, h = 0;
+        stbox_render_set_view(24, 384);              /* borders too */
+        if (stbox_render_cap(&FC.pic, 0, px, 1024, &w, &h)) {
+            char fn[64];
+            snprintf(fn, sizeof fn, "stboxmetal-frame-%d.ppm", FC.n);
+            FILE *f = fopen(fn, "wb");
+            if (f) {
+                fprintf(f, "P6\n%d %d\n255\n", w, h);
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++) {
+                        const uint32_t v = px[(size_t)y * 1024 + x];
+                        fputc((v >> 16) & 255, f); fputc((v >> 8) & 255, f); fputc(v & 255, f);
+                    }
+                fclose(f);
+            }
+            printf("[FRAME %d] the box's own picture of it (%dx%d, row 0 = line %u): %s%s\n", FC.n, w, h,
+                   FC.pic.first_line, fn, f ? "" : " - FAILED");
+        }
+    }
+    FC.state = 0;
+}
+
 static volatile int g_report_stop;
 static void *reporter(void *arg)
 {
@@ -682,7 +805,10 @@ static void *reporter(void *arg)
     sched_setaffinity(0, sizeof cs, &cs);
     uint64_t lw = 0, lf = 0, lfr = 0;
     for (int sec = 5; !g_report_stop; sec += 5) {
-        for (int i = 0; i < 50 && !g_report_stop; i++) usleep(100000);
+        for (int i = 0; i < 50 && !g_report_stop; i++) {
+            usleep(100000);
+            if (FC.state == 5) fc_report();
+        }
         const double n = M.probe_ok ? (double)M.probe_ok : 1.0;
         const double em = M.e_sum / n, sd = sqrt(fmax(0.0, M.e_sq / n - em * em));
         printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, queue max %llu drop %llu"
@@ -1144,7 +1270,7 @@ int main(int argc, char **argv)
     stbox_metal_blk = g_blk;
     acia_init();
     if (m_start_box() != 0) return 1;
-    printf("\n[METAL] running: Ctrl+Alt+Undo %s, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Shift+Undo quit\n",
+    printf("\n[METAL] running: Ctrl+Alt+Undo %s, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Help frame capture, Ctrl+Alt+Shift+Undo quit\n",
            g_from_cfg ? "setup page" : "reset", g_ndisks ? g_ndisks : 1);
     if (g_ide_on || g_acsi_on) printf("[METAL] hard disks:%s%s\n", g_ide_on ? " IDE" : "", g_acsi_on ? " ACSI" : "");
     pthread_t rep, padt;
@@ -1159,6 +1285,8 @@ int main(int argc, char **argv)
 #ifdef BEAMTEST_SIM
     const char *trs = getenv("SIM_RESET_S");          /* test the reset path */
     uint64_t test_reset_at = trs ? ticks() + (uint64_t)(atof(trs) * HZ) : 0;
+    const char *tfc = getenv("SIM_FCAP_S");
+    uint64_t fcap_at = tfc ? ticks() + (uint64_t)(atof(tfc) * HZ) : 0;
     const char *tcr = getenv("SIM_CRASH_S");
     uint64_t crash_at = tcr ? ticks() + (uint64_t)(atof(tcr) * HZ) : 0;
     const char *sim_in = getenv("SIM_INPUT");
@@ -1185,6 +1313,7 @@ int main(int argc, char **argv)
                 while (*sim_in == ' ') sim_in++;
             }
         }
+        if (fcap_at && ticks() > fcap_at) { fcap_at = 0; FC.req = 1; }
         if (crash_at && ticks() > crash_at) {          /* test the halt report */
             crash_at = 0;
             m68k_set_reg(M68K_REG_SP, 0xD00100);
@@ -1224,6 +1353,26 @@ int main(int argc, char **argv)
         if (g_want_disk >= 0) { int d = g_want_disk; g_want_disk = -1; m_disk(d); continue; }
 
         const double now = (double)ticks();
+        if (FC.req && !FC.state) { FC.req = 0; FC.arm_frame = stbox_shared.frame; FC.state = 1; }
+        if (FC.state >= 2) {
+            fc_check(now);
+            if (FC.state == 3) {                       /* the box published it */
+                const uint32_t ci = stbox_shared.cap_idx;
+                FC.have_pic = ci < STBOX_CAP_BUFS;
+                if (FC.have_pic) memcpy(&FC.pic, &stbox_cap[ci], sizeof FC.pic);
+#ifdef BEAMTEST_SIM
+                { FILE *rf = fopen("/tmp/mt/fcap.ram", "wb"); fwrite(stbox_shared.ram, 1, g_ram_bytes, rf); fclose(rf);
+                  printf("[sim] MFP:");
+                  for (uint32_t r = 0xFFFA01; r <= 0xFFFA25; r += 2) printf(" %02X", stbox_bus_r8(r));
+                  printf("  vectors: hbl %08X vbl %08X tb %08X\n", stbox_bus_r32(0x68), stbox_bus_r32(0x70), stbox_bus_r32(0x120)); }
+#endif
+                FC.state = 4;
+            } else if (FC.state == 4 && FC.chk >= FC.nl) {
+                int pending = 0;                       /* its writes all out? */
+                for (unsigned j = mq_r; j != mq_w && !pending; j++) pending = mq[j & (MQ - 1)].cap;
+                if (!pending) FC.state = 5;
+            }
+        }
         /* the next timed thing: a queued write or the lock read */
         double tn = 1e30; int is_probe = 0;
         if (mq_r != mq_w) {
@@ -1263,7 +1412,8 @@ int main(int argc, char **argv)
              * 68000's 0.5, so a burst falls behind by design. The lateness
              * that matters for raster tricks is that of the others. */
             static uint64_t prev_abs;
-            if (e->abs - prev_abs < 16) {
+            const int burst = e->abs - prev_abs < 16;
+            if (burst) {
                 M.burst++;
                 if (late > M.burst_late_max_ns) M.burst_late_max_ns = late;
             } else {
@@ -1280,6 +1430,9 @@ int main(int argc, char **argv)
                 x->abs = e->abs; x->a = (uint8_t)e->a; x->v = (uint8_t)e->v;
                 x->late10 = (int16_t)(late / 10.0 > 32000 ? 32000 : late / 10.0);
             }
+            if (e->cap && FC.nw < CW)
+                FC.w[FC.nw++] = (cw_t){ e->line, e->lcyc, e->a, e->v, (uint8_t)burst,
+                                        (int32_t)late, e->pc };
             M.writes++;
             mq_r++;
             act(5, t0);
