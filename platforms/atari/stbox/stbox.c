@@ -911,10 +911,12 @@ static int stbox_int_ack(int level)
 /* ================================================================== */
 /* IKBD                                                               */
 /* ================================================================== */
+static uint32_t g_ikbd_drop;         /* bytes lost to a full fifo       */
 static void ikbd_tx(uint8_t b)      /* IKBD -> guest */
 {
     uint8_t nt = (uint8_t)(acia.ft + 1);
     if (nt != acia.fh) { acia.fifo[acia.ft] = b; acia.ft = nt; }
+    else g_ikbd_drop++;
 }
 
 /* bytes-of-parameters for guest->IKBD commands we must consume */
@@ -1024,6 +1026,7 @@ static void ikbd_rx(uint8_t b)      /* guest -> IKBD, one byte */
  * it changed. Joystick 1's fire becomes the right mouse button while
  * the mouse is on (a real IKBD wires them together): it is stripped
  * from the $FF packet and an F8 packet with the button carries it. */
+static uint32_t g_joy_pkts[2];       /* $FE/$FF packets put out          */
 static void joy_emit(int port)
 {
     uint8_t st = acia.joy[port];
@@ -1043,6 +1046,7 @@ static void joy_emit(int port)
     if (port == 0 && mouse_on && !acia.both) return;  /* mouse owns port 0 */
     if (st == acia.joy_sent[port]) return;      /* only changes go out */
     acia.joy_sent[port] = st;
+    g_joy_pkts[port & 1]++;
     ikbd_tx(0xFE + port); ikbd_tx(st);
 }
 
@@ -2493,6 +2497,23 @@ void stbox_core_irq_state(uint32_t out[5])
     out[3] = ((uint32_t)mfp.vr << 24) | ((uint32_t)acia.sr << 16) |
              ((uint32_t)acia.cr << 8) | mfp.gpip;
     out[4] = (uint8_t)(acia.ft - acia.fh);
+}
+
+/* The IKBD model's joystick side, for a diagnostic line (any thread;
+ * torn values are possible). out: [0] joy0 [1] joy1 state, [2] joy0 [3]
+ * joy1 last sent, [4] joystick event mode, [5] mouse mode (0 rel, 1 abs,
+ * 2 keys, 3 off), [6] both, [7] bytes waiting in the fifo, [8] bytes
+ * dropped (fifo full), [9] input ring drops, [10]/[11] packets put out
+ * for joy0/joy1, [12] ACIA control (bit 7 = rx irq on), [13] right-
+ * button-from-fire state. */
+void stbox_input_snapshot(uint32_t out[14])
+{
+    out[0] = acia.joy[0]; out[1] = acia.joy[1];
+    out[2] = acia.joy_sent[0]; out[3] = acia.joy_sent[1];
+    out[4] = acia.joy_event; out[5] = acia.mouse_mode; out[6] = acia.both;
+    out[7] = (uint8_t)(acia.ft - acia.fh); out[8] = g_ikbd_drop; out[9] = g_in_drop;
+    out[10] = g_joy_pkts[0]; out[11] = g_joy_pkts[1];
+    out[12] = acia.cr; out[13] = acia.joy_rbutton;
 }
 
 void stbox_input_stats(uint32_t out[6])

@@ -114,6 +114,7 @@ void joy_usb_resend(void);
 /* ---- CPU thread ----------------------------------------------------- */
 /* Current ST joystick byte for a port (0 = mouse port, 1 = game port). */
 uint8_t joy_usb_state(int st_port);
+int joy_usb_describe(int pad, char *buf, int n);    /* diagnostic line */
 /* Number of pads attached (for status displays). */
 int     joy_usb_count(void);
 

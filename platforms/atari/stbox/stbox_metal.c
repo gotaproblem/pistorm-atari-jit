@@ -450,10 +450,31 @@ static void acia_send(uint8_t b) { if (atx_w - atx_r < sizeof atx) atx[atx_w++ &
 
 /* the guest changed the IKBD's mode: the real one follows, so its packets
  * carry what the guest expects (joystick 0 instead of the mouse, etc.) */
+/* ---- the input log: every input change on its way to the guest -------
+ * Written by the bus thread only (pad queue drain, real IKBD packets,
+ * the guest's IKBD commands), printed by the reporter every 5 s. Kinds:
+ * 'P' pad -> joystick (port, state), 'S' pad Start -> Space (down),
+ * 'J' real IKBD joystick packet (port, state), 'K' real key (code),
+ * 'C' guest IKBD command (byte), 'X' command forwarded to the real IKBD. */
+#define ILOG 1024
+typedef struct { uint32_t ms; char kind; uint8_t a, b; } ilog_t;
+static ilog_t   ilog[ILOG];
+static volatile unsigned ilog_w;
+static uint64_t ilog_t0;
+static void ilog_put(char kind, uint8_t a, uint8_t b)
+{
+    const unsigned w = ilog_w;
+    ilog[w & (ILOG - 1)] = (ilog_t){ (uint32_t)((ticks() - ilog_t0) * NSPT / 1e6), kind, a, b };
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    ilog_w = w + 1;
+}
+
 static void m_ikbd(const uint8_t *c, int len)
 {
+    ilog_put('C', c[0], len > 1 ? c[1] : 0);
     switch (c[0]) {
     case 0x08: case 0x12: case 0x14: case 0x15: case 0x1A:
+        ilog_put('X', c[0], 0);
         acia_send(c[0]); break;
     case 0x80:
         if (len >= 2 && c[1] == 0x01) { acia_send(0x80); acia_send(0x01); }
@@ -473,6 +494,7 @@ static void key_in(uint8_t code)
 {
     const int down = !(code & 0x80);
     const uint8_t k = code & 0x7F;
+    ilog_put('K', code, 0);
     if (k == 0x1D) g_kctrl = down;
     if (k == 0x38) g_kalt = down;
     if (k == 0x2A || k == 0x36) g_kshift = down;
@@ -495,9 +517,11 @@ static void ikbd_byte(uint8_t b)
         const uint8_t h = pk.buf[0];
         if (h >= 0xF8 && h <= 0xFB)           /* relative mouse          */
             stbox_mouse_rel((int8_t)pk.buf[1], (int8_t)pk.buf[2], h & 3);
-        else if (h == 0xFE || h == 0xFF)       /* joystick 0 / 1 event    */
+        else if (h == 0xFE || h == 0xFF) {     /* joystick 0 / 1 event    */
+            ilog_put('J', h - 0xFE, pk.buf[1]);
             stbox_joy_event(h - 0xFE, pk.buf[1]);
-        else if (h == 0xFD) {                  /* joystick report         */
+        } else if (h == 0xFD) {                /* joystick report         */
+            ilog_put('J', 0, pk.buf[1]); ilog_put('J', 1, pk.buf[2]);
             stbox_joy_event(0, pk.buf[1]); stbox_joy_event(1, pk.buf[2]);
         }
         pk.need = pk.n = 0;
@@ -583,8 +607,8 @@ static void padq_drain(void)                   /* bus thread */
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         const uint32_t v = padq[padq_r & (PADQ - 1)];
         padq_r++;
-        if ((v >> 24) == 1) stbox_joy_event((v >> 8) & 1, (uint8_t)v);
-        else                stbox_key_event((uint8_t)v, (v >> 8) & 1);
+        if ((v >> 24) == 1) { ilog_put('P', (v >> 8) & 1, (uint8_t)v); stbox_joy_event((v >> 8) & 1, (uint8_t)v); }
+        else                { ilog_put('S', (uint8_t)v, (v >> 8) & 1); stbox_key_event((uint8_t)v, (v >> 8) & 1); }
     }
 }
 
@@ -743,12 +767,56 @@ static const char *m_reg(uint32_t a)
     snprintf(b, sizeof b, "%06X", a);
     return b;
 }
+static void ilog_print(void)
+{
+    static unsigned seen;
+    const unsigned n = ilog_w;
+    if (n == seen) return;
+    if (n - seen > ILOG) seen = n - ILOG;
+    char line[600]; int L = 0;
+    for (; seen != n; seen++) {
+        const ilog_t e = ilog[seen & (ILOG - 1)];
+        char it[40];
+        switch (e.kind) {
+        case 'P': snprintf(it, sizeof it, " %u.%03u pad>j%u=%02X", e.ms / 1000, e.ms % 1000, e.a, e.b); break;
+        case 'S': snprintf(it, sizeof it, " %u.%03u start>space%s", e.ms / 1000, e.ms % 1000, e.b ? "dn" : "up"); break;
+        case 'J': snprintf(it, sizeof it, " %u.%03u ikbd>j%u=%02X", e.ms / 1000, e.ms % 1000, e.a, e.b); break;
+        case 'K': snprintf(it, sizeof it, " %u.%03u key%02X", e.ms / 1000, e.ms % 1000, e.a); break;
+        case 'C': snprintf(it, sizeof it, " %u.%03u guest-cmd%02X", e.ms / 1000, e.ms % 1000, e.a); break;
+        default:  snprintf(it, sizeof it, " %u.%03u to-ikbd%02X", e.ms / 1000, e.ms % 1000, e.a); break;
+        }
+        const int il = (int)strlen(it);
+        if (L + il > 160) { printf("[INPUT]%s\n", line); L = 0; }
+        memcpy(line + L, it, (size_t)il + 1); L += il;
+    }
+    if (L) printf("[INPUT]%s\n", line);
+}
+static void input_state(const char *tag)
+{
+    uint32_t o[14];
+    stbox_input_snapshot(o);
+    printf("%s box IKBD: joy0 %02X joy1 %02X (last sent %02X %02X), joystick events %s, mouse %s%s,"
+           " fifo %u, fifo drops %u, ring drops %u, packets %u/%u, ACIA rx irq %s, fire-as-RMB %u\n",
+           tag, o[0], o[1], o[2], o[3], o[4] ? "on" : "off",
+           o[5] == 0 ? "rel" : o[5] == 1 ? "abs" : o[5] == 2 ? "keys" : "off", o[6] ? " (both)" : "",
+           o[7], o[8], o[9], o[10], o[11], (o[12] & 0x80) ? "on" : "off", o[13]);
+    for (int i = 0; i < 2; i++) {
+        char b[256];
+        joy_usb_describe(i, b, sizeof b);
+        printf("%s %s\n", tag, b);
+    }
+}
+
 static void fc_report(void)
 {
     FC.n++;
     unsigned stale_lines = 0, stale_longs = 0, late = 0;
     for (unsigned i = 0; i < FC.nl; i++) if (FC.l[i].stale > 0) { stale_lines++; stale_longs += FC.l[i].stale; }
     for (unsigned i = 0; i < FC.nw; i++) if (FC.w[i].late_ns > 1000) late++;
+    {
+        char tag[24]; snprintf(tag, sizeof tag, "[FRAME %d]", FC.n);
+        input_state(tag);
+    }
     printf("[FRAME %d] box frame %u: %u displayed lines, %u of them showed RAM not yet copied (%u longs);"
            " %u timed writes, %u over 1 us late\n", FC.n, FC.frame, FC.nl, stale_lines, stale_longs, FC.nw, late);
     printf("[FRAME %d] line bytes vcnt   stale | writes on the line: cycle reg=value +late_ns (b = in a burst) @pc\n", FC.n);
@@ -809,6 +877,7 @@ static void *reporter(void *arg)
             usleep(100000);
             if (FC.state == 5) fc_report();
         }
+        ilog_print();
         const double n = M.probe_ok ? (double)M.probe_ok : 1.0;
         const double em = M.e_sum / n, sd = sqrt(fmax(0.0, M.e_sq / n - em * em));
         printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, queue max %llu drop %llu"
@@ -1268,6 +1337,7 @@ int main(int argc, char **argv)
     stbox_metal_ikbd = m_ikbd;
     stbox_metal_dirty = g_dirty;
     stbox_metal_blk = g_blk;
+    ilog_t0 = ticks();
     acia_init();
     if (m_start_box() != 0) return 1;
     printf("\n[METAL] running: Ctrl+Alt+Undo %s, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Help frame capture, Ctrl+Alt+Shift+Undo quit\n",

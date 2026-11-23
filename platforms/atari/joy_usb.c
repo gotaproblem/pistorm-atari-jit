@@ -521,6 +521,21 @@ void joy_usb_tick(void)
 /* CPU-thread readers                                                  */
 /* ------------------------------------------------------------------ */
 
+/* one pad as joy_usb sees it, for a diagnostic line (any thread; a
+ * torn value costs one misleading line) */
+int joy_usb_describe(int pad, char *buf, int n)
+{
+    if (pad < 0 || pad >= JOY_USB_MAX_PADS) return 0;
+    const joypad *p = &pads[pad];
+    if (p->fd < 0) return snprintf(buf, (size_t)n, "pad %d: none", pad);
+    return snprintf(buf, (size_t)n,
+        "pad %d: joy %02X sent %X | buttons %04X hat %d,%d stick %d,%d"
+        " (x %d y %d, centre %d,%d on %d off %d) start %d",
+        pad, (unsigned)atomic_load(&p->joy), (unsigned)p->last_sent, p->btn,
+        p->hat[0], p->hat[1], p->stick[0], p->stick[1], p->raw[AX_LX], p->raw[AX_LY],
+        p->ax[0].centre, p->ax[1].centre, p->ax[0].on, p->ax[0].off, p->start_sent);
+}
+
 uint8_t joy_usb_state(int st_port)
 {
     const joypad *p = &pads[st_port == 1 ? 0 : 1];

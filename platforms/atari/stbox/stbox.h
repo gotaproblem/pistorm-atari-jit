@@ -177,6 +177,7 @@ void stbox_note_route(int on);
 /* pushes by type (key, mouse, joy, raw), ring-full drops, ACIA bytes
  * delivered to the guest - for the health line */
 void stbox_input_stats(uint32_t out[6]);
+void stbox_input_snapshot(uint32_t out[14]);   /* the IKBD joystick side */
 
 /* ------------------------------------------------------------------ */
 /* core-3 slice entry (ipl_task housekeeping slot ONLY)               */
