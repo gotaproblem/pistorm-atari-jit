@@ -12115,6 +12115,7 @@ static void m68k_op_divs_16_d(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12153,6 +12154,7 @@ static void m68k_op_divs_16_ai(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12191,6 +12193,7 @@ static void m68k_op_divs_16_pi(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12229,6 +12232,7 @@ static void m68k_op_divs_16_pd(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12267,6 +12271,7 @@ static void m68k_op_divs_16_di(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12305,6 +12310,7 @@ static void m68k_op_divs_16_ix(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12343,6 +12349,7 @@ static void m68k_op_divs_16_aw(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12381,6 +12388,7 @@ static void m68k_op_divs_16_al(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12419,6 +12427,7 @@ static void m68k_op_divs_16_pcdi(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12457,6 +12466,7 @@ static void m68k_op_divs_16_pcix(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12495,6 +12505,7 @@ static void m68k_op_divs_16_i(void)
 
 	if(src != 0)
 	{
+		m68ki_divs_cycles(*r_dst, src);
 		if((uint32)*r_dst == 0x80000000 && src == -1)
 		{
 			FLAG_Z = 0;
@@ -12531,6 +12542,7 @@ static void m68k_op_divu_16_d(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12557,6 +12569,7 @@ static void m68k_op_divu_16_ai(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12583,6 +12596,7 @@ static void m68k_op_divu_16_pi(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12609,6 +12623,7 @@ static void m68k_op_divu_16_pd(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12635,6 +12650,7 @@ static void m68k_op_divu_16_di(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12661,6 +12677,7 @@ static void m68k_op_divu_16_ix(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12687,6 +12704,7 @@ static void m68k_op_divu_16_aw(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12713,6 +12731,7 @@ static void m68k_op_divu_16_al(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12739,6 +12758,7 @@ static void m68k_op_divu_16_pcdi(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12765,6 +12785,7 @@ static void m68k_op_divu_16_pcix(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 
@@ -12791,6 +12812,7 @@ static void m68k_op_divu_16_i(void)
 
 	if(src != 0)
 	{
+		m68ki_divu_cycles(*r_dst, src);
 		uint quotient = *r_dst / src;
 		uint remainder = *r_dst % src;
 

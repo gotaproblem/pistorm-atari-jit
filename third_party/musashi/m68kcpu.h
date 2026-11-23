@@ -884,6 +884,43 @@ extern jmp_buf m68ki_aerr_trap;
 
 #define ADD_CYCLES(A)    m68ki_remaining_cycles += (A)
 #define USE_CYCLES(A)    m68ki_remaining_cycles -= (A)
+
+/* STBOX: the 68000's divide takes as long as its microcode loop does for
+ * these operands (Jorge Cwik's analysis; Hatari getDivu68kCycles /
+ * getDivs68kCycles), not the worst case the cycle table charges. The
+ * table's 140 (DIVU) / 158 (DIVS) are the longest case; the difference
+ * is handed back. 68000 only. */
+#include <stdint.h>
+static inline int m68ki_divu_exec(uint32_t dividend, uint16_t divisor)
+{
+	if ((dividend >> 16) >= divisor) return 10;          /* overflow */
+	int mc = 38;
+	const uint32_t hd = (uint32_t)divisor << 16;
+	for (int i = 0; i < 15; i++) {
+		const uint32_t t = dividend;
+		dividend <<= 1;
+		if ((int32_t)t < 0) dividend -= hd;
+		else { mc += 2; if (dividend >= hd) { dividend -= hd; mc--; } }
+	}
+	return mc * 2;                                       /* 76..136 */
+}
+static inline int m68ki_divs_exec(int32_t dividend, int16_t divisor)
+{
+	int mc = 6;
+	if (dividend < 0) mc++;
+	const uint32_t ad = dividend < 0 ? (uint32_t)(-(int64_t)dividend) : (uint32_t)dividend;
+	const uint16_t av = divisor < 0 ? (uint16_t)(-(int32_t)divisor) : (uint16_t)divisor;
+	if ((ad >> 16) >= av) return (mc + 2) * 2;           /* overflow */
+	uint32_t aq = ad / av;
+	mc += 55;
+	if (divisor >= 0) { if (dividend >= 0) mc--; else mc++; }
+	for (int i = 0; i < 15; i++) { if ((int16_t)aq >= 0) mc++; aq <<= 1; }
+	return mc * 2;                                       /* 120..156 */
+}
+#define m68ki_divu_cycles(dividend, divisor) do { if (CPU_TYPE_IS_010_LESS(CPU_TYPE)) \
+	USE_CYCLES(4 + m68ki_divu_exec((uint32_t)(dividend), (uint16_t)(divisor)) - 140); } while (0)
+#define m68ki_divs_cycles(dividend, divisor) do { if (CPU_TYPE_IS_010_LESS(CPU_TYPE)) \
+	USE_CYCLES(2 + m68ki_divs_exec((int32_t)(dividend), (int16_t)(divisor)) - 158); } while (0)
 #define SET_CYCLES(A)    m68ki_remaining_cycles = A
 #define GET_CYCLES()     m68ki_remaining_cycles
 #define USE_ALL_CYCLES() m68ki_remaining_cycles %= CYC_INSTRUCTION[REG_IR]
