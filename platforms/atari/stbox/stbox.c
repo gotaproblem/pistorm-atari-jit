@@ -381,7 +381,13 @@ static struct {
     /* IKBD -> guest fifo, drained at serial pace */
     uint8_t fifo[256];
     uint8_t fh, ft;
-    uint32_t next_rx_cyc;     /* frame-relative pacing uses total cycles */
+    uint64_t next_rx_cyc;     /* g_total_cyc when the next byte may land.
+                                 It was 32 bits against the 64-bit total:
+                                 after 2^32 cycles (535 s) every compare
+                                 passed, the pacing was gone, and bytes
+                                 came back-to-back - fast enough to re-enter
+                                 a game's keyboard handler in the middle of
+                                 a packet (Shadow of the Beast II, ~750 s) */
     /* guest -> IKBD command assembly */
     uint8_t cmd[8];
     uint8_t cmdlen, cmdneed;
@@ -1091,7 +1097,7 @@ static void acia_pump(void)
     acia.rx = acia.fifo[acia.fh++];
     g_acia_rx_cnt++;
     acia.sr |= 0x81;                              /* RDRF + IRQ */
-    acia.next_rx_cyc = (uint32_t)g_total_cyc + IKBD_BYTE_CYC;
+    acia.next_rx_cyc = g_total_cyc + IKBD_BYTE_CYC;
     mfp.gpip &= (uint8_t)~0x10;                   /* GPIP4 low = ACIA irq */
     mfp_raise(MFP_CH_ACIA);
 }
@@ -2633,6 +2639,8 @@ void stbox_rfdc_enable(int on)
 }
 int  stbox_core_armed(void)  { return g_armed; }
 /* returns 1 exactly once per halt event (render thread reports it) */
+int stbox_core_halted(void) { return g_halted != 0; }
+
 int stbox_core_take_halt_report(void)
 {
     if (g_halted == 2) { g_halted = 1; return 1; }

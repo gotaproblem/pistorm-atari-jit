@@ -226,6 +226,7 @@ void stbox_request_reset(void);           /* cold reset on next slice       */
 uint8_t *stbox_core_disk_insert(uint8_t *buf, uint32_t size);
 uint32_t stbox_core_cps(void);
 int  stbox_core_take_halt_report(void);   /* 1 once per double-fault halt   */
+int  stbox_core_halted(void);            /* the guest is halted            */
 typedef struct {
     uint32_t fault1;      /* address of the ORIGINAL bus error - if a real
                              ST would not fault here, the decode is the bug */

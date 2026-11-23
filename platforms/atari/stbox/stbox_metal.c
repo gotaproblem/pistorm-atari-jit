@@ -1512,7 +1512,9 @@ int main(int argc, char **argv)
         /* the box: keep it AHEAD cycles in front of the beam */
         const double beam = m_abs(now);
         const uint64_t box = stbox_core_total_cyc();
-        if ((double)box < beam + g_ahead && gap > boxrun) {
+        /* a halted box never moves on: slicing it would take every
+         * turn of this loop, and the keyboard - Ctrl+Alt+Undo - with it */
+        if ((double)box < beam + g_ahead && gap > boxrun && !stbox_core_halted()) {
             if ((double)box < beam) M.box_behind++;
             const uint64_t s0 = ticks();
             /* owe it exactly one slice: we decide when it runs, so its
