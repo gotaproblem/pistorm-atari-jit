@@ -74,6 +74,8 @@
 #include <linux/input.h>
 #include "stbox.h"
 #include "../joy_usb.h"
+#include <linux/input.h>
+#include "../linux_st_scan.h"
 #include "../../../third_party/musashi/m68k.h"
 
 volatile int stbox_errand_active;           /* real-FDC bridge: not here */
@@ -623,12 +625,17 @@ static void padq_drain(void)                   /* bus thread */
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         const uint32_t v = padq[padq_r & (PADQ - 1)];
         padq_r++;
-        if ((v >> 24) == 1) { ilog_put('P', (v >> 8) & 1, (uint8_t)v); stbox_joy_event((v >> 8) & 1, (uint8_t)v); }
+        const unsigned kind = v >> 24;
+        if (kind == 1)      { ilog_put('P', (v >> 8) & 1, (uint8_t)v); stbox_joy_event((v >> 8) & 1, (uint8_t)v); }
+        else if (kind == 3) key_in((uint8_t)v);           /* USB/BT keyboard: as the real one, hotkeys too */
+        else if (kind == 4) { ilog_put('M', (uint8_t)v, (uint8_t)(v >> 8));
+                              stbox_mouse_rel((int8_t)(v & 0xFF), (int8_t)((v >> 8) & 0xFF), (v >> 16) & 3); }
         else                { ilog_put('S', (uint8_t)v, (v >> 8) & 1); stbox_key_event((uint8_t)v, (v >> 8) & 1); }
     }
 }
 
 static volatile int g_pad_stop;
+static int g_pads;                          /* gamepads wanted (psctrl.cfg `usb`), below */
 static void *pad_thread(void *arg)
 {
     (void)arg;
@@ -639,7 +646,10 @@ static void *pad_thread(void *arg)
     };
     JOY_USB_enabled = true;
     joy_usb_set_hooks(&h);
-    struct { int fd, pad; char node[32]; } dev[8];
+    /* kind: 1 gamepad (joy_usb), 2 keyboard, 4 mouse - a combo receiver
+     * can be keyboard and mouse at once */
+    struct { int fd, pad, kind; char node[32]; } dev[16];
+    int mdx = 0, mdy = 0, mbut = 0, msent = 0, mdirty = 0;
     int nd = 0;
     uint64_t next_scan = 0;
     while (!g_pad_stop) {
@@ -649,7 +659,7 @@ static void *pad_thread(void *arg)
             next_scan = now + 1000;
             DIR *d = opendir("/dev/input");
             struct dirent *de;
-            while (d && (de = readdir(d)) && nd < 8) {
+            while (d && (de = readdir(d)) && nd < 16) {
                 if (strncmp(de->d_name, "event", 5)) continue;
                 char path[32];
                 snprintf(path, sizeof path, "/dev/input/%.20s", de->d_name);
@@ -664,31 +674,72 @@ static void *pad_thread(void *arg)
                 ioctl(fd, EVIOCGBIT(0, sizeof ev), ev);
                 ioctl(fd, EVIOCGBIT(EV_KEY, sizeof key), key);
                 ioctl(fd, EVIOCGBIT(EV_ABS, sizeof ab), ab);
-                int pad = -1;
+                unsigned long rl[(REL_MAX / (8 * sizeof(long))) + 1] = {0};
+                ioctl(fd, EVIOCGBIT(EV_REL, sizeof rl), rl);
+#define HASB(a, b) (((a)[(b) / (8 * sizeof(long))] >> ((b) % (8 * sizeof(long)))) & 1)
+                int pad = -1, kind = 0;
                 char name[64] = "?";
+                ioctl(fd, EVIOCGNAME(sizeof name), name);
                 if (joy_usb_is_gamepad(ev, key, ab)) {
-                    ioctl(fd, EVIOCGNAME(sizeof name), name);
-                    pad = joy_usb_dev_open(fd, name);
+                    if (g_pads) pad = joy_usb_dev_open(fd, name);
+                    if (pad >= 0) kind = 1;
+                } else {
+                    if (HASB(ev, EV_KEY) && HASB(key, KEY_A) && HASB(key, KEY_SPACE) && HASB(key, KEY_ENTER)) kind |= 2;
+                    if (HASB(ev, EV_REL) && HASB(rl, REL_X) && HASB(rl, REL_Y) && HASB(key, BTN_LEFT)) kind |= 4;
                 }
-                if (pad < 0) { close(fd); continue; }
-                printf("[METAL] gamepad %d: %s (%s) = ST joystick %d\n", pad, name, path, pad == 0 ? 1 : 0);
-                dev[nd].fd = fd; dev[nd].pad = pad;
+#undef HASB
+                if (!kind) { close(fd); continue; }
+                if (kind == 1)
+                    printf("[METAL] gamepad %d: %s (%s) = ST joystick %d\n", pad, name, path, pad == 0 ? 1 : 0);
+                else {
+                    /* keys and motion go to the ST only, not the Pi's console */
+                    ioctl(fd, EVIOCGRAB, (void *)1L);
+                    printf("[METAL] %s%s%s: %s (%s)\n", kind & 2 ? "keyboard" : "", kind == 6 ? " + " : "",
+                           kind & 4 ? "mouse" : "", name, path);
+                }
+                dev[nd].fd = fd; dev[nd].pad = pad; dev[nd].kind = kind;
                 snprintf(dev[nd].node, sizeof dev[nd].node, "%s", path);
                 nd++;
             }
             if (d) closedir(d);
         }
-        struct pollfd pf[8];
+        struct pollfd pf[16];
         for (int i = 0; i < nd; i++) { pf[i].fd = dev[i].fd; pf[i].events = POLLIN; }
         poll(pf, (nfds_t)nd, 10);
         for (int i = 0; i < nd; i++) {
             struct input_event e;
             for (;;) {
                 ssize_t r = read(dev[i].fd, &e, sizeof e);
-                if (r == (ssize_t)sizeof e) { joy_usb_handle_event(dev[i].pad, &e); continue; }
+                if (r == (ssize_t)sizeof e) {
+                    if (dev[i].kind == 1) { joy_usb_handle_event(dev[i].pad, &e); continue; }
+                    if (e.type == EV_KEY && e.value != 2) {           /* 2 = autorepeat: the ST repeats itself */
+                        const int down = e.value != 0;
+                        if (e.code == BTN_LEFT)  { mbut = down ? (mbut | 2) : (mbut & ~2); mdirty = 1; }
+                        else if (e.code == BTN_RIGHT) { mbut = down ? (mbut | 1) : (mbut & ~1); mdirty = 1; }
+                        else if (e.code <= KEY_MAX && st_scan[e.code] != ST_NONE)
+                            padq_put(0x03000000u | (down ? 0 : 0x80) | st_scan[e.code]);
+                    } else if (e.type == EV_REL) {
+                        if (e.code == REL_X) { mdx += e.value; mdirty = 1; }
+                        else if (e.code == REL_Y) { mdy += e.value; mdirty = 1; }
+                    } else if (e.type == EV_SYN && mdirty) {
+                        /* one IKBD packet moves at most 127 each way */
+                        do {
+                            const int sx = mdx > 127 ? 127 : mdx < -127 ? -127 : mdx;
+                            const int sy = mdy > 127 ? 127 : mdy < -127 ? -127 : mdy;
+                            if (!sx && !sy && mbut == msent) break;
+                            padq_put(0x04000000u | ((uint32_t)mbut << 16) | ((uint32_t)(uint8_t)sy << 8) | (uint8_t)sx);
+                            mdx -= sx; mdy -= sy; msent = mbut;
+                        } while (mdx || mdy);
+                        mdirty = 0;
+                    }
+                    continue;
+                }
                 if (r < 0 && errno == EAGAIN) break;
-                printf("[METAL] gamepad %d gone\n", dev[i].pad);
-                joy_usb_dev_close(dev[i].pad);
+                if (dev[i].kind == 1) {
+                    printf("[METAL] gamepad %d gone\n", dev[i].pad);
+                    joy_usb_dev_close(dev[i].pad);
+                } else
+                    printf("[METAL] %s gone (%s)\n", dev[i].kind & 2 ? "keyboard" : "mouse", dev[i].node);
                 close(dev[i].fd);
                 dev[i] = dev[--nd];
                 i--;
@@ -800,6 +851,7 @@ static void ilog_print(void)
         case 'S': snprintf(it, sizeof it, " %u.%03u start>space%s", e.ms / 1000, e.ms % 1000, e.b ? "dn" : "up"); break;
         case 'J': snprintf(it, sizeof it, " %u.%03u ikbd>j%u=%02X", e.ms / 1000, e.ms % 1000, e.a, e.b); break;
         case 'K': snprintf(it, sizeof it, " %u.%03u key%02X", e.ms / 1000, e.ms % 1000, e.a); break;
+        case 'M': snprintf(it, sizeof it, " %u.%03u mouse%+d,%+d", e.ms / 1000, e.ms % 1000, (int8_t)e.a, (int8_t)e.b); break;
         case 'C': snprintf(it, sizeof it, " %u.%03u guest-cmd%02X", e.ms / 1000, e.ms % 1000, e.a); break;
         default:  snprintf(it, sizeof it, " %u.%03u to-ikbd%02X", e.ms / 1000, e.ms % 1000, e.a); break;
         }
@@ -909,10 +961,21 @@ static void *reporter(void *arg)
             if (M.acia_ovr != q_ovr)
                 L += snprintf(why + L, sizeof why - L, " %llu keyboard bytes lost (ACIA overrun);",
                               (unsigned long long)(M.acia_ovr - q_ovr));
-            if (M.acia_fe != q_fe || M.acia_zero != q_zero)
-                L += snprintf(why + L, sizeof why - L, " keyboard line: %llu framing errors, %llu stray $00 bytes"
-                              " (dropped) - is the keyboard plugged in?;",
-                              (unsigned long long)(M.acia_fe - q_fe), (unsigned long long)(M.acia_zero - q_zero));
+            {   /* said once when it starts and once when it stops: an ST whose
+                 * keyboard is unplugged would otherwise say it every 5 s */
+                static int dead;
+                const int now_dead = M.acia_fe - q_fe > 100 || M.acia_zero - q_zero > 100;
+                if (now_dead && !dead)
+                    L += snprintf(why + L, sizeof why - L, " the ST keyboard line is dead (%llu framing errors in 5 s) -"
+                                  " keyboard unplugged? Its bytes are ignored; USB/Bluetooth keyboards still work;",
+                                  (unsigned long long)(M.acia_fe - q_fe));
+                else if (!now_dead && dead)
+                    L += snprintf(why + L, sizeof why - L, " the ST keyboard line is alive again;");
+                else if (!now_dead && (M.acia_fe != q_fe || M.acia_zero != q_zero))
+                    L += snprintf(why + L, sizeof why - L, " %llu bad keyboard bytes dropped;",
+                                  (unsigned long long)(M.acia_fe - q_fe + M.acia_zero - q_zero));
+                dead = now_dead;
+            }
             q_fe = M.acia_fe; q_zero = M.acia_zero;
             if (L) printf("[METAL] %dm%02ds:%s\n", sec / 60, sec % 60, why);
             q_rel = M.relocks; q_drop = M.q_drop; q_ovr = M.acia_ovr;
@@ -1496,7 +1559,7 @@ int main(int argc, char **argv)
     }
     pthread_t rep, padt;
     pthread_create(&rep, NULL, reporter, NULL);
-    if (g_pads) pthread_create(&padt, NULL, pad_thread, NULL);
+    pthread_create(&padt, NULL, pad_thread, NULL);   /* pads (unless usb off), keyboards, mice */
 
     const double guard = GUARD_NS / NSPT, boxrun = BOXRUN_NS / NSPT,
                  flushg = FLUSH_NS / NSPT, pollg = POLL_NS / NSPT;
@@ -1705,7 +1768,7 @@ int main(int argc, char **argv)
 
     g_report_stop = 1; g_pad_stop = 1;
     pthread_join(rep, NULL);
-    if (g_pads) pthread_join(padt, NULL);
+    pthread_join(padt, NULL);
     stbox_metal_hw = NULL; stbox_metal_line = NULL; stbox_metal_ikbd = NULL;
     stbox_core_disarm();
     ym_silence();
