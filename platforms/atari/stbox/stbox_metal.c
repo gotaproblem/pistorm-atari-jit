@@ -1075,6 +1075,69 @@ static void m_fastboot(uint8_t *rom, int size)
 #include <pwd.h>
 
 static struct sc_cfg g_cfg;
+
+/* ---- the calibration each Pi measured ------------------------------------
+ * The write calibration and the vertical decision depend on the Pi and the
+ * PiStorm, not on the build: a Pi 4 and a Pi 3A+ booting the same cloned
+ * psctrl.cfg need their own. stboxmetal.cal (beside psctrl.cfg) holds one
+ * line per Pi model - "model|cal|vdec" - measured the first time that model
+ * runs a build without metal_cal / metal_vdec, then reused. Delete the line
+ * (or the file), or set metal_cal measure, to measure again. */
+static char g_cal_file[600];
+static int  g_cal_measure, g_vdec_measure, g_cal_cached, g_vdec_cached;
+static void m_model(char *out, size_t n)
+{
+    out[0] = 0;
+    FILE *f = fopen("/proc/device-tree/model", "rb");
+    if (f) { size_t k = fread(out, 1, n - 1, f); out[k] = 0; fclose(f); }
+    for (char *p = out; *p; p++) if (*p == '|' || *p == '\n') *p = ' ';
+    if (!out[0]) snprintf(out, n, "unknown Pi");
+}
+static void m_cal_load(void)
+{
+    if (!g_cal_file[0]) return;
+    char model[128], line[256];
+    m_model(model, sizeof model);
+    FILE *f = fopen(g_cal_file, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        char *a = strchr(line, '|'); if (!a) continue;
+        *a++ = 0;
+        if (strcmp(line, model)) continue;
+        double c, v;
+        if (sscanf(a, "%lf|%lf", &c, &v) == 2) {
+            if (!cal_forced && !g_cal_measure)   { g_cal = c;  cal_forced = 1;  g_cal_cached = 1; }
+            if (!vdec_forced && !g_vdec_measure) { g_vdec = v; vdec_forced = 1; g_vdec_cached = 1; }
+        }
+    }
+    fclose(f);
+}
+static void m_cal_save(void)
+{
+    if (!g_cal_file[0]) return;
+    char model[128], line[256], tmp[640];
+    m_model(model, sizeof model);
+    snprintf(tmp, sizeof tmp, "%s.new", g_cal_file);
+    FILE *o = fopen(tmp, "w");
+    if (!o) { printf("[METAL] cannot write %s: %s\n", tmp, strerror(errno)); return; }
+    FILE *f = fopen(g_cal_file, "r");
+    if (f) {                                   /* keep the other Pis' lines */
+        while (fgets(line, sizeof line, f)) {
+            const char *a = strchr(line, '|');
+            if (a && (size_t)(a - line) == strlen(model) && !strncmp(line, model, strlen(model))) continue;
+            fputs(line, o);
+        }
+        fclose(f);
+    }
+    fprintf(o, "%s|%.2f|%.1f\n", model, g_cal, g_vdec);
+    fclose(o);
+    if (rename(tmp, g_cal_file) != 0) printf("[METAL] cannot write %s: %s\n", g_cal_file, strerror(errno));
+    else printf("[METAL] %s: calibration %+.2f, vertical decision %.1f saved for this %s\n",
+                g_cal_file, g_cal, g_vdec, model);
+    /* the file belongs to the user who ran sudo, like psctrl.cfg */
+    const char *su = getenv("SUDO_UID"), *sg = getenv("SUDO_GID");
+    if (su && sg && chown(g_cal_file, (uid_t)atoi(su), (gid_t)atoi(sg)) != 0) { /* not fatal */ }
+}
 static char g_rom_path[512], g_disk_path[512], g_fdd_path[512];
 static char g_tos_buf[512], g_disk_buf[10][512];
 static int  g_from_cfg, g_fastboot, g_pads = 1;
@@ -1166,8 +1229,19 @@ static int m_load_cfg(const char *path, const char *build, const char **tos)
     if ((v = sc_get(&g_cfg, sec, "rom"))) { m_resolve(g_rom_path, v, g_tos_buf, sizeof g_tos_buf); *tos = g_tos_buf; }
     g_fastboot = m_bool(sc_get(&g_cfg, sec, "fastboot"));
     if ((v = sc_get(&g_cfg, sec, "usb")) && m_word_is(v, k_false)) g_pads = 0;
-    if ((v = sc_get(&g_cfg, sec, "metal_cal")))  { g_cal = atof(v);  cal_forced = 1; }
-    if ((v = sc_get(&g_cfg, sec, "metal_vdec"))) { g_vdec = atof(v); vdec_forced = 1; }
+    /* a number fixes it; `measure` measures at every start; no key: the
+     * value this Pi measured before, from stboxmetal.cal (m_cal_load) */
+    if ((v = sc_get(&g_cfg, sec, "metal_cal"))) {
+        if (!strncasecmp(v, "measure", 7)) g_cal_measure = 1; else { g_cal = atof(v); cal_forced = 1; }
+    }
+    if ((v = sc_get(&g_cfg, sec, "metal_vdec"))) {
+        if (!strncasecmp(v, "measure", 7)) g_vdec_measure = 1; else { g_vdec = atof(v); vdec_forced = 1; }
+    }
+    {   /* the cache sits beside the config file */
+        const char *sl = strrchr(path, '/');
+        if (sl) snprintf(g_cal_file, sizeof g_cal_file, "%.*s/stboxmetal.cal", (int)(sl - path), path);
+        else    snprintf(g_cal_file, sizeof g_cal_file, "stboxmetal.cal");
+    }
     if ((v = sc_get(&g_cfg, sec, "metal_log")) && !strncasecmp(v, "full", 4)) g_log = 1;
     if ((v = sc_get(&g_cfg, sec, "stram_size")))
         printf("  stram_size ignored: the box has the real ST's RAM\n");
@@ -1331,13 +1405,16 @@ int main(int argc, char **argv)
     if (g_log) printf("box: TOS %s, %u K\n", tos, g_ram_bytes >> 10);
     bt_quiet = !g_log;
 
+    m_cal_load();
+    const int measured_any = !cal_forced || !vdec_forced;
+
     /* calibrate the write landing, as beamtest's B */
     if (g_log) printf("\n[A] LOCK\n");
     if (lock(g_log ? 0 : 2) != 0) return 1;
     measure_writes();
     if (!cal_forced) {
         if (g_log) printf("\n[B] RIGHT BORDER SWEEP (calibration, %.0f s)\n", cal_secs);
-        else       printf("[METAL] measuring the write calibration (%.0f s; metal_cal skips it)\n", 2 * cal_secs);
+        else       printf("[METAL] measuring the write calibration on this Pi (%.0f s, once)\n", 2 * cal_secs);
         run_phase(PH_RIGHT, cal_secs);
         if (g_log) { report_common(); report_sweep(1); }
         bt_calibrate_from_sweep(cal_secs);
@@ -1345,7 +1422,7 @@ int main(int argc, char **argv)
         printf("calibration %+.2f cycles (--cal)\n", g_cal);
     if (!vdec_forced) {
         if (g_log) printf("\n[F] VERTICAL DECISION SWEEP (%.0f s)\n", cal_secs);
-        else       printf("[METAL] measuring the vertical decision (%.0f s; metal_vdec skips it)\n", cal_secs);
+        else       printf("[METAL] measuring the vertical decision on this Pi (%.0f s, once)\n", cal_secs);
         lock(g_log ? 1 : 2);
         run_phase(PH_VSWEEP, cal_secs);
         /* the first 50 Hz cycle from which top and bottom together open
@@ -1368,6 +1445,8 @@ int main(int argc, char **argv)
         bt_plain_screen();
     } else if (g_log)
         printf("vertical decision %.0f (--vdec)\n", g_vdec);
+
+    if (measured_any && !g_cal_measure && !g_vdec_measure) m_cal_save();
 
     /* hand the machine to the box */
     M_INIT();
