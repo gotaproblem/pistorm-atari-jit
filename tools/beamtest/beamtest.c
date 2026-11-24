@@ -810,6 +810,7 @@ static void __attribute__((unused)) bt_plain_screen(void)
 
 /* After the coarse right sweep has run (R holds it): find the slot, sweep
  * it in 1-cycle steps and set g_cal to its middle. */
+static int bt_cal_failed;             /* the sweep found no clean slot */
 static void bt_calibrate_from_sweep(double secs)
 {
             /* one band that always opens, with no neighbour that ever
@@ -822,8 +823,10 @@ static void bt_calibrate_from_sweep(double secs)
                 if (b != best && R.hit[b] > 0.1 * tot) clean = 0;
             if (cal_forced)
                 printf("  calibration: %+.2f cycles (--cal)\n", g_cal);
-            else if (!clean)
+            else if (!clean) {
                 printf("  calibration: NO single band opened cleanly - the tests below are uncorrected\n");
+                bt_cal_failed = 1;
+            }
             else {
                 /* then the same sweep in 1-cycle steps about that slot: the
                  * run of offsets that open it is the slot; aim at its
@@ -851,8 +854,10 @@ static void bt_calibrate_from_sweep(double secs)
                 g_cal = wsum > 0.5 ? sum / wsum : coarse;
                 if (nok) {
                     if (!bt_quiet) printf("  calibration: offsets %+d..%+d open the border 97 %%+ of the time;\n", first, last);
-                } else
+                } else {
                     printf("  calibration: no offset opened the border 97 %% of the time;\n");
+                    bt_cal_failed = 1;
+                }
                 if (!bt_quiet || !nok) printf("  the tests below aim %+.2f cycles from target (the hit-weighted middle)\n", g_cal);
                 g_band_base = -16; g_band_step = 4;
             }

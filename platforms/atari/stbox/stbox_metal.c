@@ -106,7 +106,7 @@ static inline double m_abs(double t)    { return (double)mA0 + (t - mT0) / TPC; 
 static struct {
     uint64_t writes, late1us, burst, q_drop, q_max, box_slices, box_behind;
     double   burst_late_max_ns;
-    uint64_t flushed, acia_in, acia_out, acia_ovr;
+    uint64_t flushed, acia_in, acia_out, acia_ovr, acia_fe, acia_zero;
     uint64_t probes, probe_ok, probe_rej, probe_late, probe_skip;
     double   e_sum, e_sq, e_max, late_max_ns, slice_max_ns, box_ns, flush_ns, wait_ns;
     uint64_t relocks, resets;
@@ -533,6 +533,9 @@ static void ikbd_byte(uint8_t b)
         pk.need = pk.n = 0;
         return;
     }
+    /* $00 is no key: outside a packet it is line noise, and passed on it
+     * would be a key press the guest clicks for */
+    if (b == 0x00) { M.acia_zero++; return; }
     int len = 0;
     if (b >= 0xF8 && b <= 0xFB) len = 3;
     else if (b == 0xFE || b == 0xFF) len = 2;
@@ -549,7 +552,14 @@ static void acia_poll(void)
 {
     const uint8_t sr = ps_read_8(R_ACIA_CR);
     if (sr & 0x20) M.acia_ovr++;
-    if (sr & 0x01) ikbd_byte(ps_read_8(R_ACIA_DR));
+    if (sr & 0x01) {
+        const uint8_t b = ps_read_8(R_ACIA_DR);
+        /* a framing error is no byte the IKBD sent: a line held low (a
+         * keyboard unplugged, or its 6301 held in reset) reads as a
+         * stream of $00s, each with FE set, at the full 7812 baud */
+        if (sr & 0x10) { M.acia_fe++; pk.need = pk.n = 0; }
+        else ikbd_byte(b);
+    }
     else if ((sr & 0x02) && atx_r != atx_w) { ps_write_8(R_ACIA_DR, atx[atx_r++ & 255]); M.acia_out++; }
 }
 
@@ -887,7 +897,7 @@ static void *reporter(void *arg)
             if (FC.state == 5) fc_report();
         }
         if (!g_log) {                     /* quiet: only what needs attention */
-            static uint64_t q_rel, q_drop, q_ovr;
+            static uint64_t q_rel, q_drop, q_ovr, q_fe, q_zero;
             if (stbox_core_take_halt_report()) m_halt_report();
             char why[200]; int L = 0;
             if (M.relocks != q_rel)
@@ -899,6 +909,11 @@ static void *reporter(void *arg)
             if (M.acia_ovr != q_ovr)
                 L += snprintf(why + L, sizeof why - L, " %llu keyboard bytes lost (ACIA overrun);",
                               (unsigned long long)(M.acia_ovr - q_ovr));
+            if (M.acia_fe != q_fe || M.acia_zero != q_zero)
+                L += snprintf(why + L, sizeof why - L, " keyboard line: %llu framing errors, %llu stray $00 bytes"
+                              " (dropped) - is the keyboard plugged in?;",
+                              (unsigned long long)(M.acia_fe - q_fe), (unsigned long long)(M.acia_zero - q_zero));
+            q_fe = M.acia_fe; q_zero = M.acia_zero;
             if (L) printf("[METAL] %dm%02ds:%s\n", sec / 60, sec % 60, why);
             q_rel = M.relocks; q_drop = M.q_drop; q_ovr = M.acia_ovr;
             /* keep the per-interval maxima from growing without bound */
@@ -914,7 +929,7 @@ static void *reporter(void *arg)
         const double em = M.e_sum / n, sd = sqrt(fmax(0.0, M.e_sq / n - em * em));
         printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, queue max %llu drop %llu"
                " | RAM longs +%llu | lock reads ok %llu rejected %llu late %llu skipped %llu, err sd %.2f max %.1f cyc, relocks %llu"
-               " | box %.0f %% (slice max %.0f ns, behind %llu), RAM copy %.0f %%, waiting %.0f %% | IKBD in %llu out %llu ovr %llu\n",
+               " | box %.0f %% (slice max %.0f ns, behind %llu), RAM copy %.0f %%, waiting %.0f %% | IKBD in %llu out %llu ovr %llu fe %llu zero %llu\n",
                sec, stbox_shared.frame, (unsigned long long)(stbox_shared.frame - lfr), stbox_core_cps(),
                (unsigned long long)(M.writes - lw), (unsigned long long)M.burst, M.burst_late_max_ns,
                (unsigned long long)M.late1us, M.late_max_ns,
@@ -925,7 +940,8 @@ static void *reporter(void *arg)
                sd, M.e_max, (unsigned long long)M.relocks,
                M.box_ns / 5e7, M.slice_max_ns, (unsigned long long)M.box_behind,
                M.flush_ns / 5e7, M.wait_ns / 5e7,
-               (unsigned long long)M.acia_in, (unsigned long long)M.acia_out, (unsigned long long)M.acia_ovr);
+               (unsigned long long)M.acia_in, (unsigned long long)M.acia_out, (unsigned long long)M.acia_ovr,
+               (unsigned long long)M.acia_fe, (unsigned long long)M.acia_zero);
         if (M.late1us) {
             printf("[METAL]       late writes came after:");
             for (int i = 0; i < 6; i++)
@@ -1084,7 +1100,7 @@ static struct sc_cfg g_cfg;
  * runs a build without metal_cal / metal_vdec, then reused. Delete the line
  * (or the file), or set metal_cal measure, to measure again. */
 static char g_cal_file[600];
-static int  g_cal_measure, g_vdec_measure, g_cal_cached, g_vdec_cached;
+static int  g_cal_measure, g_vdec_measure, g_cal_cached, g_vdec_cached, g_vdec_failed;
 static void m_model(char *out, size_t n)
 {
     out[0] = 0;
@@ -1439,6 +1455,7 @@ int main(int argc, char **argv)
                    R.vs_n[i] ? 100.0 * R.vs_top[i] / R.vs_n[i] : 0.0,
                    R.vs_n[i] ? 100.0 * R.vs_bot[i] / R.vs_n[i] : 0.0, R.vs_n[i]);
         if (first > 496) g_vdec = first - 1;
+        if (first <= 496) g_vdec_failed = 1;
         if (g_log || first <= 496)
             printf("  vertical decision: %s cycle %.0f (box model 502)\n",
                    first > 496 ? "real ST at" : "NOT FOUND - using", g_vdec);
@@ -1446,7 +1463,13 @@ int main(int argc, char **argv)
     } else if (g_log)
         printf("vertical decision %.0f (--vdec)\n", g_vdec);
 
-    if (measured_any && !g_cal_measure && !g_vdec_measure) m_cal_save();
+    if (measured_any && !g_cal_measure && !g_vdec_measure) {
+        if (bt_cal_failed || g_vdec_failed)
+            printf("[METAL] the %s measurement failed: not saved, it is measured again next start\n",
+                   bt_cal_failed ? "write calibration" : "vertical decision");
+        else
+            m_cal_save();
+    }
 
     /* hand the machine to the box */
     M_INIT();

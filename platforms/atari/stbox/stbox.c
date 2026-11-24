@@ -202,6 +202,31 @@ static void ram_recfg(void)
                   (g_bank_cfg[1] == g_bank_act[1] || g_bank_act[1] == 0));
 }
 
+/* Where a logical offset in a bank lands in the installed chips when the
+ * MMU is configured for another size. The STF's MMU multiplexes the
+ * address into row and column differently for 128K / 512K / 2MB, so a
+ * mismatch scrambles bits rather than wrapping - TOS's memory sizing
+ * relies on exactly that pattern (a 1 MB STF, 512K+512K, sized itself as
+ * 4 MB with plain wrapping and put its screen at $3F8000). The STE's MMU
+ * just masks. Hatari's STMemory_MMU_Translate_Addr_STF / _STE. */
+static int g_ste;                  /* STE tier, below */
+static inline uint32_t bank_xlat(uint32_t a, uint32_t phys, uint32_t logical)
+{
+    if (phys == logical) return a & (phys - 1);
+    if (g_ste) return a & (phys - 1);
+    uint32_t r;
+    if (phys == (2048u << 10))
+        r = logical == (512u << 10) ? ((a & 0xffc00) << 1) | (a & 0x7ff)
+                                    : ((a & 0x7fe00) << 2) | (a & 0x7ff);      /* 128K */
+    else if (phys == (512u << 10))
+        r = logical == (2048u << 10) ? ((a & 0xff800) >> 1) | (a & 0x3ff)
+                                     : ((a & 0x3fe00) << 1) | (a & 0x3ff);     /* 128K */
+    else /* 128K chips */
+        r = logical == (2048u << 10) ? ((a & 0x7f800) >> 2) | (a & 0x1ff)
+                                     : ((a & 0x3fc00) >> 1) | (a & 0x1ff);     /* 512K */
+    return r & (phys - 1);
+}
+
 /* returns storage offset; ok: 1 = backed RAM, 0 = open bus in the
  * configured range, -1 = beyond configured RAM entirely */
 static inline uint32_t ram_map(uint32_t a, int *ok)
@@ -213,12 +238,12 @@ static inline uint32_t ram_map(uint32_t a, int *ok)
     }
     if (a < g_bank_cfg[0]) {
         if (!g_bank_act[0]) { *ok = 0; return 0; }
-        *ok = 1; return a & (g_bank_act[0] - 1);
+        *ok = 1; return bank_xlat(a, g_bank_act[0], g_bank_cfg[0]);
     }
     a -= g_bank_cfg[0];
     if (a < g_bank_cfg[1]) {
         if (!g_bank_act[1]) { *ok = 0; return 0; }
-        *ok = 1; return g_bank_act[0] + (a & (g_bank_act[1] - 1));
+        *ok = 1; return g_bank_act[0] + bank_xlat(a, g_bank_act[1], g_bank_cfg[1]);
     }
     *ok = -1; return 0;
 }

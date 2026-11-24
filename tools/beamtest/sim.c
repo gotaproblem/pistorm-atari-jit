@@ -231,6 +231,7 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     rez[0] = (chg_t){ INT64_MIN, 0 }; nrez = 1;
     ss->shifter = 1; ss->mode = SS_MODE_COLOUR;
     ss->bank0 = 2048u << 10; ss->bank1 = 2048u << 10; ss->memcfg = 0x0A;
+    if (getenv("SIM_1MB")) { ss->bank0 = ss->bank1 = 512u << 10; ss->memcfg = 0x05; }   /* a 1040-style ST */
     printf("[sim] ST %.1f Hz (%+.0f ppm), write lands %.0f +/- %.0f ns after issue, takes %.0f ns\n",
            st_hz, ppm, lat_ns, jit_ns, dur_ns);
     return 0;
