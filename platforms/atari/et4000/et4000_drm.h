@@ -85,6 +85,10 @@ void drmpres_flip(void);
 
 void drmpres_close(void);
 
+/* frames drmpres_flip() did not show because the previous flip had not
+ * latched yet (async path), since start */
+unsigned drmpres_flips_dropped(void);
+
 /* --- accessors for other users of the SAME DRM master fd -------------------
  * Only the DRM master may touch planes, and that is us. The host video player
  * (platforms/atari/video/) puts movies on a SECOND overlay plane of this same

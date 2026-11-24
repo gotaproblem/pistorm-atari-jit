@@ -747,6 +747,9 @@ uint32_t drmpres_src_pitch(void)
 uint32_t drmpres_src_w(void) { return g_src_w; }
 uint32_t drmpres_src_h(void) { return g_src_h; }
 
+static volatile unsigned g_flips_dropped;   /* frames not shown: the last flip still pending */
+unsigned drmpres_flips_dropped(void) { return g_flips_dropped; }
+
 void drmpres_flip(void)
 {
     if (g_fd < 0 || !g_have_src)
@@ -759,8 +762,10 @@ void drmpres_flip(void)
             /* previous flip still in flight -> drop this frame (g_back unchanged).
              * Failsafe: if a completion event is ever missed, recover after ~8
              * frames instead of freezing the display forever. */
-            if (++stuck <= 8)
+            if (++stuck <= 8) {
+                g_flips_dropped++;
                 return;
+            }
             g_flip_pending = 0;
         }
         stuck = 0;

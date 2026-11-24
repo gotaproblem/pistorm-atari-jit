@@ -1078,6 +1078,8 @@ static void fc_report(void)
  * left as it is. */
 static int g_hdmi = 1;
 static volatile int g_hdmi_stop;
+static volatile int g_hdmi_up;                 /* the mirror is showing      */
+static volatile unsigned g_hdmi_shown, g_hdmi_skip, g_hdmi_render_max_us;
 static void *hdmi_thread(void *arg)
 {
     (void)arg;
@@ -1089,6 +1091,7 @@ static void *hdmi_thread(void *arg)
     }
     drmpres_set_source_kind(DRMPRES_SRC_ST);
     const int hz = drmpres_match_refresh(50.0);   /* the ST's rate: no judder */
+    g_hdmi_up = 1;
     printf("[METAL] HDMI mirror on, %ux%u%s\n", drmpres_mode_w(), drmpres_mode_h(),
                       hz > 0 ? ", switched to 50 Hz" : "");
     static uint32_t px[768 * STBOX_CAP_ROWS];
@@ -1097,8 +1100,10 @@ static void *hdmi_thread(void *arg)
     unsigned shown = 0;
     while (!g_hdmi_stop) {
         const uint32_t fr = stbox_shared.frame, idx = stbox_shared.cap_idx;
-        if (fr == last || idx >= STBOX_CAP_BUFS) { usleep(2000); continue; }
+        if (fr == last || idx >= STBOX_CAP_BUFS) { usleep(1000); continue; }
+        if (last != (uint32_t)-1 && fr - last > 1) g_hdmi_skip += fr - last - 1;   /* box frames never drawn */
         last = fr;
+        const uint64_t r0 = ticks();
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         int w = 0, h = 0;
         if (!stbox_render_cap(&stbox_cap[idx], 0, px, 768, &w, &h) || w <= 0 || h <= 0) continue;
@@ -1114,6 +1119,11 @@ static void *hdmi_thread(void *arg)
             memcpy(bb + (size_t)y * pitch, px + (size_t)y * 768, (size_t)w * 4);
         drmpres_flip();
         shown++;
+        g_hdmi_shown = shown;
+        {
+            const unsigned us = (unsigned)((double)(ticks() - r0) * NSPT / 1000.0);
+            if (us > g_hdmi_render_max_us) g_hdmi_render_max_us = us;
+        }
     }
     drmpres_close();
     if (g_log) printf("[METAL] HDMI mirror: %u frames shown\n", shown);
@@ -1223,6 +1233,13 @@ static void *reporter(void *arg)
         }
         if (g_vmoved) printf("[METAL]       writes moved off the vertical decision: %llu\n", (unsigned long long)g_vmoved);
         if (stbox_core_take_halt_report()) m_halt_report();
+        if (g_hdmi_up) {
+            static unsigned h_sh, h_sk, h_dr;
+            const unsigned sh = g_hdmi_shown, sk = g_hdmi_skip, dr = drmpres_flips_dropped();
+            printf("[METAL]       HDMI: %u frames drawn, %u box frames never drawn, %u drawn but not shown"
+                   " (flip pending), longest draw %u us\n", sh - h_sh, sk - h_sk, dr - h_dr, g_hdmi_render_max_us);
+            h_sh = sh; h_sk = sk; h_dr = dr; g_hdmi_render_max_us = 0;
+        }
         printf("[METAL]       top border: box shut %llu/%llu frames real agrees, box open %llu/%llu"
                " | bottom border (box open): %llu/%llu\n",
                (unsigned long long)M.top_ok[0], (unsigned long long)M.top_n[0],
