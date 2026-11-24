@@ -245,13 +245,24 @@ static void m_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes,
     P1.frame_seen = stbox_shared.frame;
 }
 
+static double g_plead_ns;                    /* lock read start -> its stamp */
 static void m_probe(void)
 {
     P1.pending = 0;
     M.probes++;
     uint32_t cnt; uint64_t t;
     const double due = m_time((double)P1.abs);
+    const uint64_t p0 = ticks();
     if (!read_counter(&cnt, &t)) { M.probe_rej++; P1.rej_run++; return; }
+    /* the read's stamp is the middle of the counter's low byte, two bus
+     * reads after the start: ~1.2 us on a Pi 4 but ~3 us on a 3A+, where
+     * every read came out "late" (2 of 250 a second used) and the lock
+     * drifted to 6 cycles sd. Learn that time and start the read that
+     * much early (main loop), so the stamp itself lands on time. */
+    {
+        const double ov = (double)(t - p0) * NSPT;
+        if (ov > 0 && ov < 8000.0) g_plead_ns = g_plead_ns > 0 ? 0.9 * g_plead_ns + 0.1 * ov : ov;
+    }
     if (((double)t - due) * NSPT > 2000.0) { M.probe_late++; return; }
     const long off = (long)cnt - (long)P1.ln.vcnt;
     if (off <= 0 || off >= (long)P1.ln.bytes) {
@@ -1666,7 +1677,7 @@ int main(int argc, char **argv)
             tn = m_time((double)e->abs + g_cal) - (e->size == 1 ? LEAD8 : LEAD16);
         }
         if (P1.pending) {
-            const double tp = m_time((double)P1.abs);
+            const double tp = m_time((double)P1.abs) - g_plead_ns / NSPT;
             if (tp < tn) { tn = tp; is_probe = 1; }
         }
         for (int k = 0; k < 2; k++)

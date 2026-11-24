@@ -158,6 +158,7 @@ static uint32_t counter_at(double ns)
     return base + cur_acc + partial;
 }
 
+static double rd_ns = 500.0;          /* a bus read's length (SIM_RD_NS)  */
 static double jitter(void) { return jit_ns * (2.0 * rand() / RAND_MAX - 1.0); }
 
 static void land(chg_t *a, int *n, double issue, uint8_t v)
@@ -200,7 +201,7 @@ uint8_t ps_read_8(uint32_t addr)
     case 0xFF8207: r = (uint8_t)(v >> 8);  break;
     case 0xFF8209: r = (uint8_t)v;         break;
     }
-    spin_until(t + 500);
+    spin_until(t + rd_ns);
     return r;
 }
 
@@ -219,6 +220,7 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     if ((e = getenv("SIM_LAT_NS"))) lat_ns = atof(e);
     if ((e = getenv("SIM_JIT_NS"))) jit_ns = atof(e);
     if ((e = getenv("SIM_DUR_NS"))) dur_ns = atof(e);
+    if ((e = getenv("SIM_RD_NS")))  rd_ns  = atof(e);   /* 3A+: ~1.2 us */
     srand((unsigned)now_ns());
     if ((e = getenv("SIM_JUMP_S"))) jump_at_ns = now_ns() + atof(e) * 1e9;
     st_hz = 8021247.0 * (1.0 + ppm * 1e-6);
