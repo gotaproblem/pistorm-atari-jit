@@ -180,6 +180,7 @@ void ps_write_8(uint32_t addr, uint16_t data)
 }
 void ps_write_16(uint32_t addr, uint16_t data) { (void)addr; (void)data; spin_until(now_ns() + dur_ns + 50); }
 void ps_write_32(uint32_t addr, uint32_t data) { (void)addr; (void)data; }
+uint16_t ps_read_16(uint32_t addr) { (void)addr; spin_until(now_ns() + 700); return 0; }   /* no RAM modelled */
 
 uint8_t ps_read_8(uint32_t addr)
 {

@@ -93,7 +93,8 @@ static int  g_log;
 #define GUARD_NS       2500.0               /* wait for a write this close */
 #define BOXRUN_NS      5000.0               /* a box slice needs this gap  */
 #define FLUSH_NS       2500.0               /* a long to RAM needs this    */
-#define POLL_NS        2200.0               /* an ACIA poll needs this     */
+#define POLL_NS        2200.0
+#define PAL_DROP_NS    64000.0              /* a colour write this late is dropped */               /* an ACIA poll needs this     */
 #define ACIA_POLL_US   100.0
 
 /* ---- the time map: box cycle -> Pi tick ------------------------------- */
@@ -106,7 +107,7 @@ static inline double m_abs(double t)    { return (double)mA0 + (t - mT0) / TPC; 
 
 /* ---- stats (written by the bus thread, printed by the reporter) ------- */
 static struct {
-    uint64_t writes, late1us, burst, q_drop, q_max, box_slices, box_behind;
+    uint64_t writes, late1us, burst, pal_drop, q_drop, q_max, box_slices, box_behind;
     double   burst_late_max_ns;
     uint64_t flushed, acia_in, acia_out, acia_ovr, acia_fe, acia_zero;
     uint64_t probes, probe_ok, probe_rej, probe_late, probe_skip;
@@ -145,6 +146,11 @@ static struct {
     cl_t     l[320];
     stbox_cap_t pic;                        /* the box's picture of it    */
     int      have_pic;
+    /* the real ST's side, read back once the frame is out: its video base
+     * and the 32000 bytes there against the box's RAM */
+    uint32_t real_base, box_base;
+    unsigned diff_words, diff_dirty, first_diff[8], nfirst;
+    uint16_t real_scr[16000];
 } FC;
 static void fc_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes, uint32_t vcnt)
 {
@@ -957,6 +963,28 @@ static void input_state(const char *tag)
     }
 }
 
+/* bus thread, once a capture's writes are all out: what the real Shifter
+ * is pointed at, and whether the real RAM there holds what the box has
+ * (16000 word reads, ~20 ms - a one-off, the next frame's writes wait) */
+static void fc_readback(void)
+{
+    FC.box_base  = (stbox_bus_r8(0xFF8201) << 16) | (stbox_bus_r8(0xFF8203) << 8);
+    FC.real_base = (ps_read_8(0xFF8201) << 16) | (ps_read_8(0xFF8203) << 8);
+    FC.diff_words = FC.diff_dirty = FC.nfirst = 0;
+    const uint32_t b = FC.box_base;
+    for (unsigned i = 0; i < 16000; i++) {
+        const uint32_t a = b + 2 * i;
+        if (a + 1 >= g_ram_bytes) { FC.real_scr[i] = 0; continue; }
+        const uint16_t r = ps_read_16(a);
+        FC.real_scr[i] = r;
+        const uint16_t x = (uint16_t)((stbox_shared.ram[a] << 8) | stbox_shared.ram[a + 1]);
+        if (r != x) {
+            FC.diff_words++;
+            if (g_dirty[a >> 8] & (1ull << ((a >> 2) & 63))) FC.diff_dirty++;
+            if (FC.nfirst < 8) FC.first_diff[FC.nfirst++] = a;
+        }
+    }
+}
 static void fc_report(void)
 {
     FC.n++;
@@ -969,6 +997,25 @@ static void fc_report(void)
     }
     printf("[FRAME %d] box frame %u: %u displayed lines, %u of them showed RAM not yet copied (%u longs);"
            " %u timed writes, %u over 1 us late\n", FC.n, FC.frame, FC.nl, stale_lines, stale_longs, FC.nw, late);
+    printf("[FRAME %d] video base: box $%06X, real Shifter $%06X%s\n", FC.n, FC.box_base, FC.real_base,
+           FC.box_base == FC.real_base ? "" : "  <- DIFFERENT: the real ST shows another buffer");
+    printf("[FRAME %d] real RAM at the box's screen: %u of 16000 words differ from the box's (%u of them still"
+           " waiting to be copied)", FC.n, FC.diff_words, FC.diff_dirty);
+    for (unsigned i = 0; i < FC.nfirst; i++) {
+        const uint32_t a = FC.first_diff[i];
+        printf("%s $%06X real %04X box %04X", i ? "," : "; first:", a, FC.real_scr[(a - FC.box_base) / 2],
+               (stbox_shared.ram[a] << 8) | stbox_shared.ram[a + 1]);
+    }
+    printf("\n");
+    {
+        char fn[64]; snprintf(fn, sizeof fn, "stboxmetal-frame-%d-real.scr", FC.n);
+        FILE *f = fopen(fn, "wb");
+        if (f) {
+            for (unsigned i = 0; i < 16000; i++) { fputc(FC.real_scr[i] >> 8, f); fputc(FC.real_scr[i] & 0xFF, f); }
+            fclose(f);
+        }
+        printf("[FRAME %d] the real ST's 32000 bytes there written to %s%s\n", FC.n, fn, f ? "" : " - FAILED");
+    }
     printf("[FRAME %d] line bytes vcnt   stale | writes on the line: cycle reg=value +late_ns (b = in a burst) @pc\n", FC.n);
     unsigned wi = 0;
     for (unsigned i = 0; i < FC.nl || wi < FC.nw; ) {
@@ -1038,6 +1085,19 @@ static void *reporter(void *arg)
         if (!g_log) {                     /* quiet: only what needs attention */
             static uint64_t q_rel, q_drop, q_ovr, q_fe, q_zero;
             if (stbox_core_take_halt_report()) m_halt_report();
+            {   /* colour writes a line late, dropped: say when it starts and ends */
+                static uint64_t pd0, pd_start; static int dropping;
+                if (M.pal_drop != pd0 && !dropping) {
+                    printf("[METAL] %dm%02ds: more colour changes than the bus keeps up with - dropping the ones"
+                           " a line late (a many-colour picture?)\n", sec / 60, sec % 60);
+                    dropping = 1; pd_start = pd0;
+                } else if (M.pal_drop == pd0 && dropping) {
+                    printf("[METAL] %dm%02ds: colour writes caught up (%llu dropped)\n", sec / 60, sec % 60,
+                           (unsigned long long)(M.pal_drop - pd_start));
+                    dropping = 0;
+                }
+                pd0 = M.pal_drop;
+            }
             char why[200]; int L = 0;
             if (M.relocks != q_rel)
                 L += snprintf(why + L, sizeof why - L, " lost the beam and re-locked (%llu so far);",
@@ -1079,13 +1139,13 @@ static void *reporter(void *arg)
         ilog_print();
         const double n = M.probe_ok ? (double)M.probe_ok : 1.0;
         const double em = M.e_sum / n, sd = sqrt(fmax(0.0, M.e_sq / n - em * em));
-        printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, queue max %llu drop %llu"
+        printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, colour dropped %llu, queue max %llu drop %llu"
                " | RAM longs +%llu | lock reads ok %llu rejected %llu late %llu skipped %llu, err sd %.2f max %.1f cyc, relocks %llu"
                " | box %.0f %% (slice max %.0f ns, behind %llu), RAM copy %.0f %%, waiting %.0f %%, writing %.0f %% | IKBD in %llu out %llu ovr %llu fe %llu zero %llu\n",
                sec, stbox_shared.frame, (unsigned long long)(stbox_shared.frame - lfr), stbox_core_cps(),
                (unsigned long long)(M.writes - lw), (unsigned long long)M.burst, M.burst_late_max_ns,
                (unsigned long long)M.late1us, M.late_max_ns,
-               (unsigned long long)M.q_max, (unsigned long long)M.q_drop,
+               (unsigned long long)M.pal_drop, (unsigned long long)M.q_max, (unsigned long long)M.q_drop,
                (unsigned long long)(M.flushed - lf),
                (unsigned long long)M.probe_ok, (unsigned long long)M.probe_rej,
                (unsigned long long)M.probe_late, (unsigned long long)M.probe_skip,
@@ -1751,7 +1811,7 @@ int main(int argc, char **argv)
             } else if (FC.state == 4 && FC.chk >= FC.nl) {
                 int pending = 0;                       /* its writes all out? */
                 for (unsigned j = mq_r; j != mq_w && !pending; j++) pending = mq[j & (MQ - 1)].cap;
-                if (!pending) FC.state = 5;
+                if (!pending) { fc_readback(); FC.state = 5; }
             }
         }
         /* the next timed thing: a queued write or the lock read */
@@ -1785,6 +1845,26 @@ int main(int argc, char **argv)
             }
             const mev_t *e = &mq[mq_r & (MQ - 1)];
             const uint64_t t0 = ticks();
+            /* a colour write a whole line late shows nothing useful: its
+             * line has gone and the same colour is rewritten after it. A picture that changes the palette 48 times a
+             * line (PP's loader pictures, Spectrum 512) needs more bus time
+             * than a Pi write takes once the box falls behind, and without
+             * this the backlog grew to seconds and starved the RAM copy -
+             * the bitmap never reached the real ST (random pixels under
+             * stripes of colour). Dropped, the thread catches up. */
+            if (e->a >= 0xFF8240 && e->a < 0xFF8260 && ((double)t0 - tn) * NSPT > PAL_DROP_NS) {
+                /* only when a later write to the same colour is already
+                 * queued: a game that sets a colour once must never lose
+                 * it to a one-off hiccup */
+                int later = 0;
+                for (unsigned j = mq_r + 1, n = 0; j != mq_w && n < 128 && !later; j++, n++)
+                    later = mq[j & (MQ - 1)].a == e->a;
+                if (later) {
+                    M.pal_drop++;
+                    mq_r++;
+                    continue;
+                }
+            }
             if (e->size == 1) ps_write_8(e->a, e->v);
             else              ps_write_16(e->a, e->v);
             const double late = ((double)t0 - tn) * NSPT;
