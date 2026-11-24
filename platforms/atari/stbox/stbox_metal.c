@@ -110,7 +110,7 @@ static struct {
     double   burst_late_max_ns;
     uint64_t flushed, acia_in, acia_out, acia_ovr, acia_fe, acia_zero;
     uint64_t probes, probe_ok, probe_rej, probe_late, probe_skip;
-    double   e_sum, e_sq, e_max, late_max_ns, slice_max_ns, box_ns, flush_ns, wait_ns;
+    double   e_sum, e_sq, e_max, late_max_ns, slice_max_ns, box_ns, flush_ns, wait_ns, write_ns;
     uint64_t relocks, resets;
     /* top/bottom border checks: [0] box shut, [1] box open */
     uint64_t top_n[2], top_ok[2], bot_n, bot_ok, case_n[2];
@@ -1070,7 +1070,7 @@ static void *reporter(void *arg)
             q_rel = M.relocks; q_drop = M.q_drop; q_ovr = M.acia_ovr;
             /* keep the per-interval maxima from growing without bound */
             M.late_max_ns = 0; M.slice_max_ns = 0; M.q_max = 0; M.e_max = 0; M.burst_late_max_ns = 0;
-            M.box_ns = M.flush_ns = M.wait_ns = 0; M.box_behind = 0;
+            M.box_ns = M.flush_ns = M.wait_ns = M.write_ns = 0; M.box_behind = 0;
             M.flush_max_ns = M.poll_max_ns = M.probe_max_ns = 0;
             vc_r = vc_w;
             ilog_r_skip();
@@ -1081,7 +1081,7 @@ static void *reporter(void *arg)
         const double em = M.e_sum / n, sd = sqrt(fmax(0.0, M.e_sq / n - em * em));
         printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, queue max %llu drop %llu"
                " | RAM longs +%llu | lock reads ok %llu rejected %llu late %llu skipped %llu, err sd %.2f max %.1f cyc, relocks %llu"
-               " | box %.0f %% (slice max %.0f ns, behind %llu), RAM copy %.0f %%, waiting %.0f %% | IKBD in %llu out %llu ovr %llu fe %llu zero %llu\n",
+               " | box %.0f %% (slice max %.0f ns, behind %llu), RAM copy %.0f %%, waiting %.0f %%, writing %.0f %% | IKBD in %llu out %llu ovr %llu fe %llu zero %llu\n",
                sec, stbox_shared.frame, (unsigned long long)(stbox_shared.frame - lfr), stbox_core_cps(),
                (unsigned long long)(M.writes - lw), (unsigned long long)M.burst, M.burst_late_max_ns,
                (unsigned long long)M.late1us, M.late_max_ns,
@@ -1091,7 +1091,7 @@ static void *reporter(void *arg)
                (unsigned long long)M.probe_late, (unsigned long long)M.probe_skip,
                sd, M.e_max, (unsigned long long)M.relocks,
                M.box_ns / 5e7, M.slice_max_ns, (unsigned long long)M.box_behind,
-               M.flush_ns / 5e7, M.wait_ns / 5e7,
+               M.flush_ns / 5e7, M.wait_ns / 5e7, M.write_ns / 5e7,
                (unsigned long long)M.acia_in, (unsigned long long)M.acia_out, (unsigned long long)M.acia_ovr,
                (unsigned long long)M.acia_fe, (unsigned long long)M.acia_zero);
         if (M.late1us) {
@@ -1127,7 +1127,7 @@ static void *reporter(void *arg)
         }
         lw = M.writes; lf = M.flushed; lfr = stbox_shared.frame;
         M.late_max_ns = 0; M.slice_max_ns = 0; M.q_max = 0; M.e_max = 0; M.burst_late_max_ns = 0;
-        M.box_ns = M.flush_ns = M.wait_ns = 0; M.box_behind = 0;
+        M.box_ns = M.flush_ns = M.wait_ns = M.write_ns = 0; M.box_behind = 0;
         if (stbox_exc_count) {
             static unsigned seen;
             const unsigned n = stbox_exc_count;
@@ -1817,6 +1817,7 @@ int main(int argc, char **argv)
             M.writes++;
             mq_r++;
             act(5, t0);
+            M.write_ns += g_act_ns;
             continue;
         }
 
