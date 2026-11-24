@@ -770,12 +770,13 @@ static void *pad_thread(void *arg)
  * stboxmetal-halt-N.ram (raw, $000000 up) beside the log. */
 static int g_ide_on, g_acsi_on;               /* hard disks, below */
 void ide_dump_stats(void);                     /* IDE.c */
+static const char *g_dis_tag = "[HALT]";       /* m_dis / m_pcs line prefix */
 static void m_dis(uint32_t pc)
 {
     char buf[128];
     pc &= 0xFFFFFF;
     m68k_disassemble(buf, pc, M68K_CPU_TYPE_68000);
-    printf("[HALT]     %06X  %s\n", pc, buf);
+    printf("%s     %06X  %s\n", g_dis_tag, pc, buf);
 }
 static void m_pcs(const uint32_t *pcs, int n)
 {
@@ -785,18 +786,18 @@ static void m_pcs(const uint32_t *pcs, int n)
         int dup = 0;
         for (int j = i - 1; j >= 0 && j >= i - 16; j--) if (pcs[j] == pcs[i]) { dup = 1; break; }
         if (dup) { skipped++; continue; }
-        if (skipped) { printf("[HALT]       (%d repeats of the lines above)\n", skipped); skipped = 0; }
+        if (skipped) { printf("%s       (%d repeats of the lines above)\n", g_dis_tag, skipped); skipped = 0; }
         m_dis(pcs[i]);
     }
-    if (skipped) printf("[HALT]       (%d repeats of the lines above)\n", skipped);
+    if (skipped) printf("%s       (%d repeats of the lines above)\n", g_dis_tag, skipped);
 }
 static void m_exc(const char *tag, const stbox_exc_info_t *e)
 {
-    printf("[HALT]   %s vec%u at pc %06X (next %06X) sr %04X sp %06X d0 %08X a0 %06X a1 %06X a6 %06X cyc %llu",
-           tag, e->vector, e->ppc, e->pc, e->sr, e->sp, e->d0, e->a0, e->a1, e->a6,
+    printf("%s   %s vec%u at pc %06X (next %06X) sr %04X sp %06X d0 %08X a0 %06X a1 %06X a6 %06X cyc %llu",
+           g_dis_tag, tag, e->vector, e->ppc, e->pc, e->sr, e->sp, e->d0, e->a0, e->a1, e->a6,
            (unsigned long long)e->cycles);
     if (e->vector == 2) printf(" fault $%06X", e->addr);
-    printf("\n[HALT]     stack:");
+    printf("\n%s     stack:", g_dis_tag);
     for (int i = 0; i < 8; i++) printf(" %08X", e->stack[i]);
     printf("\n");
 }
@@ -829,6 +830,73 @@ static void m_halt_report(void)
     if (f) { fwrite(stbox_shared.ram, 1, g_ram_bytes, f); fclose(f); }
     printf("[HALT] RAM ($000000-$%06X) written to %s%s\n", g_ram_bytes - 1, fn, f ? "" : " - FAILED");
     printf("[METAL] guest HALTED (double bus fault) at pc %06X: Ctrl+Alt+Undo to restart\n", h->ppc);
+}
+
+/* ---- a box that stopped: no timed write and no RAM change for 5 s -------
+ * (Defender on the 3A+ froze ~15 s into its attract mode: no halt, no
+ * exception, the box still slicing.) Where the CPU is going round, its
+ * registers, the MFP's interrupt state and a RAM dump, once per stall. */
+static void m_stall_report(int sec)
+{
+    static int ns;
+    g_dis_tag = "[STALL]";
+    const unsigned idx = stbox_pc_ring_idx;
+    const uint32_t pc = m68k_get_reg(NULL, M68K_REG_PC), sr = m68k_get_reg(NULL, M68K_REG_SR);
+    printf("[STALL] %dm%02ds: the guest has made no video write and changed no RAM for 5 s - not halted;"
+           " pc %06X sr %04X (int mask %u), %u instructions since the last report\n",
+           sec / 60, sec % 60, pc & 0xFFFFFF, sr, (sr >> 8) & 7, idx - ns);
+    printf("[STALL]   d0-d7:");
+    for (int r = M68K_REG_D0; r <= M68K_REG_D7; r++) printf(" %08X", m68k_get_reg(NULL, r));
+    printf("\n[STALL]   a0-a7:");
+    for (int r = M68K_REG_A0; r <= M68K_REG_A7; r++) printf(" %08X", m68k_get_reg(NULL, r));
+    printf(" usp %08X\n", m68k_get_reg(NULL, M68K_REG_USP));
+    /* the loop: distinct PCs among the last 4096, with how often each ran */
+    {
+        enum { NPC = 48 };
+        uint32_t u[NPC]; unsigned c[NPC]; int nu = 0, more = 0;
+        for (unsigned i = idx - 4096; i != idx; i++) {
+            const uint32_t q = stbox_pc_ring[i & (STBOX_PC_RING - 1)] & 0xFFFFFF;
+            int k = 0;
+            while (k < nu && u[k] != q) k++;
+            if (k < nu) c[k]++;
+            else if (nu < NPC) { u[nu] = q; c[nu] = 1; nu++; }
+            else more++;
+        }
+        for (int a = 1; a < nu; a++)              /* by address */
+            for (int b = a; b > 0 && u[b - 1] > u[b]; b--) {
+                uint32_t t = u[b]; u[b] = u[b - 1]; u[b - 1] = t;
+                unsigned tc = c[b]; c[b] = c[b - 1]; c[b - 1] = tc;
+            }
+        printf("[STALL]   the last 4096 instructions ran at %d addresses%s:\n", nu, more ? " (and more)" : "");
+        for (int k = 0; k < nu; k++) {
+            char buf[128];
+            m68k_disassemble(buf, u[k], M68K_CPU_TYPE_68000);
+            printf("[STALL]     %06X %5u x  %s\n", u[k], c[k], buf);
+        }
+    }
+    printf("[STALL]   MFP gpip..vr:");
+    for (uint32_t a = 0xFFFA01; a <= 0xFFFA17; a += 2) printf(" %02X", stbox_bus_r8(a));
+    printf("  tacr..tcdcr:");
+    for (uint32_t a = 0xFFFA19; a <= 0xFFFA1D; a += 2) printf(" %02X", stbox_bus_r8(a));
+    printf("  acia kbd %02X midi %02X\n", stbox_bus_r8(0xFFFC00), stbox_bus_r8(0xFFFC04));
+    printf("[STALL]   the 256 instructions before now:\n");
+    {
+        static uint32_t last[256];
+        for (int i = 0; i < 256; i++) last[i] = stbox_pc_ring[(idx - 256 + i) & (STBOX_PC_RING - 1)];
+        m_pcs(last, 256);
+    }
+    printf("[STALL]   the last exceptions:\n");
+    for (int i = STBOX_EXC_RING; i > 0; i--)
+        if (stbox_exc_count >= (unsigned)i)
+            m_exc("last", &stbox_exc_ring[(stbox_exc_count - i) & (STBOX_EXC_RING - 1)]);
+    char fn[64];
+    static int nf;
+    snprintf(fn, sizeof fn, "stboxmetal-stall-%d.ram", ++nf);
+    FILE *f = fopen(fn, "wb");
+    if (f) { fwrite(stbox_shared.ram, 1, g_ram_bytes, f); fclose(f); }
+    printf("[STALL]   RAM ($000000-$%06X) written to %s%s\n", g_ram_bytes - 1, fn, f ? "" : " - FAILED");
+    ns = idx;
+    g_dis_tag = "[HALT]";
 }
 
 /* the frame capture, written out by the reporter thread */
@@ -958,6 +1026,14 @@ static void *reporter(void *arg)
         for (int i = 0; i < 50 && !g_report_stop; i++) {
             usleep(100000);
             if (FC.state == 5) fc_report();
+        }
+        {   /* the guest stopped doing anything visible: say where, once */
+            static uint64_t s_w, s_f; static uint32_t s_fr; static int stalled;
+            const int quiet_5s = M.writes == s_w && M.flushed == s_f;
+            const int now_st = quiet_5s && stbox_shared.frame - s_fr > 200 && !stbox_core_halted() && sec > 10;
+            if (now_st && !stalled) { m_stall_report(sec); stalled = 1; }
+            else if (!quiet_5s && stalled) { printf("[STALL] %dm%02ds: the guest is moving again\n", sec / 60, sec % 60); stalled = 0; }
+            s_w = M.writes; s_f = M.flushed; s_fr = stbox_shared.frame;
         }
         if (!g_log) {                     /* quiet: only what needs attention */
             static uint64_t q_rel, q_drop, q_ovr, q_fe, q_zero;
@@ -1586,6 +1662,8 @@ int main(int argc, char **argv)
     uint64_t fcap_at = tfc ? ticks() + (uint64_t)(atof(tfc) * HZ) : 0;
     const char *tcr = getenv("SIM_CRASH_S");
     uint64_t crash_at = tcr ? ticks() + (uint64_t)(atof(tcr) * HZ) : 0;
+    const char *tst = getenv("SIM_STALL_S");           /* test the stall report */
+    uint64_t stall_at = tst ? ticks() + (uint64_t)(atof(tst) * HZ) : 0;
     const char *sim_in = getenv("SIM_INPUT");
     const uint64_t sim_t0 = ticks();
     const char *tsh = getenv("SIM_SHOT_S");           /* SIM_SHOT=file.pgm */
@@ -1615,6 +1693,12 @@ int main(int argc, char **argv)
             crash_at = 0;
             m68k_set_reg(M68K_REG_SP, 0xD00100);
             m68k_set_reg(M68K_REG_PC, 0xD00000);
+        }
+        if (stall_at && ticks() > stall_at) {          /* ipl 7, bra.s * at $600 */
+            stall_at = 0;
+            stbox_shared.ram[0x600] = 0x60; stbox_shared.ram[0x601] = 0xFE;
+            m68k_set_reg(M68K_REG_SR, 0x2700);
+            m68k_set_reg(M68K_REG_PC, 0x600);
         }
         if (shot_at && ticks() > shot_at) {           /* the box's screen, as a PGM */
             shot_at = 0;
