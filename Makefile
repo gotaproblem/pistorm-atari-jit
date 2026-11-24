@@ -479,12 +479,12 @@ METAL_SRC = platforms/atari/stbox/stbox_metal.c platforms/atari/stbox/stbox.c \
             platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c \
             platforms/atari/joy_usb.c platforms/atari/IDE.c platforms/atari/idedriver.c \
             platforms/atari/disk_order.c platforms/atari/fdd/acsi.c platforms/atari/setup/setup_cfg.c \
-            platforms/atari/stbox/stbox_render.c
+            platforms/atari/stbox/stbox_render.c platforms/atari/et4000/et4000_drm.c
 platforms/atari/stbox/stbox_metal_diskload.inc: platforms/atari/stbox/stbox_host.c
 	awk '/^static FILE \*fopen_ci/,/^int stbox_disk_insert_path/' $< | sed '$$d' > $@
 stboxmetal: $(METAL_SRC) tools/beamtest/beamtest.c platforms/atari/stbox/stbox_metal_diskload.inc
 	$(CC) $(METAL_SRC) -o $@ $(CFLAGS) -I. -Iplatforms/atari/setup -Iplatforms/atari \
-	      -Iplatforms/atari/stbox -Ithird_party/musashi -Ithird_party/musashi/softfloat -lm
+	      -Iplatforms/atari/stbox -Ithird_party/musashi -Ithird_party/musashi/softfloat -lm -ldrm
 
 # Hybrid STBOX go/no-go: can timed writes hit the real beam to one bus slot?
 # Not part of `all`: stop the emulator first, then sudo ./beamtest.

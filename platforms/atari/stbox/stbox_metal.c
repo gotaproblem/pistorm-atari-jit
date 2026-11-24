@@ -60,7 +60,8 @@
  * Hard disks: IDE at $F00000 and emulated ACSI targets, the emulator's
  * own IDE.c / acsi.c behind the box's address decode and DMA chip.
  *
- * Not yet: the real floppy drive (disk images only), HDMI, STE.
+ * The Pi's HDMI mirrors the box's picture (hdmi_thread). Not yet: the real
+ * floppy drive (disk images only), STE.
  */
 #define BEAMTEST_NO_MAIN
 #include "../../../tools/beamtest/beamtest.c"
@@ -76,6 +77,8 @@
 #include "../joy_usb.h"
 #include <linux/input.h>
 #include "../linux_st_scan.h"
+#include "../et4000/et4000_drm.h"                 /* the HDMI mirror's presenter */
+#include "stbox_render.h"
 #include "../../../third_party/musashi/m68k.h"
 
 volatile int stbox_errand_active;           /* real-FDC bridge: not here */
@@ -1062,6 +1065,61 @@ static void fc_report(void)
     FC.state = 0;
 }
 
+/* ---- HDMI mirror ---------------------------------------------------------
+ * The box's own picture of every frame, on the Pi's HDMI, beside the real
+ * ST's monitor. Core 3 already captures each frame line by line as its
+ * GLUE drew it (stbox.h, SCANLINE CAPTURE: borders opened, raster splits,
+ * colour changes at their pixel - all exact, whatever the bus could carry
+ * to the real ST); this thread draws the newest one (stbox_render.c, the
+ * monitor's view: side borders and overscan shown) and puts it on a DRM
+ * plane with the emulator's presenter (et4000_drm.c), scaled by the HVS.
+ * On core 2, never the bus core. No display connected: one line, off.
+ * native_hdmi false (the emulator's key) / --hdmi off: the Pi's screen is
+ * left as it is. */
+static int g_hdmi = 1;
+static volatile int g_hdmi_stop;
+static void *hdmi_thread(void *arg)
+{
+    (void)arg;
+    cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(2, &cs);
+    sched_setaffinity(0, sizeof cs, &cs);
+    if (drmpres_open() != 0) {
+        printf("[METAL] HDMI: no display to mirror to - mirror off\n");
+        return NULL;
+    }
+    drmpres_set_source_kind(DRMPRES_SRC_ST);
+    const int hz = drmpres_match_refresh(50.0);   /* the ST's rate: no judder */
+    printf("[METAL] HDMI mirror on, %ux%u%s\n", drmpres_mode_w(), drmpres_mode_h(),
+                      hz > 0 ? ", switched to 50 Hz" : "");
+    static uint32_t px[768 * STBOX_CAP_ROWS];
+    stbox_render_set_view(24, 384);
+    uint32_t last = (uint32_t)-1;
+    unsigned shown = 0;
+    while (!g_hdmi_stop) {
+        const uint32_t fr = stbox_shared.frame, idx = stbox_shared.cap_idx;
+        if (fr == last || idx >= STBOX_CAP_BUFS) { usleep(2000); continue; }
+        last = fr;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        int w = 0, h = 0;
+        if (!stbox_render_cap(&stbox_cap[idx], 0, px, 768, &w, &h) || w <= 0 || h <= 0) continue;
+        /* square-pixel shape: a low-res pixel is one unit wide (medium
+         * draws two per unit), lines one unit high; mono 640 x 400 */
+        if (stbox_cap[idx].mono) drmpres_set_shape((uint32_t)w, (uint32_t)h);
+        else drmpres_set_shape(384, (uint32_t)h);
+        if (drmpres_set_source((uint32_t)w, (uint32_t)h) != 0) continue;
+        uint8_t *bb = drmpres_backbuffer();
+        const uint32_t pitch = drmpres_src_pitch();
+        if (!bb) continue;
+        for (int y = 0; y < h; y++)
+            memcpy(bb + (size_t)y * pitch, px + (size_t)y * 768, (size_t)w * 4);
+        drmpres_flip();
+        shown++;
+    }
+    drmpres_close();
+    if (g_log) printf("[METAL] HDMI mirror: %u frames shown\n", shown);
+    return NULL;
+}
+
 static volatile int g_report_stop;
 static void *reporter(void *arg)
 {
@@ -1471,6 +1529,8 @@ static int m_load_cfg(const char *path, const char *build, const char **tos)
         else    snprintf(g_cal_file, sizeof g_cal_file, "stboxmetal.cal");
     }
     if ((v = sc_get(&g_cfg, sec, "metal_log")) && !strncasecmp(v, "full", 4)) g_log = 1;
+    /* the emulator's key: off keeps the Pi's screen as it is */
+    if ((v = sc_get(&g_cfg, sec, "native_hdmi")) && m_word_is(v, k_false)) g_hdmi = 0;
     if ((v = sc_get(&g_cfg, sec, "stram_size")))
         printf("  stram_size ignored: the box has the real ST's RAM\n");
 
@@ -1578,6 +1638,7 @@ int main(int argc, char **argv)
     double cal_secs = 5.0;
     int core = 3;
     const char *cfg = NULL, *build = NULL;
+    int hdmi_arg = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc) cfg = argv[++i];
         else if (!strcmp(argv[i], "--build") && i + 1 < argc) build = argv[++i];
@@ -1589,9 +1650,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--ahead") && i + 1 < argc) g_ahead = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) g_log = !strncmp(argv[++i], "full", 4);
+        else if (!strcmp(argv[i], "--hdmi") && i + 1 < argc) hdmi_arg = strcmp(argv[++i], "off") != 0;
         else {
             fprintf(stderr, "usage: %s [--config psctrl.cfg --build SECTION] [--tos ROM] [--disk IMG]...\n"
-                            "       [--cal CYCLES | --cal-secs S] [--vdec CYCLE] [--ahead CYCLES] [--core N] [--log quiet|full]\n", argv[0]);
+                            "       [--cal CYCLES | --cal-secs S] [--vdec CYCLE] [--ahead CYCLES] [--core N] [--log quiet|full] [--hdmi on|off]\n", argv[0]);
             return 2;
         }
     }
@@ -1706,9 +1768,11 @@ int main(int argc, char **argv)
         printf("[METAL] keys: Ctrl+Alt+Undo %s, Ctrl+Alt+F1..F%d disks, Ctrl+Alt+Help capture, Ctrl+Alt+Shift+Undo quit\n",
                g_from_cfg ? "setup page" : "reset", g_ndisks ? g_ndisks : 1);
     }
-    pthread_t rep, padt;
+    if (hdmi_arg >= 0) g_hdmi = hdmi_arg;
+    pthread_t rep, padt, hdmit;
     pthread_create(&rep, NULL, reporter, NULL);
     pthread_create(&padt, NULL, pad_thread, NULL);   /* pads (unless usb off), keyboards, mice */
+    if (g_hdmi) pthread_create(&hdmit, NULL, hdmi_thread, NULL);
 
     const double guard = GUARD_NS / NSPT, boxrun = BOXRUN_NS / NSPT,
                  flushg = FLUSH_NS / NSPT, pollg = POLL_NS / NSPT;
@@ -1944,9 +2008,10 @@ int main(int argc, char **argv)
         }
     }
 
-    g_report_stop = 1; g_pad_stop = 1;
+    g_report_stop = 1; g_pad_stop = 1; g_hdmi_stop = 1;
     pthread_join(rep, NULL);
     pthread_join(padt, NULL);
+    if (g_hdmi) pthread_join(hdmit, NULL);
     stbox_metal_hw = NULL; stbox_metal_line = NULL; stbox_metal_ikbd = NULL;
     stbox_core_disarm();
     ym_silence();
