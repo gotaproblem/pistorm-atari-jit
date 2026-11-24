@@ -958,7 +958,9 @@ static void *reporter(void *arg)
             if (M.q_drop != q_drop)
                 L += snprintf(why + L, sizeof why - L, " %llu timed writes dropped (queue full);",
                               (unsigned long long)(M.q_drop - q_drop));
-            if (M.acia_ovr != q_ovr)
+            /* a dead line (framing errors) overruns now and then too:
+             * that is noise from the unplugged keyboard, not a lost key */
+            if (M.acia_ovr != q_ovr && !(M.acia_fe - q_fe > 100 || M.acia_zero - q_zero > 100))
                 L += snprintf(why + L, sizeof why - L, " %llu keyboard bytes lost (ACIA overrun);",
                               (unsigned long long)(M.acia_ovr - q_ovr));
             {   /* said once when it starts and once when it stops: an ST whose
