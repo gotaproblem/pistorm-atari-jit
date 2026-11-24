@@ -106,6 +106,28 @@ else
 fi
 say "pad: $MAC"
 
+# the kernel adds the input device after HID service discovery, a few
+# seconds after the link comes up - match it by the pad's Bluetooth
+# address (uniq= in /proc/bus/input/devices), falling back to its name.
+# Prints the eventN node; waits up to $1 seconds.
+find_node() {
+    local secs=$1 i n lmac name
+    lmac=$(echo "$MAC" | tr A-F a-f)
+    name=$(grep -m1 -oE "Device $MAC .*" "$LOG" | cut -d' ' -f3- | tr -d '\r')
+    for ((i = 0; i < secs; i++)); do
+        n=$(awk -v mac="$lmac" -v name="${name:-Controller}" '
+            /^I:/ { blk = ""; hit = 0 }
+            { blk = blk $0 "\n" }
+            /^U: Uniq=/ && index(tolower($0), mac) { hit = 1 }
+            /^N: Name=/ && index($0, name)         { hit = 1 }
+            /^H: Handlers=/ && hit { match($0, /event[0-9]+/); print substr($0, RSTART, RLENGTH); exit }
+        ' /proc/bus/input/devices 2>/dev/null)
+        [ -n "$n" ] && { printf '%s\n' "$n"; return 0; }
+        sleep 1
+    done
+    return 1
+}
+
 # ---- already good? ----------------------------------------------------
 m=$(mark); cmd info "$MAC"; sleep 1
 if [ $FRESH = 0 ] && tail -c +$((m + 1)) "$LOG" | grep -q "Paired: yes"; then
@@ -114,11 +136,16 @@ if [ $FRESH = 0 ] && tail -c +$((m + 1)) "$LOG" | grep -q "Paired: yes"; then
     if waitfor 8 "Connection successful|Connected: yes" "$m" >/dev/null; then
         sleep 3
         m=$(mark); cmd info "$MAC"; sleep 1
-        if tail -c +$((m + 1)) "$LOG" | grep -q "Connected: yes"; then
+        # "Connected: yes" alone proves nothing: a pad that has forgotten
+        # this Pi (paired to another host since) links up for a few ms,
+        # refuses the stored key ("PIN or Key Missing" in btmon) and
+        # drops, over and over. Only an input device proves the bond.
+        if tail -c +$((m + 1)) "$LOG" | grep -q "Connected: yes" && find_node 10 >/dev/null; then
             say "already paired and connected"; FRESH=-1
         fi
     fi
-    [ $FRESH = -1 ] || { say "paired but will not stay connected - re-pairing from scratch"; FRESH=1; }
+    [ $FRESH = -1 ] || { say "the pad no longer accepts this Pi's key (paired to another host since?) - re-pairing from scratch"
+                         say "put it in pairing mode now: hold the small pair button until the logo flashes FAST"; FRESH=1; }
 fi
 if [ $FRESH = 1 ]; then
     cmd remove "$MAC"; sleep 1
@@ -162,23 +189,7 @@ for i in $(seq 1 12); do
 done
 [ $up -ge 4 ] || die "pad connects but drops again (journalctl -u bluetooth -b | tail; sudo btmon)"
 
-# the kernel adds the input device after HID service discovery, a few
-# seconds after the link comes up - match it by the pad's Bluetooth
-# address (uniq= in /proc/bus/input/devices), falling back to its name
-NAME=$(grep -m1 -oE "Device $MAC .*" "$LOG" | cut -d' ' -f3- | tr -d '\r')
-lmac=$(echo "$MAC" | tr A-F a-f)
-node=
-for i in $(seq 1 15); do
-    node=$(awk -v mac="$lmac" -v name="${NAME:-Controller}" '
-        /^I:/ { blk = ""; hit = 0 }
-        { blk = blk $0 "\n" }
-        /^U: Uniq=/ && index(tolower($0), mac) { hit = 1 }
-        /^N: Name=/ && index($0, name)         { hit = 1 }
-        /^H: Handlers=/ && hit { match($0, /event[0-9]+/); print substr($0, RSTART, RLENGTH); exit }
-    ' /proc/bus/input/devices 2>/dev/null)
-    [ -n "$node" ] && break
-    sleep 1
-done
+node=$(find_node 15)
 if [ -n "$node" ]; then
     say "OK: $MAC connected, /dev/input/$node - the emulator will pick it up (usb gamepad)"
 else
