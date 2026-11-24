@@ -6,6 +6,7 @@
 #include <string.h>
 #include "shifter_setup.h"
 #include "gpio/ps_protocol.h"
+#include "shifter_blank.h"
 #include "psfont8x8.h"
 
 extern uint8_t fc;                        /* gpio/ps_protocol.c */
@@ -100,11 +101,14 @@ int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
     ps_write_8(REG_VBASE_HI, (SS_SCREEN_BASE >> 16) & 0xFF);
     ps_write_8(REG_VBASE_MI, (SS_SCREEN_BASE >> 8) & 0xFF);
     ss->hz50 = hz50 ? 1 : 0;
-    ps_write_8(REG_SYNC, hz50 ? 0x02 : 0x00);   /* bit 1: 1 = 50 Hz */
 
     /* TOS convention: colour 0 = paper $777. Mono reads bit 0 of it. */
     static const uint16_t pal[4] = { 0x0777, 0x0700, 0x0070, 0x0000 };
     ss_palette(pal);
+    /* sync and rez together in the vertical blank: a change mid-display
+     * can leave the Shifter a word out of step (shifter_blank.h) */
+    shifter_wait_blank(100);
+    ps_write_8(REG_SYNC, hz50 ? 0x02 : 0x00);   /* bit 1: 1 = 50 Hz */
     ps_write_8(REG_REZ, ss->mode == SS_MODE_MONO ? 2 : 1);
 
     /* nothing on the board is known yet: force the first flush to write all */

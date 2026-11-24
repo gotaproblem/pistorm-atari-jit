@@ -103,6 +103,7 @@
 #include <unistd.h>
 
 #include "gpio/ps_protocol.h"
+#include "platforms/atari/setup/shifter_blank.h"
 #include "gpio/bus_lock.h"
 #include "shifter_setup.h"
 
@@ -603,6 +604,7 @@ static void run_phase(int ph, double secs)
         /* three frames with no usable lock read: the beam is lost (run 4
          * never came back from it). Stop, lock afresh, carry on. */
         if (g_rej_run >= 3) {
+            shifter_wait_blank(100);
             ps_write_8(R_SYNC, 2);
             ps_write_8(R_REZ, 0);
             if (R.recover < 16) R.recover_sec[R.recover] = (uint32_t)(R.frames / 50);
@@ -613,6 +615,7 @@ static void run_phase(int ph, double secs)
         }
     }
     /* leave the machine plain */
+    shifter_wait_blank(100);
     ps_write_8(R_SYNC, 2);
     ps_write_8(R_REZ, 0);
 }
@@ -784,6 +787,7 @@ static int bt_init(const char *who, int core)
     /* a solid screen in colour 15, black border: any line the Shifter
      * fetches is colour 15 whatever its length, so overscan shows at once */
     fc = 0x5;
+    shifter_wait_blank(100);
     ps_write_8(R_SYNC, 2);
     ps_write_8(R_REZ, 0);
     ps_write_8(0x00FF8201u, (BASE >> 16) & 0xFF);
@@ -799,6 +803,8 @@ static int bt_init(const char *who, int core)
 /* Back to the plain screen the lock reads (after a test or a box run). */
 static void __attribute__((unused)) bt_plain_screen(void)
 {
+    /* sync and rez in the vertical blank: see shifter_blank.h */
+    shifter_wait_blank(100);
     ps_write_8(R_SYNC, 2);
     ps_write_8(R_REZ, 0);
     ps_write_8(0x00FF8201u, (BASE >> 16) & 0xFF);
