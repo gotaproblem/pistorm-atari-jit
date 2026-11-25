@@ -1090,10 +1090,18 @@ static void *hdmi_thread(void *arg)
         return NULL;
     }
     drmpres_set_source_kind(DRMPRES_SRC_ST);
-    const int hz = drmpres_match_refresh(50.0);   /* the ST's rate: no judder */
     g_hdmi_up = 1;
-    printf("[METAL] HDMI mirror on, %ux%u%s\n", drmpres_mode_w(), drmpres_mode_h(),
-                      hz > 0 ? ", switched to 50 Hz" : "");
+    printf("[METAL] HDMI mirror on, %ux%u\n", drmpres_mode_w(), drmpres_mode_h());
+    /* The panel follows the ST's frame rate: every second the box's frames
+     * are counted against the Pi's clock; when the ST settles on a
+     * different rate (50 Hz PAL, 60 Hz, 71 Hz mono - a game switching
+     * for good, not a border trick's few cycles) the panel moves to the
+     * mode nearest it and its pixel clock is trimmed to the real ST's
+     * exact rate (the beam lock's cycle time x the frame's cycles), so no
+     * frame is dropped or doubled. 71 Hz has no HDMI mode: left as is. */
+    uint64_t rt0 = ticks();
+    uint32_t rf0 = stbox_shared.frame;
+    int cls = 0, cand = 0, cand_n = 0;
     static uint32_t px[768 * STBOX_CAP_ROWS];
     stbox_render_set_view(24, 384);
     uint32_t last = (uint32_t)-1;
@@ -1119,15 +1127,24 @@ static void *hdmi_thread(void *arg)
             memcpy(bb + (size_t)y * pitch, px + (size_t)y * 768, (size_t)w * 4);
         drmpres_flip();
         shown++;
-        if (shown == 150) {               /* refused unless the panel is within 0.5 % */
-            /* 3 s in, the lock has the ST's own clock: run the panel at
-             * exactly the ST's frame rate (8021165 Hz / 160256 = 50.052 Hz
-             * on the Pi 4's ST) instead of 50.000, which dropped a frame
-             * every ~20 s. A 50 Hz PAL frame; a game at 60 Hz is not
-             * followed yet. */
-            const double st_hz = HZ / (TPC * 160256.0);
-            const double got = drmpres_trim_refresh(st_hz);
-            if (got > 0) printf("[METAL] HDMI at the ST's own %.3f Hz\n", got);
+        {
+            const uint64_t tn = ticks();
+            const double dt = (double)(tn - rt0) / HZ;
+            if (dt >= 1.0) {
+                const double fps = (double)(fr - rf0) / dt;
+                rt0 = tn; rf0 = fr;
+                const int c = fps > 66.0 ? 71 : fps > 55.0 ? 60 : fps > 40.0 ? 50 : 0;
+                if (c && c == cand) cand_n++; else { cand = c; cand_n = 1; }
+                if (c && c != cls && cand_n >= 2) {          /* two seconds the same */
+                    cls = c;
+                    const double cyc = c == 50 ? 160256.0 : c == 60 ? 133604.0 : 112224.0;
+                    const double st_hz = HZ / (TPC * cyc);
+                    drmpres_match_refresh((double)c);
+                    const double got = drmpres_trim_refresh(st_hz);
+                    if (got > 0) printf("[METAL] HDMI at the ST's own %.3f Hz\n", got);
+                    else printf("[METAL] the ST runs at %.3f Hz; HDMI has no mode within 0.5 %% of it - left as is\n", st_hz);
+                }
+            }
         }
         g_hdmi_shown = shown;
         {
