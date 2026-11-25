@@ -1119,6 +1119,16 @@ static void *hdmi_thread(void *arg)
             memcpy(bb + (size_t)y * pitch, px + (size_t)y * 768, (size_t)w * 4);
         drmpres_flip();
         shown++;
+        if (shown == 150) {               /* refused unless the panel is within 0.5 % */
+            /* 3 s in, the lock has the ST's own clock: run the panel at
+             * exactly the ST's frame rate (8021165 Hz / 160256 = 50.052 Hz
+             * on the Pi 4's ST) instead of 50.000, which dropped a frame
+             * every ~20 s. A 50 Hz PAL frame; a game at 60 Hz is not
+             * followed yet. */
+            const double st_hz = HZ / (TPC * 160256.0);
+            const double got = drmpres_trim_refresh(st_hz);
+            if (got > 0) printf("[METAL] HDMI at the ST's own %.3f Hz\n", got);
+        }
         g_hdmi_shown = shown;
         {
             const unsigned us = (unsigned)((double)(ticks() - r0) * NSPT / 1000.0);

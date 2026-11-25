@@ -89,6 +89,10 @@ void drmpres_close(void);
  * latched yet (async path), since start */
 unsigned drmpres_flips_dropped(void);
 
+/* scale the current mode's pixel clock (within 0.5 %) so the panel runs at
+ * exactly `hz`; returns the refresh set, 0 if unchanged */
+double drmpres_trim_refresh(double hz);
+
 /* --- accessors for other users of the SAME DRM master fd -------------------
  * Only the DRM master may touch planes, and that is us. The host video player
  * (platforms/atari/video/) puts movies on a SECOND overlay plane of this same

@@ -997,6 +997,38 @@ int drmpres_match_refresh(double fps)
     return (int)best.vrefresh;
 }
 
+/* Nudge the current mode's pixel clock so the panel refreshes at exactly
+ * `hz` - for a source with its own clock (the real ST's 50.05 Hz against
+ * HDMI's 50.00, one frame dropped every ~20 s). Same timings, clock
+ * scaled; refused beyond 0.5 % (no sink should be asked for more). The
+ * original mode comes back with drmpres_restore_refresh / drmpres_close.
+ * Returns the refresh now set, 0 when nothing was changed. */
+double drmpres_trim_refresh(double hz)
+{
+    if (g_fd < 0 || hz <= 0.0 || !g_mode.htotal || !g_mode.vtotal)
+        return 0.0;
+    const double now = (double)g_mode.clock * 1000.0 / ((double)g_mode.htotal * g_mode.vtotal);
+    const double r = hz / now;
+    if (fabs(r - 1.0) > 0.005 || fabs(r - 1.0) < 2e-6)
+        return 0.0;
+    drmModeModeInfo m = g_mode;
+    m.clock = (uint32_t)llround((double)g_mode.clock * r);
+    m.type &= ~DRM_MODE_TYPE_PREFERRED;
+    m.type |= DRM_MODE_TYPE_USERDEF;
+    if (!g_mode_switched) { g_orig_mode = g_mode; g_mode_switched = 1; }
+    if (drmModeSetCrtc(g_fd, g_crtc_id, g_bg_fb, 0, 0, &g_conn_id, 1, &m) < 0) {
+        fprintf(stderr, "[DRM] could not trim the pixel clock %u -> %u kHz: %s\n",
+                g_mode.clock, m.clock, strerror(errno));
+        return 0.0;
+    }
+    const double got = (double)m.clock * 1000.0 / ((double)m.htotal * m.vtotal);
+    fprintf(stderr, "[DRM] pixel clock %u -> %u kHz: %.4f -> %.4f Hz (wanted %.4f)\n",
+            g_mode.clock, m.clock, now, got, hz);
+    g_mode = m;
+    g_first_flip = 1;                 /* the plane goes back on with a full commit */
+    return got;
+}
+
 void drmpres_restore_refresh(void)
 {
     if (g_fd < 0 || !g_mode_switched)
