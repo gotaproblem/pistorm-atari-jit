@@ -882,6 +882,9 @@ static void fdc_command(uint8_t v)
 /* interrupt plumbing                                                 */
 /* ================================================================== */
 static uint8_t g_hbl_pending, g_vbl_pending;
+#define MFP_WAIT      4                 /* extra cycles per MFP access    */
+#define MFP_IACK_XTRA 20                /* MFP vectored IACK, over the 44 */
+extern void m68k_use_cycles(int n);
 
 static int g_in_exec_irq;             /* = g_in_exec, set by the slice   */
 static int g_irq_level;
@@ -928,6 +931,10 @@ static int stbox_int_ack(int level)
                     if (mfp.vr & 0x08) mfp.isrb |= bit;
                 }
                 update_irq();
+                /* the MFP's vectored IACK on an ST: 64 cycles from Timer B's
+                 * event to the handler's first instruction in Hatari (the
+                 * 68000's 44 + the MFP's IRQ and vector delay) */
+                if (g_in_exec_irq) m68k_use_cycles(MFP_IACK_XTRA);
                 return (mfp.vr & 0xF0) + ch;
             }
         }
@@ -1460,7 +1467,14 @@ static uint32_t tb_point(void)
     line_peek(&l);
     if (!l.bytes)
         return 0xFFFFFFFFu;
-    uint32_t p = (uint32_t)(l.fstart + 2 * (l.bytes + l.extra)) + TB_OFS;
+    /* Timer B counts DE edges on the MFP's input I3: AER bit 3 clear =
+     * the falling edge, the end of the line's display (TOS); set = the
+     * rising edge, its start (Hatari Video_TimerB_GetPos). No Second
+     * Prize sets it; counted at the end, its sky raster ran ~320 cycles
+     * late and its colour changes stepped into the next line's picture. */
+    uint32_t p = (mfp.aer & 0x08)
+               ? (uint32_t)l.fstart + TB_OFS
+               : (uint32_t)(l.fstart + 2 * (l.bytes + l.extra)) + TB_OFS;
     if (p > g_line_len) p = g_line_len;
     return g_tb_cache = g_line_start + p;
 }
@@ -1818,6 +1832,7 @@ static void     hw_write(uint32_t a, uint32_t v, int size);
 static uint16_t mw_data_read(void);           /* STE microwire, below */
 static uint16_t mw_mask_read(void);
 
+static inline void mfp_wait(void) { if (g_in_exec) m68k_use_cycles(MFP_WAIT); }
 static uint8_t mfp_read(uint32_t a)
 {
     switch (a & 0x3F) {
@@ -1843,7 +1858,7 @@ static void mfp_write(uint32_t a, uint8_t v)
 {
     switch (a & 0x3F) {
         case 0x01: mfp.gpip = v; break;
-        case 0x03: mfp.aer  = v; break;
+        case 0x03: mfp.aer  = v; g_tb_cache_ok = 0; break;   /* Timer B's edge */
         case 0x05: mfp.ddr  = v; break;
         case 0x07: mfp.iera = v; mfp.ipra &= v; break;
         case 0x09: {
@@ -2073,8 +2088,9 @@ static uint32_t hw_read(uint32_t a, int size)
     }
     if (a == 0xFF8802) return 0xFF;
 
-    /* MFP */
-    if (a >= 0xFFFA01 && a <= 0xFFFA3F) return mfp_read(a);
+    /* MFP: each access is 4 cycles longer than the 68000's own (Hatari's
+     * traced clr.b $fa1b.w = 24, move.b #,$fa1b.w = 20 on an STF) */
+    if (a >= 0xFFFA01 && a <= 0xFFFA3F) { mfp_wait(); return mfp_read(a); }
 
     /* ACIAs */
     if (a == 0xFFFC00) return acia.sr;
@@ -2281,8 +2297,8 @@ static void hw_write(uint32_t a, uint32_t v, int size)
         return;
     }
 
-    /* MFP */
-    if (a >= 0xFFFA01 && a <= 0xFFFA3F) { mfp_write(a, (uint8_t)v); return; }
+    /* MFP (wait: see the read side) */
+    if (a >= 0xFFFA01 && a <= 0xFFFA3F) { mfp_wait(); mfp_write(a, (uint8_t)v); return; }
 
     /* ACIAs */
     if (a == 0xFFFC00) { acia.cr = (uint8_t)v; return; }

@@ -2186,8 +2186,11 @@ static inline void m68ki_exception_interrupt(uint int_level)
 
 	m68ki_jump(new_pc);
 
-	/* Defer cycle counting until later */
-	USE_CYCLES(CYC_EXCEPTION[vector]);
+	/* Defer cycle counting until later. PiStorm: a vectored interrupt
+	 * (vector 64-255, the ST's MFP) costs what an autovectored one does
+	 * (44 on a 68000) - the table's entries for 64-255 are 4, meant for
+	 * nothing, and an MFP interrupt was taken 40 cycles early. */
+	USE_CYCLES(CYC_EXCEPTION[vector >= 64 ? EXCEPTION_INTERRUPT_AUTOVECTOR + int_level : vector]);
 
 #if !M68K_EMULATE_INT_ACK
 	/* Automatically clear IRQ if we are not using an acknowledge scheme */
