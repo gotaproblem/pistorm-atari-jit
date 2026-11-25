@@ -161,6 +161,7 @@ static double TPC;          /* ticks per ST cycle (follows the lock)       */
 static double O;            /* tick of frame 0, line 0, cycle 0            */
 static double P;            /* ticks per frame                             */
 static double LEAD8, LEAD16;/* issue a write this many ticks early         */
+static double BURST_NS = 990.0;  /* a write's cost back to back (measured)  */
 static int    lead_forced = -1;
 static double g_cal;        /* cycles: aim writes this far from target   */
 static int    cal_forced;
@@ -773,6 +774,7 @@ static void measure_writes(void)
     /* aim the middle of a write where the middle of a counter read was */
     LEAD8  = h_pct(&h8, 0.5)  / 2.0 / NSPT;
     LEAD16 = h_pct(&h16, 0.5) / 2.0 / NSPT;
+    BURST_NS = h_pct(&hb16, 0.5);
     if (lead_forced >= 0) LEAD8 = LEAD16 = lead_forced / NSPT;
     if (!bt_quiet)
     printf("  write lead: byte %.0f ns, word %.0f ns%s\n", LEAD8 * NSPT, LEAD16 * NSPT,

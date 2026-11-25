@@ -110,7 +110,7 @@ static inline double m_abs(double t)    { return (double)mA0 + (t - mT0) / TPC; 
 
 /* ---- stats (written by the bus thread, printed by the reporter) ------- */
 static struct {
-    uint64_t writes, late1us, burst, pal_drop, q_drop, q_max, box_slices, box_behind;
+    uint64_t writes, late1us, burst, runs_moved, pal_drop, q_drop, q_max, box_slices, box_behind;
     double   burst_late_max_ns;
     uint64_t flushed, acia_in, acia_out, acia_ovr, acia_fe, acia_zero;
     uint64_t probes, probe_ok, probe_rej, probe_late, probe_skip;
@@ -254,7 +254,10 @@ static void m_line(uint64_t abs_line, unsigned line, int fstart, unsigned bytes,
     P1.frame_seen = stbox_shared.frame;
 }
 
-static double g_plead_ns;                    /* lock read start -> its stamp */
+static double g_plead_ns;
+static double g_cap_every;                   /* --capture-every S          */
+static uint64_t g_run_end;                   /* colour runs moved earlier   */
+static double   g_run_shift;                    /* lock read start -> its stamp */
 static void m_probe(void)
 {
     P1.pending = 0;
@@ -1234,11 +1237,11 @@ static void *reporter(void *arg)
         ilog_print();
         const double n = M.probe_ok ? (double)M.probe_ok : 1.0;
         const double em = M.e_sum / n, sd = sqrt(fmax(0.0, M.e_sq / n - em * em));
-        printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late) others late>1us %llu max %.0f ns, colour dropped %llu, queue max %llu drop %llu"
+        printf("[METAL] %3ds frames %u (+%llu) cps %u | writes +%llu (in bursts %llu, max %.0f ns late, colour runs moved early %llu) others late>1us %llu max %.0f ns, colour dropped %llu, queue max %llu drop %llu"
                " | RAM longs +%llu | lock reads ok %llu rejected %llu late %llu skipped %llu, err sd %.2f max %.1f cyc, relocks %llu"
                " | box %.0f %% (slice max %.0f ns, behind %llu), RAM copy %.0f %%, waiting %.0f %%, writing %.0f %% | IKBD in %llu out %llu ovr %llu fe %llu zero %llu\n",
                sec, stbox_shared.frame, (unsigned long long)(stbox_shared.frame - lfr), stbox_core_cps(),
-               (unsigned long long)(M.writes - lw), (unsigned long long)M.burst, M.burst_late_max_ns,
+               (unsigned long long)(M.writes - lw), (unsigned long long)M.burst, M.burst_late_max_ns, (unsigned long long)M.runs_moved,
                (unsigned long long)M.late1us, M.late_max_ns,
                (unsigned long long)M.pal_drop, (unsigned long long)M.q_max, (unsigned long long)M.q_drop,
                (unsigned long long)(M.flushed - lf),
@@ -1319,7 +1322,7 @@ static int m_start_box(void)
     ym_silence();
     usleep(60000);
     if (lock(g_log ? 1 : 2) != 0) return -1;
-    mq_r = mq_w = 0;
+    mq_r = mq_w = 0; g_run_end = 0;
     g_last_abs = 0;
     memset(&P1, 0, sizeof P1);
     memset(PV, 0, sizeof PV);
@@ -1695,9 +1698,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--core") && i + 1 < argc) core = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--log") && i + 1 < argc) g_log = !strncmp(argv[++i], "full", 4);
         else if (!strcmp(argv[i], "--hdmi") && i + 1 < argc) hdmi_arg = strcmp(argv[++i], "off") != 0;
+        else if (!strcmp(argv[i], "--capture-every") && i + 1 < argc) g_cap_every = atof(argv[++i]);
         else {
             fprintf(stderr, "usage: %s [--config psctrl.cfg --build SECTION] [--tos ROM] [--disk IMG]...\n"
-                            "       [--cal CYCLES | --cal-secs S] [--vdec CYCLE] [--ahead CYCLES] [--core N] [--log quiet|full] [--hdmi on|off]\n", argv[0]);
+                            "       [--cal CYCLES | --cal-secs S] [--vdec CYCLE] [--ahead CYCLES] [--core N] [--log quiet|full] [--hdmi on|off] [--capture-every SECONDS]\n", argv[0]);
             return 2;
         }
     }
@@ -1922,11 +1926,51 @@ int main(int argc, char **argv)
                 if (!pending) { fc_readback(); FC.state = 5; }
             }
         }
+        /* --capture-every S: a frame capture every S seconds, no key needed
+         * (a game that reacts to any key - No Second Prize - can't be
+         * captured with Ctrl+Alt+Help) */
+        if (g_cap_every > 0.0) {
+            static uint64_t next_cap;
+            const uint64_t tc = ticks();
+            if (!next_cap) next_cap = tc + (uint64_t)(g_cap_every * HZ);
+            else if (tc > next_cap && FC.state == 0 && !FC.req) {
+                FC.req = 1;
+                next_cap = tc + (uint64_t)(g_cap_every * HZ);
+            }
+        }
         /* the next timed thing: a queued write or the lock read */
         double tn = 1e30; int is_probe = 0;
         if (mq_r != mq_w) {
             const mev_t *e = &mq[mq_r & (MQ - 1)];
             tn = m_time((double)e->abs + g_cal) - (e->size == 1 ? LEAD8 : LEAD16);
+            /* A run of colour writes closer together than the bus can
+             * take them (a movem to the palette: one every 4 cycles, the
+             * Pi's back-to-back write ~8) can't all land on time; sent
+             * from their own times the last of 16 came ~8 us late, ~140
+             * pixels into the next line (No Second Prize's sky bands
+             * stepped at the left). The whole run is moved earlier by
+             * what it lacks, so its LAST write lands on time and the
+             * early ones fall in the line's blanking before it - where a
+             * colour change does not show. Colour registers only, never
+             * sync/rez/base; at most 200 cycles (25 us). */
+            if (e->a >= 0xFF8240 && e->a < 0xFF8260) {
+                if (e->abs >= g_run_end) {               /* the start of a run? */
+                    const double wcyc = BURST_NS / NSPT / TPC;
+                    double lack = 0.0; uint64_t last = e->abs; unsigned n = 1;
+                    for (unsigned j = mq_r + 1; j != mq_w && n < 64; j++, n++) {
+                        const mev_t *x = &mq[j & (MQ - 1)];
+                        if (x->a < 0xFF8240 || x->a >= 0xFF8260) break;
+                        const double d = (double)(x->abs - last);
+                        if (d >= wcyc) break;
+                        lack += wcyc - d;
+                        last = x->abs;
+                    }
+                    g_run_shift = n > 1 ? (lack > 200.0 ? 200.0 : lack) : 0.0;
+                    g_run_end = last + 1;
+                    if (n > 1) M.runs_moved++;
+                }
+                tn -= g_run_shift * TPC;
+            }
         }
         if (P1.pending) {
             const double tp = m_time((double)P1.abs) - g_plead_ns / NSPT;
