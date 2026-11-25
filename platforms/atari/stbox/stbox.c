@@ -883,7 +883,11 @@ static void fdc_command(uint8_t v)
 /* ================================================================== */
 static uint8_t g_hbl_pending, g_vbl_pending;
 #define MFP_WAIT      4                 /* extra cycles per MFP access    */
-#define MFP_IACK_XTRA 20                /* MFP vectored IACK, over the 44 */
+#define MFP_IACK_XTRA 12                /* MFP vectored IACK, over the 44
+                                           (Hatari CPU_IACK_CYCLES_MFP)   */
+#define MFP_IRQ_DELAY 4u                /* an MFP IRQ reaches the 68000 4
+                                           cycles after it is raised
+                                           (Hatari MFP_IRQ_DELAY_TO_CPU)  */
 extern void m68k_use_cycles(int n);
 
 static int g_in_exec_irq;             /* = g_in_exec, set by the slice   */
@@ -931,9 +935,11 @@ static int stbox_int_ack(int level)
                     if (mfp.vr & 0x08) mfp.isrb |= bit;
                 }
                 update_irq();
-                /* the MFP's vectored IACK on an ST: 64 cycles from Timer B's
-                 * event to the handler's first instruction in Hatari (the
-                 * 68000's 44 + the MFP's IRQ and vector delay) */
+                /* the MFP's vectored IACK: 12 cycles over the 68000's 44
+                 * (Hatari CPU_IACK_CYCLES_MFP). With MFP_IRQ_DELAY, Timer
+                 * B's event to the handler's first instruction is 60 when
+                 * an instruction ends 4 cycles after it (Hatari, Beast
+                 * II's sky); later when the one in progress runs longer */
                 if (g_in_exec_irq) m68k_use_cycles(MFP_IACK_XTRA);
                 return (mfp.vr & 0xF0) + ch;
             }
@@ -1493,9 +1499,20 @@ static uint32_t tb_point(void)
     return g_tb_cache = g_line_start + p;
 }
 
+/* when Timer B's interrupt can be taken: its event, plus the 4 cycles the
+ * MFP's IRQ takes to reach the 68000 - an instruction that ends sooner is
+ * followed by one more before the interrupt, as in Hatari */
+static uint32_t tb_due(void)
+{
+    const uint32_t p = tb_point();
+    if (p == 0xFFFFFFFFu) return p;
+    const uint32_t end = g_line_start + g_line_len;
+    return p + MFP_IRQ_DELAY < end ? p + MFP_IRQ_DELAY : end;
+}
+
 static void tb_check(void)
 {
-    if (g_frame_cyc >= tb_point()) {
+    if (g_frame_cyc >= tb_due()) {
         g_tb_done = 1;
         mfp_timerb_event();
     }
@@ -2960,7 +2977,7 @@ void stbox_slice(uint64_t now)
              * interrupt it raises is taken at the next instruction */
             uint32_t budget = SLICE_CYC;
             uint32_t ev = g_next_line_cyc;
-            const uint32_t tb = tb_point();
+            const uint32_t tb = tb_due();
             if (tb < ev) ev = tb;
             if (!g_vbl_done && VBL_CYC < ev) ev = VBL_CYC;
             ev = ev > g_frame_cyc ? ev - g_frame_cyc : 1;
