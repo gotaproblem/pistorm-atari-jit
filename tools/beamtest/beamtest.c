@@ -733,17 +733,42 @@ static int lock(int quiet)
 static int bt_quiet;                 /* stboxmetal's quiet log: no tables */
 static void measure_writes(void)
 {
-    hist_t h8, h16;
-    memset(&h8, 0, sizeof h8); memset(&h16, 0, sizeof h16);
+    hist_t h8, h16, h32, hb16, hb32;
+    memset(&h8, 0, sizeof h8); memset(&h16, 0, sizeof h16); memset(&h32, 0, sizeof h32);
+    memset(&hb16, 0, sizeof hb16); memset(&hb32, 0, sizeof hb32);
     for (int i = 0; i < 4000; i++) {
         uint64_t t0 = ticks(); ps_write_8(R_SYNC, 2); uint64_t t1 = ticks();
         h_add(&h8, (double)(t1 - t0) * NSPT);
         t0 = ticks(); ps_write_16(R_PAL0, C_BLACK); t1 = ticks();
         h_add(&h16, (double)(t1 - t0) * NSPT);
+        /* colours 0 and 1 in one 32-bit write: what pairing a movem's
+         * colour words would cost (a long is two bus cycles on the ST) */
+        t0 = ticks(); ps_write_32(R_PAL0, ((uint32_t)C_BLACK << 16) | C_BLACK); t1 = ticks();
+        h_add(&h32, (double)(t1 - t0) * NSPT);
     }
+    /* sustained: 16 colours back to back as words, and as 8 longs - per
+     * colour, what a game's burst of colour changes gets. The palette is
+     * read first and put back after. */
+    uint16_t pal_save[16];
+    for (int c = 0; c < 16; c++) pal_save[c] = ps_read_16(R_PAL0 + 2 * c) & 0x0FFF;
+    for (int i = 0; i < 500; i++) {
+        uint64_t t0 = ticks();
+        for (int c = 0; c < 16; c++) ps_write_16(R_PAL0 + 2 * c, C_BLACK);
+        uint64_t t1 = ticks();
+        h_add(&hb16, (double)(t1 - t0) * NSPT / 16.0);
+        t0 = ticks();
+        for (int c = 0; c < 16; c += 2) ps_write_32(R_PAL0 + 2 * c, ((uint32_t)C_BLACK << 16) | C_BLACK);
+        t1 = ticks();
+        h_add(&hb32, (double)(t1 - t0) * NSPT / 16.0);
+    }
+    for (int c = 0; c < 16; c++) ps_write_16(R_PAL0 + 2 * c, pal_save[c]);
     if (!bt_quiet) {
         h_print("byte write time", &h8);
         h_print("word write time", &h16);
+        h_print("long write time", &h32);
+        h_print("burst/colour, words", &hb16);
+        h_print("burst/colour, longs", &hb32);
+        printf("  (the 68000 writes a colour every 500 ns in a movem burst)\n");
     }
     /* aim the middle of a write where the middle of a counter read was */
     LEAD8  = h_pct(&h8, 0.5)  / 2.0 / NSPT;
