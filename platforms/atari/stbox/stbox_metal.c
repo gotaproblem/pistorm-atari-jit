@@ -1850,7 +1850,9 @@ int main(int argc, char **argv)
                 const char *c = strchr(sim_in, ':');
                 if (c) {
                     unsigned v = 0;
+                    int mx, my;
                     if (c[1] == 'j' && sscanf(c + 3, "=%x", &v) == 1) stbox_joy_event(c[2] - '0', (uint8_t)v);
+                    else if (c[1] == 'm' && sscanf(c + 2, "=%d,%d", &mx, &my) == 2) stbox_mouse_rel(mx, my, 0);
                     else if (c[1] == 'k' && sscanf(c + 2, "=%x", &v) == 1) {
                         stbox_key_event(v & 0x7F, !(v & 0x80));
                     }

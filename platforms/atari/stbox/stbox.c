@@ -1122,10 +1122,24 @@ static void input_drain(void)
 }
 
 /* serial-pace one fifo byte into the ACIA when due */
+static uint32_t g_acia_lost;          /* bytes lost to an unread RDR     */
 static void acia_pump(void)
 {
-    if ((acia.sr & 0x01) || acia.fh == acia.ft) return;
+    if (acia.fh == acia.ft) return;
     if (g_total_cyc < acia.next_rx_cyc) return;
+    /* The IKBD keeps sending whether the guest reads or not. A byte that
+     * arrives while the last is still unread is lost and OVRN set, as on
+     * a 6850 - it used to wait in the fifo instead. Defender stops reading
+     * the keyboard ACIA for a while, then reads it again in a loop into a
+     * 16-byte buffer: the mouse packets held back for it all came at once,
+     * the buffer filled, and the game stopped itself ($DEADCA00, bra *). */
+    if (acia.sr & 0x01) {
+        acia.fh++;
+        g_acia_lost++;
+        acia.sr |= 0x20;                          /* OVRN */
+        acia.next_rx_cyc = g_total_cyc + IKBD_BYTE_CYC;
+        return;
+    }
     acia.rx = acia.fifo[acia.fh++];
     g_acia_rx_cnt++;
     acia.sr |= 0x81;                              /* RDRF + IRQ */
@@ -2095,7 +2109,7 @@ static uint32_t hw_read(uint32_t a, int size)
     /* ACIAs */
     if (a == 0xFFFC00) return acia.sr;
     if (a == 0xFFFC02) {
-        acia.sr &= (uint8_t)~0x81;                 /* clear RDRF + IRQ */
+        acia.sr &= (uint8_t)~0xA1;                 /* clear RDRF, OVRN, IRQ */
         mfp.gpip |= 0x10;                          /* GPIP4 back high  */
         return acia.rx;
     }
