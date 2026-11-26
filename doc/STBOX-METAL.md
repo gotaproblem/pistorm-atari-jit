@@ -53,6 +53,7 @@ By hand (stop the service first):
 | Ctrl+Alt+F1..F10 | put disk 1..10 in drive A |
 | Ctrl+Alt+Help | capture the next frame (see below) |
 | Ctrl+Alt+Shift+Undo | quit (so does Ctrl+C) |
+| the ST's reset button | stboxmetal stops, waits for the button to be let go and starts again: the same build boots afresh. Needs the RESET pin of CPLD firmware 1.0b; `PISTORM_RESET_PIN=0` turns it off |
 
 On a PC keyboard End or PgDn is Undo and PgUp is Help.
 

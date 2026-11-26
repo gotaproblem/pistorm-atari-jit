@@ -212,6 +212,20 @@ void ps_pulse_halt(void) {}
 void ps_reset_state_machine(void) {}
 void ps_pulse_reset(void) {}
 int  pistorm_bus_lock(const char *who) { (void)who; return 0; }
+void pistorm_bus_unlock(void) {}
+void ps_get_firmware_revision(void) {}
+/* the ST's reset button: SIM_RSTBTN_S=T holds RESET low from T s for
+ * 0.2 s, once (the variable is cleared, so a restart does not press it) */
+int  ps_st_reset_pin(void)
+{
+    static double t0 = -1, at = -2;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (t0 < 0) { t0 = now; const char *e = getenv("SIM_RSTBTN_S"); at = e ? atof(e) : -2; }
+    if (at < 0) return 0;
+    if (now - t0 >= at + 0.2) { unsetenv("SIM_RSTBTN_S"); at = -2; return 0; }
+    return now - t0 >= at;
+}
 
 int ss_bringup(struct ss_screen *ss, enum ss_mode force, int hz50)
 {

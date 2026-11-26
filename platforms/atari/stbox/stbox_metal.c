@@ -36,6 +36,8 @@
  * disk 1..10 in drive A, Ctrl+Alt+Help = capture the next frame (its
  * writes, stale RAM per line, the box's own picture - into the log and
  * stboxmetal-frame-N.ppm), Ctrl+Alt+Shift+Undo = quit (so does Ctrl+C).
+ * The ST's reset button (RESET on GPIO4): stboxmetal restarts itself, same
+ * arguments - the same build boots afresh.
  *
  * HOW IT RUNS. One thread on an isolated core owns the bus and does
  * everything, in priority order:
@@ -520,6 +522,14 @@ static int      g_ndisks;
 static int      g_kctrl, g_kalt, g_kshift;
 static volatile int g_want_reset, g_want_quit, g_want_disk = -1;
 static int g_relaunch;                      /* exit 42: run-pistorm.sh relaunches */
+/* The ST's reset button: its RESET line on GPIO4 (CPLD firmware 1.0b,
+ * ps_st_reset_pin), sampled every 10 ms by the bus thread - a plain GPLEV
+ * read. Low on two samples running: the real chips (Shifter, MMU, YM, MFP)
+ * have just been reset under the box, so stboxmetal tears down, waits for
+ * the button to be let go and starts again with the same arguments - the
+ * same build boots afresh, as a real ST's reset does. PISTORM_RESET_PIN=0
+ * turns it off (as the emulator's). */
+static int g_rst_sense, g_reset_btn;
 
 static void key_in(uint8_t code)
 {
@@ -1722,6 +1732,15 @@ int main(int argc, char **argv)
     m_disks_on();
 
     if (bt_init("stboxmetal", core)) return 1;
+    ps_get_firmware_revision();                /* ps_st_reset_pin needs it */
+    {
+        const char *re = getenv("PISTORM_RESET_PIN");
+        g_rst_sense = !(re && *re == '0') && ps_st_reset_pin() >= 0;
+        if (g_log || !g_rst_sense)
+            printf("[METAL] ST reset button: %s\n", g_rst_sense ? "on (GPIO4)" :
+                   ps_st_reset_pin() < 0 ? "off (CPLD firmware has no RESET pin - needs 1.0b)"
+                                         : "off (PISTORM_RESET_PIN=0)");
+    }
     g_ram_bytes = scr.bank0 + scr.bank1;
     if (g_ram_bytes != (512u << 10) && g_ram_bytes != (1024u << 10) &&
         g_ram_bytes != (2048u << 10) && g_ram_bytes != (4096u << 10)) {
@@ -1826,6 +1845,9 @@ int main(int argc, char **argv)
                  flushg = FLUSH_NS / NSPT, pollg = POLL_NS / NSPT;
     const uint64_t poll_every = (uint64_t)(ACIA_POLL_US * 1000.0 / NSPT);
     uint64_t next_poll = ticks();
+    const uint64_t rst_every = (uint64_t)(HZ / 100.0);   /* 10 ms */
+    uint64_t next_rst = ticks() + rst_every;
+    unsigned rst_low = 0;
 
 #ifdef BEAMTEST_SIM
     const char *trs = getenv("SIM_RESET_S");          /* test the reset path */
@@ -1895,6 +1917,11 @@ int main(int argc, char **argv)
             printf("[sim] screen base %06X rez %d -> %s\n", base, rez, getenv("SIM_SHOT"));
         }
 #endif
+        if (g_rst_sense && ticks() >= next_rst) {      /* the ST's reset button */
+            next_rst = ticks() + rst_every;
+            rst_low = ps_st_reset_pin() == 1 ? rst_low + 1 : 0;
+            if (rst_low >= 2) { g_reset_btn = 1; break; }
+        }
         if (g_want_reset && g_from_cfg) {        /* back to the setup page */
             g_relaunch = 1;
             break;
@@ -2109,6 +2136,16 @@ int main(int argc, char **argv)
     printf("\nstboxmetal done%s: %u frames, %llu writes (%llu over 1 us late), %llu RAM longs\n",
            g_stop ? " (Ctrl+C)" : "", stbox_shared.frame, (unsigned long long)M.writes,
            (unsigned long long)M.late1us, (unsigned long long)M.flushed);
+    if (g_reset_btn) {
+        printf("[METAL] ST reset button - starting again when it is let go\n");
+        for (int i = 0; i < 1000 && ps_st_reset_pin() == 1; i++)   /* <= 10 s */
+            usleep(10000);
+        fflush(stdout); fflush(stderr);
+        pistorm_bus_unlock();                  /* the new image takes it again */
+        execv("/proc/self/exe", argv);
+        printf("[METAL] cannot restart (%s) - back to the setup page (exit 42)\n", strerror(errno));
+        return 42;
+    }
     if (g_relaunch) { printf("[METAL] Ctrl+Alt+Undo: back to the setup page (exit 42)\n"); return 42; }
     return 0;
 }
