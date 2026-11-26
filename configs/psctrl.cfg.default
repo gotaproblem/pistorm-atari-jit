@@ -115,3 +115,16 @@ network_netmask 255.255.255.0
 #hdd 0:games.img
 #acsi disabled
 #network disabled
+
+# stboxmetal: an ST in the Pi driving the real Shifter, YM and IKBD - for
+# games and demos, no per-game timing tweaks (doc/STBOX-METAL.md). The
+# first start measures this Pi's calibration (15 s) into stboxmetal.cal.
+# Uncomment to have it on the setup page.
+#[metal]
+#engine metal
+#machine st
+#rom tos206uk.rom
+#fastboot
+#ide enabled
+#hdd 0:games.img
+#acsi disabled

@@ -1072,6 +1072,12 @@ if [ -x "$HERE/emulator" ]; then
 else
   echo "  Emulator     : not built yet  ->  make -C \"$HERE\""
 fi
+if [ -x "$HERE/stboxmetal" ]; then
+  echo "  stboxmetal   : $HERE/stboxmetal  (built - a psctrl.cfg build with"
+  echo "                 'engine metal' runs it; doc/STBOX-METAL.md)"
+else
+  echo "  stboxmetal   : not built yet  ->  make -C \"$HERE\" stboxmetal"
+fi
 echo "  Bring your own : TOS ROM -> $ROOT/roms/   (or use the bundled EmuTOS)"
 echo "                   games/images -> $ROOT/dkimages/"
 echo "  GEM programs : $ROOT/atari-share/apj-os/natfeats/"

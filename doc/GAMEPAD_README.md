@@ -71,6 +71,14 @@ served from the same state. Fixed on the way: the box had joystick events
 OFF at power-on and after reset (a real IKBD has them on), never silenced
 the mouse on `$14`, and answered `$16` with zeros.
 
+## stboxmetal
+
+A metal build (`engine metal`, [STBOX-METAL.md](STBOX-METAL.md)) reads the
+pads on core 1 through the same mapping: the first pad is joystick 1, the
+second joystick 0, Start is the Space bar. They go to the box's IKBD model
+alongside the real ST's own joysticks. `usb off` in the build turns them
+off. A frame capture's log prints each pad's state (buttons, hat, stick).
+
 ## DOS (psdos / DOSGEM)
 
 While the DOSGEM window is on top the pads are DOS's - no click to
@@ -98,7 +106,9 @@ Wired: the stock Pi kernel has `xpad` – just plug in (360, One, Series X|S).
 
 Bluetooth, the short way – `sudo tools/pair-gamepad.sh` scans, pairs
 (retrying while you hold the pair button), trusts, connects and checks the
-kernel made an input device. `--fresh` forgets a stale bond first; a MAC or
+kernel made an input device. A pad that is paired but gives no input
+device (a stale key: btmon says "PIN or Key Missing") is re-paired fresh
+by itself. `--fresh` forgets a stale bond first; a MAC or
 a name substring picks the pad. Pairing is a one-off: a trusted pad
 reconnects by itself when you press its power button, and the emulator
 picks it up by hotplug.

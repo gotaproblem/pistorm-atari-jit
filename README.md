@@ -43,6 +43,7 @@ Everything beyond this README is in [`doc/`](doc/):
 | [PSCTRL-DESIGN.md](doc/PSCTRL-DESIGN.md) | PSCTRL design notes |
 | [PSMON-DESIGN.md](doc/PSMON-DESIGN.md) | PSMON design notes |
 | [STBOX-DESIGN.md](doc/STBOX-DESIGN.md) | STBOX design notes |
+| [STBOX-METAL.md](doc/STBOX-METAL.md) | stboxmetal: an ST in the Pi driving the real ST's Shifter, YM and IKBD |
 
 ## Requirements
 This is not for newbies, a good amount of linux development knowledge is needed.
