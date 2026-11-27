@@ -44,10 +44,10 @@ on a mono one, from the monitor sense line. Both use the same layout:
   CPLD firmware as it is named (e.g. `1.1b (EPM240)`), Pi temperature.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
   date and clock (`[psctrl] clock 24|12`, `date dmy|mdy`).
-- **Start menu:** *Environments…* (the setup page's builds screen: new,
-  copy, delete, edit any build), *Restart ASTOS*, *Exit to console*,
-  *Shut down…*. The builds themselves are on the desktop, not in the menu.
-- **Right-click on an icon:** *Launch*, *Settings…* (that build's editor).
+- **Start menu:** *New environment…*, *Restart ASTOS*, *Exit to console*,
+  *Shut down…*. The environments themselves are on the desktop.
+- **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,
+  *Delete…*.
 
 If no ST-RAM answers (no ST monitor wired), ASTOS draws on HDMI instead.
 `hdmi on` in `[psctrl]` mirrors the desktop to HDMI as well.
@@ -64,7 +64,7 @@ gamepads all work.
 | double-click, Enter, pad A or Start | launch the selected build |
 | a letter | jump to the next build starting with it |
 | Tab, Esc, F1, the start button, right-click off an icon | start menu |
-| F2, or right-click → *Settings…* | edit the selected build's settings |
+| F2, or right-click → *Settings…* | the selected environment's settings |
 | Help (PgUp on a PC keyboard) | screenshot → `~/astos-shot-N.ppm` (640×400) |
 | Help during the start-up splash | safe mode |
 
@@ -75,16 +75,31 @@ build that fails to start. Ctrl+Alt+Shift+Undo still shuts the Pi down.
 
 ## Settings
 
-*Settings…* opens the setup page's editor for that build inside ASTOS: the
-same seven tabs (Machine, Video, Sound, Input, Drives, Network, Tuning), the
-same rules (a key ticked when the build has the line, JIT and machine
-dependencies, the image pickers for ROMs and disks), and the same *Save*.
-Esc (or the right mouse button) comes back to the desktop - with unsaved
-changes it asks once first - and *Boot now* launches the build. It still
-looks like the page (its own palette, 80×25 text); an ASTOS-styled settings
-window is a later phase. *Environments…* opens the page's builds screen
-(N new, copy, D delete, E edit, S save) the same way. ASTOS re-reads
-psctrl.cfg when you come back.
+*Settings…* (F2, or right-click an icon) opens the environment's settings
+window, drawn by ASTOS:
+
+- **Category** is a drop-down list: Machine, Video, Sound, Input, Drives,
+  Network, Tuning (Tab opens it, Left/Right steps through it).
+- Every setting's **value is a drop-down list**: a list key shows its
+  choices, a switch *On* / *Off*, a ROM or disk the files in `rom_path` /
+  `disk_path` / `fdd_path` (plus *type a name…*), and anything set can be
+  removed from the environment from the same list. A typed value (a number,
+  a path) is an edit field in place: Enter accepts, Esc cancels.
+- Rows that cannot apply to this environment are greyed with the reason
+  (`needs 68020+`, `Falcon only`, `needs ide`); the cursor skips them.
+- **Save** writes psctrl.cfg; **Close** (Esc, or the right button) goes back
+  to the desktop - with unsaved changes the first Esc only warns.
+- Keys: Up/Down a setting, Enter its list, Space on/off (or remove), F10
+  save.
+
+The rules behind it are the setup page's own (its editor used as a model:
+`spm_*` in `setup_page.c`), so the file ends up exactly as the page would
+have written it - the JIT / cpu / machine dependencies, pinned disk slots,
+the defaults filled in on save.
+
+*New environment…* asks for a name and opens the new, empty environment's
+settings; *Duplicate…* copies one under a new name; *Delete…* asks first.
+Names follow the page's rule: lower case letters, digits, `-` and `_`.
 
 ## psctrl.cfg
 
@@ -132,6 +147,7 @@ down dialog. Needs nothing installed beyond gcc.
 | `platforms/astos/astos_gfx.c` | the 640×200 logical canvas, icons, packing onto the Shifter (medium planes / mono with rows doubled), the pointer, screenshots |
 | `platforms/astos/astos_input.c` | ST keyboard + IKBD relative mouse over the ACIA; USB keyboards, mice, pads |
 | `platforms/astos/astos_env.c` | builds from psctrl.cfg, details, the launch file |
+| `platforms/astos/astos_settings.c` | the settings window: category and value drop-down lists over the page's editor model |
 | `platforms/astos/astos_sys.c` | Pi temperature, clock |
 | `platforms/astos/astos_host_stub.c` | the no-board stubs for `astos-host` |
 

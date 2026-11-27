@@ -1970,3 +1970,223 @@ boot:
     snprintf(chosen, chosen_len, "%s", st.boot);
     return SP_BOOT;
 }
+
+/* ================================================================== */
+/* the editor as a model, for ASTOS's own settings window              */
+/* ================================================================== */
+/*
+ * The same state, rows and rules as the page's editor - build_rows,
+ * tick, edit_row, choose_accept, commit_edit and the picker run exactly
+ * as they do for the page - with the drawing and the keys left to the
+ * caller. One build at a time.
+ */
+static struct state mst;
+
+int spm_open(const char *cfg_path, const char *section)
+{
+    memset(&mst, 0, sizeof mst);
+    if (sc_load(&mst.cfg, cfg_path) != 0)
+        return -1;
+    load_builds(&mst);
+    snprintf(mst.sec, sizeof mst.sec, "%s", section);
+    mst.screen = SCR_EDIT;
+    mst.secs = -1;
+    mst.tab = SE_TAB_MACHINE;
+    build_rows(&mst);
+    if (build_ste_video(&mst.cfg, mst.sec) && np_board_ste() == 0)
+        snprintf(mst.msg, sizeof mst.msg, "%.63s", STE_ON_ST_WARNING);
+    return 0;
+}
+
+int spm_tab(void)            { return mst.tab; }
+void spm_set_tab(int tab)
+{
+    mst.tab = (tab % SE_TAB_N + SE_TAB_N) % SE_TAB_N;
+    mst.sel = mst.top = 0;
+    mst.choosing = mst.picking = mst.editing = 0;
+    build_rows(&mst);
+}
+
+int spm_rows(void)           { return mst.nrow - 2; }   /* less Save, Boot */
+
+void spm_row(int i, struct spm_row *o)
+{
+    memset(o, 0, sizeof *o);
+    if (i < 0 || i >= spm_rows())
+        return;
+    const struct row *r = &mst.row[i];
+    const char *k = r->text;
+    const char *v = r->ord >= 0 ? sc_get_n(&mst.cfg, mst.sec, k, r->ord) : NULL;
+    char vbuf[SC_LINE_LEN];
+    snprintf(o->key, sizeof o->key, "%s", k);
+    o->on = r->ticked;
+    o->usable = usable(r);
+    o->why = r->why;
+    if (!o->why && r->blocked) {
+        snprintf(o->whybuf, sizeof o->whybuf, "needs %.20s",
+                 r->kind == ROW_SLOT && !strcasecmp(k, "hdd") ? "ide" :
+                 se_needs(k) ? se_needs(k) : k);
+        o->why = o->whybuf;
+    }
+    switch (r->kind) {
+    case ROW_LABEL:
+        o->kind = SPM_LABEL;
+        snprintf(o->name, sizeof o->name, "%s", !strcasecmp(k, "fdd") ? "Floppy drives" :
+                 !strcasecmp(k, "hostfs") ? "Host folders (hostfs)" : k);
+        return;
+    case ROW_ADD:
+        o->kind = SPM_ADD;
+        snprintf(o->name, sizeof o->name, "%s +", k);
+        snprintf(o->value, sizeof o->value, "add a drive");
+        o->is_text = 1;
+        return;
+    case ROW_SLOT: {
+        o->kind = SPM_SLOT;
+        snprintf(o->name, sizeof o->name, "  %s %s", k, r->label);
+        const char *val = "empty";
+        if (r->ticked && v) {
+            int sl;
+            if (is_disk(k))
+                val = slot_of(v, &sl);
+            else {
+                val = sp_row_value(k, v, vbuf, sizeof vbuf);
+                if (!strcasecmp(k, "hostfs") && val[1] == ':')
+                    val += 2 + (val[2] == ' ');
+            }
+        }
+        snprintf(o->value, sizeof o->value, "%s", val);
+        o->is_file = image_base_key(k) != NULL;
+        o->is_text = !o->is_file;
+        return;
+    }
+    default:
+        break;
+    }
+    o->kind = SPM_KEY;
+    snprintf(o->name, sizeof o->name, "%s", sp_row_label(k, v));
+    if (mst.tab == SE_TAB_DRIVES || se_kind(k) == SE_K_SWITCH) {
+        o->is_switch = 1;
+        snprintf(o->value, sizeof o->value, "%s", r->ticked ? "on" : "off");
+        return;
+    }
+    const char *val = row_value(&mst, r, vbuf, sizeof vbuf);
+    if ((r->why || r->blocked) && !r->ticked)
+        val = "empty";
+    snprintf(o->value, sizeof o->value, "%s", val);
+    o->is_list = se_count(k) > 0;
+    o->is_file = !o->is_list && image_base_key(k) != NULL;
+    o->is_text = !o->is_list && !o->is_file;
+    long lo, hi;
+    if (!o->why && se_kind(k) == SE_K_INT) {
+        if (se_int_range(k, &lo, &hi))
+            snprintf(o->whybuf, sizeof o->whybuf, "default %.10s, %d to %d",
+                     se_tick_value(k), (int)lo, (int)hi);
+        else
+            snprintf(o->whybuf, sizeof o->whybuf, "default %.10s", se_tick_value(k));
+        o->hint = o->whybuf;
+    }
+}
+
+static enum spm_mode mode_now(void)
+{
+    if (mst.choosing) return SPM_CHOOSE;
+    if (mst.picking)  return SPM_PICK;
+    if (mst.editing)  return SPM_EDIT;
+    return SPM_DONE;
+}
+
+static void sel_row(int i)
+{
+    mst.sel = i;
+    mst.choosing = mst.picking = mst.editing = 0;
+}
+
+enum spm_mode spm_activate(int i)
+{
+    if (i < 0 || i >= spm_rows())
+        return SPM_DONE;
+    sel_row(i);
+    edit_row(&mst);
+    enum spm_mode m = mode_now();
+    if (m == SPM_DONE)
+        build_rows(&mst);
+    return m;
+}
+
+enum spm_mode spm_toggle(int i)
+{
+    if (i < 0 || i >= spm_rows())
+        return SPM_DONE;
+    sel_row(i);
+    tick(&mst, 1);
+    enum spm_mode m = mode_now();
+    if (m == SPM_DONE)
+        build_rows(&mst);
+    return m;
+}
+
+int spm_choices(void)              { return mst.choosing ? se_count(mst.row[mst.sel].text) : 0; }
+const char *spm_choice(int i)      { return se_label(mst.row[mst.sel].text, i); }
+int spm_choice_off(int i)          { return choice_is_off(mst.row[mst.sel].text, i); }
+int spm_choice_cur(void)           { return mst.choice; }
+void spm_choose(int i)
+{
+    if (!mst.choosing)
+        return;
+    mst.choice = i;
+    choose_accept(&mst);
+    build_rows(&mst);
+}
+
+int spm_files(void)                { return mst.picking ? mst.nfiles : 0; }
+const char *spm_file(int i)        { return i >= 0 && i < mst.nfiles ? mst.files[i] : ""; }
+int spm_file_cur(void)             { return mst.pick - 1; }       /* -1 none */
+enum spm_mode spm_pick(int i)
+{
+    if (!mst.picking)
+        return mode_now();
+    mst.picking = 0;
+    if (i < 0) {                       /* type a name instead */
+        mst.editing = 1;
+        return SPM_EDIT;
+    }
+    snprintf(mst.edit, sizeof mst.edit, "%s", mst.files[i]);
+    commit_edit(&mst);
+    enum spm_mode m = mode_now();
+    if (m == SPM_DONE)
+        build_rows(&mst);
+    return m;
+}
+
+const char *spm_edit_text(void)    { return mst.edit; }
+enum spm_mode spm_commit(const char *text)
+{
+    snprintf(mst.edit, sizeof mst.edit, "%s", text ? text : "");
+    commit_edit(&mst);
+    enum spm_mode m = mode_now();      /* still editing = refused, see msg */
+    if (m == SPM_DONE)
+        build_rows(&mst);
+    return m;
+}
+
+void spm_cancel(void)
+{
+    mst.choosing = mst.picking = mst.editing = 0;
+    mst.msg[0] = '\0';
+    build_rows(&mst);
+}
+
+const char *spm_msg(void)          { return mst.msg; }
+int spm_dirty(void)                { return mst.cfg.dirty; }
+const char *spm_section(void)      { return mst.sec; }
+
+int spm_save(void)
+{
+    sp_fill_defaults(&mst.cfg);
+    if (sc_save(&mst.cfg, NULL) == 0) {
+        snprintf(mst.msg, sizeof mst.msg, "saved");
+        return 0;
+    }
+    snprintf(mst.msg, sizeof mst.msg, "SAVE FAILED - %.48s", sc_save_error(&mst.cfg));
+    return -1;
+}

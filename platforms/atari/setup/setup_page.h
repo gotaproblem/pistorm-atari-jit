@@ -78,6 +78,53 @@ enum sp_result sp_run_edit(struct ss_screen *ss, const char *cfg_path,
                            unsigned long chosen_len);
 void sp_set_poll(sp_poll_fn fn);
 
+/* The editor as a model (ASTOS draws its own settings window over it):
+ * the page's rows, rules and pickers for one build, without the page.
+ * spm_open loads the build; spm_set_tab picks a tab (setup_enums.h
+ * SE_TAB_*); rows are read with spm_row. spm_activate is the page's
+ * Enter on a row (a list opens its choices, a file key the picker, a
+ * text key the editor, a switch flips), spm_toggle its Space (tick /
+ * untick: a set key is removed from the build). The SPM_* mode says
+ * what to show next; spm_choose / spm_pick / spm_commit finish it, and
+ * spm_msg says what happened. Nothing is written until spm_save. */
+enum spm_kind { SPM_KEY = 0, SPM_LABEL, SPM_SLOT, SPM_ADD };
+enum spm_mode { SPM_DONE = 0, SPM_CHOOSE, SPM_PICK, SPM_EDIT };
+struct spm_row {
+    enum spm_kind kind;
+    char key[32];          /* the cfg key                              */
+    char name[48];         /* what the row is called                   */
+    char value[96];        /* what it is set to, as shown              */
+    int  on;               /* the build has it (a switch: it is on)    */
+    int  usable;           /* can be changed here                      */
+    const char *why;       /* greyed: why not ("needs 68020+"), or NULL */
+    const char *hint;      /* default and range of a number, or NULL   */
+    int  is_switch, is_list, is_file, is_text;
+    char whybuf[48];
+};
+int  spm_open(const char *cfg_path, const char *section);
+int  spm_tab(void);
+void spm_set_tab(int tab);
+int  spm_rows(void);
+void spm_row(int i, struct spm_row *out);
+enum spm_mode spm_activate(int i);
+enum spm_mode spm_toggle(int i);
+int  spm_choices(void);
+const char *spm_choice(int i);
+int  spm_choice_off(int i);
+int  spm_choice_cur(void);
+void spm_choose(int i);
+int  spm_files(void);
+const char *spm_file(int i);
+int  spm_file_cur(void);
+enum spm_mode spm_pick(int i);          /* -1: type a name instead */
+const char *spm_edit_text(void);
+enum spm_mode spm_commit(const char *text);
+void spm_cancel(void);
+const char *spm_msg(void);
+int  spm_dirty(void);
+const char *spm_section(void);
+int  spm_save(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -21,6 +21,7 @@
  * draws the desktop into out.ppm after the keys (r l u d = arrows,
  * e = Enter, m = start menu, s = shut down dialog, x = Esc) and exits.
  */
+#include <ctype.h>
 #include <errno.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -35,7 +36,7 @@
 #include "astos_input.h"
 #include "setup_cfg.h"
 #include "setup_hdmi.h"
-#include "setup_page.h"
+#include "astos_settings.h"
 #include "native_probe.h"
 #include "gpio/ps_protocol.h"
 #include "gpio/bus_lock.h"
@@ -53,9 +54,12 @@ static int nenv, sel;
 
 static int safe_mode, no_board, hdmi_on, h12, mdy;
 static int menu_open, menu_sel;
-enum { DLG_NONE, DLG_SHUTDOWN, DLG_MESSAGE };
+enum { DLG_NONE, DLG_SHUTDOWN, DLG_MESSAGE, DLG_NAME, DLG_DELETE };
 static int dlg, dlg_sel;
 static char dlg_text[2][64];
+static char name_buf[SC_SEC_LEN];             /* DLG_NAME: what is typed       */
+static char name_from[SC_SEC_LEN];            /* "" = new and empty, else copy */
+static char name_err[64];
 
 static int autolaunch = -1, countdown_s;      /* index, seconds left */
 
@@ -100,11 +104,11 @@ static void cell_rect(int i, int *x, int *y)
     *y = GRID_Y + (i / GRID_COLS) * CELL_H;
 }
 
-/* start menu rows: Environments... (the page's builds screen: new, copy,
- * delete, edit), a separator, then Restart / Console / Shut down */
-enum { MI_SETTINGS = 0, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
+/* start menu rows: New environment..., a separator, then Restart /
+ * Console / Shut down */
+enum { MI_NEW = 0, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
 static const char *const sys_label[MI_NSYS] = {
-    "Environments...", "Restart ASTOS", "Exit to console", "Shut down...",
+    "New environment...", "Restart ASTOS", "Exit to console", "Shut down...",
 };
 static int menu_rows(void) { return MI_NSYS; }
 static int menu_h(void)    { return 14 + menu_rows() * ROW_H + 10; }
@@ -247,8 +251,10 @@ static void draw_menu(void)
 }
 
 /* the right-click menu on an icon */
-enum { CX_LAUNCH = 0, CX_SETTINGS, CX_N };
-static const char *const ctx_label[CX_N] = { "Launch", "Settings..." };
+enum { CX_LAUNCH = 0, CX_SETTINGS, CX_DUP, CX_DELETE, CX_N };
+static const char *const ctx_label[CX_N] = {
+    "Launch", "Settings...", "Duplicate...", "Delete...",
+};
 static int ctx_open, ctx_x, ctx_y, ctx_sel;
 #define CTX_W 128
 static int ctx_h(void) { return CX_N * ROW_H + 6; }
@@ -277,13 +283,31 @@ static void open_ctx(int x, int y)
 
 static void draw_dialog(void)
 {
-    int w = 320, h = dlg == DLG_SHUTDOWN ? 58 : 44;
+    if (dlg == DLG_NAME) {
+        int w = 360, h = 62, x = (AW - w) / 2, y = (BAR_Y - h) / 2;
+        char t[64], f[40];
+        snprintf(t, sizeof t, name_from[0] ? "Duplicate %.20s" : "New environment", name_from);
+        draw_window(x, y, w, h, t);
+        g_text(x + 10, y + 16, "Name:", C_TEXT);
+        snprintf(f, sizeof f, "%.30s_", name_buf);
+        g_fill(x + 60, y + 15, w - 70, 10, C_WHITE);
+        g_frame(x + 60, y + 15, w - 70, 10, C_ACCENT);
+        g_text(x + 64, y + 16, f, C_TEXT);
+        g_textn(x + 10, y + 28, name_err[0] ? name_err : "letters, digits, - and _",
+                (w - 20) / 8, name_err[0] ? C_ACCENT : C_DIM);
+        draw_button(x + w - 200, y + h - 16, 96, "Create", dlg_sel == 0);
+        draw_button(x + w - 96, y + h - 16, 88, "Cancel", dlg_sel == 1);
+        return;
+    }
+    int w = 320, h = (dlg == DLG_SHUTDOWN || dlg == DLG_DELETE) ? 58 : 44;
     int x = (AW - w) / 2, y = (BAR_Y - h) / 2;
-    draw_window(x, y, w, h, dlg == DLG_SHUTDOWN ? "Shut down" : "ASTOS");
+    draw_window(x, y, w, h, dlg == DLG_SHUTDOWN ? "Shut down" :
+                            dlg == DLG_DELETE ? "Delete" : "ASTOS");
     g_textn(x + 10, y + 16, dlg_text[0], (w - 20) / 8, C_TEXT);
     g_textn(x + 10, y + 26, dlg_text[1], (w - 20) / 8, C_DIM);
-    if (dlg == DLG_SHUTDOWN) {
-        draw_button(x + w - 200, y + h - 16, 96, "Shut down", dlg_sel == 0);
+    if (dlg == DLG_SHUTDOWN || dlg == DLG_DELETE) {
+        draw_button(x + w - 200, y + h - 16, 96, dlg == DLG_DELETE ? "Delete" : "Shut down",
+                    dlg_sel == 0);
         draw_button(x + w - 96, y + h - 16, 88, "Cancel", dlg_sel == 1);
     }
 }
@@ -307,6 +331,14 @@ static void render(void)
         g_fill(0, 0, AW, 10, C_WHITE);
         g_text(8, 1, "ASTOS safe mode: no auto-launch, no HDMI.  Restart ASTOS to leave.",
                C_TEXT);
+    }
+    if (set_is_open()) {
+        set_draw();
+        draw_taskbar();
+        if (dlg)
+            draw_dialog();
+        g_pack(&ss);
+        return;
     }
     draw_icons();
     draw_details();
@@ -365,21 +397,128 @@ static int launch(int i)
     return 1;
 }
 
-/* the setup page's editor, run inside ASTOS: page_sec "" = its builds
- * screen (new / copy / delete / edit), a name = that build's editor */
-static int page_req;
-static char page_sec[SC_SEC_LEN];
-static void request_page(const char *sec)
+static void reload_envs(const char *keep)
 {
-    page_req = 1;
-    snprintf(page_sec, sizeof page_sec, "%s", sec);
+    char want[SC_SEC_LEN];
+    snprintf(want, sizeof want, "%s", keep ? keep : "");
+    if (sc_load(&cfg, cfg_path) != 0)
+        fprintf(stderr, "[ASTOS] cannot re-read %s\n", cfg_path);
+    nenv = env_load(&cfg, envs, MAX_ENV);
+    sel = 0;
+    for (int i = 0; i < nenv; i++)
+        if (!strcasecmp(envs[i].sec, want))
+            sel = i;
+}
+
+/* the settings window for one environment */
+static void open_settings(int i)
+{
+    if (i < 0 || i >= nenv)
+        return;
+    if (set_open(cfg_path, envs[i].sec, envs[i].title) != 0)
+        message("Could not read psctrl.cfg", cfg_path);
+    else
+        printf("[ASTOS] settings: [%s]\n", envs[i].sec);
+}
+
+static void settings_closed(void)
+{
+    char keep[SC_SEC_LEN];
+    snprintf(keep, sizeof keep, "%s", set_section());
+    reload_envs(keep);
+}
+
+/* New / Duplicate: ask for the name */
+static void ask_name(const char *from)
+{
+    dlg = DLG_NAME;
+    dlg_sel = 0;
+    name_buf[0] = name_err[0] = '\0';
+    snprintf(name_from, sizeof name_from, "%s", from ? from : "");
+}
+
+/* the same rule as the page: lower case, letters digits - _, unique */
+static int name_ok(void)
+{
+    if (!name_buf[0]) { snprintf(name_err, sizeof name_err, "a name is needed"); return 0; }
+    for (char *p = name_buf; *p; p++) {
+        *p = (char)tolower((unsigned char)*p);
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') {
+            snprintf(name_err, sizeof name_err, "'%c' cannot be in a name", *p);
+            return 0;
+        }
+    }
+    if (!strcmp(name_buf, "psctrl") || !strcmp(name_buf, "astos")) {
+        snprintf(name_err, sizeof name_err, "[%s] is reserved", name_buf);
+        return 0;
+    }
+    char secs[64][SC_SEC_LEN];
+    int n = sc_sections(&cfg, secs, 64);
+    for (int i = 0; i < n; i++)
+        if (!strcasecmp(secs[i], name_buf)) {
+            snprintf(name_err, sizeof name_err, "there is already a [%.20s]", name_buf);
+            return 0;
+        }
+    return 1;
+}
+
+static void create_env(void)
+{
+    if (!name_ok())
+        return;
+    int r = name_from[0] ? sc_copy_section(&cfg, name_from, name_buf)
+                         : sc_add_section(&cfg, name_buf);
+    if (r != 0 || sc_save(&cfg, cfg_path) != 0) {
+        snprintf(name_err, sizeof name_err, "could not save %.40s", cfg_path);
+        return;
+    }
+    printf("[ASTOS] %s [%s]\n", name_from[0] ? "duplicated as" : "new environment", name_buf);
+    char made[SC_SEC_LEN];
+    snprintf(made, sizeof made, "%s", name_buf);
+    dlg = DLG_NONE;
+    reload_envs(made);
+    if (!strcasecmp(envs[sel].sec, made))
+        open_settings(sel);                      /* straight to its settings */
+}
+
+static void ask_delete(int i)
+{
+    if (i < 0 || i >= nenv)
+        return;
+    dlg = DLG_DELETE;
+    dlg_sel = 1;
+    snprintf(dlg_text[0], sizeof dlg_text[0], "Delete %.40s?", envs[i].title);
+    snprintf(dlg_text[1], sizeof dlg_text[1], "Its section goes from psctrl.cfg.");
+}
+
+static void delete_env(void)
+{
+    char gone[SC_SEC_LEN];
+    snprintf(gone, sizeof gone, "%s", envs[sel].sec);
+    dlg = DLG_NONE;
+    if (sc_del_section(&cfg, gone) != 0) {
+        message("Could not delete it", gone);
+        return;
+    }
+    static const char *const refs[] = { "astos_last", "astos_autolaunch", "boot" };
+    for (unsigned k = 0; k < sizeof refs / sizeof *refs; k++) {
+        const char *v = sc_get(&cfg, "psctrl", refs[k]);
+        if (v && !strcasecmp(v, gone))
+            sc_set(&cfg, "psctrl", refs[k], NULL);
+    }
+    if (sc_save(&cfg, cfg_path) != 0) {
+        message("Could not save psctrl.cfg", sc_save_error(&cfg));
+        return;
+    }
+    printf("[ASTOS] deleted [%s]\n", gone);
+    reload_envs(NULL);
 }
 
 static int menu_activate(int r, int *exit_code)
 {
     menu_open = 0;
     switch (r) {
-    case MI_SETTINGS: request_page(""); return 0;
+    case MI_NEW:      ask_name(NULL); return 0;
     case MI_RESTART:  *exit_code = ASTOS_EXIT_RESTART; return 1;
     case MI_CONSOLE:  *exit_code = 0; return 1;
     case MI_SHUTDOWN:
@@ -410,6 +549,19 @@ static void screenshot(void)
 
 static void cancel_autolaunch(void) { autolaunch = -1; }
 
+static int ctx_do(int r, int *exit_code)
+{
+    switch (r) {
+    case CX_LAUNCH:
+        if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
+        return 0;
+    case CX_SETTINGS: open_settings(sel); return 0;
+    case CX_DUP:      ask_name(envs[sel].sec); return 0;
+    case CX_DELETE:   ask_delete(sel); return 0;
+    }
+    return 0;
+}
+
 /* one key; returns 1 with *exit_code set when ASTOS should exit */
 static int on_key(struct si_event k, int *exit_code)
 {
@@ -423,15 +575,45 @@ static int on_key(struct si_event k, int *exit_code)
             dlg = DLG_NONE;
         return 0;
     }
+    if (dlg == DLG_NAME) {
+        size_t n = strlen(name_buf);
+        switch (k.key) {
+        case SI_CHAR:
+            if (n + 1 < sizeof name_buf) { name_buf[n] = k.ch; name_buf[n + 1] = '\0'; }
+            name_err[0] = '\0';
+            break;
+        case SI_BACKSPACE: if (n) name_buf[n - 1] = '\0'; break;
+        case SI_TAB: dlg_sel ^= 1; break;
+        case SI_ENTER: if (dlg_sel == 0) create_env(); else dlg = DLG_NONE; break;
+        case SI_ESC: dlg = DLG_NONE; break;
+        default: break;
+        }
+        return 0;
+    }
+    if (dlg == DLG_DELETE) {
+        switch (k.key) {
+        case SI_LEFT: case SI_RIGHT: case SI_TAB: dlg_sel ^= 1; break;
+        case SI_ESC: dlg = DLG_NONE; break;
+        case SI_ENTER: case SI_SPACE:
+            if (dlg_sel == 0) delete_env(); else dlg = DLG_NONE;
+            break;
+        default: break;
+        }
+        return 0;
+    }
+    if (set_is_open()) {
+        if (set_key(k))
+            settings_closed();
+        return 0;
+    }
     if (ctx_open) {
         switch (k.key) {
-        case SI_UP: case SI_DOWN: ctx_sel ^= 1; break;
+        case SI_UP:   ctx_sel = (ctx_sel + CX_N - 1) % CX_N; break;
+        case SI_DOWN: ctx_sel = (ctx_sel + 1) % CX_N; break;
         case SI_ESC: ctx_open = 0; break;
         case SI_ENTER: case SI_SPACE:
             ctx_open = 0;
-            if (ctx_sel == CX_SETTINGS) { request_page(envs[sel].sec); return 0; }
-            if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
-            break;
+            return ctx_do(ctx_sel, exit_code);
         default: break;
         }
         return 0;
@@ -468,7 +650,7 @@ static int on_key(struct si_event k, int *exit_code)
     case SI_F1: case SI_TAB: case SI_ESC:
         menu_open = 1; menu_sel = 0; break;
     case SI_F2:                                         /* its settings */
-        if (nenv) request_page(envs[sel].sec);
+        if (nenv) open_settings(sel);
         break;
     case SI_ENTER: case SI_F10:
         if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
@@ -495,9 +677,10 @@ static int on_click(int x, int y, int *exit_code)
 {
     cancel_autolaunch();
     if (dlg == DLG_MESSAGE) { dlg = DLG_NONE; return 0; }
-    if (dlg == DLG_SHUTDOWN) {
+    if (dlg == DLG_SHUTDOWN || dlg == DLG_DELETE) {
         int w = 320, h = 58, dx = (AW - w) / 2, dy = (BAR_Y - h) / 2;
         if (inside(x, y, dx + w - 200, dy + h - 16, 96, 12)) {
+            if (dlg == DLG_DELETE) { delete_env(); return 0; }
             *exit_code = ASTOS_EXIT_HALT;
             return 1;
         }
@@ -505,13 +688,22 @@ static int on_click(int x, int y, int *exit_code)
             dlg = DLG_NONE;
         return 0;
     }
+    if (dlg == DLG_NAME) {
+        int w = 360, h = 62, dx = (AW - w) / 2, dy = (BAR_Y - h) / 2;
+        if (inside(x, y, dx + w - 200, dy + h - 16, 96, 12)) create_env();
+        else if (inside(x, y, dx + w - 96, dy + h - 16, 88, 12)) dlg = DLG_NONE;
+        return 0;
+    }
+    if (set_is_open()) {
+        if (set_click(x, y))
+            settings_closed();
+        return 0;
+    }
     if (ctx_open) {
         if (inside(x, y, ctx_x, ctx_y, CTX_W, ctx_h())) {
             int r = (y - ctx_y - 2) / ROW_H;
             ctx_open = 0;
-            if (r == CX_SETTINGS) { request_page(envs[sel].sec); return 0; }
-            if (r == CX_LAUNCH && launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
-            return 0;
+            return r >= 0 && r < CX_N ? ctx_do(r, exit_code) : 0;
         }
         ctx_open = 0;
         return 0;
@@ -553,6 +745,8 @@ static int on_click(int x, int y, int *exit_code)
 /* hover in the open menu follows the pointer */
 static int on_hover(int x, int y)
 {
+    if (set_is_open() && !dlg)
+        return set_hover(x, y);
     if (ctx_open && inside(x, y, ctx_x, ctx_y + 2, CTX_W, CX_N * ROW_H)) {
         int r = (y - ctx_y - 2) / ROW_H;
         if (r >= 0 && r < CX_N && r != ctx_sel) { ctx_sel = r; return 1; }
@@ -573,100 +767,6 @@ static void tick_status(void)
     temp_c10 = no_board ? 512 : sys_temp_c10();
     sys_clock(clock_s, sizeof clock_s, h12);
     sys_date(date_s, sizeof date_s, mdy);
-}
-
-/* ---- settings: the setup page's editor ------------------------------- */
-
-static const char *page_shot;            /* no-board test: shoot, then leave */
-
-/* keys for the page from ASTOS's input (it owns the ACIA reader and the
- * USB devices); the right mouse button is Esc, so a mouse-only user can
- * always get back out */
-static struct si_event page_poll(int timeout_ms)
-{
-    struct si_event none = { SI_NONE, SI_SRC_USB, 0 };
-    if (no_board) {
-        if (page_shot)
-            g_screenshot(&ss, page_shot);
-        page_shot = NULL;
-        struct si_event esc = { SI_ESC, SI_SRC_USB, 0 };
-        return esc;
-    }
-    double until = now_s() + timeout_ms / 1000.0;
-    do {
-        struct ai_event e = ai_poll(timeout_ms);
-        if (e.type == AI_KEY)
-            return e.key;
-        if (e.type == AI_MOUSE) {
-            int edge = (e.buttons & 2) && !(buttons_prev & 2);
-            buttons_prev = e.buttons;
-            if (edge) {
-                struct si_event esc = { SI_ESC, e.usb ? SI_SRC_USB : SI_SRC_ST, 0 };
-                return esc;
-            }
-        }
-    } while (now_s() < until);
-    return none;
-}
-
-static void astos_palette(void)
-{
-    if (ss.shifter) {
-        uint16_t pal[4];
-        g_palette_st(pal);
-        ss_palette(pal);
-    }
-    if (hdmi_on && sh_active()) {
-        uint32_t rgb[4];
-        g_palette_rgb(rgb);
-        sh_set_palette(rgb);
-    }
-}
-
-static void reload_envs(const char *keep)
-{
-    char want[SC_SEC_LEN];
-    snprintf(want, sizeof want, "%s", keep ? keep : "");
-    if (sc_load(&cfg, cfg_path) != 0)
-        fprintf(stderr, "[ASTOS] cannot re-read %s\n", cfg_path);
-    nenv = env_load(&cfg, envs, MAX_ENV);
-    sel = 0;
-    for (int i = 0; i < nenv; i++)
-        if (!strcasecmp(envs[i].sec, want))
-            sel = i;
-}
-
-/* Run the page (builds screen, or one build's editor), then come back.
- * Returns 1 with *exit_code set when its Boot now launches a build. */
-static int run_page(int *exit_code)
-{
-    static const uint16_t page_pal[4] = { 0x0777, 0x0700, 0x0070, 0x0000 };
-    static const uint32_t page_rgb[4] = { 0xEEEEEE, 0xCC0000, 0x00AA00, 0x000000 };
-    char chosen[SC_SEC_LEN] = "";
-    const char *was = nenv ? envs[sel].sec : "";
-    char keep[SC_SEC_LEN];
-    snprintf(keep, sizeof keep, "%s", page_sec[0] ? page_sec : was);
-
-    printf("[ASTOS] settings: %s\n", page_sec[0] ? page_sec : "environments");
-    if (ss.shifter)
-        ss_palette(g_mono() ? (const uint16_t[4]){ 0x0777, 0, 0, 0 } : page_pal);
-    if (hdmi_on && sh_active())
-        sh_set_palette(page_rgb);
-    sp_set_poll(page_poll);
-    enum sp_result r = sp_run_edit(&ss, cfg_path, page_sec, chosen, sizeof chosen);
-    sp_set_poll(NULL);
-    astos_palette();
-
-    reload_envs(chosen[0] ? chosen : keep);
-    if (r == SP_BOOT && chosen[0]) {
-        for (int i = 0; i < nenv; i++)
-            if (!strcasecmp(envs[i].sec, chosen))
-                sel = i;
-        if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
-    }
-    if (r == SP_ERROR)
-        message("Could not read psctrl.cfg", cfg_path);
-    return 0;
 }
 
 /* ---- start-up ------------------------------------------------------- */
@@ -873,18 +973,13 @@ int main(int argc, char **argv)
             case 's': menu_open = 1; menu_sel = MI_SHUTDOWN; e.key = SI_ENTER; break;
             case 'c': open_ctx(100, 40); continue;
             case 'p': e.key = SI_F2; break;
-            case 'v': menu_open = 1; menu_sel = MI_SETTINGS; e.key = SI_ENTER; break;
+            case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
+            case ' ': e.key = SI_SPACE; break;
+            case 't': e.key = SI_TAB; break;
             default: continue;
             }
             if (on_key(e, &exit_code))
                 break;
-            if (page_req) {
-                page_req = 0;
-                char ps[600];
-                snprintf(ps, sizeof ps, "%s.page.ppm", shot ? shot : "astos");
-                page_shot = ps;
-                run_page(&exit_code);
-            }
         }
         mx = 300; my = g_mono() ? 260 : 130;
         render();
@@ -935,6 +1030,15 @@ int main(int argc, char **argv)
                 /* right: on an icon its menu (Launch, Settings), else
                  * the start menu */
                 cancel_autolaunch();
+                if (set_is_open() && !dlg) {         /* right = Esc there */
+                    struct si_event esc = { SI_ESC, SI_SRC_ST, 0 };
+                    if (set_key(esc))
+                        settings_closed();
+                    buttons_prev = e.buttons;
+                    render();
+                    show();
+                    continue;
+                }
                 int lx = mx, ly = log_y(my), hit = -1;
                 for (int i = 0; i < nenv && !menu_open && !dlg; i++) {
                     int cx, cy;
@@ -984,12 +1088,6 @@ int main(int argc, char **argv)
             }
         }
 
-        if (page_req) {
-            page_req = 0;
-            if (run_page(&exit_code))
-                break;
-            redraw = 1;
-        }
         if (redraw)
             render();
         if (redraw || moved)
