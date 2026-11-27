@@ -39,7 +39,7 @@ on a mono one, from the monitor sense line. Both use the same layout:
 - **Desktop:** one icon per build (GEM machine, APJ-OS, Native ST, HDMI build,
   metal joystick), up to 16.
 - **Details panel:** the selected build's engine, CPU, machine, ROM, disks
-  and screen, and a *Launch* button.
+  and screen.
 - **This machine:** ST-RAM found, monitor and frame rate, input devices,
   CPLD firmware, Pi temperature.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
@@ -58,7 +58,8 @@ gamepads all work.
 | | |
 |---|---|
 | arrows | move between builds |
-| Enter, double-click, *Launch*, pad A or Start | launch the selected build |
+| click | select a build (on the desktop or in the start menu) - never launches |
+| double-click, Enter, pad A or Start | launch the selected build |
 | a letter | jump to the next build starting with it |
 | Tab, Esc, F1, the start button, right-click | start menu |
 | Help (PgUp on a PC keyboard) | screenshot → `~/astos-shot-N.ppm` (640×400) |

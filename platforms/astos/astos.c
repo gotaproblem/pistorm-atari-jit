@@ -170,8 +170,7 @@ static void draw_details(void)
     for (int i = 0; i < 6; i++)
         g_textn(x + 8, y + 15 + i * ROW_H, e->line[i], (PANEL_W - 16) / 8,
                 i == 0 && e->metal ? C_ACCENT : C_TEXT);
-    draw_button(x + PANEL_W - 88, y + h - 17, 80, "Launch", 1);
-    g_text(x + 8, y + h - 15, "Enter / double-click", C_DIM);
+    g_text(x + 8, y + h - 15, "Double-click or Enter to launch", C_DIM);
 }
 
 static void draw_machine(void)
@@ -462,15 +461,27 @@ static int on_click(int x, int y, int *exit_code)
     if (menu_open) {
         if (inside(x, y, 0, menu_y(), MENU_W, menu_h())) {
             for (int r = 0; r < menu_rows(); r++)
-                if (y >= menu_row_y(r) - 1 && y < menu_row_y(r) - 1 + ROW_H)
-                    return menu_activate(r, exit_code);
+                if (y >= menu_row_y(r) - 1 && y < menu_row_y(r) - 1 + ROW_H) {
+                    if (r >= nenv)                 /* Restart, Console, Shut down */
+                        return menu_activate(r, exit_code);
+                    /* an environment: one click selects it (the menu stays
+                     * open on it), a double-click launches it - never a
+                     * single click */
+                    double t = now_s();
+                    int dbl = last_click_env == 1000 + r && t - last_click_t < 0.45;
+                    menu_sel = r;
+                    sel = r;
+                    last_click_env = 1000 + r;
+                    last_click_t = t;
+                    if (dbl) {
+                        last_click_env = -1;
+                        return menu_activate(r, exit_code);
+                    }
+                    return 0;
+                }
             return 0;
         }
         menu_open = 0;
-        return 0;
-    }
-    if (nenv && inside(x, y, PANEL_X + PANEL_W - 88, 8 + 11 + 6 * ROW_H + 22 - 17, 80, 12)) {
-        if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
         return 0;
     }
     for (int i = 0; i < nenv; i++) {
