@@ -41,11 +41,13 @@ on a mono one, from the monitor sense line. Both use the same layout:
 - **Details panel:** the selected build's engine, CPU, machine, ROM, disks
   and screen.
 - **This machine:** ST-RAM found, monitor and frame rate, input devices,
-  CPLD firmware, Pi temperature.
+  CPLD firmware as it is named (e.g. `1.1b (EPM240)`), Pi temperature.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
   date and clock (`[psctrl] clock 24|12`, `date dmy|mdy`).
-- **Start menu:** every build, *Restart ASTOS*, *Exit to console*,
-  *Shut down…*.
+- **Start menu:** *Environments…* (the setup page's builds screen: new,
+  copy, delete, edit any build), *Restart ASTOS*, *Exit to console*,
+  *Shut down…*. The builds themselves are on the desktop, not in the menu.
+- **Right-click on an icon:** *Launch*, *Settings…* (that build's editor).
 
 If no ST-RAM answers (no ST monitor wired), ASTOS draws on HDMI instead.
 `hdmi on` in `[psctrl]` mirrors the desktop to HDMI as well.
@@ -61,7 +63,8 @@ gamepads all work.
 | click | select a build (on the desktop or in the start menu) - never launches |
 | double-click, Enter, pad A or Start | launch the selected build |
 | a letter | jump to the next build starting with it |
-| Tab, Esc, F1, the start button, right-click | start menu |
+| Tab, Esc, F1, the start button, right-click off an icon | start menu |
+| F2, or right-click → *Settings…* | edit the selected build's settings |
 | Help (PgUp on a PC keyboard) | screenshot → `~/astos-shot-N.ppm` (640×400) |
 | Help during the start-up splash | safe mode |
 
@@ -69,6 +72,19 @@ Inside a launched build, everything is as it was: Ctrl+Alt+Undo (Ctrl+Alt+End
 on a PC keyboard) ends it, and with ASTOS that means **back to ASTOS**, not to
 the setup page. So does the ST's reset button, APJ-OS's *Restart*, and a
 build that fails to start. Ctrl+Alt+Shift+Undo still shuts the Pi down.
+
+## Settings
+
+*Settings…* opens the setup page's editor for that build inside ASTOS: the
+same seven tabs (Machine, Video, Sound, Input, Drives, Network, Tuning), the
+same rules (a key ticked when the build has the line, JIT and machine
+dependencies, the image pickers for ROMs and disks), and the same *Save*.
+Esc (or the right mouse button) comes back to the desktop - with unsaved
+changes it asks once first - and *Boot now* launches the build. It still
+looks like the page (its own palette, 80×25 text); an ASTOS-styled settings
+window is a later phase. *Environments…* opens the page's builds screen
+(N new, copy, D delete, E edit, S save) the same way. ASTOS re-reads
+psctrl.cfg when you come back.
 
 ## psctrl.cfg
 

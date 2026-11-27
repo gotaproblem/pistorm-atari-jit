@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #include "shifter_setup.h"
+#include "setup_input.h"
 
 /* Switch rows: a key whose value is empty (a bare key in the .cfg means
  * on) or one of the boolean words config_file.c understands. They show
@@ -66,6 +67,16 @@ const char *sp_dump_key(const char *kbd_val);
 
 enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                       char *chosen, unsigned long chosen_len);
+
+/* For ASTOS. sp_run_edit: one build's editor only (section), or with
+ * section "" the builds screen with no countdown; leaving returns
+ * SP_QUIT, "Boot now" returns SP_BOOT with the build in `chosen`.
+ * sp_set_poll: read keys from fn instead of si_poll (NULL restores). */
+typedef struct si_event (*sp_poll_fn)(int timeout_ms);
+enum sp_result sp_run_edit(struct ss_screen *ss, const char *cfg_path,
+                           const char *section, char *chosen,
+                           unsigned long chosen_len);
+void sp_set_poll(sp_poll_fn fn);
 
 #ifdef __cplusplus
 }

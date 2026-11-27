@@ -35,6 +35,7 @@
 #include "astos_input.h"
 #include "setup_cfg.h"
 #include "setup_hdmi.h"
+#include "setup_page.h"
 #include "native_probe.h"
 #include "gpio/ps_protocol.h"
 #include "gpio/bus_lock.h"
@@ -64,7 +65,7 @@ static int buttons_prev;
 static double last_click_t;
 static int last_click_env = -1;
 
-static char cpld_text[24] = "-";
+static char cpld_text[32] = "-";
 static int temp_c10 = -1;
 static char clock_s[16], date_s[16];
 
@@ -99,17 +100,18 @@ static void cell_rect(int i, int *x, int *y)
     *y = GRID_Y + (i / GRID_COLS) * CELL_H;
 }
 
-/* start menu rows: envs, separator, then the system rows */
-enum { MI_RESTART = 0, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
+/* start menu rows: Environments... (the page's builds screen: new, copy,
+ * delete, edit), a separator, then Restart / Console / Shut down */
+enum { MI_SETTINGS = 0, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
 static const char *const sys_label[MI_NSYS] = {
-    "Restart ASTOS", "Exit to console", "Shut down...",
+    "Environments...", "Restart ASTOS", "Exit to console", "Shut down...",
 };
-static int menu_rows(void) { return nenv + MI_NSYS; }
-static int menu_h(void)    { return 14 + menu_rows() * ROW_H + 6; }
+static int menu_rows(void) { return MI_NSYS; }
+static int menu_h(void)    { return 14 + menu_rows() * ROW_H + 10; }
 static int menu_y(void)    { return BAR_Y - menu_h(); }
 static int menu_row_y(int r)
 {
-    return menu_y() + 14 + r * ROW_H + (r >= nenv ? 4 : 0);
+    return menu_y() + 14 + r * ROW_H + (r >= 1 ? 4 : 0);
 }
 
 /* ---- drawing -------------------------------------------------------- */
@@ -188,7 +190,7 @@ static void draw_machine(void)
     snprintf(l[2], sizeof l[2], "Input   %s%s%d kbd, %d mouse, %d pad",
              ai_have_st() ? "ST" : "", ai_have_st() ? " + " : "",
              ai_keyboards(), ai_mice(), ai_pads());
-    snprintf(l[3], sizeof l[3], "PiStorm CPLD firmware %s", cpld_text);
+    snprintf(l[3], sizeof l[3], "CPLD    firmware %.30s", cpld_text);
     if (temp_c10 >= 0)
         snprintf(l[4], sizeof l[4], "Pi      %d.%d C", temp_c10 / 10, temp_c10 % 10);
     else
@@ -231,20 +233,46 @@ static void draw_menu(void)
     g_fill(2, y + 1, MENU_W, h, C_TEXT);
     g_fill(0, y, MENU_W, h, C_WHITE);
     g_frame(0, y, MENU_W, h, C_TEXT);
-    g_text(8, y + 3, "Environments", C_DIM);
+    g_text(8, y + 3, "ASTOS " ASTOS_VERSION, C_DIM);
     g_hline(4, y + 12, MENU_W - 8, C_DIM);
     for (int r = 0; r < menu_rows(); r++) {
         int ry = menu_row_y(r);
         int on = r == menu_sel;
-        if (r == nenv)
+        if (r == 1)
             g_hline(4, ry - 3, MENU_W - 8, C_DIM);
         if (on)
             g_fill(4, ry - 1, MENU_W - 8, ROW_H, C_ACCENT);
-        const char *lab = r < nenv ? envs[r].title : sys_label[r - nenv];
-        g_textn(12, ry, lab, (MENU_W - 24) / 8, on ? C_WHITE : C_TEXT);
-        if (r < nenv && envs[r].metal)
-            g_text(MENU_W - 16 - 5 * 8, ry, "metal", on ? C_WHITE : C_DIM);
+        g_textn(12, ry, sys_label[r], (MENU_W - 24) / 8, on ? C_WHITE : C_TEXT);
     }
+}
+
+/* the right-click menu on an icon */
+enum { CX_LAUNCH = 0, CX_SETTINGS, CX_N };
+static const char *const ctx_label[CX_N] = { "Launch", "Settings..." };
+static int ctx_open, ctx_x, ctx_y, ctx_sel;
+#define CTX_W 128
+static int ctx_h(void) { return CX_N * ROW_H + 6; }
+
+static void draw_ctx(void)
+{
+    int h = ctx_h();
+    g_fill(ctx_x + 2, ctx_y + 1, CTX_W, h, C_TEXT);
+    g_fill(ctx_x, ctx_y, CTX_W, h, C_WHITE);
+    g_frame(ctx_x, ctx_y, CTX_W, h, C_TEXT);
+    for (int r = 0; r < CX_N; r++) {
+        int ry = ctx_y + 3 + r * ROW_H;
+        if (r == ctx_sel)
+            g_fill(ctx_x + 4, ry - 1, CTX_W - 8, ROW_H, C_ACCENT);
+        g_text(ctx_x + 12, ry, ctx_label[r], r == ctx_sel ? C_WHITE : C_TEXT);
+    }
+}
+
+static void open_ctx(int x, int y)
+{
+    ctx_open = 1;
+    ctx_sel = 0;
+    ctx_x = x > AW - CTX_W - 4 ? AW - CTX_W - 4 : x;
+    ctx_y = y > BAR_Y - ctx_h() - 2 ? BAR_Y - ctx_h() - 2 : y;
 }
 
 static void draw_dialog(void)
@@ -287,6 +315,8 @@ static void render(void)
     draw_taskbar();
     if (menu_open)
         draw_menu();
+    if (ctx_open)
+        draw_ctx();
     if (dlg)
         draw_dialog();
     g_pack(&ss);
@@ -305,8 +335,8 @@ static void show(void)
 static void message(const char *a, const char *b)
 {
     dlg = DLG_MESSAGE;
-    snprintf(dlg_text[0], sizeof dlg_text[0], "%s", a);
-    snprintf(dlg_text[1], sizeof dlg_text[1], "%s", b ? b : "");
+    snprintf(dlg_text[0], sizeof dlg_text[0], "%.63s", a);
+    snprintf(dlg_text[1], sizeof dlg_text[1], "%.63s", b ? b : "");
 }
 
 static int launch(int i)
@@ -335,15 +365,21 @@ static int launch(int i)
     return 1;
 }
 
+/* the setup page's editor, run inside ASTOS: page_sec "" = its builds
+ * screen (new / copy / delete / edit), a name = that build's editor */
+static int page_req;
+static char page_sec[SC_SEC_LEN];
+static void request_page(const char *sec)
+{
+    page_req = 1;
+    snprintf(page_sec, sizeof page_sec, "%s", sec);
+}
+
 static int menu_activate(int r, int *exit_code)
 {
     menu_open = 0;
-    if (r < nenv) {
-        sel = r;
-        if (launch(r)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
-        return 0;
-    }
-    switch (r - nenv) {
+    switch (r) {
+    case MI_SETTINGS: request_page(""); return 0;
     case MI_RESTART:  *exit_code = ASTOS_EXIT_RESTART; return 1;
     case MI_CONSOLE:  *exit_code = 0; return 1;
     case MI_SHUTDOWN:
@@ -387,6 +423,19 @@ static int on_key(struct si_event k, int *exit_code)
             dlg = DLG_NONE;
         return 0;
     }
+    if (ctx_open) {
+        switch (k.key) {
+        case SI_UP: case SI_DOWN: ctx_sel ^= 1; break;
+        case SI_ESC: ctx_open = 0; break;
+        case SI_ENTER: case SI_SPACE:
+            ctx_open = 0;
+            if (ctx_sel == CX_SETTINGS) { request_page(envs[sel].sec); return 0; }
+            if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
+            break;
+        default: break;
+        }
+        return 0;
+    }
     if (dlg == DLG_SHUTDOWN) {
         switch (k.key) {
         case SI_LEFT: case SI_RIGHT: case SI_TAB: dlg_sel ^= 1; break;
@@ -417,7 +466,10 @@ static int on_key(struct si_event k, int *exit_code)
     case SI_DOWN:  if (sel + GRID_COLS < nenv) sel += GRID_COLS; break;
     case SI_HOME:  sel = 0; break;
     case SI_F1: case SI_TAB: case SI_ESC:
-        menu_open = 1; menu_sel = sel; break;
+        menu_open = 1; menu_sel = 0; break;
+    case SI_F2:                                         /* its settings */
+        if (nenv) request_page(envs[sel].sec);
+        break;
     case SI_ENTER: case SI_F10:
         if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
         break;
@@ -453,32 +505,27 @@ static int on_click(int x, int y, int *exit_code)
             dlg = DLG_NONE;
         return 0;
     }
+    if (ctx_open) {
+        if (inside(x, y, ctx_x, ctx_y, CTX_W, ctx_h())) {
+            int r = (y - ctx_y - 2) / ROW_H;
+            ctx_open = 0;
+            if (r == CX_SETTINGS) { request_page(envs[sel].sec); return 0; }
+            if (r == CX_LAUNCH && launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
+            return 0;
+        }
+        ctx_open = 0;
+        return 0;
+    }
     if (inside(x, y, 0, BAR_Y, START_W, BAR_H)) {
         menu_open = !menu_open;
-        menu_sel = sel;
+        menu_sel = 0;
         return 0;
     }
     if (menu_open) {
         if (inside(x, y, 0, menu_y(), MENU_W, menu_h())) {
             for (int r = 0; r < menu_rows(); r++)
-                if (y >= menu_row_y(r) - 1 && y < menu_row_y(r) - 1 + ROW_H) {
-                    if (r >= nenv)                 /* Restart, Console, Shut down */
-                        return menu_activate(r, exit_code);
-                    /* an environment: one click selects it (the menu stays
-                     * open on it), a double-click launches it - never a
-                     * single click */
-                    double t = now_s();
-                    int dbl = last_click_env == 1000 + r && t - last_click_t < 0.45;
-                    menu_sel = r;
-                    sel = r;
-                    last_click_env = 1000 + r;
-                    last_click_t = t;
-                    if (dbl) {
-                        last_click_env = -1;
-                        return menu_activate(r, exit_code);
-                    }
-                    return 0;
-                }
+                if (y >= menu_row_y(r) - 1 && y < menu_row_y(r) - 1 + ROW_H)
+                    return menu_activate(r, exit_code);
             return 0;
         }
         menu_open = 0;
@@ -506,6 +553,11 @@ static int on_click(int x, int y, int *exit_code)
 /* hover in the open menu follows the pointer */
 static int on_hover(int x, int y)
 {
+    if (ctx_open && inside(x, y, ctx_x, ctx_y + 2, CTX_W, CX_N * ROW_H)) {
+        int r = (y - ctx_y - 2) / ROW_H;
+        if (r >= 0 && r < CX_N && r != ctx_sel) { ctx_sel = r; return 1; }
+        return 0;
+    }
     if (!menu_open || !inside(x, y, 0, menu_y(), MENU_W, menu_h()))
         return 0;
     for (int r = 0; r < menu_rows(); r++)
@@ -521,6 +573,100 @@ static void tick_status(void)
     temp_c10 = no_board ? 512 : sys_temp_c10();
     sys_clock(clock_s, sizeof clock_s, h12);
     sys_date(date_s, sizeof date_s, mdy);
+}
+
+/* ---- settings: the setup page's editor ------------------------------- */
+
+static const char *page_shot;            /* no-board test: shoot, then leave */
+
+/* keys for the page from ASTOS's input (it owns the ACIA reader and the
+ * USB devices); the right mouse button is Esc, so a mouse-only user can
+ * always get back out */
+static struct si_event page_poll(int timeout_ms)
+{
+    struct si_event none = { SI_NONE, SI_SRC_USB, 0 };
+    if (no_board) {
+        if (page_shot)
+            g_screenshot(&ss, page_shot);
+        page_shot = NULL;
+        struct si_event esc = { SI_ESC, SI_SRC_USB, 0 };
+        return esc;
+    }
+    double until = now_s() + timeout_ms / 1000.0;
+    do {
+        struct ai_event e = ai_poll(timeout_ms);
+        if (e.type == AI_KEY)
+            return e.key;
+        if (e.type == AI_MOUSE) {
+            int edge = (e.buttons & 2) && !(buttons_prev & 2);
+            buttons_prev = e.buttons;
+            if (edge) {
+                struct si_event esc = { SI_ESC, e.usb ? SI_SRC_USB : SI_SRC_ST, 0 };
+                return esc;
+            }
+        }
+    } while (now_s() < until);
+    return none;
+}
+
+static void astos_palette(void)
+{
+    if (ss.shifter) {
+        uint16_t pal[4];
+        g_palette_st(pal);
+        ss_palette(pal);
+    }
+    if (hdmi_on && sh_active()) {
+        uint32_t rgb[4];
+        g_palette_rgb(rgb);
+        sh_set_palette(rgb);
+    }
+}
+
+static void reload_envs(const char *keep)
+{
+    char want[SC_SEC_LEN];
+    snprintf(want, sizeof want, "%s", keep ? keep : "");
+    if (sc_load(&cfg, cfg_path) != 0)
+        fprintf(stderr, "[ASTOS] cannot re-read %s\n", cfg_path);
+    nenv = env_load(&cfg, envs, MAX_ENV);
+    sel = 0;
+    for (int i = 0; i < nenv; i++)
+        if (!strcasecmp(envs[i].sec, want))
+            sel = i;
+}
+
+/* Run the page (builds screen, or one build's editor), then come back.
+ * Returns 1 with *exit_code set when its Boot now launches a build. */
+static int run_page(int *exit_code)
+{
+    static const uint16_t page_pal[4] = { 0x0777, 0x0700, 0x0070, 0x0000 };
+    static const uint32_t page_rgb[4] = { 0xEEEEEE, 0xCC0000, 0x00AA00, 0x000000 };
+    char chosen[SC_SEC_LEN] = "";
+    const char *was = nenv ? envs[sel].sec : "";
+    char keep[SC_SEC_LEN];
+    snprintf(keep, sizeof keep, "%s", page_sec[0] ? page_sec : was);
+
+    printf("[ASTOS] settings: %s\n", page_sec[0] ? page_sec : "environments");
+    if (ss.shifter)
+        ss_palette(g_mono() ? (const uint16_t[4]){ 0x0777, 0, 0, 0 } : page_pal);
+    if (hdmi_on && sh_active())
+        sh_set_palette(page_rgb);
+    sp_set_poll(page_poll);
+    enum sp_result r = sp_run_edit(&ss, cfg_path, page_sec, chosen, sizeof chosen);
+    sp_set_poll(NULL);
+    astos_palette();
+
+    reload_envs(chosen[0] ? chosen : keep);
+    if (r == SP_BOOT && chosen[0]) {
+        for (int i = 0; i < nenv; i++)
+            if (!strcasecmp(envs[i].sec, chosen))
+                sel = i;
+        if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
+    }
+    if (r == SP_ERROR)
+        message("Could not read psctrl.cfg", cfg_path);
+    return 0;
 }
 
 /* ---- start-up ------------------------------------------------------- */
@@ -539,6 +685,24 @@ static void splash(const char *line)
         sh_present(&ss);
 }
 
+/* The CPLD's revision word as the firmware is named: bits 10-9 the kind
+ * (01 alpha, 10 beta, else release), bit 8 EPM570, and for an alpha
+ * bits 7-0 the number (0.253a), otherwise bits 7-5 major and 4-0 minor
+ * ($421 = 1.1b on an EPM240) - as ps_get_firmware_revision prints it. */
+static void fw_text(unsigned fw, char *out, size_t n)
+{
+    if (!fw) {
+        snprintf(out, n, "not answering");
+        return;
+    }
+    const char *chip = (fw & 0x100) ? "EPM570" : "EPM240";
+    if ((fw & 0x600) == 0x200)
+        snprintf(out, n, "0.%ua (%s)", fw & 0xFFu, chip);
+    else
+        snprintf(out, n, "%u.%u%c (%s)", (fw & 0xE0u) >> 5, fw & 0x1Fu,
+                 (fw & 0x600) == 0x400 ? 'b' : 'r', chip);
+}
+
 static int board_up(void)
 {
     if (pistorm_bus_lock("astos") != 0) {
@@ -551,7 +715,7 @@ static int board_up(void)
         ps_power_wait();
         ps_get_firmware_revision();
     }
-    snprintf(cpld_text, sizeof cpld_text, "$%03X", (unsigned)ps_fw_rev);
+    fw_text(ps_fw_rev, cpld_text, sizeof cpld_text);
     ps_pulse_halt();
     ps_reset_state_machine();
     ps_pulse_reset();
@@ -603,7 +767,7 @@ int main(int argc, char **argv)
         ss.hz50 = 1;
         ss.bank0 = ss.bank1 = 2048u << 10;
         ss.shifter = 0;
-        snprintf(cpld_text, sizeof cpld_text, "$421 (no board)");
+        fw_text(0x421, cpld_text, sizeof cpld_text);
     } else {
         if (board_up() != 0)
             return 1;
@@ -706,11 +870,21 @@ int main(int argc, char **argv)
             case 'e': e.key = SI_ENTER; break;
             case 'm': e.key = SI_F1; break;
             case 'x': e.key = SI_ESC; break;
-            case 's': menu_open = 1; menu_sel = nenv + MI_SHUTDOWN; e.key = SI_ENTER; break;
+            case 's': menu_open = 1; menu_sel = MI_SHUTDOWN; e.key = SI_ENTER; break;
+            case 'c': open_ctx(100, 40); continue;
+            case 'p': e.key = SI_F2; break;
+            case 'v': menu_open = 1; menu_sel = MI_SETTINGS; e.key = SI_ENTER; break;
             default: continue;
             }
             if (on_key(e, &exit_code))
                 break;
+            if (page_req) {
+                page_req = 0;
+                char ps[600];
+                snprintf(ps, sizeof ps, "%s.page.ppm", shot ? shot : "astos");
+                page_shot = ps;
+                run_page(&exit_code);
+            }
         }
         mx = 300; my = g_mono() ? 260 : 130;
         render();
@@ -757,10 +931,25 @@ int main(int argc, char **argv)
                     break;
                 redraw = 1;
             }
-            if ((e.buttons & 2) && !(buttons_prev & 2)) {    /* right: menu */
+            if ((e.buttons & 2) && !(buttons_prev & 2)) {
+                /* right: on an icon its menu (Launch, Settings), else
+                 * the start menu */
                 cancel_autolaunch();
-                menu_open = !menu_open;
-                menu_sel = sel;
+                int lx = mx, ly = log_y(my), hit = -1;
+                for (int i = 0; i < nenv && !menu_open && !dlg; i++) {
+                    int cx, cy;
+                    cell_rect(i, &cx, &cy);
+                    if (inside(lx, ly, cx + 8, cy - 2, CELL_W - 16, CELL_H - 6))
+                        hit = i;
+                }
+                if (hit >= 0) {
+                    sel = hit;
+                    open_ctx(lx, ly);
+                } else if (!dlg) {
+                    ctx_open = 0;
+                    menu_open = !menu_open;
+                    menu_sel = 0;
+                }
                 redraw = 1;
             }
             buttons_prev = e.buttons;
@@ -795,6 +984,12 @@ int main(int argc, char **argv)
             }
         }
 
+        if (page_req) {
+            page_req = 0;
+            if (run_page(&exit_code))
+                break;
+            redraw = 1;
+        }
         if (redraw)
             render();
         if (redraw || moved)

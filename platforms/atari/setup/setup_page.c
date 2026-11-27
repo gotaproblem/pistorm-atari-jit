@@ -1711,8 +1711,34 @@ static void snap(struct ss_screen *ss, struct state *st)
     printf("[SETUP] screen dump %s\n", path);
 }
 
+/* Where keys come from: si_poll, unless ASTOS supplies its own reader
+ * (it owns the ACIA and the USB devices while the page is up). */
+static sp_poll_fn poll_fn = si_poll;
+void sp_set_poll(sp_poll_fn fn) { poll_fn = fn ? fn : si_poll; }
+
+static enum sp_result run(struct ss_screen *ss, const char *cfg_path,
+                          char *chosen, unsigned long chosen_len,
+                          const char *edit_sec);
+
 enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                       char *chosen, unsigned long chosen_len)
+{
+    return run(ss, cfg_path, chosen, chosen_len, NULL);
+}
+
+enum sp_result sp_run_edit(struct ss_screen *ss, const char *cfg_path,
+                           const char *section, char *chosen,
+                           unsigned long chosen_len)
+{
+    return run(ss, cfg_path, chosen, chosen_len, section ? section : "");
+}
+
+/* edit_sec NULL: the whole page, as at boot. "": the builds screen with no
+ * countdown (ASTOS's Settings). A name: that build's editor only, and
+ * leaving it ends the page (ASTOS's per-environment Settings). */
+static enum sp_result run(struct ss_screen *ss, const char *cfg_path,
+                          char *chosen, unsigned long chosen_len,
+                          const char *edit_sec)
 {
     static struct state st;
     memset(&st, 0, sizeof st);
@@ -1720,8 +1746,15 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
         return SP_ERROR;
     load_builds(&st);
     clock_load(&st.cfg);
-    st.secs = sc_get_int(&st.cfg, "psctrl", "countdown", 5);
+    st.secs = edit_sec ? -1 : sc_get_int(&st.cfg, "psctrl", "countdown", 5);
     st.screen = SCR_BUILDS;
+    int edit_only = edit_sec && *edit_sec;
+    if (edit_only) {
+        snprintf(st.sec, sizeof st.sec, "%s", edit_sec);
+        st.screen = SCR_EDIT; st.tab = 0; st.sel = 0; st.top = 0;
+        if (build_ste_video(&st.cfg, st.sec) && np_board_ste() == 0)
+            snprintf(st.msg, sizeof st.msg, "%.63s", STE_ON_ST_WARNING);
+    }
 
     /* PISTORM_SETUP_TRACE=1: every key and what it did, on the console -
      * the way to see where a page that stops responding got to */
@@ -1734,7 +1767,7 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
         ss_flush(ss);
         sh_present(ss);
 
-        struct si_event e = si_poll(100);
+        struct si_event e = poll_fn(100);
         if (trace && e.key != SI_NONE) {
             char kn[32];
             printf("[SETUP] key %s on row '%s' ord %d -> ", si_key_name(&e, kn, sizeof kn),
@@ -1901,6 +1934,16 @@ enum sp_result sp_run(struct ss_screen *ss, const char *cfg_path,
                     edit_row(&st);
                 break;
             case SI_ESC:
+                if (edit_only) {                 /* back to ASTOS */
+                    if (st.cfg.dirty && !st.warned) {
+                        st.warned = 1;
+                        snprintf(st.msg, sizeof st.msg,
+                                 "unsaved changes - Save keeps them, ESC again drops them");
+                        break;
+                    }
+                    snprintf(chosen, chosen_len, "%s", st.sec);
+                    return SP_QUIT;
+                }
                 st.screen = SCR_BUILDS; st.msg[0] = '\0';
                 load_builds(&st);
                 break;

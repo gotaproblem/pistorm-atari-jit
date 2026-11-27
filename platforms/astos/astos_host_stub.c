@@ -26,6 +26,7 @@ int      ps_st_reset_pin(void)               { return -1; }
 int      pistorm_bus_lock(const char *w)     { (void)w; return 0; }
 void     pistorm_bus_unlock(void)            { }
 int      np_ensure_native_section(const char *p) { (void)p; return 0; }
+int      np_board_ste(void)                  { return 0; }
 
 int  sh_open(void)                           { return -1; }
 int  sh_active(void)                         { return 0; }
