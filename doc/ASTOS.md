@@ -103,6 +103,11 @@ environment) sets `cpu 68000` and `jit_power 0` - stboxmetal is an 8 MHz
 jit_cache). The cpu and jit_power rows then show *engine metal* and cannot
 be changed until the engine is changed back.
 
+**Not an STE (or Falcon):** DMA sound and the LMC1992 are STE hardware, so
+on any other machine choosing the machine - or opening such an environment
+- writes `dma_sound disabled` and `lmc 0` (lmc is on when its line is
+absent, so it is written out). Both rows stay greyed *STE/Falcon only*.
+
 *New environment…* asks for a name and opens the new, empty environment's
 settings; *Duplicate…* copies one under a new name; *Delete…* asks first.
 Names follow the page's rule: lower case letters, digits, `-` and `_`.

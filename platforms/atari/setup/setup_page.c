@@ -582,6 +582,30 @@ static void drop_by_rules(struct state *st)
  * and turns the ACSI switch off (the Falcon's port is SCSI) - the image
  * lines stay in the file, ignored, for when the build is an ST again. */
 static int acsi_switch_line(const struct state *st);
+
+/* DMA sound and the LMC1992 are STE (and Falcon) hardware. On any other
+ * machine both are written off - `dma_sound disabled`, `lmc 0` - rather
+ * than left to the defaults: lmc is ON when its line is absent. Returns
+ * what it changed, for the message. */
+static const char *sound_follow(struct state *st)
+{
+    const char *m = sc_get(&st->cfg, st->sec, "machine");
+    if (!se_machine_rule("dma_sound", m))
+        return "";
+    int d = 0, l = 0;
+    const char *v = sc_get(&st->cfg, st->sec, "dma_sound");
+    if (!v || strcasecmp(v, "disabled")) {
+        sc_set(&st->cfg, st->sec, "dma_sound", "disabled");
+        d = 1;
+    }
+    v = sc_get(&st->cfg, st->sec, "lmc");
+    if (!v || strcmp(v, "0")) {
+        sc_set(&st->cfg, st->sec, "lmc", "0");
+        l = 1;
+    }
+    return d && l ? "-dma_sound -lmc" : d ? "-dma_sound" : l ? "-lmc" : "";
+}
+
 static void apply_machine(struct state *st)
 {
     const char *m = sc_get(&st->cfg, st->sec, "machine");
@@ -613,6 +637,11 @@ static void apply_machine(struct state *st)
         se_machine_rule("cpu_compatible", m) &&
         sc_set(&st->cfg, st->sec, "cpu_compatible", NULL) == 0)
         DID("%s-cpu_compatible", *did ? " " : "");
+    {
+        const char *snd = sound_follow(st);
+        if (*snd)
+            DID("%s%s", *did ? " " : "", snd);
+    }
     {
         char sh[48];
         sp_shifter_follow(&st->cfg, st->sec, "machine", sh, sizeof sh);
@@ -2038,6 +2067,8 @@ int spm_open(const char *cfg_path, const char *section)
     mst.secs = -1;
     mst.tab = SE_TAB_MACHINE;
     engine_follow(&mst);                   /* an older metal build: say so */
+    if (*sound_follow(&mst) && !mst.msg[0])   /* an ST with DMA sound / lmc on */
+        snprintf(mst.msg, sizeof mst.msg, "not an STE: DMA sound and LMC off");
     build_rows(&mst);
     if (build_ste_video(&mst.cfg, mst.sec) && np_board_ste() == 0)
         snprintf(mst.msg, sizeof mst.msg, "%.63s", STE_ON_ST_WARNING);
