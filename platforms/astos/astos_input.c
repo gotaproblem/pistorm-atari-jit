@@ -6,9 +6,20 @@
  * off, so the byte stream carries mouse packets - a header $F8-$FB
  * (bit 1 = left button, bit 0 = right) and two signed deltas - between
  * the key codes. Other IKBD reports are skipped by their length.
+ *
+ * The 6850 holds ONE received byte and the IKBD sends one every 1.28 ms
+ * (7812.5 baud), three per mouse packet. A byte not read in time is
+ * overwritten (overrun), and a lost packet header turns the deltas that
+ * follow into key codes - a delta of $01 is Esc. So the ACIA is emptied
+ * by its own thread every 200 us into a ring, whatever the main loop is
+ * doing (drawing, flushing the screen), and parsed from there. The bus
+ * accessors take the transaction lock for non-CPU threads, so the reader
+ * and the drawing interleave safely.
  */
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <linux/input.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,6 +49,8 @@ static struct {
 static int ndev, n_kbd, n_mouse, n_pad, have_st, grabbed;
 static int shift_usb, shift_st;
 static int usb_buttons;
+static struct ai_event pend_key;              /* held back one poll */
+static int have_pend;
 
 static struct ai_event none(void)
 {
@@ -88,16 +101,55 @@ static int st_open(void)
     return 1;
 }
 
+/* ---- the reader thread: ACIA -> ring ---- */
+#define RING 1024                               /* power of two         */
+static uint16_t ring[RING];                     /* byte | 0x100 = error */
+static atomic_uint ring_w, ring_r;
+static pthread_t reader;
+static atomic_int reader_run;
+static unsigned long acia_errors;
+
+static void *acia_reader(void *arg)
+{
+    (void)arg;
+    while (atomic_load(&reader_run)) {
+        uint8_t sr = ps_read_8(ACIA_CTRL);
+        if (sr & ACIA_RDRF) {
+            uint8_t b = ps_read_8(ACIA_DATA);
+            unsigned w = atomic_load(&ring_w);
+            if (w - atomic_load(&ring_r) < RING) {
+                ring[w & (RING - 1)] = (uint16_t)(b | ((sr & ACIA_ERRS) ? 0x100 : 0));
+                atomic_store(&ring_w, w + 1);
+            }
+            continue;                             /* the next may be close */
+        }
+        usleep(200);
+    }
+    return NULL;
+}
+
+static int ring_get(void)
+{
+    unsigned r = atomic_load(&ring_r);
+    if (r == atomic_load(&ring_w))
+        return -1;
+    int v = ring[r & (RING - 1)];
+    atomic_store(&ring_r, r + 1);
+    return v;
+}
+
 static int pk_need, pk_have, pk_kind;          /* IKBD packet in progress */
 static uint8_t pk[8];
 
+/* one parsed report from the ring, or AI_NONE when it is empty */
 static struct ai_event st_poll(void)
 {
-    uint8_t sr = ps_read_8(ACIA_CTRL);
-    if (!(sr & ACIA_RDRF))
+    int v = ring_get();
+    if (v < 0)
         return none();
-    uint8_t b = ps_read_8(ACIA_DATA);
-    if (sr & ACIA_ERRS) {
+    uint8_t b = (uint8_t)v;
+    if (v & 0x100) {
+        acia_errors++;
         pk_need = 0;                          /* resync on the next header */
         return none();
     }
@@ -222,13 +274,27 @@ int ai_open(int want_st, int grab)
         }
         closedir(d);
     }
-    if (want_st)
+    if (want_st) {
         have_st = st_open();
+        atomic_store(&ring_r, 0);
+        atomic_store(&ring_w, 0);
+        atomic_store(&reader_run, 1);
+        if (pthread_create(&reader, NULL, acia_reader, NULL) != 0) {
+            atomic_store(&reader_run, 0);
+            have_st = 0;
+        }
+    }
     return ndev + have_st;
 }
 
 void ai_close(void)
 {
+    if (atomic_load(&reader_run)) {
+        atomic_store(&reader_run, 0);
+        pthread_join(reader, NULL);
+    }
+    if (acia_errors)
+        printf("[ASTOS] ST keyboard/mouse: %lu ACIA receive error(s)\n", acia_errors);
     for (int i = 0; i < ndev; i++) {
         if (grabbed)
             ioctl(dev[i].fd, EVIOCGRAB, (void *)0);
@@ -312,19 +378,44 @@ static struct ai_event usb_poll(void)
 
 struct ai_event ai_poll(int timeout_ms)
 {
+    if (have_pend) {
+        have_pend = 0;
+        return pend_key;
+    }
     for (int waited = 0; ; waited += 2) {
         struct ai_event e = usb_poll();
         if (e.type != AI_NONE)
             return e;
         if (have_st) {
-            /* drain what the ACIA has: a mouse packet is 3 bytes */
-            for (int k = 0; k < 8; k++) {
+            /* everything the reader has queued; consecutive mouse packets
+             * with the same buttons become one movement */
+            struct ai_event m = none();
+            for (;;) {
+                unsigned before = atomic_load(&ring_r);
                 e = st_poll();
-                if (e.type != AI_NONE)
+                if (e.type == AI_NONE) {
+                    if (atomic_load(&ring_r) == before)
+                        break;                    /* ring empty           */
+                    continue;                     /* mid-packet byte      */
+                }
+                if (e.type == AI_KEY) {
+                    if (m.type == AI_MOUSE) {     /* deliver the move first, */
+                        pend_key = e;             /* the key next time       */
+                        have_pend = 1;
+                        return m;
+                    }
                     return e;
-                if (!pk_need && !(ps_read_8(ACIA_CTRL) & ACIA_RDRF))
-                    break;
+                }
+                if (m.type == AI_MOUSE && m.buttons != e.buttons) {
+                    pend_key = e;                 /* a button change ends it */
+                    have_pend = 1;
+                    return m;
+                }
+                if (m.type == AI_MOUSE) { m.dx += e.dx; m.dy += e.dy; }
+                else m = e;
             }
+            if (m.type == AI_MOUSE)
+                return m;
         }
         if (waited >= timeout_ms)
             return none();

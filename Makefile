@@ -511,7 +511,7 @@ astos: $(ASTOS_SRC) $(ASTOS_HDR)
 # The same desktop on any Linux, no board: draws to a .ppm for checking the
 # layout (./astos-host --config configs/psctrl.cfg.default --shot out.ppm).
 astos-host: $(ASTOS_COMMON) platforms/astos/astos_host_stub.c $(ASTOS_HDR)
-	$(CC) $(ASTOS_COMMON) platforms/astos/astos_host_stub.c -o $@ -O2 -Wall -Wextra \
+	$(CC) $(ASTOS_COMMON) platforms/astos/astos_host_stub.c -o $@ -O2 -Wall -Wextra -pthread \
 	      -I. -Igpio -Iplatforms/atari/setup -Iplatforms/astos
 
 # GCC 14 ICEs in the second scheduling pass (sched-deps.cc add_dependence_1)
