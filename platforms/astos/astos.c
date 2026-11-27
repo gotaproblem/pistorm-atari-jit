@@ -795,8 +795,22 @@ int main(int argc, char **argv)
         sh_close();
     if (exit_code != ASTOS_EXIT_LAUNCH && exit_code != ASTOS_EXIT_RESTART)
         printf("[ASTOS] exit %d\n", exit_code);
-    /* leave the chips as a fresh reset would: the build that starts next
-     * (or TOS) initialises everything itself */
+    if (exit_code == 0 || exit_code == ASTOS_EXIT_HALT) {
+        /* Exit to console / Shut down: nothing starts after us, and a reset
+         * would point the Shifter at low memory - random patterns for as
+         * long as the Atari stays on. Leave a black screen instead: every
+         * pen black (in mono, pen 0 bit 0 clear = inverted, so 0 bits show
+         * black) and the screen cleared, and no reset. */
+        if (ss.shifter) {
+            static const uint16_t black[4] = { 0, 0, 0, 0 };
+            ss_palette(black);
+            memset(ss.shadow, 0, sizeof ss.shadow);
+            ss_flush(&ss);
+        }
+        return exit_code;
+    }
+    /* a build or ASTOS starts next: leave the chips as a fresh reset would,
+     * it initialises everything itself */
     ps_reset_state_machine();
     ps_pulse_reset();
     return exit_code;
