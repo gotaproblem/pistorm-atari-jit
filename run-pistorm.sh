@@ -20,6 +20,25 @@
 #                   genuine failure (bad .cfg, missing ROM, no board), and
 #                   relaunching it for ever would hide the message.
 #
+# ASTOS (platforms/astos/, doc/ASTOS.md). When ./astos is built, it is
+# what this script starts, in place of the setup page: the machine boots
+# into the ASTOS desktop, and the emulator only ever runs a build ASTOS
+# picked. ASTOS's own exit codes:
+#   44  launch    - the build named in /run/astos-launch: run
+#                   ./emulator --no-setup --build <it> (an `engine metal`
+#                   build hands itself to stboxmetal as before). However
+#                   that ends - 42 from Ctrl+Alt+Undo, the ST's reset
+#                   button, power loss, a crash - ASTOS comes back. Only
+#                   43 (Ctrl+Alt+Shift+Undo) still shuts Linux down.
+#   42  restart   - start ASTOS again (its Restart, the ST's reset button,
+#                   a power loss: ASTOS waits for the power on its way up).
+#   43  halt      - ASTOS's Shut down: shut Linux down.
+#    0  stop      - ASTOS's Exit to console.
+#   other         - ASTOS failed: try again; after 2 failures in a row
+#                   start it with --safe (no auto-launch, no HDMI), after
+#                   5 stop and leave the console.
+# PISTORM_ASTOS=0 in front of the script brings the setup page back.
+#
 # Launch through this loop from the console instead of running ./emulator
 # directly. Extra arguments after the script name are forwarded.
 # Absolute path to this script BEFORE the cd, so the sudo re-exec below
@@ -40,6 +59,72 @@ if [ "$(id -u)" -ne 0 ]; then
 	keep=$(env | grep '^PISTORM_[A-Z0-9_]*=' | tr '\n' ' ')
 	exec sudo -- env $keep /bin/sh "$self" "$@"
 fi
+# ---- ASTOS ---------------------------------------------------------------
+if [ -x ./astos ] && [ "${PISTORM_ASTOS:-1}" != "0" ]; then
+	cfg=../configs/psctrl.cfg
+	afails=0
+	safe=""
+	while :; do
+		rm -f /run/astos-launch
+		./astos --config "$cfg" $safe
+		rc=$?
+		case "$rc" in
+		44)
+			afails=0
+			safe=""
+			build=$(head -n 1 /run/astos-launch 2>/dev/null)
+			if [ -z "$build" ]; then
+				echo "[run-pistorm] ASTOS asked to launch, but named no build"
+				sleep 1
+				continue
+			fi
+			echo "[run-pistorm] ASTOS: launching [$build]"
+			./emulator --config "$cfg" --no-setup --build "$build" "$@"
+			erc=$?
+			if [ "$erc" -eq 43 ]; then
+				echo "[run-pistorm] Ctrl+Alt+Shift+Undo (43) - shutting Linux down."
+				sync
+				shutdown -h now
+				exit 0
+			fi
+			echo "[run-pistorm] [$build] ended ($erc) - back to ASTOS"
+			sleep 1
+			;;
+		42)
+			afails=0
+			safe=""
+			echo "[run-pistorm] ASTOS restart (42)"
+			sleep 1
+			;;
+		43)
+			echo "[run-pistorm] ASTOS: shut down (43) - shutting Linux down."
+			sync
+			shutdown -h now
+			exit 0
+			;;
+		0)
+			echo "[run-pistorm] ASTOS: exit to console (0)."
+			exit 0
+			;;
+		*)
+			afails=$((afails + 1))
+			if [ "$afails" -ge 5 ]; then
+				echo "[run-pistorm] ASTOS failed ($rc) 5 times running - stopping."
+				exit 1
+			fi
+			if [ "$afails" -ge 2 ]; then
+				safe="--safe"
+				echo "[run-pistorm] ASTOS failed ($rc) twice running - safe mode"
+			else
+				echo "[run-pistorm] ASTOS exited ($rc) - starting it again"
+			fi
+			sleep 2
+			;;
+		esac
+	done
+fi
+
+# ---- the setup page (no ASTOS) ---------------------------------------------
 fails=0
 while :; do
 	started=$(date +%s)

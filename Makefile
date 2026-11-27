@@ -280,8 +280,11 @@ endif
 ifeq ($(shell pkg-config --exists libswresample && echo ok),)
 MISSING_DEPS += libswresample-dev
 endif
+# astos-host builds on any Linux with nothing installed: no check for it
+ifneq ($(MAKECMDGOALS),astos-host)
 ifneq ($(strip $(MISSING_DEPS)),)
 $(error Missing build dependencies: $(MISSING_DEPS)  ->  sudo apt install $(MISSING_DEPS))
+endif
 endif
 
 ifeq ($(strip $(SLIRP_LIBS)),)
@@ -373,12 +376,12 @@ HEAVY_OBJS = $(CPU_CPP:.cpp=.o) $(JIT_CPP:.cpp=.o)
 $(HEAVY_OBJS): OPT := $(HEAVY_OPT)
 
 DELETEFILES = $(COBJS) $(CPPOBJS) $(COBJS:%.o=%.d) $(CPPOBJS:%.o=%.d) \
-              $(TARGET) ataritest setupvtest .ffmpeg-choice
+              $(TARGET) ataritest setupvtest astos astos-host .ffmpeg-choice
 
 # -----------------------------------------------------------------
 # Rules
 # -----------------------------------------------------------------
-all: $(TARGET) ataritest stboxmetal
+all: $(TARGET) ataritest stboxmetal astos
 
 # WHY THE STAMP FILE. Which FFmpeg gets linked is decided by an rpath, and an
 # rpath is baked in at LINK time - but nothing in the object files changes when
@@ -490,6 +493,26 @@ stboxmetal: $(METAL_SRC) tools/beamtest/beamtest.c platforms/atari/stbox/stbox_m
 # Not part of `all`: stop the emulator first, then sudo ./beamtest.
 beamtest: tools/beamtest/beamtest.c platforms/atari/setup/shifter_setup.c gpio/ps_protocol.c gpio/bus_lock.c
 	$(CC) $^ -o $@ $(CFLAGS) -Iplatforms/atari/setup -lm
+
+# ASTOS, the front end the machine boots into (platforms/astos/, doc/ASTOS.md).
+# Built with `all`: run-pistorm.sh starts it in place of the setup page and
+# starts the build it picks. By hand: stop the service first, then
+# sudo ./astos --config ../configs/psctrl.cfg
+ASTOS_COMMON = platforms/astos/astos.c platforms/astos/astos_gfx.c \
+               platforms/astos/astos_env.c platforms/astos/astos_sys.c \
+               platforms/astos/astos_input.c platforms/atari/setup/setup_cfg.c \
+               platforms/atari/setup/setup_input.c platforms/atari/setup/shifter_setup.c
+ASTOS_SRC = $(ASTOS_COMMON) platforms/atari/setup/setup_hdmi.c \
+            platforms/atari/setup/native_probe.c gpio/ps_protocol.c gpio/bus_lock.c
+ASTOS_HDR = platforms/astos/astos.h platforms/astos/astos_input.h
+astos: $(ASTOS_SRC) $(ASTOS_HDR)
+	$(CC) $(ASTOS_SRC) -o $@ $(CFLAGS) -Iplatforms/atari/setup -Iplatforms/astos -ldrm
+
+# The same desktop on any Linux, no board: draws to a .ppm for checking the
+# layout (./astos-host --config configs/psctrl.cfg.default --shot out.ppm).
+astos-host: $(ASTOS_COMMON) platforms/astos/astos_host_stub.c $(ASTOS_HDR)
+	$(CC) $(ASTOS_COMMON) platforms/astos/astos_host_stub.c -o $@ -O2 -Wall -Wextra \
+	      -I. -Igpio -Iplatforms/atari/setup -Iplatforms/astos
 
 # GCC 14 ICEs in the second scheduling pass (sched-deps.cc add_dependence_1)
 # on ps_acia_kbd_rescue() with the cortex-a53 pipeline model, i.e. only on

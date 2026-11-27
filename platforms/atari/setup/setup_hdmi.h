@@ -25,6 +25,9 @@ int  sh_active(void);
  * centred on black. */
 void sh_present(const struct ss_screen *ss);
 
+/* The four pens as 0xRRGGBB (ASTOS; the page uses the defaults). */
+void sh_set_palette(const uint32_t rgb[4]);
+
 /* Restore whatever the console had and let go of DRM. */
 void sh_close(void);
 

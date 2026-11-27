@@ -2767,6 +2767,7 @@ int main (int argc, char *argv[])
   time_t t;
   char config_file[256];
   int  no_setup = 0;              /* --no-setup: never show the setup page */
+  char forced_build[32] = "";     /* --build <section>: the build to boot */
 
   /* Claim the bus before anything touches the GPIO (gpio/bus_lock.c).
    * Two processes driving the same pins mid-cycle is not a cosmetic
@@ -2892,6 +2893,17 @@ int main (int argc, char *argv[])
       continue;
     }
 
+    /* --build <section>: boot this psctrl.cfg build, no setup page. ASTOS
+     * (platforms/astos/) picks the build and run-pistorm.sh passes it. */
+    if (strcmp(argv[g], "--build") == 0 && g + 1 < argc)
+    {
+      g++;
+      memset(forced_build, 0, sizeof forced_build);
+      strncpy(forced_build, argv[g], sizeof forced_build - 1);
+      no_setup = 1;
+      continue;
+    }
+
     if (strcmp(argv[g], "--config") == 0)
     {
       if (g + 1 >= argc)
@@ -2959,6 +2971,20 @@ int main (int argc, char *argv[])
        * would feed countdown/boot to the .cfg parser and nothing else. */
       if (last && *last && strcasecmp(last, "psctrl"))
         strncpy(boot_section, last, sizeof boot_section - 1);
+      if (forced_build[0]) {
+        char all[64][SC_SEC_LEN];
+        int nall = sc_sections(&probe, all, 64), found = 0;
+        for (int i = 0; i < nall; i++)
+          if (!strcasecmp(all[i], forced_build))
+            found = 1;
+        if (!found) {
+          fprintf(stderr, "[CFG] *** --build %s: no such section in %s ***\n",
+                  forced_build, config_file);
+          return 1;
+        }
+        memset(boot_section, 0, sizeof boot_section);
+        strncpy(boot_section, forced_build, sizeof boot_section - 1);
+      }
 
       if (!no_setup && countdown > 0) {
         static struct ss_screen scr;

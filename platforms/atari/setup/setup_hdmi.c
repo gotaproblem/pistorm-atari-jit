@@ -27,8 +27,15 @@ static drmModeModeInfo mode;
 static drmModeCrtc *saved;
 
 /* ST palette as the page uses it: paper, red, green, ink */
-static const uint32_t palette[4] = { 0xFFEEEEEE, 0xFFCC0000, 0xFF00AA00,
-                                     0xFF000000 };
+static uint32_t palette[4] = { 0xFFEEEEEE, 0xFFCC0000, 0xFF00AA00,
+                               0xFF000000 };
+
+/* ASTOS draws with its own four pens (0xRRGGBB); the page keeps these */
+void sh_set_palette(const uint32_t rgb[4])
+{
+    for (int i = 0; i < 4; i++)
+        palette[i] = 0xFF000000u | (rgb[i] & 0xFFFFFFu);
+}
 
 int sh_active(void) { return fd >= 0 && map_; }
 
