@@ -367,7 +367,7 @@ void set_draw(void)
     button(16 + BTN_W + 8, FOOT_Y, "Close", 0);
     if (spm_dirty())
         g_text(16 + 2 * (BTN_W + 8) + 4, FOOT_Y + 2, "unsaved changes", C_ACCENT);
-    g_textn(304, FOOT_Y + 2, "Enter change  Space on/off  Tab category", 40, C_DIM);
+    g_textn(420, FOOT_Y + 2, "Enter change  Space on/off", 26, C_DIM);
 
     if (pop == POP_CAT || pop == POP_VALUE)
         draw_pop();

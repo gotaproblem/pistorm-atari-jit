@@ -97,6 +97,12 @@ The rules behind it are the setup page's own (its editor used as a model:
 have written it - the JIT / cpu / machine dependencies, pinned disk slots,
 the defaults filled in on save.
 
+**engine metal** fixes two settings: choosing it (or opening an older metal
+environment) sets `cpu 68000` and `jit_power 0` - stboxmetal is an 8 MHz
+68000, interpreted - and drops what needed more (fpu, mmu, ttram,
+jit_cache). The cpu and jit_power rows then show *engine metal* and cannot
+be changed until the engine is changed back.
+
 *New environment…* asks for a name and opens the new, empty environment's
 settings; *Duplicate…* copies one under a new name; *Delete…* asks first.
 Names follow the page's rule: lower case letters, digits, `-` and `_`.

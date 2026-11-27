@@ -880,6 +880,45 @@ static void jit_follow(struct state *st, const char *key)
     }
 }
 
+/* engine metal: stboxmetal is a 68000 at 8 MHz, interpreted, so the
+ * build says so - cpu 68000 and the JIT off (jit_power 0) - and what
+ * needed a bigger cpu or the JIT goes with it (fpu, mmu, ttram,
+ * jit_cache). Both rows are then fixed while the engine is metal. */
+static int engine_metal(const struct sc_cfg *c, const char *sec)
+{
+    const char *e = sc_get(c, sec, "engine");
+    return e && !strncasecmp(e, "metal", 5);
+}
+
+static int metal_fixed(const struct sc_cfg *c, const char *sec, const char *key)
+{
+    return engine_metal(c, sec) &&
+           (!strcasecmp(key, "cpu") || !strcasecmp(key, "jit_power"));
+}
+
+static void engine_follow(struct state *st)
+{
+    if (!engine_metal(&st->cfg, st->sec))
+        return;
+    const char *cpu = sc_get(&st->cfg, st->sec, "cpu");
+    const char *jp  = sc_get(&st->cfg, st->sec, "jit_power");
+    int changed = 0;
+    if (!cpu || strcmp(cpu, "68000")) {
+        sc_set(&st->cfg, st->sec, "cpu", "68000");
+        changed = 1;
+    }
+    if (!jp || strtol(jp, NULL, 0) != 0) {
+        sc_set(&st->cfg, st->sec, "jit_power", "0");
+        changed = 1;
+    }
+    if (!changed)
+        return;
+    drop_by_rules(st);                     /* fpu, mmu, ttram ... */
+    char did[48];
+    sp_jit_follow(&st->cfg, st->sec, "jit_power", did, sizeof did);
+    snprintf(st->msg, sizeof st->msg, "engine metal: cpu 68000, JIT off");
+}
+
 /* A build with the STE video personality: machine ste, and shifter ste
  * (a missing shifter line follows the machine). config_file.c's
  * emulator_config_shifter_ste() is the same rule. */
@@ -1006,6 +1045,8 @@ static void build_rows(struct state *st)
         r->why = se_env_rule(k, st->sec);
         if (!r->why) r->why = se_cpu_rule(k, cpu);
         if (!r->why) r->why = se_machine_rule(k, machine);
+        if (!r->why && metal_fixed(&st->cfg, st->sec, k))
+            r->why = "engine metal";
         if (!r->why && (!r->ticked || !strncasecmp(k, "comp", 4)))
             r->why = sp_jit_rule(&st->cfg, st->sec, k);
     }
@@ -1261,6 +1302,8 @@ static void tick_row(struct state *st, int open_editor_for_text)
     }
     if (!strcasecmp(r->text, "machine"))
         apply_machine(st);
+    if (!strcasecmp(r->text, "engine"))
+        engine_follow(st);
 }
 
 static void commit_edit(struct state *st)
@@ -1371,6 +1414,8 @@ static void choose_accept(struct state *st)
         }
         if (!strcasecmp(r->text, "machine"))
             apply_machine(st);
+        if (!strcasecmp(r->text, "engine"))
+            engine_follow(st);
         jit_follow(st, r->text);
         if (!strcasecmp(r->text, "shifter")) {
             char sh[48];
@@ -1992,6 +2037,7 @@ int spm_open(const char *cfg_path, const char *section)
     mst.screen = SCR_EDIT;
     mst.secs = -1;
     mst.tab = SE_TAB_MACHINE;
+    engine_follow(&mst);                   /* an older metal build: say so */
     build_rows(&mst);
     if (build_ste_video(&mst.cfg, mst.sec) && np_board_ste() == 0)
         snprintf(mst.msg, sizeof mst.msg, "%.63s", STE_ON_ST_WARNING);
