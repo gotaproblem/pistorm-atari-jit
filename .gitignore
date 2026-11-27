@@ -63,5 +63,5 @@ stbox-diag-*
 /stboxmetal
 /beamtest
 platforms/atari/stbox/stbox_metal_diskload.inc
-astos
-astos-host
+/astos
+/astos-host
