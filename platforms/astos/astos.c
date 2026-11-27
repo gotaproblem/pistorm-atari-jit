@@ -798,13 +798,25 @@ int main(int argc, char **argv)
     if (exit_code == 0 || exit_code == ASTOS_EXIT_HALT) {
         /* Exit to console / Shut down: nothing starts after us, and a reset
          * would point the Shifter at low memory - random patterns for as
-         * long as the Atari stays on. Leave a black screen instead: every
-         * pen black (in mono, pen 0 bit 0 clear = inverted, so 0 bits show
-         * black) and the screen cleared, and no reset. */
+         * long as the Atari stays on. Leave a black screen saying what
+         * happened instead, and no reset. Black paper: medium pen 0 black;
+         * mono pen 0 bit 0 clear = inverted, so 0 bits show black and the
+         * ink bits white. */
         if (ss.shifter) {
-            static const uint16_t black[4] = { 0, 0, 0, 0 };
-            ss_palette(black);
+            static const uint16_t pal[4] = { 0x0000, 0x0777, 0x0444, 0x0777 };
+            const char *l1, *l2;
+            if (exit_code == ASTOS_EXIT_HALT) {
+                l1 = "The Pi is shutting down";
+                l2 = "Switch the Atari off when the Pi's activity light stops";
+            } else {
+                l1 = "ASTOS has exited to the Linux console";
+                l2 = "To start it again:  sudo systemctl restart pistorm";
+            }
+            int dim = g_mono() ? 1 : 2;
+            ss_palette(pal);
             memset(ss.shadow, 0, sizeof ss.shadow);
+            ss_puts(&ss, (SS_COLS - (int)strlen(l1)) / 2, 11, l1, 1, 0);
+            ss_puts(&ss, (SS_COLS - (int)strlen(l2)) / 2, 13, l2, dim, 0);
             ss_flush(&ss);
         }
         return exit_code;
