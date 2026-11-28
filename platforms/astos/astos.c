@@ -1106,6 +1106,7 @@ static int board_up(void)
 
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0);        /* to the journal line by line */
     const char *cfg_arg = NULL, *shot = NULL, *keys = NULL;
     enum ss_mode force = SS_MODE_AUTO;
 

@@ -17,6 +17,8 @@
  * and the drawing interleave safely.
  */
 #include <dirent.h>
+#include <errno.h>
+#include <sys/inotify.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -43,10 +45,12 @@
 
 static struct {
     int fd, is_pad, is_kbd, is_mouse;
+    char node[16];                      /* "event5"                         */
     struct { int centre, on, off; } ax[2];
     int stick[2];
 } dev[MAX_DEV];
 static int ndev, n_kbd, n_mouse, n_pad, have_st, grabbed;
+static int ino_fd = -1;                /* /dev/input watched: hotplug      */
 static int shift_usb, shift_st;
 static int usb_buttons;
 static struct ai_event pend_key;              /* held back one poll */
@@ -202,10 +206,20 @@ static int has_bit(const unsigned long *b, int n)
     return (b[n / (8 * (int)sizeof(long))] >> (n % (8 * (int)sizeof(long)))) & 1;
 }
 
-static void try_dev(const char *path, int grab)
+/* a keyboard, mouse or pad at /dev/input/<node>; once only. Devices come
+ * and go: a Bluetooth keyboard or mouse connects seconds after boot and
+ * again after each of its sleeps, as a new event node, and USB ones can be
+ * plugged in at any time - so /dev/input is watched (inotify) and a node
+ * that stops reading (ENODEV) is let go. */
+static void try_dev(const char *node, int grab)
 {
     if (ndev >= MAX_DEV)
         return;
+    for (int i = 0; i < ndev; i++)
+        if (!strcmp(dev[i].node, node))
+            return;
+    char path[48];
+    snprintf(path, sizeof path, "/dev/input/%.30s", node);
     int fd = open(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0)
         return;
@@ -240,7 +254,16 @@ static void try_dev(const char *path, int grab)
     dev[i].is_pad = pad;
     dev[i].is_kbd = kbd;
     dev[i].is_mouse = mouse;
+    snprintf(dev[i].node, sizeof dev[i].node, "%.15s", node);
     n_pad += pad; n_kbd += kbd; n_mouse += mouse;
+    char name[80] = "?";
+    struct input_id id;
+    memset(&id, 0, sizeof id);
+    ioctl(fd, EVIOCGNAME(sizeof name), name);
+    ioctl(fd, EVIOCGID, &id);
+    printf("[ASTOS] input: + %s \"%s\" (%s) %s\n", node, name,
+           id.bustype == BUS_BLUETOOTH ? "bluetooth" : id.bustype == BUS_USB ? "usb" : "other",
+           pad ? "pad" : kbd && mouse ? "keyboard+mouse" : kbd ? "keyboard" : "mouse");
     if (pad) {
         static const int code[2] = { ABS_X, ABS_Y };
         for (int a = 0; a < 2; a++) {
@@ -262,16 +285,18 @@ int ai_open(int want_st, int grab)
 {
     ndev = n_kbd = n_mouse = n_pad = have_st = 0;
     grabbed = grab;
+    /* the watch first, so nothing that appears during the scan is missed */
+    ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (ino_fd >= 0 && inotify_add_watch(ino_fd, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) {
+        close(ino_fd);
+        ino_fd = -1;
+    }
     DIR *d = opendir("/dev/input");
     if (d) {
         struct dirent *e;
-        while ((e = readdir(d))) {
-            if (strncmp(e->d_name, "event", 5))
-                continue;
-            char path[48];
-            snprintf(path, sizeof path, "/dev/input/%.30s", e->d_name);
-            try_dev(path, grab);
-        }
+        while ((e = readdir(d)))
+            if (!strncmp(e->d_name, "event", 5))
+                try_dev(e->d_name, grab);
         closedir(d);
     }
     if (want_st) {
@@ -301,6 +326,10 @@ void ai_close(void)
         close(dev[i].fd);
     }
     ndev = 0;
+    if (ino_fd >= 0) {
+        close(ino_fd);
+        ino_fd = -1;
+    }
 }
 
 int ai_have_st(void)   { return have_st; }
@@ -308,12 +337,44 @@ int ai_keyboards(void) { return n_kbd; }
 int ai_mice(void)      { return n_mouse; }
 int ai_pads(void)      { return n_pad; }
 
+static void drop_dev(int i)
+{
+    printf("[ASTOS] input: - %s\n", dev[i].node);
+    close(dev[i].fd);
+    n_pad -= dev[i].is_pad; n_kbd -= dev[i].is_kbd; n_mouse -= dev[i].is_mouse;
+    dev[i] = dev[--ndev];
+}
+
+static void hotplug(void)
+{
+    if (ino_fd < 0)
+        return;
+    char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    ssize_t n;
+    while ((n = read(ino_fd, buf, sizeof buf)) > 0)
+        for (char *p = buf; p < buf + n; ) {
+            const struct inotify_event *ie = (const struct inotify_event *)p;
+            if (ie->len && !strncmp(ie->name, "event", 5))
+                try_dev(ie->name, grabbed);
+            p += sizeof *ie + ie->len;
+        }
+}
+
 static struct ai_event usb_poll(void)
 {
     struct input_event ie;
+    hotplug();
     for (int i = 0; i < ndev; i++) {
         int mdx = 0, mdy = 0, mwheel = 0, mouse_changed = 0;
-        while (read(dev[i].fd, &ie, sizeof ie) == (ssize_t)sizeof ie) {
+        for (;;) {
+            ssize_t got = read(dev[i].fd, &ie, sizeof ie);
+            if (got != (ssize_t)sizeof ie) {
+                if (got < 0 && errno != EAGAIN && errno != EINTR) {
+                    drop_dev(i--);                /* unplugged / gone to sleep */
+                    mouse_changed = 0;
+                }
+                break;
+            }
             if (dev[i].is_pad) {
                 if (ie.type == EV_ABS && ie.code == ABS_HAT0X && ie.value)
                     return key_ev((struct si_event){ ie.value < 0 ? SI_LEFT : SI_RIGHT, SI_SRC_PAD, 0 });
