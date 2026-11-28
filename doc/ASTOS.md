@@ -48,19 +48,17 @@ on a mono one, from the monitor sense line. Both use the same layout:
   date to switch day/month/year and month/day/year, the clock to switch
   24 / 12 hour; saved as `[psctrl] temp c|f`, `date dmy|mdy` and
   `clock 24|12` (the last two are the keys the setup page used).
-- **Throttle state**, left of the temperature: the firmware's
+- **Pi state**, left of the temperature, from the firmware's
   `get_throttled` word (what `vcgencmd get_throttled` prints), read once a
-  second through the VideoCore mailbox. `OK` when nothing has happened
-  since boot; otherwise a code per condition - `UV` under-voltage, `CAP`
-  ARM frequency capped, `THR` throttled, `TMP` soft temperature limit - in
-  a filled box while it is happening now, in plain text once it has passed.
-  A click shows the raw value and what it means. On HDMI, `OK` is green
-  and `UV` / `TMP` are red; the ST monitor keeps its four pens (medium has
-  no red or green to spare), so there the codes are boxes and plain text. Every change is also
-  printed to the console / journal (`[ASTOS] get_throttled 0x50005 -
-  under-voltage now ...`). ASTOS only reads it: the since-boot bits are
-  never cleared. `PISTORM_ASTOS_THROTTLED=0x50005` fakes a value, to see
-  how it looks.
+  second through the VideoCore mailbox: `PI OK` when there has been no
+  under-voltage and no temperature limit since boot; otherwise `UV`
+  (under-voltage) and/or `TEMP` (soft temperature limit) - in a filled box
+  while it is happening, in plain text once it has passed. On HDMI `PI OK`
+  is green and `UV` / `TEMP` red; the ST monitor keeps its four pens. A
+  click shows the raw value and every condition, frequency capping and
+  throttling included. Every change is printed to the console / journal.
+  ASTOS only reads it: the since-boot bits are never cleared.
+  `PISTORM_ASTOS_THROTTLED=0x50005` fakes a value, to see how it looks.
 - **Start menu:** *New environment…*, *HDMI display* (on / off / only),
   *Restart ASTOS*, *Exit to console*, *Shut down…*. The environments themselves are on the desktop.
 - **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,

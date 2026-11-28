@@ -80,7 +80,7 @@ static int throttled = -1, thr_x = AW, thr_w;   /* get_throttled, its place */
 
 /* HDMI-only colour (setup_hdmi.c tints): the Shifter has no pen to spare */
 #define RGB_GOOD 0x16A34A                       /* green: OK                */
-#define RGB_BAD  0xDC2626                       /* red:   UV, TMP           */
+#define RGB_BAD  0xDC2626                       /* red:   UV, TEMP          */
 static struct sh_tint tints[SH_MAX_TINT];
 static int ntint;
 static void add_tint(int x, int y, int w, int h, int c, uint32_t rgb)
@@ -92,7 +92,7 @@ static void add_tint(int x, int y, int w, int h, int c, uint32_t rgb)
 }
 
 /* the four conditions, short as the taskbar shows them */
-static const char *const thr_code[4] = { "UV", "CAP", "THR", "TMP" };
+static const char *const thr_code[4] = { "UV", "CAP", "THR", "TEMP" };
 static const char *const thr_name[4] = {
     "under-voltage", "ARM frequency capped", "throttled", "soft temperature limit",
 };
@@ -263,17 +263,19 @@ static void draw_taskbar(void)
     g_text(date_x, BAR_Y + 3, date_s, C_TEXT);
     g_text(temp_x, BAR_Y + 3, t, C_TEXT);
 
-    /* get_throttled, left of the temperature: "OK", or a code for each
-     * condition - one happening NOW in a filled box, one that happened
-     * since boot and has passed in plain text. A click explains it. */
+    /* get_throttled, left of the temperature: "PI OK", or UV / TEMP when
+     * the Pi is (or was, since boot) under-voltage or at the temperature
+     * limit - a filled box while it is happening, plain text once it has
+     * passed. Frequency capping and throttling alone are not shown here
+     * (they follow from those two); a click lists everything. */
     thr_w = 0;
     ntint = 0;
     if (throttled < 0)
         return;
-    int now = throttled & 0xF, past = (throttled >> 16) & 0xF;
+    int now = throttled & 0x9, past = (throttled >> 16) & 0x9;   /* UV, TEMP */
     int w = 0;
     if (!now && !past)
-        w = g_text_w("OK");
+        w = g_text_w("PI OK");
     else
         for (int b = 0; b < 4; b++)
             if (((now | past) >> b) & 1)
@@ -281,8 +283,8 @@ static void draw_taskbar(void)
     thr_x = temp_x - 16 - w;
     thr_w = w;
     if (!now && !past) {
-        g_text(thr_x, BAR_Y + 3, "OK", C_DIM);
-        add_tint(thr_x, BAR_Y + 2, w, 9, C_DIM, RGB_GOOD);
+        g_text(thr_x, BAR_Y + 3, "PI OK", C_DIM);
+        add_tint(thr_x, BAR_Y + 2, w, 9, C_DIM, RGB_GOOD);          /* green */
         return;
     }
     int cx = thr_x;
@@ -290,18 +292,14 @@ static void draw_taskbar(void)
         if (!(((now | past) >> b) & 1))
             continue;
         int cw = g_text_w(thr_code[b]);
-        /* UV and TMP are the ones to act on: red on HDMI (the Shifter's
-         * four pens have no red to spare) */
-        int bad = b == 0 || b == 3;
+        /* red on HDMI (the Shifter's four pens have no red to spare) */
         if ((now >> b) & 1) {
             g_fill(cx - 3, BAR_Y + 2, cw + 6, BAR_H - 3, C_ACCENT);
             g_text(cx, BAR_Y + 3, thr_code[b], C_WHITE);
-            if (bad)
-                add_tint(cx - 3, BAR_Y + 2, cw + 6, BAR_H - 3, C_ACCENT, RGB_BAD);
+            add_tint(cx - 3, BAR_Y + 2, cw + 6, BAR_H - 3, C_ACCENT, RGB_BAD);
         } else {
             g_text(cx, BAR_Y + 3, thr_code[b], C_TEXT);
-            if (bad)
-                add_tint(cx, BAR_Y + 2, cw, 9, C_TEXT, RGB_BAD);
+            add_tint(cx, BAR_Y + 2, cw, 9, C_TEXT, RGB_BAD);
         }
         cx += cw + 8;
     }
