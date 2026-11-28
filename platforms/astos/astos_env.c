@@ -57,6 +57,53 @@ static const char *disk_name(const char *v)
     return s ? s + 1 : v;
 }
 
+/* a switch word, as config_file.c reads one on a bus line */
+static int switch_word(const char *v, int *on)
+{
+    static const char *const yes[] = { "enabled", "enable", "on", "true", "yes", "1" };
+    static const char *const no[]  = { "disabled", "disable", "off", "false", "no", "0" };
+    for (unsigned i = 0; i < sizeof yes / sizeof *yes; i++)
+        if (!strcasecmp(v, yes[i])) { *on = 1; return 1; }
+    for (unsigned i = 0; i < sizeof no / sizeof *no; i++)
+        if (!strcasecmp(v, no[i]))  { *on = 0; return 1; }
+    return 0;
+}
+
+/* "IDE     on, apj-os.img +1" / "off": the bus switch (`ide`, or the
+ * acsi line that is a switch word) and its image lines (`hdd`, or the
+ * other acsi lines) */
+static void bus_line(struct sc_cfg *c, const char *s, const char *sw_key,
+                     const char *img_key, const char *label, char *out, size_t n)
+{
+    int on = 0, nimg = 0;
+    const char *first = NULL;
+    int ns = sc_count(c, s, sw_key);
+    for (int i = 0; i < ns; i++) {
+        const char *v = sc_get_n(c, s, sw_key, i);
+        int w;
+        if (v && (!*v || switch_word(v, &w)))
+            on = !*v ? 1 : w;
+    }
+    int ni = sc_count(c, s, img_key);
+    for (int i = 0; i < ni; i++) {
+        const char *v = sc_get_n(c, s, img_key, i);
+        int w;
+        if (!v || !*v || switch_word(v, &w))
+            continue;
+        if (!first)
+            first = disk_name(v);
+        nimg++;
+    }
+    if (!on)
+        snprintf(out, n, "%soff", label);
+    else if (!first)
+        snprintf(out, n, "%son, no image", label);
+    else if (nimg > 1)
+        snprintf(out, n, "%son, %.18s +%d", label, first, nimg - 1);
+    else
+        snprintf(out, n, "%son, %.22s", label, first);
+}
+
 static int is_machine_section(const char *s)
 {
     return strcasecmp(s, "psctrl") && strcasecmp(s, "astos");
@@ -86,10 +133,10 @@ int env_load(struct sc_cfg *c, struct env *out, int max)
         else if (hdmi_vid)                              e->kind = K_HDMI;
         else                                            e->kind = K_TOS;
 
-        /* details panel: 6 lines, 36 characters each */
+        /* details panel: 6 lines, 36 characters each - CPU, machine, ROM,
+         * IDE, ACSI, screen. A metal build says so in its CPU line. */
         if (e->metal) {
-            snprintf(e->line[0], sizeof e->line[0], "Engine  stboxmetal, real chips");
-            snprintf(e->line[1], sizeof e->line[1], "CPU     68000 8 MHz (in the Pi)");
+            snprintf(e->line[0], sizeof e->line[0], "CPU     68000 8 MHz, real chips");
         } else {
             const char *cpu = sc_get(c, s, "cpu");
             const char *jp  = sc_get(c, s, "jit_power");
@@ -97,8 +144,7 @@ int env_load(struct sc_cfg *c, struct env *out, int max)
              * has no JIT */
             int big = cpu && atoi(cpu) >= 68020;
             int jit = big && (jp ? (*jp && *jp != '0') : 1);
-            snprintf(e->line[0], sizeof e->line[0], "Engine  JIT emulator");
-            snprintf(e->line[1], sizeof e->line[1], "CPU     %s%s%s%s",
+            snprintf(e->line[0], sizeof e->line[0], "CPU     %s%s%s%s",
                      cpu && *cpu ? cpu : "68000",
                      truthy(sc_get(c, s, "fpu")) ? " + FPU" : "",
                      jit ? ", JIT" : ", interpreter",
@@ -107,30 +153,16 @@ int env_load(struct sc_cfg *c, struct env *out, int max)
         const char *mach = sc_get(c, s, "machine");
         const char *st   = sc_get(c, s, "stram_size");
         const char *tt   = sc_get(c, s, "ttram");
-        snprintf(e->line[2], sizeof e->line[2], "Machine %s%s%s%s",
+        snprintf(e->line[1], sizeof e->line[1], "Machine %s%s%s%s",
                  mach && *mach ? mach : "st",
                  st && *st ? ", ST-RAM " : "", st && *st ? st : "",
                  (!e->metal && tt && truthy(tt)) ? ", TT-RAM" :
                  (!e->metal && tt && *tt && isdigit((unsigned char)*tt)) ? ", TT-RAM" : "");
         const char *rom = sc_get(c, s, "rom");
-        snprintf(e->line[3], sizeof e->line[3], "ROM     %s", rom && *rom ? disk_name(rom) : "-");
+        snprintf(e->line[2], sizeof e->line[2], "ROM     %s", rom && *rom ? disk_name(rom) : "-");
 
-        const char *hdd = sc_get(c, s, "hdd");
-        const char *fdd = sc_get(c, s, "fdd");
-        const char *acs = sc_get_n(c, s, "acsi", 1);
-        int more = sc_count(c, s, "hdd") + sc_count(c, s, "fdd") +
-                   (sc_count(c, s, "acsi") > 1 ? sc_count(c, s, "acsi") - 1 : 0);
-        const char *first = hdd ? disk_name(hdd) : fdd ? disk_name(fdd) :
-                            acs ? disk_name(acs) : NULL;
-        if (first)
-        {
-            char extra[16] = "";
-            if (more > 1)
-                snprintf(extra, sizeof extra, " +%d", more - 1);
-            snprintf(e->line[4], sizeof e->line[4], "Disks   %.24s%s", first, extra);
-        }
-        else
-            snprintf(e->line[4], sizeof e->line[4], "Disks   -");
+        bus_line(c, s, "ide", "hdd", "IDE     ", e->line[3], sizeof e->line[3]);
+        bus_line(c, s, "acsi", "acsi", "ACSI    ", e->line[4], sizeof e->line[4]);
 
         const char *nh = sc_get(c, s, "native_hdmi");
         if (sc_get(c, s, "vga"))

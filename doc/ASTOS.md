@@ -38,8 +38,9 @@ on a mono one, from the monitor sense line. Both use the same layout:
 
 - **Desktop:** one icon per build (GEM machine, APJ-OS, Native ST, HDMI build,
   metal joystick), up to 16.
-- **Details panel:** the selected build's engine, CPU, machine, ROM, disks
-  and screen.
+- **Details panel:** the selected environment's CPU (a metal build says
+  *68000 8 MHz, real chips*), machine, ROM, IDE and ACSI (off, or on with
+  the first image and how many more), and screen.
 - **This machine:** the real hardware, asked over the bus when ASTOS
   starts (68k halted, nothing emulated): the machine (ST / STE / Mega ST /
   Mega STE) and its TOS, ST-RAM per bank, the blitter (real chip or none),

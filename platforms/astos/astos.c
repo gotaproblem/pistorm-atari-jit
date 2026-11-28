@@ -120,7 +120,7 @@ static int log_y(int py) { return g_mono() ? py / 2 : py; }
 #define PANEL_X   352
 #define PANEL_W   280
 #define MENU_W    208
-#define MACH_Y    96
+#define MACH_Y    86
 #define ROW_H     10
 
 static void cell_rect(int i, int *x, int *y)
@@ -197,12 +197,11 @@ static void draw_details(void)
     if (nenv == 0)
         return;
     const struct env *e = &envs[sel];
-    int x = PANEL_X, y = 6, h = 11 + 6 * ROW_H + 16;
+    int x = PANEL_X, y = 6, h = 11 + 6 * ROW_H + 6;
     draw_window(x, y, PANEL_W, h, e->title);
     for (int i = 0; i < 6; i++)
         g_textn(x + 8, y + 15 + i * ROW_H, e->line[i], (PANEL_W - 16) / 8,
                 i == 0 && e->metal ? C_ACCENT : C_TEXT);
-    g_text(x + 8, y + h - 12, "Double-click or Enter to launch", C_DIM);
 }
 
 static struct astos_hw hw;
