@@ -74,6 +74,7 @@ static int last_click_env = -1;
 static char cpld_text[32] = "-";
 static int temp_c10 = -1;
 static char clock_s[16], date_s[16];
+static int clock_x = AW, date_x = AW;          /* where the taskbar drew them */
 
 static double now_s(void)
 {
@@ -227,11 +228,27 @@ static void draw_taskbar(void)
     if (nenv)
         g_textn(x, BAR_Y + 3, envs[sel].title, 20, C_TEXT);
 
-    char right[64], t[16] = "";
+    /* right to left: clock, date, temperature. The clock and the date
+     * are buttons: a click flips 24/12 hour and day/month order */
+    char t[16] = "";
     if (temp_c10 >= 0)
         snprintf(t, sizeof t, "%d.%dC", temp_c10 / 10, temp_c10 % 10);
-    snprintf(right, sizeof right, "%s  %s  %s", t, date_s, clock_s);
-    g_text(AW - 6 - g_text_w(right), BAR_Y + 3, right, C_TEXT);
+    clock_x = AW - 6 - g_text_w(clock_s);
+    date_x = clock_x - 16 - g_text_w(date_s);
+    g_text(clock_x, BAR_Y + 3, clock_s, C_TEXT);
+    g_text(date_x, BAR_Y + 3, date_s, C_TEXT);
+    g_text(date_x - 16 - g_text_w(t), BAR_Y + 3, t, C_TEXT);
+}
+
+/* [psctrl] clock 24|12 and date dmy|mdy, as the page writes them */
+static void save_clock_keys(void)
+{
+    sc_set(&cfg, "psctrl", "clock", h12 ? "12" : "24");
+    sc_set(&cfg, "psctrl", "date", mdy ? "mdy" : "dmy");
+    if (!no_board && sc_save(&cfg, cfg_path) != 0)
+        fprintf(stderr, "[ASTOS] could not save %s\n", cfg_path);
+    sys_clock(clock_s, sizeof clock_s, h12);
+    sys_date(date_s, sizeof date_s, mdy);
 }
 
 static void draw_menu(void)
@@ -738,6 +755,18 @@ static int on_click(int x, int y, int *exit_code)
         ctx_open = 0;
         return 0;
     }
+    if (y >= BAR_Y && x >= clock_x - 4) {             /* the clock: 24 <-> 12 h */
+        h12 = !h12;
+        save_clock_keys();
+        printf("[ASTOS] clock %s hour\n", h12 ? "12" : "24");
+        return 0;
+    }
+    if (y >= BAR_Y && x >= date_x - 4 && x < clock_x - 8) {   /* the date */
+        mdy = !mdy;
+        save_clock_keys();
+        printf("[ASTOS] date %s\n", mdy ? "month/day/year" : "day/month/year");
+        return 0;
+    }
     if (inside(x, y, 0, BAR_Y, START_W, BAR_H)) {
         menu_open = !menu_open;
         menu_sel = 0;
@@ -1030,6 +1059,8 @@ int main(int argc, char **argv)
             case 's': menu_open = 1; menu_sel = MI_SHUTDOWN; e.key = SI_ENTER; break;
             case 'c': open_ctx(100, 40); continue;
             case 'p': e.key = SI_F2; break;
+            case 'k': render(); on_click(clock_x + 2, BAR_Y + 4, &exit_code); continue;
+            case 'j': render(); on_click(date_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
             case 't': e.key = SI_TAB; break;

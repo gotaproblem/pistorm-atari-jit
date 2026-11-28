@@ -43,7 +43,9 @@ on a mono one, from the monitor sense line. Both use the same layout:
 - **This machine:** ST-RAM found, monitor and frame rate, input devices,
   CPLD firmware as it is named (e.g. `1.1b (EPM240)`), Pi temperature.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
-  date and clock (`[psctrl] clock 24|12`, `date dmy|mdy`).
+  date and clock. Click the clock to switch 24 / 12 hour, click the date to
+  switch day/month/year and month/day/year; saved as `[psctrl] clock 24|12`
+  and `date dmy|mdy` (the same keys the setup page used).
 - **Start menu:** *New environment…*, *HDMI display* (on / off / only),
   *Restart ASTOS*, *Exit to console*, *Shut down…*. The environments themselves are on the desktop.
 - **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,
