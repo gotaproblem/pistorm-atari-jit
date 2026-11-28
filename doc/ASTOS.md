@@ -41,7 +41,8 @@ on a mono one, from the monitor sense line. Both use the same layout:
 - **Details panel:** the selected build's engine, CPU, machine, ROM, disks
   and screen.
 - **This machine:** ST-RAM found, monitor and frame rate, input devices,
-  CPLD firmware as it is named (e.g. `1.1b (EPM240)`), Pi temperature.
+  CPLD firmware as it is named (e.g. `1.1b (EPM240)`). The Pi's temperature
+  is in the taskbar.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
   date and clock. Click the clock to switch 24 / 12 hour, click the date to
   switch day/month/year and month/day/year; saved as `[psctrl] clock 24|12`

@@ -185,8 +185,8 @@ static void draw_details(void)
 
 static void draw_machine(void)
 {
-    char l[5][48];
-    int x = PANEL_X, y = 104, h = 11 + 5 * ROW_H + 6;
+    char l[4][48];
+    int x = PANEL_X, y = 104, h = 11 + 4 * ROW_H + 6;
     if (ss.shifter)
         snprintf(l[0], sizeof l[0], "ST-RAM  %uK (%uK + %uK)",
                  (ss.bank0 + ss.bank1) >> 10, ss.bank0 >> 10, ss.bank1 >> 10);
@@ -199,12 +199,9 @@ static void draw_machine(void)
              ai_have_st() ? "ST" : "", ai_have_st() ? " + " : "",
              ai_keyboards(), ai_mice(), ai_pads());
     snprintf(l[3], sizeof l[3], "CPLD    firmware %.30s", cpld_text);
-    if (temp_c10 >= 0)
-        snprintf(l[4], sizeof l[4], "Pi      %d.%d C", temp_c10 / 10, temp_c10 % 10);
-    else
-        snprintf(l[4], sizeof l[4], "Pi      -");
+    /* the Pi's temperature is in the taskbar */
     draw_window(x, y, PANEL_W, h, "This machine");
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 4; i++)
         g_textn(x + 8, y + 15 + i * ROW_H, l[i], (PANEL_W - 16) / 8, C_TEXT);
 }
 
