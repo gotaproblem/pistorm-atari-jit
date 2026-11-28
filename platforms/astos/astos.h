@@ -82,6 +82,11 @@ struct env {
 struct sc_cfg;
 int  env_load(struct sc_cfg *c, struct env *out, int max);
 int  env_launch(struct sc_cfg *c, const char *cfg_path, const char *sec);
+/* Play a floppy: the build [sec] with `image` in drive A, launched from a
+ * copy of psctrl.cfg (astos-play.cfg beside it, so stboxmetal.cal is still
+ * found) holding [astos_play] - psctrl.cfg itself is not changed. */
+int  env_play(const char *cfg_path, const char *sec, const char *image, const char *title);
+#define ASTOS_PLAY_SECTION "astos_play"
 #define ASTOS_LAUNCH_FILE "/run/astos-launch"
 #define ASTOS_EXIT_LAUNCH  44       /* run-pistorm.sh: start the build   */
 #define ASTOS_EXIT_RESTART 42       /* run-pistorm.sh: start ASTOS again */

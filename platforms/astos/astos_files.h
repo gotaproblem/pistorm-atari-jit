@@ -23,5 +23,8 @@ int  files_wheel(int x, int y, int n);
 void files_test_place(int pane, int place);
 /* 1 once after Files changed psctrl.cfg (Use in): reload the desktop */
 int  files_cfg_changed(void);
+/* 1 once after a floppy was set playing (double-click on .st / .msa):
+ * what (a line for the screen) - ASTOS then exits to launch it */
+int  files_play_pending(char *what, int n);
 
 #endif

@@ -13,6 +13,9 @@
 #include <pwd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <limits.h>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <strings.h>
 #include "astos.h"
@@ -265,5 +268,64 @@ int env_launch(struct sc_cfg *c, const char *cfg_path, const char *sec)
         return -1;
     }
     fprintf(f, "%s\n", sec);
+    return fclose(f);
+}
+
+/* a line pinned to drive A (A: or 0:) */
+static int is_drive_a(const char *v)
+{
+    return v[0] && v[1] == ':' && ((v[0] | 0x20) == 'a' || v[0] == '0');
+}
+
+int env_play(const char *cfg_path, const char *sec, const char *image, const char *title)
+{
+    static struct sc_cfg c;
+    if (sc_load(&c, cfg_path) != 0)
+        return -1;
+    sc_del_section(&c, ASTOS_PLAY_SECTION);
+    if (sc_copy_section(&c, sec, ASTOS_PLAY_SECTION) != 0)
+        return -1;
+    /* drive A: this disk, first; the build's other disks stay after it -
+     * an unpinned one then takes drive B, and on metal they are the disks
+     * Ctrl+Alt+F2.. puts in */
+    int n = sc_count(&c, ASTOS_PLAY_SECTION, "fdd");
+    char keep[10][300];
+    int nk = 0;
+    for (int i = 0; i < n; i++) {
+        const char *v = sc_get_n(&c, ASTOS_PLAY_SECTION, "fdd", i);
+        if (v && !is_drive_a(v) && nk < 10)
+            snprintf(keep[nk++], sizeof keep[0], "%s", v);
+    }
+    while (sc_count(&c, ASTOS_PLAY_SECTION, "fdd"))
+        sc_set_n(&c, ASTOS_PLAY_SECTION, "fdd", 0, NULL);
+    char a[PATH_MAX + 4];
+    snprintf(a, sizeof a, "A:%s", image);
+    if (sc_set_n(&c, ASTOS_PLAY_SECTION, "fdd", 0, a) != 0)
+        return -1;
+    for (int i = 0; i < nk; i++)
+        sc_set_n(&c, ASTOS_PLAY_SECTION, "fdd", i + 1, keep[i]);
+    if (title)
+        sc_set(&c, ASTOS_PLAY_SECTION, "title", title);
+    /* beside psctrl.cfg, owned like it */
+    char out[PATH_MAX];
+    const char *sl = strrchr(cfg_path, '/');
+    if (sl)
+        snprintf(out, sizeof out, "%.*s/astos-play.cfg", (int)(sl - cfg_path), cfg_path);
+    else
+        snprintf(out, sizeof out, "astos-play.cfg");
+    if (sc_save(&c, out) != 0) {
+        fprintf(stderr, "[ASTOS] could not save %s: %s\n", out, sc_save_error(&c));
+        return -1;
+    }
+    struct stat st;
+    if (stat(cfg_path, &st) == 0)
+        (void)!chown(out, st.st_uid, st.st_gid);
+    FILE *f = fopen(ASTOS_LAUNCH_FILE, "w");
+    if (!f) {
+        perror("[ASTOS] " ASTOS_LAUNCH_FILE);
+        return -1;
+    }
+    fprintf(f, "%s\n%s\n", ASTOS_PLAY_SECTION, out);
+    printf("[ASTOS] play %s in [%s] (from %s)\n", image, sec, out);
     return fclose(f);
 }

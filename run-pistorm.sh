@@ -78,8 +78,14 @@ if [ -x ./astos ] && [ "${PISTORM_ASTOS:-1}" != "0" ]; then
 				sleep 1
 				continue
 			fi
-			echo "[run-pistorm] ASTOS: launching [$build]"
-			./emulator --config "$cfg" --no-setup --build "$build" "$@"
+			# a second line: another config to launch it from (ASTOS's
+			# astos-play.cfg - a floppy played from Files)
+			lcfg=$(sed -n 2p /run/astos-launch 2>/dev/null)
+			if [ -z "$lcfg" ] || [ ! -f "$lcfg" ]; then
+				lcfg="$cfg"
+			fi
+			echo "[run-pistorm] ASTOS: launching [$build] from $lcfg"
+			./emulator --config "$lcfg" --no-setup --build "$build" "$@"
 			erc=$?
 			# for ASTOS's events log: how the build ended
 			echo "$build $erc" > /run/astos-last-exit 2>/dev/null

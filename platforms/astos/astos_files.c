@@ -312,7 +312,7 @@ static int pop, pop_pane, pop_sel, pop_top;
 enum { ASK_RENAME, ASK_MKDIR, ASK_IMAGE };
 static int ask_kind;
 static char ask_buf[200], ask_title[48];
-enum { CF_DELETE, CF_COPY, CF_MOVE, CF_DROP };
+enum { CF_DELETE, CF_COPY, CF_MOVE, CF_DROP, CF_PLAY };
 static int cf_kind;
 static char cf_text[96], cf_text2[64];
 
@@ -1127,13 +1127,14 @@ static void draw_pop(void)
         dlg_button(x + w - 96, y + h - 16, 88, "Cancel");
     } else {
         g_text(x + 6, y + 2, cf_kind == CF_DELETE ? "Delete" : cf_kind == CF_COPY ? "Copy" :
-               cf_kind == CF_MOVE ? "Move" : "Drop", C_WHITE);
+               cf_kind == CF_MOVE ? "Move" : cf_kind == CF_PLAY ? "Play" : "Drop", C_WHITE);
         g_textn(x + 10, y + 16, cf_text, (w - 20) / 8, C_TEXT);
         if (cf_text2[0])
             g_textn(x + 10, y + 27, cf_text2, (w - 20) / 8, C_ACCENT);
         if (cf_kind == CF_DROP)
             dlg_button(x + w - 300, y + h - 16, 96, "Copy");
         dlg_button(x + w - 200, y + h - 16, 96, cf_kind == CF_DROP ? "Move" :
+                   cf_kind == CF_PLAY ? "Play" :
                    cf_kind != CF_DELETE ? "OK" : pane[act].img ? "Delete" : "To trash");
         dlg_button(x + w - 96, y + h - 16, 88, "Cancel");
     }
@@ -1144,7 +1145,7 @@ static int inside(int x, int y, int rx, int ry, int rw, int rh);
 /* ---- a list to choose from: the kind of a new image, an environment,
  * a drive slot ----------------------------------------------------------- */
 #define CH_MAX 16
-enum { CH_IMG_KIND, CH_USE_ENV, CH_USE_SLOT };
+enum { CH_IMG_KIND, CH_USE_ENV, CH_USE_SLOT, CH_PLAY_ENV };
 static int ch_step, ch_n, ch_sel;
 static char ch_title[48], ch_item[CH_MAX][48];
 static int new_kind;                         /* the image kind chosen      */
@@ -1397,6 +1398,73 @@ static void use_pick_slot(int si)
     printf("[ASTOS] files: [%s] %s %s\n", sec, s->key, val);
 }
 
+/* ---- Play a floppy: double-click on a .st or .msa ---------------------- *
+ * In [psctrl] astos_play_env if that names a build, else the first build
+ * with engine metal (the real ST's own chips), else one picked from the list. */
+static char play_path[PATH_MAX], play_name[256], play_sec[16], play_title[24];
+static int play_pending;
+
+int files_play_pending(char *what, int n)
+{
+    if (!play_pending)
+        return 0;
+    play_pending = 0;
+    snprintf(what, (size_t)n, "Playing %.24s on %.20s", play_name, play_title);
+    return 1;
+}
+
+static int floppy_name(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    return dot && (!strcasecmp(dot, ".st") || !strcasecmp(dot, ".msa"));
+}
+
+static void play_confirm(int ei)
+{
+    snprintf(play_sec, sizeof play_sec, "%s", use_env[ei].sec);
+    snprintf(play_title, sizeof play_title, "%s", use_env[ei].title);
+    cf_kind = CF_PLAY;
+    snprintf(cf_text, sizeof cf_text, "Play %.24s on %.20s?", play_name, play_title);
+    snprintf(cf_text2, sizeof cf_text2, "Ctrl+Alt+Undo comes back to ASTOS");
+    pop = POP_CONFIRM;
+}
+
+static void play_ask(struct pane *p, const struct ent *e)
+{
+    snprintf(play_name, sizeof play_name, "%s", e->name);
+    full_path(p, e->name, play_path, sizeof play_path);
+    static struct sc_cfg c;
+    if (sc_load(&c, cfg_path_) != 0) {
+        snprintf(msg, sizeof msg, "cannot read %.60s", cfg_path_);
+        return;
+    }
+    use_nenv = env_load(&c, use_env, MAX_ENV);
+    const char *want = sc_get(&c, "psctrl", "astos_play_env");
+    for (int i = 0; want && i < use_nenv; i++)
+        if (!strcasecmp(use_env[i].sec, want)) { play_confirm(i); return; }
+    for (int i = 0; i < use_nenv; i++)
+        if (use_env[i].metal) { play_confirm(i); return; }
+    ch_n = 0;
+    for (int i = 0; i < use_nenv && ch_n < CH_MAX; i++)
+        snprintf(ch_item[ch_n++], sizeof ch_item[0], "%s", use_env[i].title);
+    if (!ch_n) {
+        snprintf(msg, sizeof msg, "no environments to play it on");
+        return;
+    }
+    char t[48];
+    snprintf(t, sizeof t, "Play %.24s on", e->name);
+    choose(CH_PLAY_ENV, t);
+}
+
+static void do_play(void)
+{
+    if (env_play(cfg_path_, play_sec, play_path, NULL) != 0) {
+        snprintf(msg, sizeof msg, "could not set it up: see the log");
+        return;
+    }
+    play_pending = 1;
+}
+
 static void ch_pick(int i)
 {
     if (i < 0 || i >= ch_n)
@@ -1419,6 +1487,7 @@ static void ch_pick(int i)
     }
     case CH_USE_ENV:  use_pick_env(i); break;
     case CH_USE_SLOT: use_pick_slot(i); break;
+    case CH_PLAY_ENV: play_confirm(i); break;
     }
 }
 
@@ -1549,7 +1618,8 @@ int files_key(struct si_event k)
     if (pop == POP_CONFIRM) {
         if (k.key == SI_ENTER) {
             pop = POP_NONE;
-            if (cf_kind == CF_DELETE) do_delete();
+            if (cf_kind == CF_PLAY) do_play();
+            else if (cf_kind == CF_DELETE) do_delete();
             else do_copy_move(cf_kind == CF_MOVE);
         } else if (k.key == SI_ESC)
             pop = POP_NONE;
@@ -1686,7 +1756,12 @@ int files_click(int x, int y)
             last_pane = i; last_k = k; last_t = t;
             if (dbl) {
                 last_k = -1;
-                open_entry(p);
+                drag = DR_NONE;
+                /* a floppy on the Pi: play it; Enter still opens it */
+                if (!p->img && !p->e[k].dir && floppy_name(p->e[k].name))
+                    play_ask(p, &p->e[k]);
+                else
+                    open_entry(p);
             }
             return 0;
         }

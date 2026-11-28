@@ -658,6 +658,24 @@ static void files_reload(void)
         reload_envs(nenv ? envs[sel].sec : "");
 }
 
+/* Files set a floppy playing: say so and hand over to run-pistorm.sh */
+static int files_played(int *exit_code)
+{
+    char what[64];
+    if (!files_play_pending(what, sizeof what))
+        return 0;
+    message(what, "Ctrl+Alt+Undo comes back here");
+    render();
+    show();
+    stat_event(EV_INFO, "%s", what);
+    if (no_board) {
+        printf("[ASTOS] %s (no board: not starting it)\n", what);
+        return 0;
+    }
+    *exit_code = ASTOS_EXIT_LAUNCH;
+    return 1;
+}
+
 static void settings_closed(void)
 {
     char keep[SC_SEC_LEN];
@@ -852,7 +870,7 @@ static int on_key(struct si_event k, int *exit_code)
     if (files_is_open()) {
         files_key(k);
         files_reload();
-        return 0;
+        return files_played(exit_code);
     }
     if (set_is_open()) {
         if (set_key(k))
@@ -957,7 +975,7 @@ static int on_click(int x, int y, int *exit_code)
     if (files_is_open()) {
         files_click(x, y);
         files_reload();
-        return 0;
+        return files_played(exit_code);
     }
     if (set_is_open()) {
         if (set_click(x, y))

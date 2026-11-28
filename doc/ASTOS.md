@@ -177,6 +177,17 @@ with the blue bar is the active one; Copy and Move go from it to the other.
 | F8 / Delete *Delete* | moves into `.trash` at the top of the place (a time stamp is added if the name is there already) |
 | Esc, right-click, *Close* | back to the desktop |
 
+**Playing a floppy:** double-click a `.st` or `.msa` on the Pi (not one
+inside a disk image) and, after a Play/Cancel confirm, it boots in drive A
+of the build named by `[psctrl] astos_play_env`, else the first build with
+`engine metal` (the real ST's own chips), else one picked from a list.
+psctrl.cfg is not changed: ASTOS writes `astos-play.cfg` beside it - a copy
+with an `[astos_play]` section, the build's keys with this disk as `fdd A:`
+and its other disks after it (on metal, Ctrl+Alt+F2.. puts those in) - and
+run-pistorm.sh launches from that (the second line of /run/astos-launch).
+Ctrl+Alt+Undo comes back to ASTOS. Enter on a floppy still opens it as a
+folder.
+
 **Looking at a file:** Enter or double-click on a file that is not a disk
 image, or F3 on any file (an image too: F3 shows it in hex), opens a viewer:
 
@@ -310,6 +321,7 @@ branches. The page's `countdown` and `boot` are not used by ASTOS.
 | `clock`, `date` | as for the page; clicking the taskbar's clock / date switches them |
 | `temp` | `c` (default) or `f`: the taskbar temperature; a click on it switches |
 | `places` | extra folders for *Files…*, comma separated |
+| `astos_play_env` | the build a double-clicked floppy plays on (default: the first `engine metal` build) |
 | `astos_mouse_speed` | USB/Bluetooth mouse speed in percent, 25-400 (default 100). The pointer also speeds up with fast movement (up to 3x); the ST's own mouse is 1:1 |
 
 The emulator gained one switch for ASTOS: `--build <section>` boots that
