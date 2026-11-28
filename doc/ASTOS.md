@@ -88,7 +88,11 @@ rows that changed are redrawn on the panel, so the pointer stays light.
 ## Keys and mouse
 
 The ST's own keyboard and mouse, USB/Bluetooth keyboards and mice, and
-gamepads all work.
+gamepads all work. Devices are picked up whenever they appear - a Bluetooth
+keyboard or mouse that connects after ASTOS has started, or wakes from its
+sleep as a new device, a USB one plugged in later - and let go when they
+vanish. Each shows in the journal (`journalctl -u pistorm`) as
+`[ASTOS] input: + event5 "name" (bluetooth) mouse` / `- event5`.
 
 | | |
 |---|---|
