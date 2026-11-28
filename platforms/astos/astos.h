@@ -82,6 +82,7 @@ int  env_launch(struct sc_cfg *c, const char *cfg_path, const char *sec);
 
 /* ---- astos_sys.c ---------------------------------------------------- */
 int  sys_temp_c10(void);            /* SoC temperature in 0.1 C, -1     */
+int  sys_throttled(void);           /* vcgencmd get_throttled bits, -1  */
 void sys_clock(char *buf, int n, int h12);
 void sys_date(char *buf, int n, int mdy);
 

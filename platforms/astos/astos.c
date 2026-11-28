@@ -76,6 +76,13 @@ static int temp_c10 = -1;
 static char clock_s[16], date_s[16];
 static int clock_x = AW, date_x = AW, temp_x = AW;  /* where the taskbar drew them */
 static int fahr;                                /* [psctrl] temp f */
+static int throttled = -1, thr_x = AW, thr_w;   /* get_throttled, its place */
+
+/* the four conditions, short as the taskbar shows them */
+static const char *const thr_code[4] = { "UV", "CAP", "THR", "TMP" };
+static const char *const thr_name[4] = {
+    "under-voltage", "ARM frequency capped", "throttled", "soft temperature limit",
+};
 
 static double now_s(void)
 {
@@ -242,6 +249,60 @@ static void draw_taskbar(void)
     g_text(clock_x, BAR_Y + 3, clock_s, C_TEXT);
     g_text(date_x, BAR_Y + 3, date_s, C_TEXT);
     g_text(temp_x, BAR_Y + 3, t, C_TEXT);
+
+    /* get_throttled, left of the temperature: "OK", or a code for each
+     * condition - one happening NOW in a filled box, one that happened
+     * since boot and has passed in plain text. A click explains it. */
+    thr_w = 0;
+    if (throttled < 0)
+        return;
+    int now = throttled & 0xF, past = (throttled >> 16) & 0xF;
+    int w = 0;
+    if (!now && !past)
+        w = g_text_w("OK");
+    else
+        for (int b = 0; b < 4; b++)
+            if (((now | past) >> b) & 1)
+                w += g_text_w(thr_code[b]) + 8;
+    thr_x = temp_x - 16 - w;
+    thr_w = w;
+    if (!now && !past) {
+        g_text(thr_x, BAR_Y + 3, "OK", C_DIM);
+        return;
+    }
+    int cx = thr_x;
+    for (int b = 0; b < 4; b++) {
+        if (!(((now | past) >> b) & 1))
+            continue;
+        int cw = g_text_w(thr_code[b]);
+        if ((now >> b) & 1) {
+            g_fill(cx - 3, BAR_Y + 2, cw + 6, BAR_H - 3, C_ACCENT);
+            g_text(cx, BAR_Y + 3, thr_code[b], C_WHITE);
+        } else
+            g_text(cx, BAR_Y + 3, thr_code[b], C_TEXT);
+        cx += cw + 8;
+    }
+}
+
+static void message(const char *a, const char *b);
+
+/* a click on it: what each code means and when it was seen */
+static void throttle_info(void)
+{
+    char a[64] = "", b2[64] = "";
+    int now = throttled & 0xF, past = (throttled >> 16) & 0xF;
+    snprintf(a, sizeof a, "get_throttled 0x%X", (unsigned)throttled);
+    if (!now && !past) {
+        snprintf(b2, sizeof b2, "No under-voltage or throttling since boot");
+    } else {
+        for (int b = 0; b < 4; b++) {
+            if (!(((now | past) >> b) & 1))
+                continue;
+            snprintf(b2 + strlen(b2), sizeof b2 - strlen(b2), "%s%s %s",
+                     *b2 ? ", " : "", thr_code[b], (now >> b) & 1 ? "now" : "before");
+        }
+    }
+    message(a, b2);
 }
 
 /* [psctrl] clock 24|12 and date dmy|mdy, as the page writes them */
@@ -766,6 +827,10 @@ static int on_click(int x, int y, int *exit_code)
         printf("[ASTOS] clock %s hour\n", h12 ? "12" : "24");
         return 0;
     }
+    if (y >= BAR_Y && thr_w && x >= thr_x - 4 && x < thr_x + thr_w) {
+        throttle_info();
+        return 0;
+    }
     if (y >= BAR_Y && x >= temp_x - 4 && x < date_x - 8 && temp_c10 >= 0) {
         fahr = !fahr;                                  /* the temperature: C <-> F */
         save_clock_keys();
@@ -834,6 +899,16 @@ static int on_hover(int x, int y)
 
 static void tick_status(void)
 {
+    int th = sys_throttled();
+    if (th != throttled && th >= 0) {         /* the journal gets every change */
+        int now = th & 0xF;
+        printf("[ASTOS] get_throttled 0x%X", (unsigned)th);
+        for (int b = 0; b < 4; b++)
+            if ((now >> b) & 1)
+                printf(" - %s now", thr_name[b]);
+        printf("\n");
+    }
+    throttled = th;
     temp_c10 = no_board ? 512 : sys_temp_c10();
     sys_clock(clock_s, sizeof clock_s, h12);
     sys_date(date_s, sizeof date_s, mdy);
@@ -1075,6 +1150,7 @@ int main(int argc, char **argv)
             case 'k': render(); on_click(clock_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'j': render(); on_click(date_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'g': render(); on_click(temp_x + 2, BAR_Y + 4, &exit_code); continue;
+            case 'h': render(); on_click(thr_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
             case 't': e.key = SI_TAB; break;
