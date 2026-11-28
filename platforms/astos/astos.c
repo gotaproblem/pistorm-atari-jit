@@ -37,6 +37,7 @@
 #include "setup_cfg.h"
 #include "setup_hdmi.h"
 #include "astos_settings.h"
+#include "astos_files.h"
 #include "native_probe.h"
 #include "gpio/ps_protocol.h"
 #include "gpio/bus_lock.h"
@@ -131,9 +132,9 @@ static void cell_rect(int i, int *x, int *y)
 
 /* start menu rows: New environment..., a separator, then Restart /
  * Console / Shut down */
-enum { MI_NEW = 0, MI_STATUS, MI_HDMI, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
+enum { MI_NEW = 0, MI_FILES, MI_STATUS, MI_HDMI, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
 static const char *const sys_label[MI_NSYS] = {
-    "New environment...", "Pi status...", "HDMI display", "Restart ASTOS",
+    "New environment...", "Files...", "Pi status...", "HDMI display", "Restart ASTOS",
     "Exit to console", "Shut down...",
 };
 static int menu_rows(void) { return MI_NSYS; }
@@ -475,6 +476,14 @@ static void render(void)
         g_pack(&ss);
         return;
     }
+    if (files_is_open()) {
+        files_draw();
+        draw_taskbar();
+        if (dlg)
+            draw_dialog();
+        g_pack(&ss);
+        return;
+    }
     if (set_is_open()) {
         set_draw();
         draw_taskbar();
@@ -693,6 +702,7 @@ static int menu_activate(int r, int *exit_code)
     switch (r) {
     case MI_NEW:      ask_name(NULL); return 0;
     case MI_HDMI:     toggle_hdmi(); return 0;
+    case MI_FILES:    files_open(cfg_path); return 0;
     case MI_STATUS:   stat_open(0); return 0;
     case MI_RESTART:  *exit_code = ASTOS_EXIT_RESTART; return 1;
     case MI_CONSOLE:  *exit_code = 0; return 1;
@@ -783,6 +793,10 @@ static int on_key(struct si_event k, int *exit_code)
         stat_key(key);
         return 0;
     }
+    if (files_is_open()) {
+        files_key(k);
+        return 0;
+    }
     if (set_is_open()) {
         if (set_key(k))
             settings_closed();
@@ -834,6 +848,9 @@ static int on_key(struct si_event k, int *exit_code)
     case SI_F2:                                         /* its settings */
         if (nenv) open_settings(sel);
         break;
+    case SI_F3:                                         /* the files */
+        files_open(cfg_path);
+        break;
     case SI_ENTER: case SI_F10:
         if (launch(sel)) { *exit_code = ASTOS_EXIT_LAUNCH; return 1; }
         break;
@@ -878,6 +895,10 @@ static int on_click(int x, int y, int *exit_code)
     }
     if (stat_is_open()) {
         stat_click(x, y);
+        return 0;
+    }
+    if (files_is_open()) {
+        files_click(x, y);
         return 0;
     }
     if (set_is_open()) {
@@ -953,6 +974,8 @@ static int on_click(int x, int y, int *exit_code)
 /* hover in the open menu follows the pointer */
 static int on_hover(int x, int y)
 {
+    if (files_is_open() && !dlg)
+        return files_hover(x, y);
     if (set_is_open() && !dlg)
         return set_hover(x, y);
     if (ctx_open && inside(x, y, ctx_x, ctx_y + 2, CTX_W, CX_N * ROW_H)) {
@@ -1231,6 +1254,22 @@ int main(int argc, char **argv)
             case 'g': render(); on_click(temp_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'h': render(); on_click(thr_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'q': stat_open(0); continue;
+            case 'f': files_open(cfg_path); continue;
+            case '\'':                         /* 'text' typed as characters */
+                for (k++; *k && *k != '\''; k++) {
+                    struct si_event c = { SI_CHAR, SI_SRC_USB, *k };
+                    on_key(c, &exit_code);
+                }
+                if (!*k) k--;
+                continue;
+            case '1': files_test_place(1, 1); continue;
+            case '2': files_test_place(1, 2); continue;
+            case 'D': e.key = SI_F8; break;
+            case 'C': e.key = SI_F5; break;
+            case 'N': e.key = SI_F7; break;
+            case 'R': e.key = SI_F2; break;
+            case 'P': e.key = SI_F1; break;
+            case 'b': e.key = SI_BACKSPACE; break;
             case 'w': stat_open(1); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
@@ -1310,6 +1349,14 @@ int main(int argc, char **argv)
                 cancel_autolaunch();
                 if (stat_is_open() && !dlg) {        /* right = close it */
                     stat_key(SI_ESC);
+                    buttons_prev = e.buttons;
+                    render();
+                    show();
+                    continue;
+                }
+                if (files_is_open() && !dlg) {       /* right = Esc there */
+                    struct si_event esc = { SI_ESC, SI_SRC_ST, 0 };
+                    files_key(esc);
                     buttons_prev = e.buttons;
                     render();
                     show();

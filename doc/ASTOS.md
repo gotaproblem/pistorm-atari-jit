@@ -70,7 +70,7 @@ on a mono one, from the monitor sense line. Both use the same layout:
   throttling included. Every change is printed to the console / journal.
   ASTOS only reads it: the since-boot bits are never cleared.
   `PISTORM_ASTOS_THROTTLED=0x50005` fakes a value, to see how it looks.
-- **Start menu:** *New environment…*, *Pi status…*, *HDMI display* (on / off / only),
+- **Start menu:** *New environment…*, *Files…*, *Pi status…*, *HDMI display* (on / off / only),
   *Restart ASTOS*, *Exit to console*, *Shut down…*. The environments themselves are on the desktop.
 - **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,
   *Delete…*.
@@ -98,6 +98,7 @@ gamepads all work.
 | a letter | jump to the next build starting with it |
 | Tab, Esc, F1, the start button, right-click off an icon | start menu |
 | F2, or right-click → *Settings…* | the selected environment's settings |
+| F3, or *Files…* | the file manager |
 | Help (PgUp on a PC keyboard) | screenshot → `~/astos-shot-N.ppm` (640×400) |
 | Help during the start-up splash | safe mode |
 
@@ -142,6 +143,37 @@ the last 200 lines past 1000):
 
 A warning or error also shows as a toast above the taskbar for 10 seconds.
 Esc or the right button closes the window.
+
+## Files
+
+*Files…* (start menu, or F3) is a two-pane file manager for the Pi's side
+of things. Each pane shows one **place**, picked from its drop-down list
+(click the bar, or F1):
+
+- every `hostfs` share of every environment, by drive letter (`Q: gem-share`);
+- *Disk images*, *Floppy images*, *ROMs*: `disk_path`, `fdd_path`, `rom_path`;
+- USB sticks and drives the Pi has mounted under `/media` (`USB: …`);
+- folders listed in `[psctrl] places` (comma separated);
+- *Pi home*: the pistorm user's home.
+
+A pane never goes above its place. Folders come first, in natural order
+(FILE2 before FILE10); names starting with `.` are not listed. The pane
+with the blue bar is the active one; Copy and Move go from it to the other.
+
+| | |
+|---|---|
+| arrows Up/Down, Home, a letter | move |
+| Enter, double-click | open a folder (`..` goes up) |
+| Backspace | up a folder |
+| Tab, Left/Right, a click in a pane | the other pane |
+| Space | mark / unmark, then down (operations take the marked items, else the one under the cursor) |
+| F5 *Copy*, F6 *Move* | to the other pane, after a confirm. Nothing is ever overwritten |
+| F2 *Rename*, F7 *Folder* | type the name, Enter |
+| F8 / Delete *Delete* | moves into `.trash` at the top of the place (a time stamp is added if the name is there already) |
+| Esc, right-click, *Close* | back to the desktop |
+
+ASTOS runs as root: what it creates is handed to the owner of the folder it
+lands in, so a share stays writable over Samba.
 
 ## Settings
 
@@ -196,6 +228,7 @@ branches. The page's `countdown` and `boot` are not used by ASTOS.
 | `hdmi_only` | ASTOS on HDMI, whatever `hdmi` says (also when the last environment has it) |
 | `clock`, `date` | as for the page; clicking the taskbar's clock / date switches them |
 | `temp` | `c` (default) or `f`: the taskbar temperature; a click on it switches |
+| `places` | extra folders for *Files…*, comma separated |
 
 The emulator gained one switch for ASTOS: `--build <section>` boots that
 build with no setup page (`run-pistorm.sh` passes it).
@@ -220,7 +253,9 @@ no HDMI mirror. Everything else works.
 
 draws the desktop into `out.ppm` (as the ST monitor shows it, 640×400) after
 the keys: `r l u d` arrows, `e` Enter, `m` start menu, `x` Esc, `s` the shut
-down dialog. Needs nothing installed beyond gcc.
+down dialog, `f` Files, `t` Tab, space, `b` Backspace, `P` place list,
+`C` Copy, `N` New folder, `R` Rename, `D` Delete, `'text'` typed. Needs
+nothing installed beyond gcc.
 
 ## Source
 
@@ -231,6 +266,7 @@ down dialog. Needs nothing installed beyond gcc.
 | `platforms/astos/astos_input.c` | ST keyboard + IKBD relative mouse over the ACIA; USB keyboards, mice, pads |
 | `platforms/astos/astos_env.c` | builds from psctrl.cfg, details, the launch file |
 | `platforms/astos/astos_settings.c` | the settings window: category and value drop-down lists over the page's editor model |
+| `platforms/astos/astos_files.c` | the file manager: places, two panes, copy / move / rename / new folder / delete to `.trash` |
 | `platforms/astos/astos_sys.c` | Pi temperature, clock |
 | `platforms/astos/astos_host_stub.c` | the no-board stubs for `astos-host` |
 
