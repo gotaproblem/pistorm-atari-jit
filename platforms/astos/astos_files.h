@@ -14,6 +14,10 @@ void files_draw(void);
 int  files_key(struct si_event k);
 int  files_click(int x, int y);
 int  files_hover(int x, int y);
+/* drag and drop: every pointer move with the left button state, and the
+ * left button's release; 1 = redraw */
+int  files_motion(int x, int y, int held);
+int  files_release(int x, int y);
 /* the wheel over the window: n notches, + = up */
 int  files_wheel(int x, int y, int n);
 void files_test_place(int pane, int place);

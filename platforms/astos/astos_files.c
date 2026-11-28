@@ -297,7 +297,7 @@ static int pop, pop_pane, pop_sel, pop_top;
 enum { ASK_RENAME, ASK_MKDIR };
 static int ask_kind;
 static char ask_buf[200], ask_title[48];
-enum { CF_DELETE, CF_COPY, CF_MOVE };
+enum { CF_DELETE, CF_COPY, CF_MOVE, CF_DROP };
 static int cf_kind;
 static char cf_text[96], cf_text2[64];
 
@@ -402,6 +402,12 @@ struct loc {
     int vol;
     char path[PATH_MAX];        /* host: absolute; image: "" or "A/B"     */
 };
+
+static struct loc drop_loc;     /* where a drag was dropped              */
+enum { DR_NONE, DR_PENDING, DR_ON };
+static int drag, drag_pane, drag_k, drag_x, drag_y;
+static double drag_t;
+static int drop_pane = -1, drop_k = -1;         /* what to show as the target */
 
 /* the pane's folder; -1 in an image's volume list */
 static int pane_loc(const struct pane *p, struct loc *l)
@@ -592,14 +598,26 @@ static int need_volume(const struct pane *p)
     return 0;
 }
 
+static void copy_move_to(int move, struct loc dl);
+
 static void do_copy_move(int move)
 {
     struct pane *s = &pane[act], *d = &pane[!act];
-    struct loc sl, dl;
+    struct loc dl;
     if (need_volume(s) || need_volume(d))
         return;
-    pane_loc(s, &sl);
     pane_loc(d, &dl);
+    copy_move_to(move, dl);
+}
+
+/* the active pane's items into dl (the other pane, or a folder dropped on) */
+static void copy_move_to(int move, struct loc dl)
+{
+    struct pane *s = &pane[act];
+    struct loc sl;
+    if (need_volume(s))
+        return;
+    pane_loc(s, &sl);
     if (same_loc(&sl, &dl)) {
         snprintf(msg, sizeof msg, "both panes show the same folder");
         return;
@@ -946,6 +964,8 @@ static void draw_pane(int i)
     g_textn(x, PATH_Y, len > maxc ? path + len - maxc : path, maxc, C_DIM);
     /* the list */
     g_frame(x, LIST_Y - 2, PW, NVIS * RH + 3, i == act ? C_ACCENT : C_DIM);
+    if (drop_pane == i && drop_k < 0)                   /* a drop target */
+        g_frame(x + 1, LIST_Y - 1, PW - 2, NVIS * RH + 1, C_ACCENT);
     for (int r = 0; r < NVIS; r++) {
         int k = p->top + r;
         if (k >= p->n)
@@ -963,6 +983,8 @@ static void draw_pane(int i)
         g_textn(x + 6, y + 1, e->mark ? "*" : " ", 1, on ? C_WHITE : C_ACCENT);
         g_textn(x + 14, y + 1, e->name, (PW - 14 - 64) / 8, fg);
         g_text(x + PW - 8 - g_text_w(sz), y + 1, sz, on ? C_WHITE : e->dir ? C_ACCENT : C_DIM);
+        if (drop_pane == i && drop_k == k)               /* the folder to drop in */
+            g_frame(x + 2, y, PW - 4, RH, C_ACCENT);
     }
     if (!p->n)
         g_text(x + 14, LIST_Y + 1, "(empty)", C_DIM);
@@ -1020,13 +1042,15 @@ static void draw_pop(void)
         dlg_button(x + w - 200, y + h - 16, 96, "OK");
         dlg_button(x + w - 96, y + h - 16, 88, "Cancel");
     } else {
-        g_text(x + 6, y + 2, cf_kind == CF_DELETE ? "Delete" : cf_kind == CF_COPY ? "Copy" : "Move",
-               C_WHITE);
+        g_text(x + 6, y + 2, cf_kind == CF_DELETE ? "Delete" : cf_kind == CF_COPY ? "Copy" :
+               cf_kind == CF_MOVE ? "Move" : "Drop", C_WHITE);
         g_textn(x + 10, y + 16, cf_text, (w - 20) / 8, C_TEXT);
         if (cf_text2[0])
             g_textn(x + 10, y + 27, cf_text2, (w - 20) / 8, C_ACCENT);
-        dlg_button(x + w - 200, y + h - 16, 96, cf_kind != CF_DELETE ? "OK" :
-                   pane[act].img ? "Delete" : "To trash");
+        if (cf_kind == CF_DROP)
+            dlg_button(x + w - 300, y + h - 16, 96, "Copy");
+        dlg_button(x + w - 200, y + h - 16, 96, cf_kind == CF_DROP ? "Move" :
+                   cf_kind != CF_DELETE ? "OK" : pane[act].img ? "Delete" : "To trash");
         dlg_button(x + w - 96, y + h - 16, 88, "Cancel");
     }
 }
@@ -1075,6 +1099,17 @@ int files_key(struct si_event k)
         case SI_ESC: pop = POP_NONE; break;
         default: break;
         }
+        return 0;
+    }
+    if (pop == POP_CONFIRM && cf_kind == CF_DROP) {    /* Enter copy, M move */
+        if (k.key == SI_ENTER || (k.key == SI_CHAR && (k.ch | 0x20) == 'c')) {
+            pop = POP_NONE;
+            copy_move_to(0, drop_loc);
+        } else if (k.key == SI_CHAR && (k.ch | 0x20) == 'm') {
+            pop = POP_NONE;
+            copy_move_to(1, drop_loc);
+        } else if (k.key == SI_ESC)
+            pop = POP_NONE;
         return 0;
     }
     if (pop == POP_CONFIRM) {
@@ -1166,7 +1201,10 @@ int files_click(int x, int y)
         int w, h, dx, dy;
         dlg_rect(&w, &h, &dx, &dy);
         struct si_event k = { SI_NONE, SI_SRC_ST, 0 };
-        if (inside(x, y, dx + w - 200, dy + h - 16, 96, 12)) k.key = SI_ENTER;
+        int drop = pop == POP_CONFIRM && cf_kind == CF_DROP;
+        if (drop && inside(x, y, dx + w - 300, dy + h - 16, 96, 12)) k.key = SI_ENTER;
+        else if (drop && inside(x, y, dx + w - 200, dy + h - 16, 96, 12)) { k.key = SI_CHAR; k.ch = 'm'; }
+        else if (inside(x, y, dx + w - 200, dy + h - 16, 96, 12)) k.key = SI_ENTER;
         else if (inside(x, y, dx + w - 96, dy + h - 16, 88, 12)) k.key = SI_ESC;
         if (k.key)
             files_key(k);
@@ -1194,6 +1232,9 @@ int files_click(int x, int y)
                 return 0;
             double t = now_s();
             int dbl = last_pane == i && last_k == k && t - last_t < 0.45;
+            /* a press on an item may become a drag */
+            drag = DR_PENDING; drag_pane = i; drag_k = k;
+            drag_x = x; drag_y = y; drag_t = t;
             p->sel = k;
             last_pane = i; last_k = k; last_t = t;
             if (dbl) {
@@ -1219,6 +1260,122 @@ int files_click(int x, int y)
         }
     }
     return 0;
+}
+
+/* ---- drag and drop -------------------------------------------------------
+ * Press on an item and move: what is dragged is the marked items when the
+ * item pressed is marked, else that item. Dropped on the other pane it goes
+ * into that pane's folder; dropped on a folder (either pane, not one being
+ * dragged) into that folder. The drop asks Copy, Move or Cancel. */
+
+/* where a drop at x,y would go: 1 and *l, *label; 0 nowhere */
+static int drop_target(int x, int y, struct loc *l, char *label, size_t n, int *hl_pane, int *hl_k)
+{
+    *hl_pane = -1; *hl_k = -1;
+    for (int i = 0; i < 2; i++) {
+        int px = PX(i);
+        if (!inside(x, y, px, LIST_Y - 2, PW, NVIS * RH + 3))
+            continue;
+        struct pane *p = &pane[i];
+        if (p->img && p->vol < 0)
+            return 0;                                    /* a volume list */
+        struct loc base;
+        pane_loc(p, &base);
+        int k = y >= LIST_Y ? p->top + (y - LIST_Y) / RH : -1;
+        if (k >= 0 && k < p->n && p->e[k].dir && strcmp(p->e[k].name, "..") &&
+            !(i == drag_pane && (p->e[k].mark || k == p->sel))) {
+            if (loc_child(&base, p->e[k].name, l) != 0)
+                return 0;
+            snprintf(label, n, "%s", p->e[k].name);
+            *hl_pane = i; *hl_k = k;
+            return 1;
+        }
+        if (i == drag_pane)
+            return 0;                                    /* its own folder */
+        *l = base;
+        snprintf(label, n, "the %s pane", i ? "right" : "left");
+        *hl_pane = i;
+        return 1;
+    }
+    return 0;
+}
+
+int files_motion(int x, int y, int held)
+{
+    if (drag == DR_NONE || pop)
+        return 0;
+    if (!held && drag == DR_PENDING) {
+        /* the switch chattering on the press: not a release yet */
+        if (now_s() - drag_t > 0.06)
+            drag = DR_NONE;
+        return 0;
+    }
+    if (drag == DR_PENDING) {
+        int ddx = x - drag_x, ddy = y - drag_y;
+        if (ddx * ddx + ddy * ddy < 36)
+            return 0;
+        struct pane *p = &pane[drag_pane];
+        if (drag_k >= p->n || !strcmp(p->e[drag_k].name, "..") || (p->img && p->vol < 0)) {
+            drag = DR_NONE;
+            return 0;
+        }
+        act = drag_pane;
+        if (!p->e[drag_k].mark) {                        /* just this one */
+            for (int i = 0; i < p->n; i++)
+                p->e[i].mark = 0;
+            p->sel = drag_k;
+        }
+        drag = DR_ON;
+        last_k = -1;                                     /* not a double-click */
+    }
+    struct loc l;
+    char label[64];
+    int hp, hk, ok = drop_target(x, y, &l, label, sizeof label, &hp, &hk);
+    static int idx[MAX_ENT];
+    int n = targets(&pane[drag_pane], idx, MAX_ENT);
+    char m[96];
+    if (ok)
+        snprintf(m, sizeof m, "drop %d item%s into %.40s", n, n == 1 ? "" : "s", label);
+    else
+        snprintf(m, sizeof m, "dragging %d item%s", n, n == 1 ? "" : "s");
+    int changed = hp != drop_pane || hk != drop_k || strcmp(m, msg);
+    drop_pane = hp; drop_k = hk;
+    snprintf(msg, sizeof msg, "%s", m);
+    return changed;
+}
+
+int files_release(int x, int y)
+{
+    if (drag == DR_PENDING) {
+        if (now_s() - drag_t > 0.06)                     /* a plain click */
+            drag = DR_NONE;
+        return 0;
+    }
+    if (drag != DR_ON)
+        return 0;
+    drag = DR_NONE;
+    drop_pane = drop_k = -1;
+    char label[64];
+    int hp, hk;
+    if (!drop_target(x, y, &drop_loc, label, sizeof label, &hp, &hk)) {
+        msg[0] = '\0';
+        return 1;
+    }
+    static int idx[MAX_ENT];
+    int n = targets(&pane[act], idx, MAX_ENT);
+    if (!n)
+        return 1;
+    msg[0] = '\0';
+    cf_kind = CF_DROP;
+    if (n == 1)
+        snprintf(cf_text, sizeof cf_text, "%.20s into %.20s?", pane[act].e[idx[0]].name, label);
+    else
+        snprintf(cf_text, sizeof cf_text, "%d items into %.24s?", n, label);
+    cf_text2[0] = '\0';
+    if (drop_loc.img)
+        snprintf(cf_text2, sizeof cf_text2, "Into the image: names become 8.3.");
+    pop = POP_CONFIRM;
+    return 1;
 }
 
 int files_hover(int x, int y)

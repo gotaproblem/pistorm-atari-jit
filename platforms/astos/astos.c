@@ -1250,6 +1250,7 @@ int main(int argc, char **argv)
     int exit_code = 0;
 
     if (no_board) {                          /* host test: keys, then a shot */
+        int test_held = 0;
         mx = 300; my = g_mono() ? 260 : 130;   /* in the left pane / list */
         for (const char *k = keys; k && *k; k++) {
             struct si_event e = { SI_NONE, SI_SRC_USB, 0 };
@@ -1287,6 +1288,21 @@ int main(int argc, char **argv)
             case 'b': e.key = SI_BACKSPACE; break;
             case 'w': stat_open(1); continue;
             case '[': on_wheel(mx, log_y(my), 1); continue;
+            case '@': {                         /* @x,y; the pointer to logical x,y */
+                int px, py, used = 0;
+                if (sscanf(k + 1, "%d,%d;%n", &px, &py, &used) == 2 && used) {
+                    mx = px; my = g_mono() ? py * 2 : py;
+                    k += used;
+                    if (files_is_open())
+                        files_motion(mx, log_y(my), test_held);
+                }
+                continue;
+            }
+            case '(': test_held = 1; on_click(mx, log_y(my), &exit_code); continue;
+            case ')': test_held = 0;
+                if (files_is_open()) files_release(mx, log_y(my));
+                if (set_is_open()) set_release(mx, log_y(my));
+                continue;
             case ']': on_wheel(mx, log_y(my), -1); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
@@ -1337,6 +1353,8 @@ int main(int argc, char **argv)
                 redraw = 1;
             if (e.wheel && on_wheel(mx, log_y(my), e.wheel))
                 redraw = 1;
+            if (files_is_open() && !dlg && files_motion(mx, log_y(my), e.buttons & 1))
+                redraw = 1;
             /* Mouse-button bounce: the ST mouse's microswitches chatter, and
              * the IKBD reports every edge, so a release could arrive as
              * release-press-release - a second click that closed the list
@@ -1348,6 +1366,8 @@ int main(int argc, char **argv)
             if (!(e.buttons & 1) && (buttons_prev & 1)) {
                 btn_up_t[0] = tb;
                 if (set_is_open() && !dlg && set_release(mx, log_y(my)))
+                    redraw = 1;
+                if (files_is_open() && !dlg && files_release(mx, log_y(my)))
                     redraw = 1;
             }
             if (!(e.buttons & 2) && (buttons_prev & 2))

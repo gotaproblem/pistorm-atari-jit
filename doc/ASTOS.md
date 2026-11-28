@@ -173,6 +173,13 @@ with the blue bar is the active one; Copy and Move go from it to the other.
 | F8 / Delete *Delete* | moves into `.trash` at the top of the place (a time stamp is added if the name is there already) |
 | Esc, right-click, *Close* | back to the desktop |
 
+**Drag and drop:** press on an item and move the mouse. The marked items
+go if the one pressed is marked, else just that one. Drop on the other pane
+to put them in its folder, or on a folder in either pane to put them in that
+folder (the target gets a blue frame; the message line says where). The drop
+asks *Copy*, *Move* or *Cancel* (keys: Enter or C, M, Esc). Dropping
+anywhere else does nothing. Works into, out of and between disk images too.
+
 ASTOS runs as root: what it creates is handed to the owner of the folder it
 lands in, so a share stays writable over Samba.
 
@@ -280,7 +287,8 @@ no HDMI mirror. Everything else works.
 draws the desktop into `out.ppm` (as the ST monitor shows it, 640×400) after
 the keys: `r l u d` arrows, `e` Enter, `m` start menu, `x` Esc, `s` the shut
 down dialog, `f` Files, `t` Tab, space, `b` Backspace, `P` place list,
-`C` Copy, `N` New folder, `R` Rename, `D` Delete, `'text'` typed. Needs
+`C` Copy, `N` New folder, `R` Rename, `D` Delete, `'text'` typed,
+`@x,y;` pointer to logical x,y, `(` / `)` left button down / up, `[` / `]` wheel. Needs
 nothing installed beyond gcc.
 
 ## Source
