@@ -51,10 +51,10 @@ on a mono one, from the monitor sense line. Both use the same layout:
   Mega STE) and its TOS, ST-RAM per bank, the blitter (real chip or none),
   the monitor and frame rate, IDE (the IDE status register answers or not),
   ACSI (a TEST UNIT READY to IDs 0-7 through the DMA chip; the IDs that
-  answer are listed), and the CPLD firmware as it is named (e.g.
-  `1.1b (EPM240)`). The machine, banks, blitter and TOS come from the same
+  answer are listed). The machine, banks, blitter and TOS come from the same
   probe that writes the `[native]` build.
-- **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
+- **Taskbar:** the *ASTOS* start button, the PiStorm's CPLD firmware
+  (`FW 1.1b`), Pi temperature,
   date and clock. Click the temperature to switch Celsius / Fahrenheit, the
   date to switch day/month/year and month/day/year, the clock to switch
   24 / 12 hour; saved as `[psctrl] temp c|f`, `date dmy|mdy` and

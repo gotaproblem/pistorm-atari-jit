@@ -207,11 +207,12 @@ static void draw_details(void)
 static struct astos_hw hw;
 
 /* The real machine, as the bus answered when ASTOS started: what it is
- * and its TOS, ST-RAM, the blitter, the monitor, IDE and ACSI, the CPLD */
+ * and its TOS, ST-RAM, the blitter, the monitor, IDE and ACSI (the CPLD
+ * firmware is in the taskbar) */
 static void draw_machine(void)
 {
-    char l[7][48];
-    int x = PANEL_X, y = MACH_Y, h = 11 + 7 * ROW_H + 6;
+    char l[6][48];
+    int x = PANEL_X, y = MACH_Y, h = 11 + 6 * ROW_H + 6;
     const char *name = "-";
     if (hw.ok)
         name = hw.np.mste_ctrl ? "Atari Mega STE" :
@@ -242,9 +243,8 @@ static void draw_machine(void)
             if (hw.acsi & (1u << id))
                 snprintf(l[5] + strlen(l[5]), sizeof l[5] - strlen(l[5]), " %d", id);
     }
-    snprintf(l[6], sizeof l[6], "CPLD    firmware %.30s", cpld_text);
     draw_window(x, y, PANEL_W, h, "This machine");
-    for (int i = 0; i < 7; i++)
+    for (int i = 0; i < 6; i++)
         g_textn(x + 8, y + 15 + i * ROW_H, l[i], (PANEL_W - 16) / 8, C_TEXT);
 }
 
@@ -265,8 +265,10 @@ static void draw_taskbar(void)
         g_text(x, BAR_Y + 3, "SAFE MODE", C_ACCENT);
         x += 10 * 8;
     }
-    if (nenv)
-        g_textn(x, BAR_Y + 3, envs[sel].title, 20, C_TEXT);
+    /* the PiStorm's CPLD firmware, as it is named: FW 1.1b */
+    char fw[40];
+    snprintf(fw, sizeof fw, "FW %.30s", cpld_text);
+    g_text(x, BAR_Y + 3, fw, C_TEXT);
 
     /* right to left: clock, date, temperature. The clock and the date
      * are buttons: a click flips 24/12 hour and day/month order */
@@ -1005,7 +1007,7 @@ static void hdmi_start(void)
 }
 
 /* The CPLD's revision word as the firmware is named: bits 10-9 the kind
- * (01 alpha, 10 beta, else release), bit 8 EPM570, and for an alpha
+ * (01 alpha, 10 beta, else release), bit 8 the chip (not shown), and for an alpha
  * bits 7-0 the number (0.253a), otherwise bits 7-5 major and 4-0 minor
  * ($421 = 1.1b on an EPM240) - as ps_get_firmware_revision prints it. */
 static void fw_text(unsigned fw, char *out, size_t n)
@@ -1014,12 +1016,11 @@ static void fw_text(unsigned fw, char *out, size_t n)
         snprintf(out, n, "not answering");
         return;
     }
-    const char *chip = (fw & 0x100) ? "EPM570" : "EPM240";
     if ((fw & 0x600) == 0x200)
-        snprintf(out, n, "0.%ua (%s)", fw & 0xFFu, chip);
+        snprintf(out, n, "0.%ua", fw & 0xFFu);
     else
-        snprintf(out, n, "%u.%u%c (%s)", (fw & 0xE0u) >> 5, fw & 0x1Fu,
-                 (fw & 0x600) == 0x400 ? 'b' : 'r', chip);
+        snprintf(out, n, "%u.%u%c", (fw & 0xE0u) >> 5, fw & 0x1Fu,
+                 (fw & 0x600) == 0x400 ? 'b' : 'r');
 }
 
 static int board_up(void)
