@@ -81,6 +81,17 @@ int  env_launch(struct sc_cfg *c, const char *cfg_path, const char *sec);
 #define ASTOS_EXIT_RESTART 42       /* run-pistorm.sh: start ASTOS again */
 #define ASTOS_EXIT_HALT    43       /* run-pistorm.sh: shut the Pi down  */
 
+/* ---- astos_hw.c ----------------------------------------------------- */
+#include "native_probe.h"
+struct astos_hw {
+    int ok;                         /* the probe ran (ST-RAM answered)  */
+    struct np_result np;            /* machine, banks, chips, TOS       */
+    int ide;                        /* an IDE status register answers   */
+    unsigned acsi;                  /* bit n: ACSI target n answered    */
+    int acsi_unknown;               /* the HDC IRQ line was stuck       */
+};
+void hw_probe(struct astos_hw *hw);
+
 /* ---- astos_sys.c ---------------------------------------------------- */
 int  sys_temp_c10(void);            /* SoC temperature in 0.1 C, -1     */
 int  sys_throttled(void);           /* vcgencmd get_throttled bits, -1  */

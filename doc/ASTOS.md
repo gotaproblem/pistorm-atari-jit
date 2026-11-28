@@ -40,9 +40,14 @@ on a mono one, from the monitor sense line. Both use the same layout:
   metal joystick), up to 16.
 - **Details panel:** the selected build's engine, CPU, machine, ROM, disks
   and screen.
-- **This machine:** ST-RAM found, monitor and frame rate, input devices,
-  CPLD firmware as it is named (e.g. `1.1b (EPM240)`). The Pi's temperature
-  is in the taskbar.
+- **This machine:** the real hardware, asked over the bus when ASTOS
+  starts (68k halted, nothing emulated): the machine (ST / STE / Mega ST /
+  Mega STE) and its TOS, ST-RAM per bank, the blitter (real chip or none),
+  the monitor and frame rate, IDE (the IDE status register answers or not),
+  ACSI (a TEST UNIT READY to IDs 0-7 through the DMA chip; the IDs that
+  answer are listed), and the CPLD firmware as it is named (e.g.
+  `1.1b (EPM240)`). The machine, banks, blitter and TOS come from the same
+  probe that writes the `[native]` build.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
   date and clock. Click the temperature to switch Celsius / Fahrenheit, the
   date to switch day/month/year and month/day/year, the clock to switch

@@ -120,6 +120,7 @@ static int log_y(int py) { return g_mono() ? py / 2 : py; }
 #define PANEL_X   352
 #define PANEL_W   280
 #define MENU_W    208
+#define MACH_Y    96
 #define ROW_H     10
 
 static void cell_rect(int i, int *x, int *y)
@@ -196,33 +197,55 @@ static void draw_details(void)
     if (nenv == 0)
         return;
     const struct env *e = &envs[sel];
-    int x = PANEL_X, y = 8, h = 11 + 6 * ROW_H + 22;
+    int x = PANEL_X, y = 6, h = 11 + 6 * ROW_H + 16;
     draw_window(x, y, PANEL_W, h, e->title);
     for (int i = 0; i < 6; i++)
         g_textn(x + 8, y + 15 + i * ROW_H, e->line[i], (PANEL_W - 16) / 8,
                 i == 0 && e->metal ? C_ACCENT : C_TEXT);
-    g_text(x + 8, y + h - 15, "Double-click or Enter to launch", C_DIM);
+    g_text(x + 8, y + h - 12, "Double-click or Enter to launch", C_DIM);
 }
 
+static struct astos_hw hw;
+
+/* The real machine, as the bus answered when ASTOS started: what it is
+ * and its TOS, ST-RAM, the blitter, the monitor, IDE and ACSI, the CPLD */
 static void draw_machine(void)
 {
-    char l[4][48];
-    int x = PANEL_X, y = 104, h = 11 + 4 * ROW_H + 6;
-    if (ss.shifter)
-        snprintf(l[0], sizeof l[0], "ST-RAM  %uK (%uK + %uK)",
+    char l[7][48];
+    int x = PANEL_X, y = MACH_Y, h = 11 + 7 * ROW_H + 6;
+    const char *name = "-";
+    if (hw.ok)
+        name = hw.np.mste_ctrl ? "Atari Mega STE" :
+               !strcmp(hw.np.machine, "ste") ? "Atari STE" :
+               !strcmp(hw.np.machine, "megast") ? "Atari Mega ST" : "Atari ST";
+    if (hw.ok && hw.np.rom_base)
+        snprintf(l[0], sizeof l[0], "Machine %s, TOS %X.%02X", name,
+                 hw.np.tos_version >> 8, hw.np.tos_version & 0xFF);
+    else
+        snprintf(l[0], sizeof l[0], "Machine %s", name);
+    if (ss.bank0)
+        snprintf(l[1], sizeof l[1], "ST-RAM  %uK (%uK + %uK)",
                  (ss.bank0 + ss.bank1) >> 10, ss.bank0 >> 10, ss.bank1 >> 10);
     else
-        snprintf(l[0], sizeof l[0], "ST-RAM  not answering");
-    snprintf(l[1], sizeof l[1], "Screen  %s, %s",
-             g_mono() ? "mono 640x400" : "colour 640x200",
+        snprintf(l[1], sizeof l[1], "ST-RAM  not answering");
+    snprintf(l[2], sizeof l[2], "Blitter %s", !hw.ok ? "-" : hw.np.blitter ? "real chip" : "none");
+    snprintf(l[3], sizeof l[3], "Monitor %s, %s",
+             g_mono() ? "mono (640x400)" : "colour (640x200)",
              ss.hz50 ? "50 Hz" : "60 Hz");
-    snprintf(l[2], sizeof l[2], "Input   %s%s%d kbd, %d mouse, %d pad",
-             ai_have_st() ? "ST" : "", ai_have_st() ? " + " : "",
-             ai_keyboards(), ai_mice(), ai_pads());
-    snprintf(l[3], sizeof l[3], "CPLD    firmware %.30s", cpld_text);
-    /* the Pi's temperature is in the taskbar */
+    snprintf(l[4], sizeof l[4], "IDE     %s", !hw.ok ? "-" : hw.ide ? "interface present" : "none");
+    if (!hw.ok || hw.acsi_unknown)
+        snprintf(l[5], sizeof l[5], "ACSI    %s", hw.ok ? "not probed (IRQ held)" : "-");
+    else if (!hw.acsi)
+        snprintf(l[5], sizeof l[5], "ACSI    no devices");
+    else {
+        snprintf(l[5], sizeof l[5], "ACSI    ID");
+        for (int id = 0; id < 8; id++)
+            if (hw.acsi & (1u << id))
+                snprintf(l[5] + strlen(l[5]), sizeof l[5] - strlen(l[5]), " %d", id);
+    }
+    snprintf(l[6], sizeof l[6], "CPLD    firmware %.30s", cpld_text);
     draw_window(x, y, PANEL_W, h, "This machine");
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 7; i++)
         g_textn(x + 8, y + 15 + i * ROW_H, l[i], (PANEL_W - 16) / 8, C_TEXT);
 }
 
@@ -1065,9 +1088,14 @@ int main(int argc, char **argv)
         ss.bank0 = ss.bank1 = 2048u << 10;
         ss.shifter = 0;
         fw_text(0x421, cpld_text, sizeof cpld_text);
+        hw.ok = 1;                           /* a plausible machine to draw */
+        strcpy(hw.np.machine, "st");
+        hw.np.rom_base = 0xE00000; hw.np.tos_version = 0x0206;
+        hw.acsi = 0x01;
     } else {
         if (board_up() != 0)
             return 1;
+        hw_probe(&hw);                        /* before the screen goes up */
         /* first start on this board: write [native] before listing */
         const char *np = getenv("PISTORM_NATIVE_PROBE");
         if (!(np && *np == '0'))

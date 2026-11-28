@@ -504,7 +504,7 @@ ASTOS_COMMON = platforms/astos/astos.c platforms/astos/astos_gfx.c \
                platforms/atari/setup/setup_cfg.c \
                platforms/atari/setup/setup_input.c platforms/atari/setup/shifter_setup.c \
                platforms/atari/setup/setup_page.c platforms/atari/setup/setup_enums.c
-ASTOS_SRC = $(ASTOS_COMMON) platforms/atari/setup/setup_hdmi.c \
+ASTOS_SRC = $(ASTOS_COMMON) platforms/astos/astos_hw.c platforms/atari/setup/setup_hdmi.c \
             platforms/atari/setup/native_probe.c gpio/ps_protocol.c gpio/bus_lock.c
 ASTOS_HDR = platforms/astos/astos.h platforms/astos/astos_input.h platforms/astos/astos_settings.h
 astos: $(ASTOS_SRC) $(ASTOS_HDR)

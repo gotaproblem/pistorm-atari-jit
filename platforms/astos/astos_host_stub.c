@@ -29,6 +29,9 @@ void     pistorm_bus_unlock(void)            { }
 int      np_ensure_native_section(const char *p) { (void)p; return 0; }
 int      np_board_ste(void)                  { return 0; }
 
+#include "astos.h"
+void hw_probe(struct astos_hw *hw)          { (void)hw; }
+
 int  sh_open(void)                           { return -1; }
 int  sh_active(void)                         { return 0; }
 void sh_present(const struct ss_screen *s)   { (void)s; }
