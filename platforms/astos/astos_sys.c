@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -39,6 +40,32 @@ int sys_throttled(void)
     if (ioctl(fd, MBOX_PROPERTY, b) < 0 || b[1] != 0x80000000u)
         return -1;
     return (int)(b[5] & 0x000F000Fu);
+}
+
+/* One property tag through the mailbox: v[0..nreq-1] in, v[0..nval-1]
+ * out (nval words of value buffer). 0, or -1 (no mailbox, refused). */
+int sys_mbox(uint32_t tag, uint32_t *v, int nreq, int nval)
+{
+    static int fd = -2;
+    if (fd == -2)
+        fd = open("/dev/vcio", O_RDWR);
+    if (fd < 0 || nval > 8)
+        return -1;
+    uint32_t b[16] __attribute__((aligned(16)));
+    memset(b, 0, sizeof b);
+    b[0] = (uint32_t)((6 + nval) * 4);
+    b[1] = 0;
+    b[2] = tag;
+    b[3] = (uint32_t)(nval * 4);
+    b[4] = (uint32_t)(nreq * 4);
+    for (int i = 0; i < nval; i++)
+        b[5 + i] = i < nreq ? v[i] : 0;
+    b[5 + nval] = 0;                         /* end tag */
+    if (ioctl(fd, MBOX_PROPERTY, b) < 0 || b[1] != 0x80000000u)
+        return -1;
+    for (int i = 0; i < nval; i++)
+        v[i] = b[5 + i];
+    return 0;
 }
 
 int sys_temp_c10(void)

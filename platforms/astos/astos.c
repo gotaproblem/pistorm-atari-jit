@@ -131,10 +131,10 @@ static void cell_rect(int i, int *x, int *y)
 
 /* start menu rows: New environment..., a separator, then Restart /
  * Console / Shut down */
-enum { MI_NEW = 0, MI_HDMI, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
+enum { MI_NEW = 0, MI_STATUS, MI_HDMI, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
 static const char *const sys_label[MI_NSYS] = {
-    "New environment...", "HDMI display", "Restart ASTOS", "Exit to console",
-    "Shut down...",
+    "New environment...", "Pi status...", "HDMI display", "Restart ASTOS",
+    "Exit to console", "Shut down...",
 };
 static int menu_rows(void) { return MI_NSYS; }
 static int menu_h(void)    { return 14 + menu_rows() * ROW_H + 10; }
@@ -331,26 +331,6 @@ static void draw_taskbar(void)
 
 static void message(const char *a, const char *b);
 
-/* a click on it: what each code means and when it was seen */
-static void throttle_info(void)
-{
-    char a[64] = "", b2[64] = "";
-    int now = throttled & 0xF, past = (throttled >> 16) & 0xF;
-    int bad = (throttled & 0x90009) != 0;
-    snprintf(a, sizeof a, "%s  (get_throttled 0x%X)", bad ? "Pi warning" : "Pi OK",
-             (unsigned)throttled);
-    if (!now && !past) {
-        snprintf(b2, sizeof b2, "No under-voltage or throttling since boot");
-    } else {
-        for (int b = 0; b < 4; b++) {
-            if (!(((now | past) >> b) & 1))
-                continue;
-            snprintf(b2 + strlen(b2), sizeof b2 - strlen(b2), "%s%s %s",
-                     *b2 ? ", " : "", thr_code[b], (now >> b) & 1 ? "now" : "before");
-        }
-    }
-    message(a, b2);
-}
 
 /* [psctrl] clock 24|12 and date dmy|mdy, as the page writes them */
 static void save_clock_keys(void)
@@ -465,6 +445,20 @@ static void draw_toast(void)
     (void)w;
 }
 
+/* a fresh warning from the events log, above the taskbar on the right */
+static void draw_event_toast(void)
+{
+    const char *t = stat_toast();
+    if (!t || menu_open || ctx_open || dlg)
+        return;
+    int w = 20 + 8 * (int)strlen(t);
+    if (w < 200) w = 200;
+    if (w > AW - 16) w = AW - 16;
+    int x = AW - w - 8, y = BAR_Y - 30;
+    draw_window(x, y, w, 26, "Pi warning");
+    g_textn(x + 8, y + 14, t, (w - 16) / 8, C_ACCENT);
+}
+
 static void render(void)
 {
     g_clear(C_DESK);
@@ -472,6 +466,14 @@ static void render(void)
         g_fill(0, 0, AW, 10, C_WHITE);
         g_text(8, 1, "ASTOS safe mode: no auto-launch, no HDMI.  Restart ASTOS to leave.",
                C_TEXT);
+    }
+    if (stat_is_open()) {
+        stat_draw();
+        draw_taskbar();
+        if (dlg)
+            draw_dialog();
+        g_pack(&ss);
+        return;
     }
     if (set_is_open()) {
         set_draw();
@@ -485,6 +487,7 @@ static void render(void)
     draw_details();
     draw_machine();
     draw_toast();
+    draw_event_toast();
     draw_taskbar();
     if (menu_open)
         draw_menu();
@@ -535,6 +538,7 @@ static int launch(int i)
         return 0;
     }
     printf("[ASTOS] launching [%s]\n", envs[i].sec);
+    stat_event(EV_INFO, "launched [%s]", envs[i].sec);
     return 1;
 }
 
@@ -689,6 +693,7 @@ static int menu_activate(int r, int *exit_code)
     switch (r) {
     case MI_NEW:      ask_name(NULL); return 0;
     case MI_HDMI:     toggle_hdmi(); return 0;
+    case MI_STATUS:   stat_open(0); return 0;
     case MI_RESTART:  *exit_code = ASTOS_EXIT_RESTART; return 1;
     case MI_CONSOLE:  *exit_code = 0; return 1;
     case MI_SHUTDOWN:
@@ -769,6 +774,13 @@ static int on_key(struct si_event k, int *exit_code)
             break;
         default: break;
         }
+        return 0;
+    }
+    if (stat_is_open()) {
+        int key = k.key;
+        if (key == SI_CHAR && (k.ch | 0x20) == 'e')
+            key = SI_TAB;                       /* E: status <-> events */
+        stat_key(key);
         return 0;
     }
     if (set_is_open()) {
@@ -864,6 +876,10 @@ static int on_click(int x, int y, int *exit_code)
         else if (inside(x, y, dx + w - 96, dy + h - 16, 88, 12)) dlg = DLG_NONE;
         return 0;
     }
+    if (stat_is_open()) {
+        stat_click(x, y);
+        return 0;
+    }
     if (set_is_open()) {
         if (set_click(x, y))
             settings_closed();
@@ -885,7 +901,7 @@ static int on_click(int x, int y, int *exit_code)
         return 0;
     }
     if (y >= BAR_Y && thr_w && x >= thr_x - 4 && x < thr_x + thr_w) {
-        throttle_info();
+        stat_open(0);
         return 0;
     }
     if (y >= BAR_Y && x >= temp_x - 4 && x < date_x - 8 && temp_c10 >= 0) {
@@ -966,6 +982,7 @@ static void tick_status(void)
         printf("\n");
     }
     throttled = th;
+    stat_tick(th);
     temp_c10 = no_board ? 512 : sys_temp_c10();
     sys_clock(clock_s, sizeof clock_s, h12);
     sys_date(date_s, sizeof date_s, mdy);
@@ -1150,6 +1167,7 @@ int main(int argc, char **argv)
     if (hdmi_on && !no_board)
         hdmi_start();
 
+    stat_init(cfg_path);                    /* the events log, the kernel log */
     nenv = env_load(&cfg, envs, MAX_ENV);
     {
         const char *last = sc_get(&cfg, "psctrl", "astos_last");
@@ -1212,6 +1230,8 @@ int main(int argc, char **argv)
             case 'j': render(); on_click(date_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'g': render(); on_click(temp_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'h': render(); on_click(thr_x + 2, BAR_Y + 4, &exit_code); continue;
+            case 'q': stat_open(0); continue;
+            case 'w': stat_open(1); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
             case 't': e.key = SI_TAB; break;
@@ -1288,6 +1308,13 @@ int main(int argc, char **argv)
                 /* right: on an icon its menu (Launch, Settings), else
                  * the start menu */
                 cancel_autolaunch();
+                if (stat_is_open() && !dlg) {        /* right = close it */
+                    stat_key(SI_ESC);
+                    buttons_prev = e.buttons;
+                    render();
+                    show();
+                    continue;
+                }
                 if (set_is_open() && !dlg) {         /* right = Esc there */
                     struct si_event esc = { SI_ESC, SI_SRC_ST, 0 };
                     if (set_key(esc))
@@ -1330,6 +1357,7 @@ int main(int argc, char **argv)
             /* the ST's reset button: start ASTOS afresh */
             if (ps_st_reset_pin() == 1) {
                 printf("[ASTOS] Atari reset - restarting\n");
+                stat_event(EV_INFO, "the Atari's reset button");
                 for (int i = 0; i < 1000 && ps_st_reset_pin() == 1; i++)
                     usleep(10000);
                 exit_code = ASTOS_EXIT_RESTART;
@@ -1340,6 +1368,7 @@ int main(int argc, char **argv)
                 power_checks = 0;
                 if (ps_power_poll() == 1) {
                     printf("[ASTOS] Atari power lost - waiting for it\n");
+                    stat_event(EV_WARN, "Atari power lost");
                     exit_code = ASTOS_EXIT_RESTART;
                     break;
                 }
@@ -1352,6 +1381,7 @@ int main(int argc, char **argv)
             show();
     }
 
+    stat_save();
     ai_close();
     if (hdmi_on)
         sh_close();

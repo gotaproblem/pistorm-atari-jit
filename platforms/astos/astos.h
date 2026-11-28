@@ -95,6 +95,20 @@ void hw_probe(struct astos_hw *hw);
 /* ---- astos_sys.c ---------------------------------------------------- */
 int  sys_temp_c10(void);            /* SoC temperature in 0.1 C, -1     */
 int  sys_throttled(void);           /* vcgencmd get_throttled bits, -1  */
+int  sys_mbox(uint32_t tag, uint32_t *v, int nreq, int nval); /* VC tag */
+
+/* ---- astos_status.c: the Pi status window and the events log ------ */
+void stat_init(const char *cfg_path);
+void stat_tick(int throttled);       /* once a second                   */
+void stat_event(int sev, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+enum { EV_INFO = 0, EV_WARN, EV_ERROR };
+void stat_save(void);                /* before ASTOS exits              */
+void stat_open(int events);          /* 0: status, 1: the events list   */
+int  stat_is_open(void);
+void stat_draw(void);
+int  stat_key(int key);              /* SI_* key; 1 = closed            */
+int  stat_click(int x, int y);       /* 1 = closed                      */
+const char *stat_toast(void);        /* a fresh warning, or NULL        */
 void sys_clock(char *buf, int n, int h12);
 void sys_date(char *buf, int n, int mdy);
 

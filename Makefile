@@ -501,6 +501,7 @@ beamtest: tools/beamtest/beamtest.c platforms/atari/setup/shifter_setup.c gpio/p
 ASTOS_COMMON = platforms/astos/astos.c platforms/astos/astos_gfx.c \
                platforms/astos/astos_env.c platforms/astos/astos_sys.c \
                platforms/astos/astos_input.c platforms/astos/astos_settings.c \
+               platforms/astos/astos_status.c \
                platforms/atari/setup/setup_cfg.c \
                platforms/atari/setup/setup_input.c platforms/atari/setup/shifter_setup.c \
                platforms/atari/setup/setup_page.c platforms/atari/setup/setup_enums.c

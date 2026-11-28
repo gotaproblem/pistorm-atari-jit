@@ -70,7 +70,7 @@ on a mono one, from the monitor sense line. Both use the same layout:
   throttling included. Every change is printed to the console / journal.
   ASTOS only reads it: the since-boot bits are never cleared.
   `PISTORM_ASTOS_THROTTLED=0x50005` fakes a value, to see how it looks.
-- **Start menu:** *New environment…*, *HDMI display* (on / off / only),
+- **Start menu:** *New environment…*, *Pi status…*, *HDMI display* (on / off / only),
   *Restart ASTOS*, *Exit to console*, *Shut down…*. The environments themselves are on the desktop.
 - **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,
   *Delete…*.
@@ -105,6 +105,43 @@ Inside a launched build, everything is as it was: Ctrl+Alt+Undo (Ctrl+Alt+End
 on a PC keyboard) ends it, and with ASTOS that means **back to ASTOS**, not to
 the setup page. So does the ST's reset button, APJ-OS's *Restart*, and a
 build that fails to start. Ctrl+Alt+Shift+Undo still shuts the Pi down.
+
+## Pi status and events
+
+*Pi status…* (start menu, or a click on `PI OK` / `UV` / `TEMP` in the
+taskbar) opens a window of live figures, refreshed once a second:
+
+| | |
+|---|---|
+| CPU | load per core: 0-1 Linux, 2 the JIT, 3 the bus |
+| Clocks | ARM now (and its maximum), core (VPU), V3D - measured, through the VideoCore mailbox |
+| Volts | core, SDRAM controller, I/O and PHY (what `vcgencmd measure_volts` reads) |
+| Temp | the SoC, against the 80 C soft and 85 C hard limits |
+| Power | under-voltage, ARM frequency capped, throttled, soft temperature limit: *NOW*, *since boot, not now* or *never since boot* |
+| Memory | Pi RAM used of total, GPU memory |
+| SD card | free space, SD errors seen this session |
+| Pi / Kernel | model, kernel, uptime |
+| Network | IP address and interface, Wi-Fi link quality |
+
+The Pi 4 cannot measure its 5 V input: under-voltage is the firmware's flag.
+
+**Events** (E, Tab or the *Events…* button) lists what has happened, newest
+first, kept across reboots in `astos-events.log` beside psctrl.cfg (trimmed to
+the last 200 lines past 1000):
+- each throttle condition starting and clearing while ASTOS runs; one that
+  happened while a build ran (its since-boot bit is new) is logged when
+  ASTOS comes back;
+- kernel log lines that matter, read from `/dev/kmsg` - SD card errors and
+  timeouts, filesystem errors and read-only remounts, the out-of-memory
+  killer (naming the program), the kernel's own under-voltage message.
+  ASTOS remembers the last record it read (in /run), so what happened
+  during a build is caught when it comes back;
+- how each environment ended (run-pistorm.sh records the exit code: normal,
+  failed to start, crashed with a signal), launches, the ST's reset button,
+  ST power lost.
+
+A warning or error also shows as a toast above the taskbar for 10 seconds.
+Esc or the right button closes the window.
 
 ## Settings
 

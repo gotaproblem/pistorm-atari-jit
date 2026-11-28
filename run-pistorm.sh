@@ -81,6 +81,8 @@ if [ -x ./astos ] && [ "${PISTORM_ASTOS:-1}" != "0" ]; then
 			echo "[run-pistorm] ASTOS: launching [$build]"
 			./emulator --config "$cfg" --no-setup --build "$build" "$@"
 			erc=$?
+			# for ASTOS's events log: how the build ended
+			echo "$build $erc" > /run/astos-last-exit 2>/dev/null
 			if [ "$erc" -eq 43 ]; then
 				echo "[run-pistorm] Ctrl+Alt+Shift+Undo (43) - shutting Linux down."
 				sync
