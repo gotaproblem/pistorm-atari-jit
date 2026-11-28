@@ -44,13 +44,20 @@ on a mono one, from the monitor sense line. Both use the same layout:
   CPLD firmware as it is named (e.g. `1.1b (EPM240)`), Pi temperature.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
   date and clock (`[psctrl] clock 24|12`, `date dmy|mdy`).
-- **Start menu:** *New environment…*, *Restart ASTOS*, *Exit to console*,
-  *Shut down…*. The environments themselves are on the desktop.
+- **Start menu:** *New environment…*, *HDMI display* (on / off / only),
+  *Restart ASTOS*, *Exit to console*, *Shut down…*. The environments themselves are on the desktop.
 - **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,
   *Delete…*.
 
-If no ST-RAM answers (no ST monitor wired), ASTOS draws on HDMI instead.
-`hdmi on` in `[psctrl]` mirrors the desktop to HDMI as well.
+**HDMI.** ASTOS shows the same desktop on HDMI, scaled, when any of these
+holds:
+- `hdmi_only` in `[psctrl]`, or the environment launched last has
+  `hdmi_only` - whoever watches only HDMI finds ASTOS there when the build
+  ends;
+- the start menu's *HDMI display* is on (`[psctrl] hdmi on`; switches live);
+- no ST memory answers at all.
+Safe mode drops the plain mirror but never an HDMI-only setup. Only the
+rows that changed are redrawn on the panel, so the pointer stays light.
 
 ## Keys and mouse
 
@@ -122,7 +129,8 @@ branches. The page's `countdown` and `boot` are not used by ASTOS.
 |---|---|
 | `astos_last` | the build launched last; ASTOS starts with it selected. Written by ASTOS |
 | `astos_autolaunch` + `astos_countdown` | launch this build after N seconds, unless a key is pressed or the mouse clicked. No keys: no auto-launch |
-| `hdmi` | `on`: mirror the ASTOS desktop to HDMI. Default off |
+| `hdmi` | `on`: show the ASTOS desktop on HDMI as well. Default off; the start menu's *HDMI display* sets it |
+| `hdmi_only` | ASTOS on HDMI, whatever `hdmi` says (also when the last environment has it) |
 | `clock`, `date` | as for the page |
 
 The emulator gained one switch for ASTOS: `--build <section>` boots that

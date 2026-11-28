@@ -30,11 +30,21 @@ static drmModeCrtc *saved;
 static uint32_t palette[4] = { 0xFFEEEEEE, 0xFFCC0000, 0xFF00AA00,
                                0xFF000000 };
 
-/* ASTOS draws with its own four pens (0xRRGGBB); the page keeps these */
+/* what is on the panel now, so sh_present redraws only the rows that
+ * changed (a pointer move is a few rows, not a 1080p frame) */
+static uint8_t shown_[SS_SCREEN_BYTES];
+static int shown_ok;
+
+/* ASTOS draws with its own four pens (0xRRGGBB); the page keeps these.
+ * The border (pen 0 out to every edge) is repainted in the new paper. */
 void sh_set_palette(const uint32_t rgb[4])
 {
     for (int i = 0; i < 4; i++)
         palette[i] = 0xFF000000u | (rgb[i] & 0xFFFFFFu);
+    shown_ok = 0;
+    if (map_)
+        for (uint64_t i = 0; i + 4 <= size; i += 4)
+            *(uint32_t *)(map_ + i) = palette[0];
 }
 
 int sh_active(void) { return fd >= 0 && map_; }
@@ -144,6 +154,7 @@ int sh_open(void)
     if (drmModeSetCrtc(fd, crtc_id, fb_id, 0, 0, &conn_id, 1, &mode) < 0)
         goto fail;
 
+    shown_ok = 0;
     printf("[SETUP] HDMI mirror on %ux%u\n", mode.hdisplay, mode.vdisplay);
     return 0;
 
@@ -183,11 +194,15 @@ void sh_present(const struct ss_screen *ss)
     const int ox = (mw - dw) / 2, oy = (mh - dh) / 2;
 
     uint32_t row[640];
-    int last_sy = -1;
+    int last_sy = -1, skip = 0;
+    const int rowbytes = ss->planes == 1 ? 80 : 160;
     for (int y = 0; y < dh; y++) {
         const int sy = (int)((int64_t)y * sh_ / dh);
         if (sy != last_sy) {
-            for (int x = 0; x < sw; x++) {
+            last_sy = sy;
+            skip = shown_ok && !memcmp(shown_ + sy * rowbytes,
+                                       ss->shadow + sy * rowbytes, (size_t)rowbytes);
+            for (int x = 0; x < sw && !skip; x++) {
                 int c;
                 if (ss->planes == 1)
                     c = ((ss->shadow[sy * 80 + (x >> 3)] >> (7 - (x & 7))) & 1) ? 3 : 0;
@@ -202,12 +217,15 @@ void sh_present(const struct ss_screen *ss)
                 }
                 row[x] = palette[c];
             }
-            last_sy = sy;
         }
+        if (skip)
+            continue;
         uint32_t *d = (uint32_t *)(map_ + (size_t)(oy + y) * pitch) + ox;
         for (int x = 0; x < dw; x++)
             d[x] = row[(int64_t)x * sw / dw];
     }
+    memcpy(shown_, ss->shadow, (size_t)rowbytes * (size_t)sh_);
+    shown_ok = 1;
 }
 
 void sh_close(void)

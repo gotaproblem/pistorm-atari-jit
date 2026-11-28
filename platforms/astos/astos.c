@@ -52,7 +52,7 @@ static char cfg_path[512];
 static struct env envs[MAX_ENV];
 static int nenv, sel;
 
-static int safe_mode, no_board, hdmi_on, h12, mdy;
+static int safe_mode, no_board, hdmi_on, hdmi_only, h12, mdy;
 static int menu_open, menu_sel;
 enum { DLG_NONE, DLG_SHUTDOWN, DLG_MESSAGE, DLG_NAME, DLG_DELETE };
 static int dlg, dlg_sel;
@@ -108,16 +108,17 @@ static void cell_rect(int i, int *x, int *y)
 
 /* start menu rows: New environment..., a separator, then Restart /
  * Console / Shut down */
-enum { MI_NEW = 0, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
+enum { MI_NEW = 0, MI_HDMI, MI_RESTART, MI_CONSOLE, MI_SHUTDOWN, MI_NSYS };
 static const char *const sys_label[MI_NSYS] = {
-    "New environment...", "Restart ASTOS", "Exit to console", "Shut down...",
+    "New environment...", "HDMI display", "Restart ASTOS", "Exit to console",
+    "Shut down...",
 };
 static int menu_rows(void) { return MI_NSYS; }
 static int menu_h(void)    { return 14 + menu_rows() * ROW_H + 10; }
 static int menu_y(void)    { return BAR_Y - menu_h(); }
 static int menu_row_y(int r)
 {
-    return menu_y() + 14 + r * ROW_H + (r >= 1 ? 4 : 0);
+    return menu_y() + 14 + r * ROW_H + (r >= MI_RESTART ? 4 : 0);
 }
 
 /* ---- drawing -------------------------------------------------------- */
@@ -244,11 +245,14 @@ static void draw_menu(void)
     for (int r = 0; r < menu_rows(); r++) {
         int ry = menu_row_y(r);
         int on = r == menu_sel;
-        if (r == 1)
+        if (r == MI_RESTART)
             g_hline(4, ry - 3, MENU_W - 8, C_DIM);
         if (on)
             g_fill(4, ry - 1, MENU_W - 8, ROW_H, C_ACCENT);
         g_textn(12, ry, sys_label[r], (MENU_W - 24) / 8, on ? C_WHITE : C_TEXT);
+        if (r == MI_HDMI)
+            g_text(MENU_W - 12 - 8 * 4, ry, hdmi_only ? "only" : hdmi_on ? " on" : "off",
+                   on ? C_WHITE : C_DIM);
     }
 }
 
@@ -412,6 +416,29 @@ static void reload_envs(const char *keep)
             sel = i;
 }
 
+static void hdmi_start(void);
+
+/* the start menu's HDMI display switch: [psctrl] hdmi on|off, live */
+static void toggle_hdmi(void)
+{
+    if (hdmi_only) {
+        message("HDMI is on: hdmi_only is set", "(in [psctrl] or the last environment)");
+        return;
+    }
+    hdmi_on = !hdmi_on;
+    sc_set(&cfg, "psctrl", "hdmi", hdmi_on ? "on" : "off");
+    if (sc_save(&cfg, cfg_path) != 0)
+        fprintf(stderr, "[ASTOS] could not save %s\n", cfg_path);
+    if (no_board)
+        return;
+    if (hdmi_on)
+        hdmi_start();
+    else {
+        sh_close();
+        printf("[ASTOS] HDMI off\n");
+    }
+}
+
 /* the settings window for one environment */
 static void open_settings(int i)
 {
@@ -521,6 +548,7 @@ static int menu_activate(int r, int *exit_code)
     menu_open = 0;
     switch (r) {
     case MI_NEW:      ask_name(NULL); return 0;
+    case MI_HDMI:     toggle_hdmi(); return 0;
     case MI_RESTART:  *exit_code = ASTOS_EXIT_RESTART; return 1;
     case MI_CONSOLE:  *exit_code = 0; return 1;
     case MI_SHUTDOWN:
@@ -787,6 +815,30 @@ static void splash(const char *line)
         sh_present(&ss);
 }
 
+/* the boolean words config_file.c accepts; a bare key is on */
+static int cfg_on(const char *v)
+{
+    return v && (!*v || !strcasecmp(v, "on") || !strcasecmp(v, "1") ||
+                 !strcasecmp(v, "yes") || !strcasecmp(v, "true") ||
+                 !strcasecmp(v, "enabled") || !strcasecmp(v, "enable"));
+}
+
+/* ASTOS on HDMI: the same picture as the ST monitor, scaled */
+static void hdmi_start(void)
+{
+    if (sh_active())
+        return;
+    if (sh_open() == 0) {
+        uint32_t rgb[4];
+        g_palette_rgb(rgb);
+        sh_set_palette(rgb);
+        printf("[ASTOS] HDMI on%s\n", hdmi_only ? " (hdmi_only)" : "");
+    } else {
+        printf("[ASTOS] HDMI: no display to open\n");
+        hdmi_on = 0;
+    }
+}
+
 /* The CPLD's revision word as the firmware is named: bits 10-9 the kind
  * (01 alpha, 10 beta, else release), bit 8 EPM570, and for an alpha
  * bits 7-0 the number (0.253a), otherwise bits 7-5 major and 4-0 minor
@@ -897,25 +949,28 @@ int main(int argc, char **argv)
         h12 = v && !strcmp(v, "12");
         v = sc_get(&cfg, "psctrl", "date");
         mdy = v && !strcasecmp(v, "mdy");
-        v = sc_get(&cfg, "psctrl", "hdmi");
-        if (v && (!*v || !strcasecmp(v, "on") || !strcasecmp(v, "1") ||
-                  !strcasecmp(v, "yes") || !strcasecmp(v, "true") ||
-                  !strcasecmp(v, "enabled")))
-            hdmi_on = 1;
     }
-    /* nothing to show on: no ST monitor wired, so HDMI regardless */
-    if (!no_board && !ss.shifter)
+    /* HDMI: [psctrl] hdmi (the start menu's switch), hdmi_only there, or
+     * the environment launched last being an hdmi_only one - whoever
+     * looks only at HDMI must find ASTOS there when the build ends. No ST
+     * memory answering at all: HDMI regardless. Safe mode drops only the
+     * plain mirror, never an HDMI-only setup. */
+    hdmi_only = cfg_on(sc_get(&cfg, "psctrl", "hdmi_only"));
+    {
+        const char *last = sc_get(&cfg, "psctrl", "astos_last");
+        if (last && cfg_on(sc_get(&cfg, last, "hdmi_only")))
+            hdmi_only = 1;
+    }
+    if (cfg_on(sc_get(&cfg, "psctrl", "hdmi")))
         hdmi_on = 1;
-    if (safe_mode && ss.shifter)
+    if (!no_board && !ss.shifter)
+        hdmi_only = 1;
+    if (safe_mode && !hdmi_only)
         hdmi_on = 0;
-    if (hdmi_on && !no_board) {
-        if (sh_open() == 0) {
-            uint32_t rgb[4];
-            g_palette_rgb(rgb);
-            sh_set_palette(rgb);
-        } else
-            hdmi_on = 0;
-    }
+    if (hdmi_only)
+        hdmi_on = 1;
+    if (hdmi_on && !no_board)
+        hdmi_start();
 
     nenv = env_load(&cfg, envs, MAX_ENV);
     {
