@@ -175,6 +175,31 @@ with the blue bar is the active one; Copy and Move go from it to the other.
 ASTOS runs as root: what it creates is handed to the owner of the folder it
 lands in, so a share stays writable over Samba.
 
+**Disk images open like folders.** Enter (or double-click) on an image -
+a floppy `.ST`, an IDE/ACSI hard-disk image - and the pane goes into it.
+A hard disk shows its partitions first (`C: GEM 16M FAT16`, `D: BGM 64M
+FAT16`, ...); `..` goes back out. Copy, Move, Rename, New folder and Delete
+all work inside an image and between an image and the Pi or another image.
+
+- Partition tables: AHDI (GEM, BGM, F32, XGM extended chains), ICD (the 8
+  extra entries), DOS MBR (FAT12/16/32, extended). No table: one FAT volume
+  at sector 0 (floppies, superfloppies).
+- FAT12, FAT16, FAT32; logical sectors 512 to 16384 bytes (BGM). AHDI GEM
+  and BGM partitions are taken as FAT16, as TOS does.
+- Word-swapped images (ARAnyM, twisted-cable dumps) are recognised per
+  partition and written back in the order they are stored in
+  (doc/DISK-BYTEORDER.md); the path line and the partition name say *swapped*.
+- Names going into an image are 8.3 in capitals, as TOS wants them. A name
+  that does not fit gets a short name (`ANOTHE~1.TEX`) plus a long name, which
+  EmuTOS and MiNT show and TOS ignores. Long names are read.
+- Delete in an image is for good: there is no trash in it. The confirm says so.
+- The FAT is written (both copies) at the end of every operation; file data
+  goes in before the entry that points at it.
+- An image you cannot write (file permissions) opens read-only and says so.
+
+While ASTOS is up no emulation is running, so an image is never written by
+both at once.
+
 ## Settings
 
 *Settings…* (F2, or right-click an icon) opens the environment's settings
@@ -266,6 +291,7 @@ nothing installed beyond gcc.
 | `platforms/astos/astos_input.c` | ST keyboard + IKBD relative mouse over the ACIA; USB keyboards, mice, pads |
 | `platforms/astos/astos_env.c` | builds from psctrl.cfg, details, the launch file |
 | `platforms/astos/astos_settings.c` | the settings window: category and value drop-down lists over the page's editor model |
+| `platforms/astos/astos_fat.c` | FAT12/16/32 inside disk images: AHDI/ICD/XGM/MBR partitions, word-swapped images, long names |
 | `platforms/astos/astos_files.c` | the file manager: places, two panes, copy / move / rename / new folder / delete to `.trash` |
 | `platforms/astos/astos_sys.c` | Pi temperature, clock |
 | `platforms/astos/astos_host_stub.c` | the no-board stubs for `astos-host` |

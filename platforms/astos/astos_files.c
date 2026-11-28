@@ -29,6 +29,7 @@
 
 #include "astos.h"
 #include "astos_files.h"
+#include "astos_fat.h"
 
 /* names are at most 255 and paths PATH_MAX: the recursive walks check
  * for a path that would not fit and stop there rather than act on a
@@ -152,14 +153,21 @@ static void load_places(const char *cfg_path)
         add_place("Pi home", pw->pw_dir);
 }
 
+static char msg[96];
+
 /* ---- a pane --------------------------------------------------------- */
 #define MAX_ENT 1024
-struct ent { char name[256]; int dir; long long size; int mark; };
+struct ent { char name[256]; int dir; long long size; int mark; int vix; };
 static struct pane {
     int place;                  /* index into place[]                   */
     char rel[PATH_MAX];         /* below the place's root, "" or "a/b"  */
     struct ent *e;
     int n, sel, top;
+    /* inside a disk image: the image file in rel, a volume, a folder */
+    struct fat_img *img;
+    char imgname[256];
+    int vol;                    /* -1: the list of its volumes          */
+    char irel[PATH_MAX];        /* in the volume, "" or "A/B"           */
 } pane[2];
 static int act;                 /* the active pane                       */
 
@@ -213,6 +221,33 @@ static void load(struct pane *p)
     p->n = 0;
     if (!p->e)
         return;
+    if (p->img) {                             /* inside an image */
+        struct ent *e = &p->e[0];
+        snprintf(e->name, sizeof e->name, "..");
+        e->dir = 1; e->size = 0; e->mark = 0;
+        p->n = 1;
+        if (p->vol < 0) {                     /* its volumes, in order */
+            for (int i = 0; i < fat_nvol(p->img) && p->n < MAX_ENT; i++) {
+                e = &p->e[p->n++];
+                snprintf(e->name, sizeof e->name, "%s", fat_vol_label(p->img, i));
+                e->dir = 1; e->size = 0; e->mark = 0; e->vix = i;
+            }
+        } else {
+            static struct fat_ent fe[MAX_ENT];
+            int n = fat_list(p->img, p->vol, p->irel, fe, MAX_ENT - 1);
+            if (n < 0)
+                snprintf(msg, sizeof msg, "%.90s", fat_error());
+            for (int i = 0; i < n; i++) {
+                e = &p->e[p->n++];
+                snprintf(e->name, sizeof e->name, "%s", fe[i].name);
+                e->dir = fe[i].dir; e->size = fe[i].size; e->mark = 0;
+            }
+            qsort(p->e + 1, (size_t)(p->n - 1), sizeof *p->e, ent_cmp);
+        }
+        if (p->sel >= p->n) p->sel = p->n - 1;
+        if (p->top > p->sel) p->top = p->sel;
+        return;
+    }
     if (p->rel[0]) {                          /* the way back up */
         snprintf(p->e[0].name, sizeof p->e[0].name, "..");
         p->e[0].dir = 1;
@@ -257,7 +292,6 @@ static void clamp(struct pane *p)
 /* ---- state ----------------------------------------------------------- */
 static int open_;
 static char cfg_path_[600];
-static char msg[96];
 enum { POP_NONE, POP_PLACE, POP_ASK, POP_CONFIRM };
 static int pop, pop_pane, pop_sel, pop_top;
 enum { ASK_RENAME, ASK_MKDIR };
@@ -265,7 +299,7 @@ static int ask_kind;
 static char ask_buf[200], ask_title[48];
 enum { CF_DELETE, CF_COPY, CF_MOVE };
 static int cf_kind;
-static char cf_text[96];
+static char cf_text[96], cf_text2[64];
 
 int files_is_open(void) { return open_; }
 
@@ -337,40 +371,6 @@ static int copy_file(const char *from, const char *to)
     return 0;
 }
 
-static int copy_tree(const char *from, const char *to, int *files)
-{
-    struct stat st;
-    if (lstat(from, &st) != 0)
-        return -1;
-    if (!S_ISDIR(st.st_mode)) {
-        if (copy_file(from, to) != 0)
-            return -1;
-        (*files)++;
-        return 0;
-    }
-    if (mkdir(to, st.st_mode & 0777) != 0)
-        return -1;
-    own_like_parent(to);
-    DIR *d = opendir(from);
-    if (!d)
-        return -1;
-    struct dirent *de;
-    int r = 0;
-    while ((de = readdir(d)) && !r) {
-        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
-            continue;
-        char a[PATH_MAX], b[PATH_MAX];
-        if (snprintf(a, sizeof a, "%s/%s", from, de->d_name) >= (int)sizeof a ||
-            snprintf(b, sizeof b, "%s/%s", to, de->d_name) >= (int)sizeof b) {
-            r = -1;
-            break;
-        }
-        r = copy_tree(a, b, files);
-    }
-    closedir(d);
-    return r;
-}
-
 static int remove_tree(const char *path)
 {
     struct stat st;
@@ -395,6 +395,174 @@ static int remove_tree(const char *path)
     return unlink(path);
 }
 
+/* ---- where an operation reads or writes: a host folder, or a folder in
+ * a volume of an image ------------------------------------------------- */
+struct loc {
+    struct fat_img *img;        /* NULL: path is a host folder           */
+    int vol;
+    char path[PATH_MAX];        /* host: absolute; image: "" or "A/B"     */
+};
+
+/* the pane's folder; -1 in an image's volume list */
+static int pane_loc(const struct pane *p, struct loc *l)
+{
+    l->img = p->img;
+    l->vol = p->vol;
+    if (p->img) {
+        if (p->vol < 0)
+            return -1;
+        snprintf(l->path, sizeof l->path, "%s", p->irel);
+    } else
+        full_path(p, NULL, l->path, sizeof l->path);
+    return 0;
+}
+
+static int loc_child(const struct loc *l, const char *name, struct loc *c)
+{
+    *c = *l;
+    int n = l->img && !l->path[0] ? snprintf(c->path, sizeof c->path, "%s", name)
+                                  : snprintf(c->path, sizeof c->path, "%s/%s", l->path, name);
+    return n < (int)sizeof c->path ? 0 : -1;
+}
+
+static int same_loc(const struct loc *a, const struct loc *b)
+{
+    return a->img == b->img && (!a->img || a->vol == b->vol) && !strcmp(a->path, b->path);
+}
+
+static char op_err[96];
+
+static int loc_exists(const struct loc *l, const char *name)
+{
+    struct loc c;
+    if (loc_child(l, name, &c) != 0)
+        return 1;
+    if (l->img)
+        return fat_stat(l->img, l->vol, c.path, NULL) == 0;
+    struct stat st;
+    return lstat(c.path, &st) == 0;
+}
+
+static int loc_mkdir(const struct loc *l, const char *name)
+{
+    if (l->img) {
+        if (fat_mkdir(l->img, l->vol, l->path, name) == 0)
+            return 0;
+        snprintf(op_err, sizeof op_err, "%s", fat_error());
+        return -1;
+    }
+    struct loc c;
+    if (loc_child(l, name, &c) != 0 || mkdir(c.path, 0775) != 0) {
+        snprintf(op_err, sizeof op_err, "%s", strerror(errno));
+        return -1;
+    }
+    own_like_parent(c.path);
+    return 0;
+}
+
+static int loc_remove(const struct loc *l, const char *name)
+{
+    struct loc c;
+    if (loc_child(l, name, &c) != 0)
+        return -1;
+    if (l->img) {
+        if (fat_delete(l->img, l->vol, c.path) == 0)
+            return 0;
+        snprintf(op_err, sizeof op_err, "%s", fat_error());
+        return -1;
+    }
+    return remove_tree(c.path);
+}
+
+/* one item, folders with all they hold; never over something there */
+static int loc_copy(const struct loc *s, const char *name, const struct loc *d, int depth)
+{
+    struct loc sc, dc;
+    if (depth > 32 || loc_child(s, name, &sc) != 0 || loc_child(d, name, &dc) != 0) {
+        snprintf(op_err, sizeof op_err, "folders too deep");
+        return -1;
+    }
+    if (loc_exists(d, name)) {
+        snprintf(op_err, sizeof op_err, "%.60s is there already", name);
+        return -1;
+    }
+    int isdir;
+    if (s->img) {
+        struct fat_ent fe;
+        if (fat_stat(s->img, s->vol, sc.path, &fe) != 0) {
+            snprintf(op_err, sizeof op_err, "%s", fat_error());
+            return -1;
+        }
+        isdir = fe.dir;
+    } else {
+        struct stat st;
+        if (lstat(sc.path, &st) != 0) {
+            snprintf(op_err, sizeof op_err, "%s", strerror(errno));
+            return -1;
+        }
+        isdir = S_ISDIR(st.st_mode);
+    }
+
+    if (isdir) {
+        if (loc_mkdir(d, name) != 0)
+            return -1;
+        /* what is in it, then each */
+        int max = 4096, n = 0;
+        char (*kids)[256] = malloc((size_t)max * 256);
+        if (!kids) { snprintf(op_err, sizeof op_err, "out of memory"); return -1; }
+        if (s->img) {
+            struct fat_ent *fe = malloc((size_t)max * sizeof *fe);
+            n = fe ? fat_list(s->img, s->vol, sc.path, fe, max) : -1;
+            for (int i = 0; i < n; i++)
+                snprintf(kids[i], 256, "%s", fe[i].name);
+            free(fe);
+        } else {
+            DIR *dd = opendir(sc.path);
+            struct dirent *de;
+            while (dd && (de = readdir(dd)) && n < max)
+                if (strcmp(de->d_name, ".") && strcmp(de->d_name, ".."))
+                    snprintf(kids[n++], 256, "%s", de->d_name);
+            if (dd) closedir(dd);
+            else n = -1;
+        }
+        int r = n < 0 ? -1 : 0;
+        for (int i = 0; i < n && !r; i++)
+            r = loc_copy(&sc, kids[i], &dc, depth + 1);
+        free(kids);
+        return r;
+    }
+
+    if (!s->img && !d->img)
+        return copy_file(sc.path, dc.path) == 0 ? 0 :
+               (snprintf(op_err, sizeof op_err, "%s", strerror(errno)), -1);
+    if (!s->img) {                                  /* host into an image */
+        if (fat_put(d->img, d->vol, d->path, name, sc.path) == 0)
+            return 0;
+        snprintf(op_err, sizeof op_err, "%s", fat_error());
+        return -1;
+    }
+    if (!d->img) {                                  /* image out to host */
+        if (fat_get(s->img, s->vol, sc.path, dc.path) == 0) {
+            own_like_parent(dc.path);
+            return 0;
+        }
+        snprintf(op_err, sizeof op_err, "%s", fat_error());
+        return -1;
+    }
+    /* image to image: by way of a file on the Pi */
+    char tmp[] = "/tmp/astos-copy.XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) { snprintf(op_err, sizeof op_err, "%s", strerror(errno)); return -1; }
+    close(fd);
+    unlink(tmp);
+    int r = fat_get(s->img, s->vol, sc.path, tmp) == 0 &&
+            fat_put(d->img, d->vol, d->path, name, tmp) == 0 ? 0 : -1;
+    if (r)
+        snprintf(op_err, sizeof op_err, "%s", fat_error());
+    unlink(tmp);
+    return r;
+}
+
 /* the entries an operation works on: the marked ones, else the cursor */
 static int targets(struct pane *p, int *idx, int max)
 {
@@ -415,41 +583,65 @@ static void reload_both(void)
     }
 }
 
+static int need_volume(const struct pane *p)
+{
+    if (p->img && p->vol < 0) {
+        snprintf(msg, sizeof msg, "open a volume first");
+        return 1;
+    }
+    return 0;
+}
+
 static void do_copy_move(int move)
 {
     struct pane *s = &pane[act], *d = &pane[!act];
-    int idx[MAX_ENT], n = targets(s, idx, MAX_ENT), files = 0, done = 0, failed = 0;
-    char dst_dir[PATH_MAX], src_dir[PATH_MAX];
-    full_path(d, NULL, dst_dir, sizeof dst_dir);
-    full_path(s, NULL, src_dir, sizeof src_dir);
-    if (!strcmp(dst_dir, src_dir)) {
+    struct loc sl, dl;
+    if (need_volume(s) || need_volume(d))
+        return;
+    pane_loc(s, &sl);
+    pane_loc(d, &dl);
+    if (same_loc(&sl, &dl)) {
         snprintf(msg, sizeof msg, "both panes show the same folder");
         return;
     }
+    static int idx[MAX_ENT];
+    int n = targets(s, idx, MAX_ENT), done = 0, failed = 0;
+    op_err[0] = '\0';
     for (int k = 0; k < n; k++) {
-        char a[PATH_MAX], b[PATH_MAX];
-        full_path(s, s->e[idx[k]].name, a, sizeof a);
-        snprintf(b, sizeof b, "%s/%s", dst_dir, s->e[idx[k]].name);
-        struct stat st;
-        if (lstat(b, &st) == 0) {             /* never overwrite */
+        const char *name = s->e[idx[k]].name;
+        if (loc_exists(&dl, name)) {                /* never overwrite */
+            snprintf(op_err, sizeof op_err, "%.60s is there already", name);
             failed++;
             continue;
         }
-        if (move && rename(a, b) == 0) {      /* same filesystem */
-            done++;
-            continue;
+        if (move && !sl.img && !dl.img) {           /* same filesystem */
+            struct loc a, b;
+            if (loc_child(&sl, name, &a) == 0 && loc_child(&dl, name, &b) == 0 &&
+                rename(a.path, b.path) == 0) {
+                done++;
+                continue;
+            }
         }
-        if (copy_tree(a, b, &files) != 0) {
-            remove_tree(b);
+        if (loc_copy(&sl, name, &dl, 0) != 0) {
+            char keep[96];
+            snprintf(keep, sizeof keep, "%s", op_err);
+            loc_remove(&dl, name);                  /* no half copies */
+            snprintf(op_err, sizeof op_err, "%s", keep);
             failed++;
             continue;
         }
-        if (move)
-            remove_tree(a);
+        if (move && loc_remove(&sl, name) != 0) {
+            failed++;
+            continue;
+        }
         done++;
     }
-    snprintf(msg, sizeof msg, "%s %d item%s%s", move ? "moved" : "copied", done,
-             done == 1 ? "" : "s", failed ? " - some already there or failed" : "");
+    if (failed)
+        snprintf(msg, sizeof msg, "%s %d, %d failed: %.50s", move ? "moved" : "copied", done,
+                 failed, op_err);
+    else
+        snprintf(msg, sizeof msg, "%s %d item%s", move ? "moved" : "copied", done,
+                 done == 1 ? "" : "s");
     printf("[ASTOS] files: %s\n", msg);
     reload_both();
 }
@@ -457,7 +649,23 @@ static void do_copy_move(int move)
 static void do_delete(void)
 {
     struct pane *p = &pane[act];
-    int idx[MAX_ENT], n = targets(p, idx, MAX_ENT), done = 0;
+    static int idx[MAX_ENT];
+    int n = targets(p, idx, MAX_ENT), done = 0;
+    if (need_volume(p))
+        return;
+    if (p->img) {                                   /* no trash in an image */
+        struct loc l;
+        pane_loc(p, &l);
+        op_err[0] = '\0';
+        for (int k = 0; k < n; k++)
+            if (loc_remove(&l, p->e[idx[k]].name) == 0)
+                done++;
+        snprintf(msg, sizeof msg, "%d item%s deleted%s%.50s", done, done == 1 ? "" : "s",
+                 done < n ? ": " : "", done < n ? op_err : "");
+        printf("[ASTOS] files: %s\n", msg);
+        reload_both();
+        return;
+    }
     char trash[PATH_MAX];
     snprintf(trash, sizeof trash, "%s/.trash", place[p->place].root);
     if (mkdir(trash, 0775) == 0)
@@ -493,30 +701,40 @@ static void do_ask(void)
         snprintf(msg, sizeof msg, "not a usable name");
         return;
     }
-    char a[PATH_MAX], b[PATH_MAX];
-    full_path(p, ask_buf, b, sizeof b);
-    struct stat st;
-    if (lstat(b, &st) == 0) {
+    struct loc l;
+    if (need_volume(p) || pane_loc(p, &l) != 0)
+        return;
+    const char *old = p->e[p->sel].name;
+    int case_only = ask_kind == ASK_RENAME && p->img && !strcasecmp(old, ask_buf);
+    if (loc_exists(&l, ask_buf) && !case_only) {
         snprintf(msg, sizeof msg, "%.40s is there already", ask_buf);
         return;
     }
     if (ask_kind == ASK_MKDIR) {
-        if (mkdir(b, 0775) == 0) {
-            own_like_parent(b);
+        if (loc_mkdir(&l, ask_buf) == 0)
             snprintf(msg, sizeof msg, "made folder %.40s", ask_buf);
-        } else
-            snprintf(msg, sizeof msg, "could not make it: %.40s", strerror(errno));
+        else
+            snprintf(msg, sizeof msg, "could not make it: %.60s", op_err);
     } else {
-        full_path(p, p->e[p->sel].name, a, sizeof a);
-        if (rename(a, b) == 0)
+        struct loc a, b;
+        int ok;
+        if (p->img) {
+            ok = loc_child(&l, old, &a) == 0 && fat_rename(p->img, p->vol, a.path, ask_buf) == 0;
+            if (!ok) snprintf(op_err, sizeof op_err, "%s", fat_error());
+        } else {
+            ok = loc_child(&l, old, &a) == 0 && loc_child(&l, ask_buf, &b) == 0 &&
+                 rename(a.path, b.path) == 0;
+            if (!ok) snprintf(op_err, sizeof op_err, "%s", strerror(errno));
+        }
+        if (ok)
             snprintf(msg, sizeof msg, "renamed to %.40s", ask_buf);
         else
-            snprintf(msg, sizeof msg, "could not rename: %.40s", strerror(errno));
+            snprintf(msg, sizeof msg, "could not rename: %.60s", op_err);
     }
     pop = POP_NONE;
     load(p);
     for (int i = 0; i < p->n; i++)              /* the cursor on it */
-        if (!strcmp(p->e[i].name, ask_buf))
+        if (!strcasecmp(p->e[i].name, ask_buf))
             p->sel = i;
     clamp(p);
 }
@@ -524,6 +742,8 @@ static void do_ask(void)
 static void ask(int kind)
 {
     struct pane *p = &pane[act];
+    if (need_volume(p))
+        return;
     if (kind == ASK_RENAME && (!p->n || !strcmp(p->e[p->sel].name, "..")))
         return;
     ask_kind = kind;
@@ -538,18 +758,62 @@ static void ask(int kind)
 static void confirm(int kind)
 {
     struct pane *p = &pane[act];
-    int idx[MAX_ENT], n = targets(p, idx, MAX_ENT);
+    if (need_volume(p) || (kind != CF_DELETE && need_volume(&pane[!act])))
+        return;
+    static int idx[MAX_ENT];
+    int n = targets(p, idx, MAX_ENT);
     if (!n)
         return;
     cf_kind = kind;
     const char *verb = kind == CF_DELETE ? "Delete" : kind == CF_COPY ? "Copy" : "Move";
     if (n == 1)
-        snprintf(cf_text, sizeof cf_text, "%s %.40s%s", verb, p->e[idx[0]].name,
-                 kind == CF_DELETE ? "?" : " to the other pane?");
+        snprintf(cf_text, sizeof cf_text, "%s %.34s%s", verb, p->e[idx[0]].name,
+                 kind == CF_DELETE ? "?" : " across?");
     else
         snprintf(cf_text, sizeof cf_text, "%s %d items%s", verb, n,
                  kind == CF_DELETE ? "?" : " to the other pane?");
+    cf_text2[0] = '\0';
+    if (kind == CF_DELETE && p->img)
+        snprintf(cf_text2, sizeof cf_text2, "No trash in an image: gone for good.");
+    else if (kind != CF_DELETE && pane[!act].img)
+        snprintf(cf_text2, sizeof cf_text2, "Into the image: names become 8.3.");
     pop = POP_CONFIRM;
+}
+
+/* into an image file, or say what it is */
+static void enter_image(struct pane *p, const struct ent *e)
+{
+    char path[PATH_MAX], why[96];
+    full_path(p, e->name, path, sizeof path);
+    struct fat_img *im = e->size >= 512 ? fat_open(path, why, sizeof why) : NULL;
+    if (!im) {
+        snprintf(msg, sizeof msg, "%.40s - %lld bytes%s%.40s", e->name, e->size,
+                 e->size >= 512 ? ", " : "", e->size >= 512 ? why : "");
+        return;
+    }
+    p->img = im;
+    snprintf(p->imgname, sizeof p->imgname, "%s", e->name);
+    p->vol = fat_nvol(im) == 1 ? 0 : -1;
+    p->irel[0] = '\0';
+    p->sel = p->top = 0;
+    snprintf(msg, sizeof msg, "%s%s", fat_nvol(im) == 1 ? fat_vol_label(im, 0) : "",
+             fat_readonly(im) ? " - read-only" : "");
+    load(p);
+    clamp(p);
+}
+
+static void leave_image(struct pane *p)
+{
+    char was[256];
+    snprintf(was, sizeof was, "%s", p->imgname);
+    fat_close(p->img);
+    p->img = NULL;
+    p->sel = p->top = 0;
+    load(p);
+    for (int i = 0; i < p->n; i++)
+        if (!strcmp(p->e[i].name, was))
+            p->sel = i;
+    clamp(p);
 }
 
 static void open_entry(struct pane *p)
@@ -558,10 +822,23 @@ static void open_entry(struct pane *p)
         return;
     struct ent *e = &p->e[p->sel];
     if (!strcmp(e->name, "..")) {
-        char *s = strrchr(p->rel, '/');
-        char was[256];
-        snprintf(was, sizeof was, "%s", s ? s + 1 : p->rel);
-        if (s) *s = '\0'; else p->rel[0] = '\0';
+        char was[256] = "";
+        if (p->img && !p->irel[0]) {
+            if (p->vol >= 0 && fat_nvol(p->img) > 1) {   /* the volume list */
+                int v = p->vol;
+                p->vol = -1;
+                p->sel = v + 1;
+                p->top = 0;
+                load(p);
+                clamp(p);
+            } else
+                leave_image(p);
+            return;
+        }
+        char *rel = p->img ? p->irel : p->rel;
+        char *s = strrchr(rel, '/');
+        snprintf(was, sizeof was, "%s", s ? s + 1 : rel);
+        if (s) *s = '\0'; else rel[0] = '\0';
         p->sel = p->top = 0;
         load(p);
         for (int i = 0; i < p->n; i++)          /* back onto where we were */
@@ -570,16 +847,29 @@ static void open_entry(struct pane *p)
         clamp(p);
         return;
     }
-    if (!e->dir) {
-        snprintf(msg, sizeof msg, "%.40s - %lld bytes", e->name, e->size);
+    if (p->img && p->vol < 0) {                 /* a volume */
+        p->vol = e->vix;
+        p->irel[0] = '\0';
+        p->sel = p->top = 0;
+        snprintf(msg, sizeof msg, "%s", fat_vol_label(p->img, p->vol));
+        load(p);
+        clamp(p);
         return;
     }
-    char rel[PATH_MAX];
-    if (p->rel[0])
-        snprintf(rel, sizeof rel, "%s/%s", p->rel, e->name);
+    if (!e->dir) {
+        if (p->img)
+            snprintf(msg, sizeof msg, "%.40s - %lld bytes", e->name, e->size);
+        else
+            enter_image(p, e);
+        return;
+    }
+    char *rel = p->img ? p->irel : p->rel;
+    char nrel[PATH_MAX];
+    if (rel[0])
+        snprintf(nrel, sizeof nrel, "%s/%s", rel, e->name);
     else
-        snprintf(rel, sizeof rel, "%s", e->name);
-    snprintf(p->rel, sizeof p->rel, "%s", rel);
+        snprintf(nrel, sizeof nrel, "%s", e->name);
+    snprintf(rel, PATH_MAX, "%s", nrel);
     p->sel = p->top = 0;
     load(p);
     clamp(p);
@@ -587,7 +877,7 @@ static void open_entry(struct pane *p)
 
 static void parent(struct pane *p)
 {
-    if (!p->rel[0])
+    if (!p->rel[0] && !p->img)
         return;
     p->sel = 0;
     open_entry(p);                              /* ".." is entry 0 */
@@ -596,6 +886,10 @@ static void parent(struct pane *p)
 static void set_place(int pn, int pl)
 {
     struct pane *p = &pane[pn];
+    if (p->img) {
+        fat_close(p->img);
+        p->img = NULL;
+    }
     p->place = pl;
     p->rel[0] = '\0';
     p->sel = p->top = 0;
@@ -640,7 +934,14 @@ static void draw_pane(int i)
     g_fill(ax + 2, PLACE_Y + 5, 3, 1, c); g_fill(ax + 3, PLACE_Y + 6, 1, 1, c);
     /* where in it */
     char path[PATH_MAX + 2];
-    snprintf(path, sizeof path, "/%s", p->rel);
+    if (p->img && p->vol >= 0)
+        snprintf(path, sizeof path, "/%s%s%s > %c:/%s", p->rel, p->rel[0] ? "/" : "",
+                 p->imgname, fat_vol_label(p->img, p->vol)[1] == ':' ?
+                 fat_vol_label(p->img, p->vol)[0] : 'A', p->irel);
+    else if (p->img)
+        snprintf(path, sizeof path, "/%s%s%s >", p->rel, p->rel[0] ? "/" : "", p->imgname);
+    else
+        snprintf(path, sizeof path, "/%s", p->rel);
     int len = (int)strlen(path), maxc = PW / 8;
     g_textn(x, PATH_Y, len > maxc ? path + len - maxc : path, maxc, C_DIM);
     /* the list */
@@ -674,7 +975,7 @@ static void draw_pane(int i)
 static void dlg_rect(int *w, int *h, int *x, int *y)
 {
     *w = 360;
-    *h = pop == POP_ASK ? 50 : 46;
+    *h = pop == POP_ASK ? 50 : cf_text2[0] ? 56 : 46;
     *x = (AW - *w) / 2;
     *y = 60;
 }
@@ -722,7 +1023,10 @@ static void draw_pop(void)
         g_text(x + 6, y + 2, cf_kind == CF_DELETE ? "Delete" : cf_kind == CF_COPY ? "Copy" : "Move",
                C_WHITE);
         g_textn(x + 10, y + 16, cf_text, (w - 20) / 8, C_TEXT);
-        dlg_button(x + w - 200, y + h - 16, 96, cf_kind == CF_DELETE ? "To trash" : "OK");
+        if (cf_text2[0])
+            g_textn(x + 10, y + 27, cf_text2, (w - 20) / 8, C_ACCENT);
+        dlg_button(x + w - 200, y + h - 16, 96, cf_kind != CF_DELETE ? "OK" :
+                   pane[act].img ? "Delete" : "To trash");
         dlg_button(x + w - 96, y + h - 16, 88, "Cancel");
     }
 }
