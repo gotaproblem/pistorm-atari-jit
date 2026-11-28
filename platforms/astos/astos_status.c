@@ -343,6 +343,17 @@ static int open_, events_view, ev_top;
 void stat_open(int events) { open_ = 1; events_view = events; ev_top = 0; }
 int  stat_is_open(void)    { return open_; }
 
+int stat_wheel(int n)
+{
+    if (!events_view)
+        return 0;
+    int max = nev - NV;
+    ev_top -= 3 * n;
+    if (ev_top > max) ev_top = max;
+    if (ev_top < 0) ev_top = 0;
+    return 1;
+}
+
 static void frame(const char *title)
 {
     g_fill(WX + 2, WY + 1, WW, WH, C_TEXT);

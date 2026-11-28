@@ -18,6 +18,7 @@ struct ai_event {
     int             dx, dy;     /* AI_MOUSE: movement in the source's units */
     int             buttons;    /* AI_MOUSE: bit 0 left, bit 1 right (state)*/
     int             usb;        /* AI_MOUSE: 1 = a USB/BT mouse             */
+    int             wheel;      /* AI_MOUSE: wheel notches, + = away (up)   */
 };
 
 int  ai_open(int want_st, int grab);

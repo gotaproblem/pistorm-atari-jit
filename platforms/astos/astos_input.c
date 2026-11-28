@@ -312,7 +312,7 @@ static struct ai_event usb_poll(void)
 {
     struct input_event ie;
     for (int i = 0; i < ndev; i++) {
-        int mdx = 0, mdy = 0, mouse_changed = 0;
+        int mdx = 0, mdy = 0, mwheel = 0, mouse_changed = 0;
         while (read(dev[i].fd, &ie, sizeof ie) == (ssize_t)sizeof ie) {
             if (dev[i].is_pad) {
                 if (ie.type == EV_ABS && ie.code == ABS_HAT0X && ie.value)
@@ -340,6 +340,7 @@ static struct ai_event usb_poll(void)
             if (ie.type == EV_REL) {
                 if (ie.code == REL_X) { mdx += ie.value; mouse_changed = 1; }
                 if (ie.code == REL_Y) { mdy += ie.value; mouse_changed = 1; }
+                if (ie.code == REL_WHEEL) { mwheel += ie.value; mouse_changed = 1; }
                 continue;
             }
             if (ie.type == EV_SYN && mouse_changed)
@@ -368,6 +369,7 @@ static struct ai_event usb_poll(void)
             struct ai_event e = none();
             e.type = AI_MOUSE;
             e.dx = mdx; e.dy = mdy;
+            e.wheel = mwheel;
             e.buttons = usb_buttons;
             e.usb = 1;
             return e;

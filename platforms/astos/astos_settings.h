@@ -15,6 +15,8 @@ void set_draw(void);
 int  set_key(struct si_event k);
 int  set_click(int x, int y);
 int  set_hover(int x, int y);
+/* the wheel: n notches, + = up; 1 = redraw */
+int  set_wheel(int x, int y, int n);
 int  set_release(int x, int y);       /* left button up; 1 = redraw */
 const char *set_section(void);
 

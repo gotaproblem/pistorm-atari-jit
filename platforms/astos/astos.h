@@ -108,6 +108,7 @@ int  stat_is_open(void);
 void stat_draw(void);
 int  stat_key(int key);              /* SI_* key; 1 = closed            */
 int  stat_click(int x, int y);       /* 1 = closed                      */
+int  stat_wheel(int n);              /* + = up; 1 = redraw              */
 const char *stat_toast(void);        /* a fresh warning, or NULL        */
 void sys_clock(char *buf, int n, int h12);
 void sys_date(char *buf, int n, int mdy);

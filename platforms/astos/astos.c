@@ -972,6 +972,20 @@ static int on_click(int x, int y, int *exit_code)
 }
 
 /* hover in the open menu follows the pointer */
+/* the wheel of a USB mouse: scrolls what is under the pointer */
+static int on_wheel(int x, int y, int n)
+{
+    if (dlg)
+        return 0;
+    if (files_is_open())
+        return files_wheel(x, y, n);
+    if (set_is_open())
+        return set_wheel(x, y, n);
+    if (stat_is_open())
+        return stat_wheel(n);
+    return 0;
+}
+
 static int on_hover(int x, int y)
 {
     if (files_is_open() && !dlg)
@@ -1236,6 +1250,7 @@ int main(int argc, char **argv)
     int exit_code = 0;
 
     if (no_board) {                          /* host test: keys, then a shot */
+        mx = 300; my = g_mono() ? 260 : 130;   /* in the left pane / list */
         for (const char *k = keys; k && *k; k++) {
             struct si_event e = { SI_NONE, SI_SRC_USB, 0 };
             switch (*k) {
@@ -1271,6 +1286,8 @@ int main(int argc, char **argv)
             case 'P': e.key = SI_F1; break;
             case 'b': e.key = SI_BACKSPACE; break;
             case 'w': stat_open(1); continue;
+            case '[': on_wheel(mx, log_y(my), 1); continue;
+            case ']': on_wheel(mx, log_y(my), -1); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
             case 't': e.key = SI_TAB; break;
@@ -1279,7 +1296,6 @@ int main(int argc, char **argv)
             if (on_key(e, &exit_code))
                 break;
         }
-        mx = 300; my = g_mono() ? 260 : 130;
         render();
         g_compose(&ss, mx, my, 1);
         if (shot && g_screenshot(&ss, shot) != 0) {
@@ -1318,6 +1334,8 @@ int main(int argc, char **argv)
             if (my > phys_h() - 1) my = phys_h() - 1;
             moved = mx != ox || my != oy;
             if (moved && on_hover(mx, log_y(my)))
+                redraw = 1;
+            if (e.wheel && on_wheel(mx, log_y(my), e.wheel))
                 redraw = 1;
             /* Mouse-button bounce: the ST mouse's microswitches chatter, and
              * the IKBD reports every edge, so a release could arrive as

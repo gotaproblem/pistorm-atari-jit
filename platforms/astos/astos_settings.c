@@ -519,4 +519,32 @@ int set_hover(int x, int y)
     return 0;
 }
 
+int set_wheel(int x, int y, int n)
+{
+    if (pop == POP_CAT || pop == POP_VALUE) {
+        int max = pop_n - POP_MAX;
+        pop_top -= n;
+        if (pop_top > max) pop_top = max;
+        if (pop_top < 0) pop_top = 0;
+        set_hover(x, y);                           /* the row now under it */
+        return 1;
+    }
+    if (pop)
+        return 0;
+    /* the list: three rows a notch, the cursor kept on a usable row in view */
+    int rows = nrows(), max = rows - NVIS;
+    top -= 3 * n;
+    if (top > max) top = max;
+    if (top < 0) top = 0;
+    if (sel < top || sel >= top + NVIS) {
+        int want = sel < top ? top : top + NVIS - 1, dir = sel < top ? +1 : -1;
+        for (int i = want; i >= top && i < top + NVIS && i < rows; i += dir) {
+            struct spm_row r;
+            spm_row(i, &r);
+            if (r.kind != SPM_LABEL && r.usable) { sel = i; break; }
+        }
+    }
+    return 1;
+}
+
 const char *set_section(void) { return spm_section(); }

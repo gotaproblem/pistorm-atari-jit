@@ -99,6 +99,7 @@ gamepads all work.
 | Tab, Esc, F1, the start button, right-click off an icon | start menu |
 | F2, or right-click → *Settings…* | the selected environment's settings |
 | F3, or *Files…* | the file manager |
+| wheel of a USB mouse on the Pi | scrolls what is under the pointer: a Files pane or place list, the settings list or a drop-down, the events log (three rows a notch). The ST's own mouse port has no wheel line, so a wheel on an adapter there cannot reach ASTOS; in a launched build a USB wheel gives Up/Down arrow keys, as an Eiffel does |
 | Help (PgUp on a PC keyboard) | screenshot → `~/astos-shot-N.ppm` (640×400) |
 | Help during the start-up splash | safe mode |
 

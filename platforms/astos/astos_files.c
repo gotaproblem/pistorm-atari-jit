@@ -1237,6 +1237,36 @@ int files_hover(int x, int y)
     return 0;
 }
 
+/* three rows a notch: the view moves, the cursor stays on screen */
+int files_wheel(int x, int y, int n)
+{
+    if (pop == POP_PLACE) {
+        int max = nplace - POP_MAX;
+        pop_top -= n;
+        if (pop_top > max) pop_top = max;
+        if (pop_top < 0) pop_top = 0;
+        files_hover(x, y);                         /* the row now under it */
+        return 1;
+    }
+    if (pop)
+        return 0;
+    for (int i = 0; i < 2; i++) {
+        int px = PX(i);
+        if (!inside(x, y, px, PLACE_Y, PW, MSG_Y - PLACE_Y))
+            continue;
+        struct pane *p = &pane[i];
+        int max = p->n - NVIS;
+        p->top -= 3 * n;
+        if (p->top > max) p->top = max;
+        if (p->top < 0) p->top = 0;
+        if (p->sel < p->top) p->sel = p->top;
+        if (p->sel >= p->top + NVIS) p->sel = p->top + NVIS - 1;
+        if (p->sel >= p->n) p->sel = p->n ? p->n - 1 : 0;
+        return 1;
+    }
+    return 0;
+}
+
 /* the test harness: how a pane looks after some keys */
 void files_test_place(int pn, int pl)
 {
