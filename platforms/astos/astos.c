@@ -312,7 +312,9 @@ static void throttle_info(void)
 {
     char a[64] = "", b2[64] = "";
     int now = throttled & 0xF, past = (throttled >> 16) & 0xF;
-    snprintf(a, sizeof a, "get_throttled 0x%X", (unsigned)throttled);
+    int bad = (throttled & 0x90009) != 0;
+    snprintf(a, sizeof a, "%s  (get_throttled 0x%X)", bad ? "Pi warning" : "Pi OK",
+             (unsigned)throttled);
     if (!now && !past) {
         snprintf(b2, sizeof b2, "No under-voltage or throttling since boot");
     } else {
@@ -410,6 +412,11 @@ static void draw_dialog(void)
         return;
     }
     int w = 320, h = (dlg == DLG_SHUTDOWN || dlg == DLG_DELETE) ? 58 : 44;
+    if (dlg == DLG_MESSAGE) {               /* as wide as its longest line */
+        int n0 = (int)strlen(dlg_text[0]), n1 = (int)strlen(dlg_text[1]);
+        int need = 20 + 8 * (n0 > n1 ? n0 : n1);
+        if (need > w) w = need > AW - 16 ? AW - 16 : need;
+    }
     int x = (AW - w) / 2, y = (BAR_Y - h) / 2;
     draw_window(x, y, w, h, dlg == DLG_SHUTDOWN ? "Shut down" :
                             dlg == DLG_DELETE ? "Delete" : "ASTOS");
