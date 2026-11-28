@@ -208,6 +208,9 @@ all work inside an image and between an image and the Pi or another image.
 - The FAT is written (both copies) at the end of every operation; file data
   goes in before the entry that points at it.
 - An image you cannot write (file permissions) opens read-only and says so.
+- Free space: each pane's path line shows the free space where it is (the
+  Pi's filesystem, or the partition in an image); an image's partition list
+  shows each partition's free space.
 
 While ASTOS is up no emulation is running, so an image is never written by
 both at once.

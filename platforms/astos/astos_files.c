@@ -24,6 +24,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -157,7 +158,7 @@ static char msg[96];
 
 /* ---- a pane --------------------------------------------------------- */
 #define MAX_ENT 1024
-struct ent { char name[256]; int dir; long long size; int mark; int vix; };
+struct ent { char name[256]; int dir; long long size; int mark; int vix; int is_vol; };
 static struct pane {
     int place;                  /* index into place[]                   */
     char rel[PATH_MAX];         /* below the place's root, "" or "a/b"  */
@@ -168,6 +169,7 @@ static struct pane {
     char imgname[256];
     int vol;                    /* -1: the list of its volumes          */
     char irel[PATH_MAX];        /* in the volume, "" or "A/B"           */
+    long long freeb;            /* free bytes where it is, -1 unknown   */
 } pane[2];
 static int act;                 /* the active pane                       */
 
@@ -214,6 +216,16 @@ static int ent_cmp(const void *a, const void *b)
 
 static void load(struct pane *p)
 {
+    p->freeb = -1;
+    if (p->img && p->vol >= 0)
+        p->freeb = (long long)fat_free(p->img, p->vol);
+    else if (!p->img) {
+        char where[PATH_MAX];
+        struct statvfs sv;
+        full_path(p, NULL, where, sizeof where);
+        if (statvfs(where, &sv) == 0)
+            p->freeb = (long long)sv.f_bavail * (long long)sv.f_frsize;
+    }
     char dir[PATH_MAX];
     full_path(p, NULL, dir, sizeof dir);
     if (!p->e)
@@ -224,13 +236,15 @@ static void load(struct pane *p)
     if (p->img) {                             /* inside an image */
         struct ent *e = &p->e[0];
         snprintf(e->name, sizeof e->name, "..");
-        e->dir = 1; e->size = 0; e->mark = 0;
+        e->dir = 1; e->size = 0; e->mark = 0; e->is_vol = 0;
         p->n = 1;
         if (p->vol < 0) {                     /* its volumes, in order */
             for (int i = 0; i < fat_nvol(p->img) && p->n < MAX_ENT; i++) {
                 e = &p->e[p->n++];
                 snprintf(e->name, sizeof e->name, "%s", fat_vol_label(p->img, i));
-                e->dir = 1; e->size = 0; e->mark = 0; e->vix = i;
+                e->dir = 1; e->mark = 0; e->vix = i;
+                e->is_vol = 1;
+                e->size = (long long)fat_free(p->img, i);      /* shown as free */
             }
         } else {
             static struct fat_ent fe[MAX_ENT];
@@ -240,7 +254,7 @@ static void load(struct pane *p)
             for (int i = 0; i < n; i++) {
                 e = &p->e[p->n++];
                 snprintf(e->name, sizeof e->name, "%s", fe[i].name);
-                e->dir = fe[i].dir; e->size = fe[i].size; e->mark = 0;
+                e->dir = fe[i].dir; e->size = fe[i].size; e->mark = 0; e->is_vol = 0;
             }
             qsort(p->e + 1, (size_t)(p->n - 1), sizeof *p->e, ent_cmp);
         }
@@ -252,7 +266,7 @@ static void load(struct pane *p)
         snprintf(p->e[0].name, sizeof p->e[0].name, "..");
         p->e[0].dir = 1;
         p->e[0].size = 0;
-        p->e[0].mark = 0;
+        p->e[0].mark = 0; p->e[0].is_vol = 0;
         p->n = 1;
     }
     DIR *d = opendir(dir);
@@ -268,7 +282,7 @@ static void load(struct pane *p)
                 continue;
             struct ent *e = &p->e[p->n++];
             snprintf(e->name, sizeof e->name, "%s", de->d_name);
-            e->dir = S_ISDIR(st.st_mode);
+            e->dir = S_ISDIR(st.st_mode); e->is_vol = 0;
             e->size = (long long)st.st_size;
             e->mark = 0;
         }
@@ -929,9 +943,21 @@ static const char *const btn[] = { "Copy", "Move", "Rename", "Folder", "Delete",
 #define NBTN 6
 static int btn_x(int i) { return 12 + i * (BTN_W + 6); }
 
+static void human(long long v, char *b, size_t n)
+{
+    if (v < 10000)                     snprintf(b, n, "%lld", v);
+    else if (v < 10000LL * 1024)       snprintf(b, n, "%lldK", v >> 10);
+    else if (v < 10000LL * 1024 * 1024) snprintf(b, n, "%lldM", v >> 20);
+    else                               snprintf(b, n, "%lldG", v >> 30);
+}
+
 static void size_text(const struct ent *e, char *b, size_t n)
 {
-    if (e->dir)                snprintf(b, n, "<DIR>");
+    if (e->is_vol) {                                  /* a partition: its free */
+        char h[16];
+        human(e->size, h, sizeof h);
+        snprintf(b, n, "%s free", h);
+    } else if (e->dir)         snprintf(b, n, "<DIR>");
     else if (e->size < 10000)  snprintf(b, n, "%lld", e->size);
     else if (e->size < 10000LL * 1024) snprintf(b, n, "%lldK", e->size >> 10);
     else if (e->size < 10000LL * 1024 * 1024) snprintf(b, n, "%lldM", e->size >> 20);
@@ -960,8 +986,18 @@ static void draw_pane(int i)
         snprintf(path, sizeof path, "/%s%s%s >", p->rel, p->rel[0] ? "/" : "", p->imgname);
     else
         snprintf(path, sizeof path, "/%s", p->rel);
-    int len = (int)strlen(path), maxc = PW / 8;
+    /* and the free space there, on the right */
+    char fr[24] = "";
+    if (p->freeb >= 0) {
+        char h[16];
+        human(p->freeb, h, sizeof h);
+        snprintf(fr, sizeof fr, "%s free", h);
+    }
+    int fw = fr[0] ? g_text_w(fr) + 14 : 0;
+    int len = (int)strlen(path), maxc = (PW - fw) / 8;
     g_textn(x, PATH_Y, len > maxc ? path + len - maxc : path, maxc, C_DIM);
+    if (fr[0])
+        g_text(x + PW - 6 - g_text_w(fr), PATH_Y, fr, C_ACCENT);
     /* the list */
     g_frame(x, LIST_Y - 2, PW, NVIS * RH + 3, i == act ? C_ACCENT : C_DIM);
     if (drop_pane == i && drop_k < 0)                   /* a drop target */
