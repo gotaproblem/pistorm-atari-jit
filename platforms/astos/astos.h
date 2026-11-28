@@ -57,6 +57,12 @@ int  g_pen(int c);                                   /* palette index  */
 void g_palette_st(uint16_t pal[4]);                  /* ST $0RGB       */
 void g_palette_rgb(uint32_t rgb[4]);                 /* for HDMI/shots */
 void g_pack(struct ss_screen *ss);                   /* canvas -> base */
+/* a whole screen as the Shifter holds it (a picture), instead of the
+ * canvas and without the pointer; NULL: back to the canvas */
+void g_raw(const uint8_t *screen);
+int  g_raw_active(void);
+/* the pens as they are on the screen now (a picture's), for screenshots */
+void g_live_rgb(const uint32_t *rgb);
 void g_compose(struct ss_screen *ss, int mx, int my_phys, int show_ptr);
 int  g_screenshot(const struct ss_screen *ss, const char *path);
 

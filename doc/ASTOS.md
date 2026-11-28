@@ -177,6 +177,24 @@ with the blue bar is the active one; Copy and Move go from it to the other.
 | F8 / Delete *Delete* | moves into `.trash` at the top of the place (a time stamp is added if the name is there already) |
 | Esc, right-click, *Close* | back to the desktop |
 
+**Looking at a file:** Enter or double-click on a file that is not a disk
+image, or F3 on any file (an image too: F3 shows it in hex), opens a viewer:
+
+- **text** (no NULs, mostly printable): wrapped at the window's width, tabs
+  every 8; Tab switches to hex at the same place.
+- **hex**: 16 bytes a row with the characters, read as it scrolls, so any size.
+- **pictures**: Degas `.PI1/.PI2/.PI3`, Degas Elite `.PC1/.PC2/.PC3`,
+  NEOchrome `.NEO`, on the whole screen. Medium resolution on a colour
+  monitor and high resolution on a mono one are shown exactly, with the
+  picture's own palette (ASTOS's comes back after). Low resolution is
+  doubled across and brought down to 4 colours (picked from the 16 by how much
+  each is used); high resolution on colour folds each pair of rows into black,
+  grey and white; colour on a mono monitor is dithered.
+
+Up/Down scroll, Left/Right a page, Home the start, G the end, the wheel
+scrolls; Esc, Enter, Backspace or a click goes back. A file inside a disk
+image is read out to `/tmp` first.
+
 **New img** (F9) makes an empty, formatted disk image in the active pane's
 folder - a floppy (360K single sided, 720K double sided, 1.44M high
 density: FAT12 with TOS's own layout) or a hard disk (32M, 128M, 256M, 512M,
@@ -331,6 +349,7 @@ nothing installed beyond gcc.
 | `platforms/astos/astos_input.c` | ST keyboard + IKBD relative mouse over the ACIA; USB keyboards, mice, pads |
 | `platforms/astos/astos_env.c` | builds from psctrl.cfg, details, the launch file |
 | `platforms/astos/astos_settings.c` | the settings window: category and value drop-down lists over the page's editor model |
+| `platforms/astos/astos_view.c` | the viewer: text, hex, Degas/NEO pictures on the whole screen |
 | `platforms/astos/astos_fat.c` | FAT12/16/32 inside disk images: AHDI/ICD/XGM/MBR partitions, word-swapped images, long names |
 | `platforms/astos/astos_files.c` | the file manager: places, two panes, copy / move / rename / new folder / delete to `.trash` |
 | `platforms/astos/astos_sys.c` | Pi temperature, clock |

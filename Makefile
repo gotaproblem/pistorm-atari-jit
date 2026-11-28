@@ -501,13 +501,13 @@ beamtest: tools/beamtest/beamtest.c platforms/atari/setup/shifter_setup.c gpio/p
 ASTOS_COMMON = platforms/astos/astos.c platforms/astos/astos_gfx.c \
                platforms/astos/astos_env.c platforms/astos/astos_sys.c \
                platforms/astos/astos_input.c platforms/astos/astos_settings.c \
-               platforms/astos/astos_status.c platforms/astos/astos_files.c platforms/astos/astos_fat.c \
+               platforms/astos/astos_status.c platforms/astos/astos_files.c platforms/astos/astos_fat.c platforms/astos/astos_view.c \
                platforms/atari/setup/setup_cfg.c \
                platforms/atari/setup/setup_input.c platforms/atari/setup/shifter_setup.c \
                platforms/atari/setup/setup_page.c platforms/atari/setup/setup_enums.c
 ASTOS_SRC = $(ASTOS_COMMON) platforms/astos/astos_hw.c platforms/atari/setup/setup_hdmi.c \
             platforms/atari/setup/native_probe.c gpio/ps_protocol.c gpio/bus_lock.c
-ASTOS_HDR = platforms/astos/astos.h platforms/astos/astos_input.h platforms/astos/astos_settings.h platforms/astos/astos_files.h platforms/astos/astos_fat.h
+ASTOS_HDR = platforms/astos/astos.h platforms/astos/astos_input.h platforms/astos/astos_settings.h platforms/astos/astos_files.h platforms/astos/astos_fat.h platforms/astos/astos_view.h
 astos: $(ASTOS_SRC) $(ASTOS_HDR)
 	$(CC) $(ASTOS_SRC) -o $@ $(CFLAGS) -Iplatforms/atari/setup -Iplatforms/astos -ldrm
 

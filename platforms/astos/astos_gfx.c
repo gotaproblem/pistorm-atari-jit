@@ -172,9 +172,21 @@ void g_icon(int x, int y, int kind)
 
 static uint8_t base[SS_SCREEN_BYTES];    /* the packed canvas, no pointer */
 
+static const uint8_t *raw_screen;
+static const uint32_t *live_rgb;
+
+void g_live_rgb(const uint32_t *rgb) { live_rgb = rgb; }
+
+void g_raw(const uint8_t *screen) { raw_screen = screen; }
+int  g_raw_active(void) { return raw_screen != NULL; }
+
 void g_pack(struct ss_screen *ss)
 {
     (void)ss;
+    if (raw_screen) {
+        memcpy(base, raw_screen, SS_SCREEN_BYTES);
+        return;
+    }
     if (mono) {
         for (int yy = 0; yy < 400; yy++) {
             const uint8_t *src = g_px + (yy >> 1) * AW;
@@ -245,7 +257,7 @@ static void phys_pixel(struct ss_screen *ss, int x, int y, int black)
 void g_compose(struct ss_screen *ss, int mx, int my, int show_ptr)
 {
     memcpy(ss->shadow, base, SS_SCREEN_BYTES);
-    if (!show_ptr)
+    if (!show_ptr || raw_screen)
         return;
     const char *const *p = mono ? ptr_mono : ptr_med;
     int rows = mono ? (int)(sizeof ptr_mono / sizeof *ptr_mono)
@@ -264,6 +276,8 @@ int g_screenshot(const struct ss_screen *ss, const char *path)
         return -1;
     uint32_t rgb[4];
     g_palette_rgb(rgb);
+    if (live_rgb && !mono)
+        memcpy(rgb, live_rgb, sizeof rgb);
     fprintf(f, "P6\n640 400\n255\n");
     for (int yo = 0; yo < 400; yo++) {
         for (int x = 0; x < 640; x++) {

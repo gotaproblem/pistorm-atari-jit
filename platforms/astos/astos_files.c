@@ -31,6 +31,7 @@
 #include "astos.h"
 #include "astos_files.h"
 #include "astos_fat.h"
+#include "astos_view.h"
 
 /* names are at most 255 and paths PATH_MAX: the recursive walks check
  * for a path that would not fit and stop there rather than act on a
@@ -830,15 +831,43 @@ static void confirm(int kind)
     pop = POP_CONFIRM;
 }
 
-/* into an image file, or say what it is */
+/* look at a file: text, hex or a picture (one in an image is read out
+ * to /tmp first, and the copy dropped once it is open) */
+static void view_file(struct pane *p, const struct ent *e)
+{
+    char path[PATH_MAX], why[96] = "";
+    int tmp = 0;
+    if (p->img) {
+        if (p->vol < 0)
+            return;
+        struct loc l, c;
+        pane_loc(p, &l);
+        if (loc_child(&l, e->name, &c) != 0)
+            return;
+        snprintf(path, sizeof path, "/tmp/astos-view.%d", (int)getpid());
+        unlink(path);
+        if (fat_get(p->img, p->vol, c.path, path) != 0) {
+            snprintf(msg, sizeof msg, "%.90s", fat_error());
+            return;
+        }
+        tmp = 1;
+    } else
+        full_path(p, e->name, path, sizeof path);
+    int r = view_open(path, e->name, why, sizeof why);
+    if (tmp)
+        unlink(path);
+    if (r != 0)
+        snprintf(msg, sizeof msg, "%.40s: %.50s", e->name, why);
+}
+
+/* into an image file, else look at it */
 static void enter_image(struct pane *p, const struct ent *e)
 {
     char path[PATH_MAX], why[96];
     full_path(p, e->name, path, sizeof path);
     struct fat_img *im = e->size >= 512 ? fat_open(path, why, sizeof why) : NULL;
     if (!im) {
-        snprintf(msg, sizeof msg, "%.40s - %lld bytes%s%.40s", e->name, e->size,
-                 e->size >= 512 ? ", " : "", e->size >= 512 ? why : "");
+        view_file(p, e);
         return;
     }
     p->img = im;
@@ -908,7 +937,7 @@ static void open_entry(struct pane *p)
     }
     if (!e->dir) {
         if (p->img)
-            snprintf(msg, sizeof msg, "%.40s - %lld bytes", e->name, e->size);
+            view_file(p, e);
         else
             enter_image(p, e);
         return;
@@ -1465,6 +1494,8 @@ void files_draw(void)
         draw_choice();
     else if (pop)
         draw_pop();
+    if (view_is_open() && !view_is_picture())
+        view_draw(WX, WY, WW, WH);
 }
 
 /* ---- input ------------------------------------------------------------ */
@@ -1485,6 +1516,10 @@ static void do_button(int i)
 int files_key(struct si_event k)
 {
     struct pane *p = &pane[act];
+    if (view_is_open()) {
+        view_key(k);
+        return 0;
+    }
     if (pop == POP_CHOICE)
         return ch_key(k);
     if (pop == POP_ASK) {
@@ -1556,6 +1591,10 @@ int files_key(struct si_event k)
     case SI_F8: case SI_DELETE: confirm(CF_DELETE); break;
     case SI_F2: ask(ASK_RENAME); break;
     case SI_F9: new_image(); break;
+    case SI_F3:                                     /* look at it as it is */
+        if (p->n && !p->e[p->sel].dir && !(p->img && p->vol < 0))
+            view_file(p, &p->e[p->sel]);
+        break;
     case SI_F4: use_in(); break;
     case SI_ESC: open_ = 0; return 1;
     case SI_CHAR:                                   /* jump by letter */
@@ -1587,6 +1626,11 @@ static double now_s(void)
 
 int files_click(int x, int y)
 {
+    if (view_is_open()) {                       /* a click: back */
+        if (view_is_picture() || !inside(x, y, WX, WY, WW, WH))
+            view_close();
+        return 0;
+    }
     if (pop == POP_CHOICE)
         return ch_click(x, y);
     if (pop == POP_PLACE) {
@@ -1705,6 +1749,8 @@ static int drop_target(int x, int y, struct loc *l, char *label, size_t n, int *
 
 int files_motion(int x, int y, int held)
 {
+    if (view_is_open())
+        return 0;
     if (drag == DR_NONE || pop)
         return 0;
     if (!held && drag == DR_PENDING) {
@@ -1783,6 +1829,8 @@ int files_release(int x, int y)
 
 int files_hover(int x, int y)
 {
+    if (view_is_open())
+        return 0;
     if (pop == POP_CHOICE)
         return ch_hover(x, y);
     if (pop != POP_PLACE)
@@ -1802,6 +1850,8 @@ int files_hover(int x, int y)
 /* three rows a notch: the view moves, the cursor stays on screen */
 int files_wheel(int x, int y, int n)
 {
+    if (view_is_open())
+        return view_wheel(n);
     if (pop == POP_PLACE) {
         int max = nplace - POP_MAX;
         pop_top -= n;

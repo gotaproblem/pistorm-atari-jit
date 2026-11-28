@@ -38,6 +38,7 @@
 #include "setup_hdmi.h"
 #include "astos_settings.h"
 #include "astos_files.h"
+#include "astos_view.h"
 #include "native_probe.h"
 #include "gpio/ps_protocol.h"
 #include "gpio/bus_lock.h"
@@ -461,8 +462,55 @@ static void draw_event_toast(void)
     g_textn(x + 8, y + 14, t, (w - 16) / 8, C_ACCENT);
 }
 
+/* a picture's own four colours while it is on the screen, ASTOS's after */
+static void picture_palette(const uint16_t *pal)
+{
+    static int on;
+    static uint16_t cur[4];
+    if (pal && !g_mono()) {
+        if (on && !memcmp(cur, pal, sizeof cur))
+            return;
+        memcpy(cur, pal, sizeof cur);
+        on = 1;
+        static uint32_t rgb[4];
+        for (int i = 0; i < 4; i++) {
+            uint32_t r = (cur[i] >> 8) & 7, g = (cur[i] >> 4) & 7, b = cur[i] & 7;
+            rgb[i] = (r * 255 / 7) << 16 | (g * 255 / 7) << 8 | (b * 255 / 7);
+        }
+        g_live_rgb(rgb);
+        if (ss.shifter)
+            ss_palette(cur);
+        if (sh_active())
+            sh_set_palette(rgb);
+        return;
+    }
+    if (!on)
+        return;
+    on = 0;
+    g_live_rgb(NULL);
+    uint16_t p[4];
+    uint32_t rgb[4];
+    g_palette_st(p);
+    g_palette_rgb(rgb);
+    if (ss.shifter)
+        ss_palette(p);
+    if (sh_active())
+        sh_set_palette(rgb);
+}
+
 static void render(void)
 {
+    if (files_is_open() && view_is_picture()) {          /* the whole screen */
+        uint16_t pal[4];
+        const uint8_t *scr = view_screen(g_mono(), pal);
+        g_raw(scr);
+        picture_palette(pal);
+        ntint = 0;
+        g_pack(&ss);
+        return;
+    }
+    g_raw(NULL);
+    picture_palette(NULL);
     g_clear(C_DESK);
     if (safe_mode) {
         g_fill(0, 0, AW, 10, C_WHITE);
