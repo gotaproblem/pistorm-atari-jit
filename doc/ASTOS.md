@@ -38,9 +38,14 @@ on a mono one, from the monitor sense line. Both use the same layout:
 
 - **Desktop:** one icon per build (GEM machine, APJ-OS, Native ST, HDMI build,
   metal joystick), up to 16.
-- **Details panel:** the selected environment's CPU (a metal build says
-  *68000 8 MHz, real chips*), machine, ROM, IDE and ACSI (off, or on with
-  the first image and how many more), and screen.
+- **Details panel:** the selected environment -
+  *Machine* (Atari ST / STE / Mega ST / Falcon, and the TOS in its ROM file:
+  `TOS 2.06`, `EmuTOS`, or the file name if it cannot be read),
+  *Memory* (ST-RAM from `stram_size` / `falcon_stram`, 4MB when unset, plus
+  TT-RAM; a metal build uses the board's), *CPU* (a metal build says
+  *68000 8 MHz, real chips*), *Blitter* (real chip / emulated / none, or the
+  machine's default), *IDE* and *ACSI* (off, or on with the first image and
+  how many more), *Screen*.
 - **This machine:** the real hardware, asked over the bus when ASTOS
   starts (68k halted, nothing emulated): the machine (ST / STE / Mega ST /
   Mega STE) and its TOS, ST-RAM per bank, the blitter (real chip or none),

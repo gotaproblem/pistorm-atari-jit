@@ -10,6 +10,7 @@
  * share the bus: only one of them is ever running.
  */
 #include <ctype.h>
+#include <pwd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -104,6 +105,45 @@ static void bus_line(struct sc_cfg *c, const char *s, const char *sw_key,
         snprintf(out, n, "%son, %.22s", label, first);
 }
 
+/* "TOS 2.06" / "EmuTOS" from the ROM file's header (version at +2), or
+ * the file name when it cannot be read. rom_path (from [psctrl], ~ the
+ * invoking user's home) is where a bare name lives, relative to the
+ * emulator's directory - where ASTOS runs. */
+static void rom_text(struct sc_cfg *c, const char *rom, char *out, size_t n)
+{
+    if (!rom || !*rom) {
+        snprintf(out, n, "no ROM");
+        return;
+    }
+    char path[600];
+    const char *rp = sc_get(c, "psctrl", "rom_path");
+    if (strchr(rom, '/') || !rp || !*rp)
+        snprintf(path, sizeof path, "%s", rom);
+    else if (rp[0] == '~') {
+        const struct passwd *pw = sc_invoking_user();
+        snprintf(path, sizeof path, "%s%s/%s", pw && pw->pw_dir ? pw->pw_dir : "",
+                 rp + 1, rom);
+    } else
+        snprintf(path, sizeof path, "%s/%s", rp, rom);
+
+    static unsigned char buf[65536];
+    FILE *f = fopen(path, "rb");
+    size_t got = f ? fread(buf, 1, sizeof buf, f) : 0;
+    if (f)
+        fclose(f);
+    if (got < 0x30 || (buf[0] != 0x60)) {          /* no bra.s: not a TOS */
+        snprintf(out, n, "%.30s", disk_name(rom));
+        return;
+    }
+    for (size_t i = 0; i + 6 <= got; i++)
+        if (!memcmp(buf + i, "EmuTOS", 6)) {
+            snprintf(out, n, "EmuTOS");
+            return;
+        }
+    unsigned v = (unsigned)buf[2] << 8 | buf[3];
+    snprintf(out, n, "TOS %X.%02X", v >> 8, v & 0xFF);
+}
+
 static int is_machine_section(const char *s)
 {
     return strcasecmp(s, "psctrl") && strcasecmp(s, "astos");
@@ -133,10 +173,35 @@ int env_load(struct sc_cfg *c, struct env *out, int max)
         else if (hdmi_vid)                              e->kind = K_HDMI;
         else                                            e->kind = K_TOS;
 
-        /* details panel: 6 lines, 36 characters each - CPU, machine, ROM,
-         * IDE, ACSI, screen. A metal build says so in its CPU line. */
+        /* details panel: Machine (+ TOS), Memory, CPU, Blitter, IDE, ACSI,
+         * Screen - 36 characters each. A metal build says so in its CPU
+         * line; its memory and blitter are the board's own. */
+        const char *mach = sc_get(c, s, "machine");
+        const char *mw = mach && *mach ? mach : "st";
+        const char *mname = !strcasecmp(mw, "ste") ? "Atari STE" :
+                            !strcasecmp(mw, "megast") || !strcasecmp(mw, "mst") ? "Atari Mega ST" :
+                            !strcasecmp(mw, "falcon") ? "Atari Falcon" : "Atari ST";
+        const char *rom = sc_get(c, s, "rom");
+        char tos[32];
+        rom_text(c, rom, tos, sizeof tos);
+        snprintf(e->line[0], sizeof e->line[0], "Machine %s, %.22s", mname, tos);
+
+        if (e->metal)
+            snprintf(e->line[1], sizeof e->line[1], "Memory  the board's ST-RAM");
+        else {
+            int falcon = !strcasecmp(mw, "falcon");
+            const char *st = sc_get(c, s, falcon ? "falcon_stram" : "stram_size");
+            const char *tt = sc_get(c, s, "ttram");
+            char ttb[24] = "";
+            if (tt && (truthy(tt) || isdigit((unsigned char)*tt)))
+                snprintf(ttb, sizeof ttb, ", %sB TT-RAM",
+                         isdigit((unsigned char)*tt) ? tt : "128M");
+            snprintf(e->line[1], sizeof e->line[1], "Memory  %sB ST-RAM%s",
+                     st && *st && isdigit((unsigned char)*st) ? st : "4M", ttb);
+        }
+
         if (e->metal) {
-            snprintf(e->line[0], sizeof e->line[0], "CPU     68000 8 MHz, real chips");
+            snprintf(e->line[2], sizeof e->line[2], "CPU     68000 8 MHz, real chips");
         } else {
             const char *cpu = sc_get(c, s, "cpu");
             const char *jp  = sc_get(c, s, "jit_power");
@@ -144,35 +209,42 @@ int env_load(struct sc_cfg *c, struct env *out, int max)
              * has no JIT */
             int big = cpu && atoi(cpu) >= 68020;
             int jit = big && (jp ? (*jp && *jp != '0') : 1);
-            snprintf(e->line[0], sizeof e->line[0], "CPU     %s%s%s%s",
+            snprintf(e->line[2], sizeof e->line[2], "CPU     %s%s%s%s",
                      cpu && *cpu ? cpu : "68000",
                      truthy(sc_get(c, s, "fpu")) ? " + FPU" : "",
                      jit ? ", JIT" : ", interpreter",
                      truthy(sc_get(c, s, "cpu_compatible")) ? ", exact" : "");
         }
-        const char *mach = sc_get(c, s, "machine");
-        const char *st   = sc_get(c, s, "stram_size");
-        const char *tt   = sc_get(c, s, "ttram");
-        snprintf(e->line[1], sizeof e->line[1], "Machine %s%s%s%s",
-                 mach && *mach ? mach : "st",
-                 st && *st ? ", ST-RAM " : "", st && *st ? st : "",
-                 (!e->metal && tt && truthy(tt)) ? ", TT-RAM" :
-                 (!e->metal && tt && *tt && isdigit((unsigned char)*tt)) ? ", TT-RAM" : "");
-        const char *rom = sc_get(c, s, "rom");
-        snprintf(e->line[2], sizeof e->line[2], "ROM     %s", rom && *rom ? disk_name(rom) : "-");
 
-        bus_line(c, s, "ide", "hdd", "IDE     ", e->line[3], sizeof e->line[3]);
-        bus_line(c, s, "acsi", "acsi", "ACSI    ", e->line[4], sizeof e->line[4]);
+        /* blitter: real = the board's chip, a true word = emulated, a
+         * false word = none, no line = what the machine shipped with */
+        const char *bl = sc_get(c, s, "blitter");
+        int blw;
+        const char *bt;
+        if (e->metal)
+            bt = "the board's";
+        else if (bl && !strcasecmp(bl, "real"))
+            bt = "real chip";
+        else if (bl && (!*bl || (switch_word(bl, &blw) && blw)))
+            bt = "emulated";
+        else if (bl && switch_word(bl, &blw) && !blw)
+            bt = "none";
+        else
+            bt = strcasecmp(mw, "st") ? "emulated (default)" : "none (default)";
+        snprintf(e->line[3], sizeof e->line[3], "Blitter %s", bt);
+
+        bus_line(c, s, "ide", "hdd", "IDE     ", e->line[4], sizeof e->line[4]);
+        bus_line(c, s, "acsi", "acsi", "ACSI    ", e->line[5], sizeof e->line[5]);
 
         const char *nh = sc_get(c, s, "native_hdmi");
         if (sc_get(c, s, "vga"))
-            snprintf(e->line[5], sizeof e->line[5], "Screen  HDMI (graphics card)");
+            snprintf(e->line[6], sizeof e->line[6], "Screen  HDMI (graphics card)");
         else if (truthy(sc_get(c, s, "psvidel")))
-            snprintf(e->line[5], sizeof e->line[5], "Screen  HDMI (PSVIDEL)");
+            snprintf(e->line[6], sizeof e->line[6], "Screen  HDMI (PSVIDEL)");
         else if (nh && (truthy(nh) || !strcasecmp(nh, "snapshot")))
-            snprintf(e->line[5], sizeof e->line[5], "Screen  ST monitor + HDMI");
+            snprintf(e->line[6], sizeof e->line[6], "Screen  ST monitor + HDMI");
         else
-            snprintf(e->line[5], sizeof e->line[5], "Screen  ST monitor");
+            snprintf(e->line[6], sizeof e->line[6], "Screen  ST monitor");
     }
     return n;
 }

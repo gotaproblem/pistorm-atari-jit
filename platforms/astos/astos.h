@@ -70,7 +70,7 @@ struct env {
     char title[24];         /* shown under the icon              */
     int  kind;              /* K_*                               */
     int  metal;             /* engine metal                      */
-    char line[6][48];       /* the details panel                 */
+    char line[7][48];       /* the details panel                 */
 };
 
 struct sc_cfg;
