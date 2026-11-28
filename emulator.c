@@ -2769,6 +2769,28 @@ int main (int argc, char *argv[])
   int  no_setup = 0;              /* --no-setup: never show the setup page */
   char forced_build[32] = "";     /* --build <section>: the build to boot */
 
+  /* ASTOS: when ./astos is built, the machine boots into it, not into the
+   * setup page. A service (or a hand-typed command) that still starts the
+   * emulator directly - the old pistorm.service ran ./emulator - is handed
+   * to run-pistorm.sh, which starts ASTOS and runs this emulator again
+   * with --no-setup --build <the build ASTOS chose>. Never when the
+   * emulator was given a build or --no-setup, and PISTORM_ASTOS=0 keeps
+   * the setup page (run-pistorm.sh sets it for its own page loop). */
+  {
+    int direct = 1;
+    for (int a = 1; a < argc; a++)
+      if (!strcmp(argv[a], "--build") || !strcmp(argv[a], "--no-setup"))
+        direct = 0;
+    const char *pa = getenv("PISTORM_ASTOS");
+    if (direct && !(pa && !strcmp(pa, "0")) &&
+        access("./astos", X_OK) == 0 && access("./run-pistorm.sh", R_OK) == 0) {
+      printf("[MAIN] ASTOS is built: starting it through run-pistorm.sh\n");
+      fflush(stdout);
+      execl("/bin/sh", "sh", "./run-pistorm.sh", (char *)NULL);
+      perror("[MAIN] exec run-pistorm.sh");   /* fall through: the page */
+    }
+  }
+
   /* Claim the bus before anything touches the GPIO (gpio/bus_lock.c).
    * Two processes driving the same pins mid-cycle is not a cosmetic
    * problem, so refuse to start if ataritest - or a second emulator -

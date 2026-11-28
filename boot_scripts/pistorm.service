@@ -7,10 +7,11 @@ Type=simple
 Restart=always
 RestartSec=1
 User=root
-# The setup page comes up on the ST monitor at every boot and boots the
-# last build after its countdown. Add --no-setup (or set `countdown 0`
-# in [psctrl]) to boot straight into the last build with no page.
-ExecStart=/home/pistorm/pistorm-atari-jit/emulator --config ../configs/psctrl.cfg
+# run-pistorm.sh starts ASTOS (when ./astos is built) and the builds it
+# launches; without ASTOS it runs the setup page loop. An older copy of
+# this file that runs ./emulator directly still ends up in ASTOS: the
+# emulator hands a plain start to run-pistorm.sh when ./astos exists.
+ExecStart=/bin/sh /home/pistorm/pistorm-atari-jit/run-pistorm.sh
 WorkingDirectory=/home/pistorm/pistorm-atari-jit
 
 [Install]

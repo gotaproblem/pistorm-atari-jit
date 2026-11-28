@@ -104,6 +104,11 @@ if [ -x ./astos ] && [ "${PISTORM_ASTOS:-1}" != "0" ]; then
 			;;
 		0)
 			echo "[run-pistorm] ASTOS: exit to console (0)."
+			# under pistorm.service (Restart=always) a plain exit would
+			# bring ASTOS straight back: stop the service instead
+			if [ -n "$INVOCATION_ID" ]; then
+				systemctl stop --no-block pistorm.service 2>/dev/null
+			fi
 			exit 0
 			;;
 		*)
@@ -125,6 +130,9 @@ if [ -x ./astos ] && [ "${PISTORM_ASTOS:-1}" != "0" ]; then
 fi
 
 # ---- the setup page (no ASTOS) ---------------------------------------------
+# the emulator hands a plain start to this script when ./astos exists;
+# here the page is what is wanted, so tell it not to
+export PISTORM_ASTOS=0
 fails=0
 while :; do
 	started=$(date +%s)
