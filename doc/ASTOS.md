@@ -266,6 +266,7 @@ branches. The page's `countdown` and `boot` are not used by ASTOS.
 | `clock`, `date` | as for the page; clicking the taskbar's clock / date switches them |
 | `temp` | `c` (default) or `f`: the taskbar temperature; a click on it switches |
 | `places` | extra folders for *Files…*, comma separated |
+| `astos_mouse_speed` | USB/Bluetooth mouse speed in percent, 25-400 (default 100). The pointer also speeds up with fast movement (up to 3x); the ST's own mouse is 1:1 |
 
 The emulator gained one switch for ASTOS: `--build <section>` boots that
 build with no setup page (`run-pistorm.sh` passes it).

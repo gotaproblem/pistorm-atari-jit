@@ -66,6 +66,7 @@ static int autolaunch = -1, countdown_s;      /* index, seconds left */
 
 static int mx = 320, my = 100;                 /* pointer, physical px */
 static int mrem_x, mrem_y;
+static int usb_speed = 100;     /* [psctrl] astos_mouse_speed, percent */
 static int buttons_prev;
 #define BOUNCE_S 0.06                          /* a press this soon after a */
 static double btn_up_t[2] = { -1.0, -1.0 };    /* release is switch bounce  */
@@ -1236,6 +1237,10 @@ int main(int argc, char **argv)
         }
     }
 
+    usb_speed = sc_get_int(&cfg, "psctrl", "astos_mouse_speed", 100);
+    if (usb_speed < 25) usb_speed = 25;
+    if (usb_speed > 400) usb_speed = 400;
+
     /* auto-launch: [psctrl] astos_autolaunch <build> + astos_countdown N */
     if (!safe_mode) {
         const char *al = sc_get(&cfg, "psctrl", "astos_autolaunch");
@@ -1337,12 +1342,20 @@ int main(int argc, char **argv)
                 break;
             redraw = 1;
         } else if (e.type == AI_MOUSE) {
-            /* a USB mouse counts much finer than the ST's: halve it */
-            int dx = e.usb ? e.dx + mrem_x : e.dx;
-            int dy = e.usb ? e.dy + mrem_y : e.dy;
-            if (e.usb) { mrem_x = dx % 2; mrem_y = dy % 2; dx /= 2; dy /= 2; }
-            if (!g_mono())                    /* medium: rows are 2 px tall */
-                dy = e.usb ? dy / 2 : dy;
+            /* a USB / Bluetooth mouse: counts x speed x acceleration, in
+             * 1/256 pixel with the remainder kept, so slow moves are not
+             * lost; medium's rows are 2 px tall, so half as many vertically.
+             * The ST's own mouse goes 1:1, as GEM has it. */
+            int dx = e.dx, dy = e.dy;
+            if (e.usb) {
+                int raw = abs(e.dx) + abs(e.dy);
+                int acc = 256 + (raw > 32 ? 32 : raw) * 16;         /* x1 .. x3 */
+                long gx = (long)usb_speed * acc / 200;          /* 100: x0.5 slow */
+                long gy = g_mono() ? gx : gx / 2;
+                long fx = e.dx * gx + mrem_x, fy = e.dy * gy + mrem_y;
+                dx = (int)(fx / 256); mrem_x = (int)(fx % 256);
+                dy = (int)(fy / 256); mrem_y = (int)(fy % 256);
+            }
             int ox = mx, oy = my;
             mx += dx; my += dy;
             if (mx < 0) mx = 0;
