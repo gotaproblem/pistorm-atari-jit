@@ -1041,11 +1041,11 @@ static void draw_pane(int i)
         human(p->freeb, h, sizeof h);
         snprintf(fr, sizeof fr, "%s free", h);
     }
-    int fw = fr[0] ? g_text_w(fr) + 14 : 0;
+    int fw = fr[0] ? g_text_w(fr) + 22 : 0;
     int len = (int)strlen(path), maxc = (PW - fw) / 8;
     g_textn(x, PATH_Y, len > maxc ? path + len - maxc : path, maxc, C_DIM);
     if (fr[0])
-        g_text(x + PW - 6 - g_text_w(fr), PATH_Y, fr, C_ACCENT);
+        g_text(x + PW - 14 - g_text_w(fr), PATH_Y, fr, C_ACCENT);
     /* the list */
     g_frame(x, LIST_Y - 2, PW, NVIS * RH + 3, i == act ? C_ACCENT : C_DIM);
     if (drop_pane == i && drop_k < 0)                   /* a drop target */
@@ -1487,7 +1487,7 @@ void files_draw(void)
     g_text(WX + 6, WY + 2, "Files", C_WHITE);
     draw_pane(0);
     draw_pane(1);
-    g_textn(12, MSG_Y + 1, msg, 76, C_ACCENT);
+    g_textn(12, MSG_Y + 8, msg, 76, C_ACCENT);
     for (int i = 0; i < NBTN; i++)
         button(btn_x(i), btn[i]);
     if (pop == POP_CHOICE)
