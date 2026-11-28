@@ -61,6 +61,14 @@ int  fat_rename(struct fat_img *im, int v, const char *path, const char *new_nam
 /* free bytes on the volume */
 uint64_t fat_free(struct fat_img *im, int v);
 
+/* new, empty, formatted images: floppies (FAT12, TOS BPB) and AHDI hard
+ * disks (GEM/BGM FAT16 partitions within TOS's limits) */
+int  fat_image_kinds(void);
+const char *fat_image_kind(int k);
+int  fat_image_floppy(int k);
+uint64_t fat_image_bytes(int k);
+int  fat_make_image(const char *path, int k);       /* never over a file */
+
 /* the last error, for the message line */
 const char *fat_error(void);
 

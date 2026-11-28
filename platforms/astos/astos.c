@@ -603,6 +603,13 @@ static void open_settings(int i)
         printf("[ASTOS] settings: [%s]\n", envs[i].sec);
 }
 
+/* Files wrote psctrl.cfg (Use in): the desktop's details from the file */
+static void files_reload(void)
+{
+    if (files_cfg_changed())
+        reload_envs(nenv ? envs[sel].sec : "");
+}
+
 static void settings_closed(void)
 {
     char keep[SC_SEC_LEN];
@@ -796,6 +803,7 @@ static int on_key(struct si_event k, int *exit_code)
     }
     if (files_is_open()) {
         files_key(k);
+        files_reload();
         return 0;
     }
     if (set_is_open()) {
@@ -900,6 +908,7 @@ static int on_click(int x, int y, int *exit_code)
     }
     if (files_is_open()) {
         files_click(x, y);
+        files_reload();
         return 0;
     }
     if (set_is_open()) {
@@ -1291,6 +1300,8 @@ int main(int argc, char **argv)
             case 'N': e.key = SI_F7; break;
             case 'R': e.key = SI_F2; break;
             case 'P': e.key = SI_F1; break;
+            case 'I': e.key = SI_F9; break;
+            case 'U': e.key = SI_F4; break;
             case 'b': e.key = SI_BACKSPACE; break;
             case 'w': stat_open(1); continue;
             case '[': on_wheel(mx, log_y(my), 1); continue;

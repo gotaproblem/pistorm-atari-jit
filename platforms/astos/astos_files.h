@@ -21,5 +21,7 @@ int  files_release(int x, int y);
 /* the wheel over the window: n notches, + = up */
 int  files_wheel(int x, int y, int n);
 void files_test_place(int pane, int place);
+/* 1 once after Files changed psctrl.cfg (Use in): reload the desktop */
+int  files_cfg_changed(void);
 
 #endif

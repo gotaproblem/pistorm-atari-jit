@@ -1258,3 +1258,132 @@ int fat_rename(struct fat_img *im, int vi, const char *path, const char *new_nam
         return -1;
     return bad ? -1 : 0;
 }
+
+/* ---- new, empty images --------------------------------------------------- */
+
+static const struct { const char *label; int floppy; uint32_t kb; } kinds[] = {
+    { "Floppy 360K  (single sided)", 1, 360 },
+    { "Floppy 720K  (double sided)", 1, 720 },
+    { "Floppy 1.44M (high density)", 1, 1440 },
+    { "Hard disk 32M  (1 partition)", 0, 32 * 1024 },
+    { "Hard disk 128M (1 partition)", 0, 128 * 1024 },
+    { "Hard disk 256M (2 partitions)", 0, 256 * 1024 },
+    { "Hard disk 512M (4 partitions)", 0, 512 * 1024 },
+    { "Hard disk 1G   (4 partitions)", 0, 1024 * 1024 },
+};
+
+int fat_image_kinds(void) { return (int)(sizeof kinds / sizeof kinds[0]); }
+const char *fat_image_kind(int k) { return kinds[k].label; }
+int fat_image_floppy(int k) { return kinds[k].floppy; }
+uint64_t fat_image_bytes(int k) { return (uint64_t)kinds[k].kb * 1024; }
+
+/* a FAT12/16 boot sector + empty FATs + empty root at byte off */
+static int format_vol(int fd, uint64_t off, uint32_t bps, uint32_t spc, uint32_t tot,
+                      uint32_t rootents, uint32_t spf, uint8_t media, uint32_t spt,
+                      uint32_t heads, int fat16)
+{
+    uint8_t *s = calloc(1, bps);
+    if (!s) return -1;
+    s[0] = 0xE9;                     /* not a 68000 BRA: never executed */
+    memcpy(s + 2, "ASTOS ", 6);
+    uint32_t serial = (uint32_t)time(NULL) ^ (uint32_t)getpid() ^ (uint32_t)off;
+    s[8] = (uint8_t)serial; s[9] = (uint8_t)(serial >> 8); s[10] = (uint8_t)(serial >> 16);
+    put16(s + 11, bps);
+    s[13] = (uint8_t)spc;
+    put16(s + 14, 1);                /* reserved: the boot sector */
+    s[16] = 2;
+    put16(s + 17, rootents);
+    put16(s + 19, tot);
+    s[21] = media;
+    put16(s + 22, spf);
+    put16(s + 24, spt);
+    put16(s + 26, heads);
+    /* the Atari boot checksum (big-endian words over 512 bytes) must not
+     * be $1234, or TOS would run it */
+    uint16_t sum = 0;
+    for (int i = 0; i < 512; i += 2)
+        sum = (uint16_t)(sum + (s[i] << 8 | s[i + 1]));
+    if (sum == 0x1234)
+        s[10] ^= 1;
+    int bad = pwrite(fd, s, bps, (off_t)off) != (ssize_t)bps;
+    /* both FATs: media byte, then end-of-chain for cluster 1 */
+    memset(s, 0, bps);
+    s[0] = media; s[1] = 0xFF; s[2] = 0xFF;
+    if (fat16) s[3] = 0xFF;
+    for (int f = 0; f < 2 && !bad; f++)
+        bad = pwrite(fd, s, bps, (off_t)(off + (uint64_t)bps * (1 + (uint64_t)f * spf))) != (ssize_t)bps;
+    free(s);
+    return bad ? -1 : 0;
+}
+
+/* the smallest FAT that holds every cluster */
+static uint32_t fat_size(uint32_t bps, uint32_t spc, uint32_t tot, uint32_t rootsec, int fat16)
+{
+    uint32_t spf = 1;
+    for (;;) {
+        uint32_t clus = (tot - 1 - 2 * spf - rootsec) / spc;
+        uint64_t need = fat16 ? (uint64_t)(clus + 2) * 2 : ((uint64_t)(clus + 2) * 3 + 1) / 2;
+        if ((uint64_t)spf * bps >= need)
+            return spf;
+        spf++;
+    }
+}
+
+int fat_make_image(const char *path, int k)
+{
+    if (k < 0 || k >= fat_image_kinds()) { ferr("no such kind"); return -1; }
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0664);
+    if (fd < 0) { ferr("cannot make it: %s", strerror(errno)); return -1; }
+    uint64_t bytes = fat_image_bytes(k);
+    int bad = ftruncate(fd, (off_t)bytes) != 0;          /* sparse: zeros */
+    if (!bad && kinds[k].floppy) {
+        uint32_t tot = kinds[k].kb * 2;
+        if (kinds[k].kb == 1440)
+            bad = format_vol(fd, 0, 512, 1, tot, 224, 9, 0xF0, 18, 2, 0);
+        else {
+            int ds = kinds[k].kb == 720;
+            bad = format_vol(fd, 0, 512, 2, tot, 112, 5, ds ? 0xF9 : 0xF8, 9, ds ? 2 : 1, 0);
+        }
+    } else if (!bad) {
+        /* AHDI: the root sector, then up to 4 partitions, the first at
+         * sector 2 (sector 1 is the bad-sector list). Over 16M a BGM with
+         * logical sectors big enough that TOS's limits hold: at most
+         * 65535 sectors and 32766 clusters of 2 sectors. */
+        uint32_t total = (uint32_t)(bytes / 512);
+        int nparts = kinds[k].kb <= 128 * 1024 ? 1 : kinds[k].kb <= 256 * 1024 ? 2 : 4;
+        uint32_t first = 2, each = (total - first) / (uint32_t)nparts;
+        uint8_t root[512];
+        memset(root, 0, sizeof root);
+        root[0x1C2] = (uint8_t)(total >> 24); root[0x1C3] = (uint8_t)(total >> 16);
+        root[0x1C4] = (uint8_t)(total >> 8);  root[0x1C5] = (uint8_t)total;
+        for (int p = 0; p < nparts && !bad; p++) {
+            uint32_t st = first + (uint32_t)p * each, sz = each;
+            int bgm = sz > 32767;
+            uint32_t bps = 512;
+            while ((uint64_t)sz * 512 / bps > 65535 || (uint64_t)sz * 512 / bps / 2 > 32766)
+                bps *= 2;
+            uint32_t tot = (uint32_t)((uint64_t)sz * 512 / bps);
+            uint32_t rootents = 256 > bps / 32 ? 256 : bps / 32;
+            uint32_t rootsec = rootents * 32 / bps;
+            uint32_t spf = fat_size(bps, 2, tot, rootsec, 1);
+            uint8_t *e = root + 0x1C6 + 12 * p;
+            e[0] = 1;
+            memcpy(e + 1, bgm ? "BGM" : "GEM", 3);
+            for (int b = 0; b < 4; b++) {
+                e[4 + b] = (uint8_t)(st >> (24 - 8 * b));
+                e[8 + b] = (uint8_t)(sz >> (24 - 8 * b));
+            }
+            bad = format_vol(fd, (uint64_t)st * 512, bps, 2, tot, rootents, spf, 0xF8, 32, 2, 1);
+        }
+        if (!bad)
+            bad = pwrite(fd, root, 512, 0) != 512;
+    }
+    if (fsync(fd) != 0) bad = 1;
+    close(fd);
+    if (bad) {
+        if (!err[0]) ferr("write error");
+        unlink(path);
+        return -1;
+    }
+    return 0;
+}

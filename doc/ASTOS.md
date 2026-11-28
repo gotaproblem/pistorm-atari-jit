@@ -177,6 +177,25 @@ with the blue bar is the active one; Copy and Move go from it to the other.
 | F8 / Delete *Delete* | moves into `.trash` at the top of the place (a time stamp is added if the name is there already) |
 | Esc, right-click, *Close* | back to the desktop |
 
+**New img** (F9) makes an empty, formatted disk image in the active pane's
+folder - a floppy (360K single sided, 720K double sided, 1.44M high
+density: FAT12 with TOS's own layout) or a hard disk (32M, 128M, 256M, 512M,
+1G: an AHDI root sector with 1, 2 or 4 BGM partitions, FAT16, kept within
+TOS's limits of 65535 sectors and 32766 clusters a partition). Hard-disk
+images are sparse: they take room on the Pi only as they fill. EmuTOS reads
+them as they are; TOS needs a hard-disk driver (AHDI, HDDRIVER) installed on
+C: to boot from one.
+
+**Use in** (F4), with the cursor on an image on the Pi, puts it in a drive of
+an environment: pick the environment, then the drive - floppy images (up to
+2.88 MB, or .st/.msa/.stx) go in drive A or B, hard disks in IDE 0/1 or ACSI
+0-3 (no ACSI on a Falcon). Each drive shows what is in it now; picking a full
+one replaces it. It writes the pinned form (`fdd A:name`, `hdd 0:name`,
+`acsi 2:name`) - the bare name when the image is in `disk_path` /
+`fdd_path`, else its whole path - and turns IDE or ACSI on in that
+environment if it was off. One image is never put in two drives of the same
+environment.
+
 **Drag and drop:** press on an item and move the mouse. The marked items
 go if the one pressed is marked, else just that one. Drop on the other pane
 to put them in its folder, or on a folder in either pane to put them in that

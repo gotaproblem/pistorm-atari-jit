@@ -52,7 +52,7 @@
 #define NVIS    11                    /* rows in a pane                  */
 #define MSG_Y   (LIST_Y + NVIS * RH + 3)
 #define FOOT_Y  (WY + WH - 18)
-#define BTN_W   72
+#define BTN_W   70
 #define POP_MAX 12
 
 /* ---- places --------------------------------------------------------- */
@@ -306,9 +306,9 @@ static void clamp(struct pane *p)
 /* ---- state ----------------------------------------------------------- */
 static int open_;
 static char cfg_path_[600];
-enum { POP_NONE, POP_PLACE, POP_ASK, POP_CONFIRM };
+enum { POP_NONE, POP_PLACE, POP_ASK, POP_CONFIRM, POP_CHOICE };
 static int pop, pop_pane, pop_sel, pop_top;
-enum { ASK_RENAME, ASK_MKDIR };
+enum { ASK_RENAME, ASK_MKDIR, ASK_IMAGE };
 static int ask_kind;
 static char ask_buf[200], ask_title[48];
 enum { CF_DELETE, CF_COPY, CF_MOVE, CF_DROP };
@@ -726,11 +726,29 @@ static int name_bad(const char *s)
     return !*s || strchr(s, '/') || !strcmp(s, ".") || !strcmp(s, "..") || s[0] == '.';
 }
 
+static void make_image(void);
+
 static void do_ask(void)
 {
     struct pane *p = &pane[act];
     if (name_bad(ask_buf)) {
         snprintf(msg, sizeof msg, "not a usable name");
+        return;
+    }
+    if (ask_kind == ASK_IMAGE) {
+        struct loc l;
+        pane_loc(p, &l);
+        if (loc_exists(&l, ask_buf)) {
+            snprintf(msg, sizeof msg, "%.40s is there already", ask_buf);
+            return;
+        }
+        pop = POP_NONE;
+        make_image();
+        load(p);
+        for (int i = 0; i < p->n; i++)
+            if (!strcmp(p->e[i].name, ask_buf))
+                p->sel = i;
+        clamp(p);
         return;
     }
     struct loc l;
@@ -939,8 +957,9 @@ static void button(int x, const char *label)
     g_text(x + (BTN_W - g_text_w(label)) / 2, FOOT_Y + 2, label, C_TEXT);
 }
 
-static const char *const btn[] = { "Copy", "Move", "Rename", "Folder", "Delete", "Close" };
-#define NBTN 6
+static const char *const btn[] = { "Copy", "Move", "Rename", "Folder", "Delete", "New img",
+                                   "Use in", "Close" };
+#define NBTN 8
 static int btn_x(int i) { return 12 + i * (BTN_W + 6); }
 
 static void human(long long v, char *b, size_t n)
@@ -1091,6 +1110,345 @@ static void draw_pop(void)
     }
 }
 
+static int inside(int x, int y, int rx, int ry, int rw, int rh);
+
+/* ---- a list to choose from: the kind of a new image, an environment,
+ * a drive slot ----------------------------------------------------------- */
+#define CH_MAX 16
+enum { CH_IMG_KIND, CH_USE_ENV, CH_USE_SLOT };
+static int ch_step, ch_n, ch_sel;
+static char ch_title[48], ch_item[CH_MAX][48];
+static int new_kind;                         /* the image kind chosen      */
+static int cfg_changed;                      /* psctrl.cfg written          */
+
+int files_cfg_changed(void)
+{
+    int c = cfg_changed;
+    cfg_changed = 0;
+    return c;
+}
+
+static void choose(int step, const char *title)
+{
+    ch_step = step;
+    ch_sel = 0;
+    snprintf(ch_title, sizeof ch_title, "%s", title);
+    pop = POP_CHOICE;
+}
+
+static void ch_rect(int *w, int *h, int *x, int *y)
+{
+    *w = 400;
+    *h = 14 + ch_n * RH + 20;
+    *x = (AW - *w) / 2;
+    *y = (FOOT_Y - *h) / 2 + 6;
+}
+
+/* ---- New image ---------------------------------------------------------- */
+
+static void new_image(void)
+{
+    struct pane *p = &pane[act];
+    if (p->img) {
+        snprintf(msg, sizeof msg, "a new image goes in a Pi folder, not in an image");
+        return;
+    }
+    ch_n = fat_image_kinds() < CH_MAX ? fat_image_kinds() : CH_MAX;
+    for (int i = 0; i < ch_n; i++)
+        snprintf(ch_item[i], sizeof ch_item[i], "%s", fat_image_kind(i));
+    choose(CH_IMG_KIND, "New image");
+}
+
+static void make_image(void)
+{
+    struct pane *p = &pane[act];
+    char path[PATH_MAX];
+    full_path(p, ask_buf, path, sizeof path);
+    uint64_t need = fat_image_bytes(new_kind);
+    if (p->freeb >= 0 && (uint64_t)p->freeb < need) {
+        snprintf(msg, sizeof msg, "not enough room here for it");
+        return;
+    }
+    if (fat_make_image(path, new_kind) != 0) {
+        snprintf(msg, sizeof msg, "%.90s", fat_error());
+        return;
+    }
+    own_like_parent(path);
+    snprintf(msg, sizeof msg, "made %.40s - Enter opens it", ask_buf);
+    printf("[ASTOS] files: new image %s (%s)\n", path, fat_image_kind(new_kind));
+}
+
+/* ---- Use in an environment ---------------------------------------------- */
+
+static struct env use_env[MAX_ENV];
+static int use_nenv, use_ei, use_floppy;
+static char use_path[PATH_MAX], use_name[256];
+struct slot { const char *key; int num; int line; char img[80]; };
+static struct slot slots[CH_MAX];
+static int nslots;
+
+static void slot_name(const struct slot *s, char *b, size_t n)
+{
+    if (!strcmp(s->key, "fdd")) snprintf(b, n, "drive %c", 'A' + s->num);
+    else snprintf(b, n, "%s %d", strcmp(s->key, "hdd") ? "ACSI" : "IDE", s->num);
+}
+
+static int is_switch(const char *v)
+{
+    static const char *const w[] = { "enabled", "disabled", "on", "off", "yes", "no",
+                                     "true", "false", "1", "0" };
+    for (unsigned i = 0; i < sizeof w / sizeof w[0]; i++)
+        if (!strcasecmp(v, w[i]))
+            return 1;
+    return 0;
+}
+
+static int is_off(const char *v)
+{
+    return v && (!strcasecmp(v, "disabled") || !strcasecmp(v, "off") ||
+                 !strcasecmp(v, "no") || !strcasecmp(v, "false") || !strcmp(v, "0"));
+}
+
+/* which slot each existing line of key fills, as the emulator reads them */
+static void read_slots(struct sc_cfg *c, const char *sec, const char *key, int nslot,
+                       int first_slot_idx)
+{
+    int n = sc_count(c, sec, key), next = 0;
+    for (int i = 0; i < n; i++) {
+        const char *v = sc_get_n(c, sec, key, i);
+        if (!v || is_switch(v))
+            continue;
+        int num = -1;
+        const char *img = v;
+        if (!strcmp(key, "fdd") && v[0] && v[1] == ':') {
+            int ch = toupper((unsigned char)v[0]);
+            num = ch == 'A' || ch == '0' ? 0 : ch == 'B' || ch == '1' ? 1 : -1;
+            img = v + 2;
+        } else if (isdigit((unsigned char)v[0]) && v[1] == ':') {
+            num = v[0] - '0';
+            img = v + 2;
+        }
+        if (num < 0) {                           /* unpinned: the next free */
+            while (next < nslot) {
+                int taken = 0;
+                for (int s = 0; s < nslot; s++)
+                    if (slots[first_slot_idx + s].num == next && slots[first_slot_idx + s].line >= 0)
+                        taken = 1;
+                if (!taken) break;
+                next++;
+            }
+            num = next++;
+        }
+        for (int s = 0; s < nslot; s++)
+            if (slots[first_slot_idx + s].num == num) {
+                slots[first_slot_idx + s].line = i;
+                const char *b = strrchr(img, '/');
+                snprintf(slots[first_slot_idx + s].img, sizeof slots[0].img, "%s", b ? b + 1 : img);
+            }
+    }
+}
+
+static void use_in(void)
+{
+    struct pane *p = &pane[act];
+    if (p->img || !p->n || p->e[p->sel].dir) {
+        snprintf(msg, sizeof msg, "put the cursor on an image file on the Pi first");
+        return;
+    }
+    const struct ent *e = &p->e[p->sel];
+    snprintf(use_name, sizeof use_name, "%s", e->name);
+    full_path(p, e->name, use_path, sizeof use_path);
+    const char *dot = strrchr(e->name, '.');
+    use_floppy = e->size <= 2949120 ||
+                 (dot && (!strcasecmp(dot, ".st") || !strcasecmp(dot, ".msa") ||
+                          !strcasecmp(dot, ".stx")));
+    static struct sc_cfg c;
+    if (sc_load(&c, cfg_path_) != 0) {
+        snprintf(msg, sizeof msg, "cannot read %.60s", cfg_path_);
+        return;
+    }
+    use_nenv = env_load(&c, use_env, MAX_ENV);
+    ch_n = 0;
+    for (int i = 0; i < use_nenv && ch_n < CH_MAX; i++)
+        snprintf(ch_item[ch_n++], sizeof ch_item[0], "%s", use_env[i].title);
+    if (!ch_n) {
+        snprintf(msg, sizeof msg, "no environments to use it in");
+        return;
+    }
+    char t[48];
+    snprintf(t, sizeof t, "Use %.20s in", e->name);
+    choose(CH_USE_ENV, t);
+}
+
+static void use_pick_env(int ei)
+{
+    use_ei = ei;
+    static struct sc_cfg c;
+    if (sc_load(&c, cfg_path_) != 0)
+        return;
+    const char *sec = use_env[ei].sec;
+    const char *mach = sc_get(&c, sec, "machine");
+    int falcon = mach && !strcasecmp(mach, "falcon");
+    nslots = 0;
+    if (use_floppy) {
+        for (int i = 0; i < 2; i++)
+            slots[nslots++] = (struct slot){ "fdd", i, -1, "" };
+        read_slots(&c, sec, "fdd", 2, 0);
+    } else {
+        for (int i = 0; i < 2; i++)
+            slots[nslots++] = (struct slot){ "hdd", i, -1, "" };
+        read_slots(&c, sec, "hdd", 2, 0);
+        if (!falcon) {                             /* no ACSI on a Falcon */
+            for (int i = 0; i < 4; i++)
+                slots[nslots++] = (struct slot){ "acsi", i, -1, "" };
+            read_slots(&c, sec, "acsi", 4, 2);
+        }
+    }
+    ch_n = nslots;
+    for (int i = 0; i < nslots; i++) {
+        const struct slot *s = &slots[i];
+        char name[12];
+        slot_name(s, name, sizeof name);
+        snprintf(ch_item[i], sizeof ch_item[i], "%-8s %.30s", name, s->img[0] ? s->img : "(empty)");
+    }
+    char t[48];
+    snprintf(t, sizeof t, "%.20s: which drive?", use_env[ei].title);
+    choose(CH_USE_SLOT, t);
+}
+
+static void use_pick_slot(int si)
+{
+    static struct sc_cfg c;
+    if (sc_load(&c, cfg_path_) != 0)
+        return;
+    const struct slot *s = &slots[si];
+    const char *sec = use_env[use_ei].sec;
+    for (int i = 0; i < nslots; i++)           /* one image, one drive */
+        if (i != si && !strcmp(slots[i].img, use_name)) {
+            char sn[12];
+            slot_name(&slots[i], sn, sizeof sn);
+            snprintf(msg, sizeof msg, "%.30s is already %s of %.24s", use_name, sn,
+                     use_env[use_ei].title);
+            return;
+        }
+    /* in the image folder the emulator looks in: the bare name, else the
+     * whole path */
+    char dir[PATH_MAX], img[PATH_MAX], val[PATH_MAX + 4];
+    snprintf(dir, sizeof dir, "%s", use_path);
+    char *sl = strrchr(dir, '/');
+    if (sl) *sl = '\0';
+    const char *base_key = use_floppy ? "fdd_path" : "disk_path";
+    char base[PATH_MAX] = "", rb[PATH_MAX], rd[PATH_MAX];
+    path_key(&c, base_key, base, sizeof base);
+    if (base[0] && realpath(base, rb) && realpath(dir, rd) && !strcmp(rb, rd))
+        snprintf(img, sizeof img, "%s", use_name);
+    else
+        snprintf(img, sizeof img, "%s", use_path);
+    if (!strcmp(s->key, "fdd"))
+        snprintf(val, sizeof val, "%c:%s", 'A' + s->num, img);
+    else
+        snprintf(val, sizeof val, "%d:%s", s->num, img);
+    int n = s->line >= 0 ? s->line : sc_count(&c, sec, s->key);
+    int bad = sc_set_n(&c, sec, s->key, n, val) != 0;
+    /* the controller switched on if it was off */
+    if (!bad && !strcmp(s->key, "hdd") && is_off(sc_get(&c, sec, "ide")))
+        bad = sc_set(&c, sec, "ide", "enabled") != 0;
+    if (!bad && !strcmp(s->key, "acsi"))
+        for (int i = 0; i < sc_count(&c, sec, "acsi"); i++)
+            if (is_off(sc_get_n(&c, sec, "acsi", i)))
+                bad = sc_set_n(&c, sec, "acsi", i, "enabled") != 0;
+    if (bad || sc_save(&c, cfg_path_) != 0) {
+        snprintf(msg, sizeof msg, "could not save: %.60s", bad ? "file full" : sc_save_error(&c));
+        return;
+    }
+    cfg_changed = 1;
+    char sn[12];
+    slot_name(s, sn, sizeof sn);
+    snprintf(msg, sizeof msg, "%.30s is now %s of %.24s", use_name, sn, use_env[use_ei].title);
+    printf("[ASTOS] files: [%s] %s %s\n", sec, s->key, val);
+}
+
+static void ch_pick(int i)
+{
+    if (i < 0 || i >= ch_n)
+        return;
+    pop = POP_NONE;
+    switch (ch_step) {
+    case CH_IMG_KIND: {
+        new_kind = i;
+        const char *stem = fat_image_floppy(i) ? "NEW" : "NEWHD";
+        const char *ext = fat_image_floppy(i) ? "ST" : "IMG";
+        struct loc l;
+        pane_loc(&pane[act], &l);
+        snprintf(ask_buf, sizeof ask_buf, "%s.%s", stem, ext);
+        for (int n = 2; loc_exists(&l, ask_buf) && n < 100; n++)
+            snprintf(ask_buf, sizeof ask_buf, "%s%d.%s", stem, n, ext);
+        ask_kind = ASK_IMAGE;
+        snprintf(ask_title, sizeof ask_title, "New image: its name");
+        pop = POP_ASK;
+        break;
+    }
+    case CH_USE_ENV:  use_pick_env(i); break;
+    case CH_USE_SLOT: use_pick_slot(i); break;
+    }
+}
+
+static void draw_choice(void)
+{
+    int w, h, x, y;
+    ch_rect(&w, &h, &x, &y);
+    g_fill(x + 2, y + 1, w, h, C_TEXT);
+    g_fill(x, y, w, h, C_WHITE);
+    g_fill(x, y, w, 11, C_ACCENT);
+    g_frame(x, y, w, h, C_TEXT);
+    g_text(x + 6, y + 2, ch_title, C_WHITE);
+    for (int i = 0; i < ch_n; i++) {
+        int iy = y + 13 + i * RH, on = i == ch_sel;
+        if (on)
+            g_fill(x + 2, iy, w - 4, RH, C_ACCENT);
+        g_textn(x + 8, iy + 1, ch_item[i], (w - 16) / 8, on ? C_WHITE : C_TEXT);
+    }
+    g_text(x + 8, y + h - 14, "Enter or click to choose", C_DIM);
+    dlg_button(x + w - 96, y + h - 16, 88, "Cancel");
+}
+
+static int ch_key(struct si_event k)
+{
+    switch (k.key) {
+    case SI_UP:   if (ch_sel > 0) ch_sel--; break;
+    case SI_DOWN: if (ch_sel < ch_n - 1) ch_sel++; break;
+    case SI_ENTER: case SI_SPACE: ch_pick(ch_sel); break;
+    case SI_ESC: pop = POP_NONE; break;
+    default: break;
+    }
+    return 0;
+}
+
+static int ch_click(int x, int y)
+{
+    int w, h, dx, dy;
+    ch_rect(&w, &h, &dx, &dy);
+    if (inside(x, y, dx + w - 96, dy + h - 16, 88, 12) || !inside(x, y, dx, dy, w, h)) {
+        pop = POP_NONE;
+        return 0;
+    }
+    int i = (y - dy - 13) / RH;
+    if (y >= dy + 13 && i < ch_n)
+        ch_pick(i);
+    return 0;
+}
+
+static int ch_hover(int x, int y)
+{
+    int w, h, dx, dy;
+    ch_rect(&w, &h, &dx, &dy);
+    if (!inside(x, y, dx, dy + 13, w, ch_n * RH))
+        return 0;
+    int i = (y - dy - 13) / RH;
+    if (i != ch_sel) { ch_sel = i; return 1; }
+    return 0;
+}
+
 void files_draw(void)
 {
     g_fill(WX + 2, WY + 1, WW, WH, C_TEXT);
@@ -1103,8 +1461,9 @@ void files_draw(void)
     g_textn(12, MSG_Y + 1, msg, 76, C_ACCENT);
     for (int i = 0; i < NBTN; i++)
         button(btn_x(i), btn[i]);
-    g_text(btn_x(NBTN) + 2, FOOT_Y + 2, "Tab pane", C_DIM);
-    if (pop)
+    if (pop == POP_CHOICE)
+        draw_choice();
+    else if (pop)
         draw_pop();
 }
 
@@ -1118,12 +1477,16 @@ static void do_button(int i)
     case 2: ask(ASK_RENAME); break;
     case 3: ask(ASK_MKDIR); break;
     case 4: confirm(CF_DELETE); break;
+    case 5: new_image(); break;
+    case 6: use_in(); break;
     }
 }
 
 int files_key(struct si_event k)
 {
     struct pane *p = &pane[act];
+    if (pop == POP_CHOICE)
+        return ch_key(k);
     if (pop == POP_ASK) {
         size_t n = strlen(ask_buf);
         switch (k.key) {
@@ -1192,6 +1555,8 @@ int files_key(struct si_event k)
     case SI_F7: ask(ASK_MKDIR); break;
     case SI_F8: case SI_DELETE: confirm(CF_DELETE); break;
     case SI_F2: ask(ASK_RENAME); break;
+    case SI_F9: new_image(); break;
+    case SI_F4: use_in(); break;
     case SI_ESC: open_ = 0; return 1;
     case SI_CHAR:                                   /* jump by letter */
         for (int n = 1; n <= p->n; n++) {
@@ -1222,6 +1587,8 @@ static double now_s(void)
 
 int files_click(int x, int y)
 {
+    if (pop == POP_CHOICE)
+        return ch_click(x, y);
     if (pop == POP_PLACE) {
         int px = PX(pop_pane), py = PLACE_Y + 12;
         int vis = nplace < POP_MAX ? nplace : POP_MAX;
@@ -1416,6 +1783,8 @@ int files_release(int x, int y)
 
 int files_hover(int x, int y)
 {
+    if (pop == POP_CHOICE)
+        return ch_hover(x, y);
     if (pop != POP_PLACE)
         return 0;
     int px = PX(pop_pane), py = PLACE_Y + 12;
