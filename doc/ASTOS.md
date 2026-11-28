@@ -44,9 +44,10 @@ on a mono one, from the monitor sense line. Both use the same layout:
   CPLD firmware as it is named (e.g. `1.1b (EPM240)`). The Pi's temperature
   is in the taskbar.
 - **Taskbar:** the *ASTOS* start button, the selected build, Pi temperature,
-  date and clock. Click the clock to switch 24 / 12 hour, click the date to
-  switch day/month/year and month/day/year; saved as `[psctrl] clock 24|12`
-  and `date dmy|mdy` (the same keys the setup page used).
+  date and clock. Click the temperature to switch Celsius / Fahrenheit, the
+  date to switch day/month/year and month/day/year, the clock to switch
+  24 / 12 hour; saved as `[psctrl] temp c|f`, `date dmy|mdy` and
+  `clock 24|12` (the last two are the keys the setup page used).
 - **Start menu:** *New environment…*, *HDMI display* (on / off / only),
   *Restart ASTOS*, *Exit to console*, *Shut down…*. The environments themselves are on the desktop.
 - **Right-click on an icon:** *Launch*, *Settings…*, *Duplicate…*,
@@ -134,7 +135,8 @@ branches. The page's `countdown` and `boot` are not used by ASTOS.
 | `astos_autolaunch` + `astos_countdown` | launch this build after N seconds, unless a key is pressed or the mouse clicked. No keys: no auto-launch |
 | `hdmi` | `on`: show the ASTOS desktop on HDMI as well. Default off; the start menu's *HDMI display* sets it |
 | `hdmi_only` | ASTOS on HDMI, whatever `hdmi` says (also when the last environment has it) |
-| `clock`, `date` | as for the page |
+| `clock`, `date` | as for the page; clicking the taskbar's clock / date switches them |
+| `temp` | `c` (default) or `f`: the taskbar temperature; a click on it switches |
 
 The emulator gained one switch for ASTOS: `--build <section>` boots that
 build with no setup page (`run-pistorm.sh` passes it).

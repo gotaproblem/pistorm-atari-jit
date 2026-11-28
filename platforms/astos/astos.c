@@ -74,7 +74,8 @@ static int last_click_env = -1;
 static char cpld_text[32] = "-";
 static int temp_c10 = -1;
 static char clock_s[16], date_s[16];
-static int clock_x = AW, date_x = AW;          /* where the taskbar drew them */
+static int clock_x = AW, date_x = AW, temp_x = AW;  /* where the taskbar drew them */
+static int fahr;                                /* [psctrl] temp f */
 
 static double now_s(void)
 {
@@ -228,13 +229,19 @@ static void draw_taskbar(void)
     /* right to left: clock, date, temperature. The clock and the date
      * are buttons: a click flips 24/12 hour and day/month order */
     char t[16] = "";
-    if (temp_c10 >= 0)
-        snprintf(t, sizeof t, "%d.%dC", temp_c10 / 10, temp_c10 % 10);
+    if (temp_c10 >= 0) {
+        if (fahr) {                                 /* F = C * 9/5 + 32, 0.1 */
+            int f10 = temp_c10 * 9 / 5 + 320;
+            snprintf(t, sizeof t, "%d.%dF", f10 / 10, f10 % 10);
+        } else
+            snprintf(t, sizeof t, "%d.%dC", temp_c10 / 10, temp_c10 % 10);
+    }
     clock_x = AW - 6 - g_text_w(clock_s);
     date_x = clock_x - 16 - g_text_w(date_s);
+    temp_x = date_x - 16 - g_text_w(t);
     g_text(clock_x, BAR_Y + 3, clock_s, C_TEXT);
     g_text(date_x, BAR_Y + 3, date_s, C_TEXT);
-    g_text(date_x - 16 - g_text_w(t), BAR_Y + 3, t, C_TEXT);
+    g_text(temp_x, BAR_Y + 3, t, C_TEXT);
 }
 
 /* [psctrl] clock 24|12 and date dmy|mdy, as the page writes them */
@@ -242,6 +249,7 @@ static void save_clock_keys(void)
 {
     sc_set(&cfg, "psctrl", "clock", h12 ? "12" : "24");
     sc_set(&cfg, "psctrl", "date", mdy ? "mdy" : "dmy");
+    sc_set(&cfg, "psctrl", "temp", fahr ? "f" : "c");
     if (!no_board && sc_save(&cfg, cfg_path) != 0)
         fprintf(stderr, "[ASTOS] could not save %s\n", cfg_path);
     sys_clock(clock_s, sizeof clock_s, h12);
@@ -758,6 +766,12 @@ static int on_click(int x, int y, int *exit_code)
         printf("[ASTOS] clock %s hour\n", h12 ? "12" : "24");
         return 0;
     }
+    if (y >= BAR_Y && x >= temp_x - 4 && x < date_x - 8 && temp_c10 >= 0) {
+        fahr = !fahr;                                  /* the temperature: C <-> F */
+        save_clock_keys();
+        printf("[ASTOS] temperature in %s\n", fahr ? "Fahrenheit" : "Celsius");
+        return 0;
+    }
     if (y >= BAR_Y && x >= date_x - 4 && x < clock_x - 8) {   /* the date */
         mdy = !mdy;
         save_clock_keys();
@@ -975,6 +989,8 @@ int main(int argc, char **argv)
         h12 = v && !strcmp(v, "12");
         v = sc_get(&cfg, "psctrl", "date");
         mdy = v && !strcasecmp(v, "mdy");
+        v = sc_get(&cfg, "psctrl", "temp");
+        fahr = v && (*v == 'f' || *v == 'F');
     }
     /* HDMI: [psctrl] hdmi (the start menu's switch), hdmi_only there, or
      * the environment launched last being an hdmi_only one - whoever
@@ -1058,6 +1074,7 @@ int main(int argc, char **argv)
             case 'p': e.key = SI_F2; break;
             case 'k': render(); on_click(clock_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'j': render(); on_click(date_x + 2, BAR_Y + 4, &exit_code); continue;
+            case 'g': render(); on_click(temp_x + 2, BAR_Y + 4, &exit_code); continue;
             case 'n': menu_open = 1; menu_sel = MI_NEW; e.key = SI_ENTER; break;
             case ' ': e.key = SI_SPACE; break;
             case 't': e.key = SI_TAB; break;
