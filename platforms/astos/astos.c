@@ -207,7 +207,7 @@ static void draw_details(void)
 static struct astos_hw hw;
 
 /* The real machine, as the bus answered when ASTOS started: what it is
- * and its TOS, ST-RAM, the blitter, the monitor, IDE and ACSI (the CPLD
+ * and its TOS, ST-RAM, the blitter, IDE and ACSI, the monitor (the CPLD
  * firmware is in the taskbar) */
 static void draw_machine(void)
 {
@@ -229,19 +229,19 @@ static void draw_machine(void)
     else
         snprintf(l[1], sizeof l[1], "ST-RAM  not answering");
     snprintf(l[2], sizeof l[2], "Blitter %s", !hw.ok ? "-" : hw.np.blitter ? "real chip" : "none");
-    snprintf(l[3], sizeof l[3], "Monitor %s, %s",
+    snprintf(l[5], sizeof l[5], "Monitor %s, %s",
              g_mono() ? "mono (640x400)" : "colour (640x200)",
              ss.hz50 ? "50 Hz" : "60 Hz");
-    snprintf(l[4], sizeof l[4], "IDE     %s", !hw.ok ? "-" : hw.ide ? "interface present" : "none");
+    snprintf(l[3], sizeof l[3], "IDE     %s", !hw.ok ? "-" : hw.ide ? "interface present" : "none");
     if (!hw.ok || hw.acsi_unknown)
-        snprintf(l[5], sizeof l[5], "ACSI    %s", hw.ok ? "not probed (IRQ held)" : "-");
+        snprintf(l[4], sizeof l[4], "ACSI    %s", hw.ok ? "not probed (IRQ held)" : "-");
     else if (!hw.acsi)
-        snprintf(l[5], sizeof l[5], "ACSI    no devices");
+        snprintf(l[4], sizeof l[4], "ACSI    no devices");
     else {
-        snprintf(l[5], sizeof l[5], "ACSI    ID");
+        snprintf(l[4], sizeof l[4], "ACSI    ID");
         for (int id = 0; id < 8; id++)
             if (hw.acsi & (1u << id))
-                snprintf(l[5] + strlen(l[5]), sizeof l[5] - strlen(l[5]), " %d", id);
+                snprintf(l[4] + strlen(l[4]), sizeof l[4] - strlen(l[4]), " %d", id);
     }
     draw_window(x, y, PANEL_W, h, "This machine");
     for (int i = 0; i < 6; i++)
