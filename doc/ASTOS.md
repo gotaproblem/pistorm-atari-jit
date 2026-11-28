@@ -54,7 +54,9 @@ on a mono one, from the monitor sense line. Both use the same layout:
   since boot; otherwise a code per condition - `UV` under-voltage, `CAP`
   ARM frequency capped, `THR` throttled, `TMP` soft temperature limit - in
   a filled box while it is happening now, in plain text once it has passed.
-  A click shows the raw value and what it means. Every change is also
+  A click shows the raw value and what it means. On HDMI, `OK` is green
+  and `UV` / `TMP` are red; the ST monitor keeps its four pens (medium has
+  no red or green to spare), so there the codes are boxes and plain text. Every change is also
   printed to the console / journal (`[ASTOS] get_throttled 0x50005 -
   under-voltage now ...`). ASTOS only reads it: the since-boot bits are
   never cleared. `PISTORM_ASTOS_THROTTLED=0x50005` fakes a value, to see

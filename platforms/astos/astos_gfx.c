@@ -35,6 +35,15 @@ static const uint16_t st_pal[4]  = { 0x0666, 0x0000, 0x0035, 0x0777 };
 static const uint32_t rgb_pal[4] = { 0xDBDBDB, 0x000000, 0x006DB6, 0xFFFFFF };
 
 void g_set_mode(int m) { mono = m; }
+
+/* the palette index a logical colour ends up as on the screen, as
+ * setup_hdmi.c's sh_present reads it (mono: ink 3, paper 0) */
+int g_pen(int c)
+{
+    if (mono)
+        return pen_mono[c] == 1 ? 3 : 0;
+    return pen_med[c];
+}
 int  g_mono(void)      { return mono; }
 
 void g_palette_st(uint16_t pal[4])

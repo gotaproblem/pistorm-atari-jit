@@ -5,6 +5,7 @@
  */
 #include <stdint.h>
 #include "shifter_setup.h"
+#include "setup_hdmi.h"
 
 uint8_t  fc;
 uint16_t ps_fw_rev = 0x421;
@@ -33,3 +34,4 @@ int  sh_active(void)                         { return 0; }
 void sh_present(const struct ss_screen *s)   { (void)s; }
 void sh_close(void)                          { }
 void sh_set_palette(const uint32_t rgb[4])   { (void)rgb; }
+void sh_set_tints(const struct sh_tint *t, int n) { (void)t; (void)n; }

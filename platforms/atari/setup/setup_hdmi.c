@@ -37,6 +37,22 @@ static int shown_ok;
 
 /* ASTOS draws with its own four pens (0xRRGGBB); the page keeps these.
  * The border (pen 0 out to every edge) is repainted in the new paper. */
+static struct sh_tint tint[SH_MAX_TINT];
+static int ntint;
+
+void sh_set_tints(const struct sh_tint *t, int n)
+{
+    if (n > SH_MAX_TINT)
+        n = SH_MAX_TINT;
+    if (n == ntint && (n == 0 || !memcmp(tint, t, sizeof *t * (size_t)n)))
+        return;
+    /* the rows the old and the new rectangles cover must be redrawn */
+    shown_ok = 0;
+    if (n)
+        memcpy(tint, t, sizeof *t * (size_t)n);
+    ntint = n;
+}
+
 void sh_set_palette(const uint32_t rgb[4])
 {
     for (int i = 0; i < 4; i++)
@@ -202,6 +218,11 @@ void sh_present(const struct ss_screen *ss)
             last_sy = sy;
             skip = shown_ok && !memcmp(shown_ + sy * rowbytes,
                                        ss->shadow + sy * rowbytes, (size_t)rowbytes);
+            /* the tints that cross this row */
+            int rt[SH_MAX_TINT], nrt = 0;
+            for (int i = 0; i < ntint && !skip; i++)
+                if (sy >= tint[i].y && sy < tint[i].y + tint[i].h)
+                    rt[nrt++] = i;
             for (int x = 0; x < sw && !skip; x++) {
                 int c;
                 if (ss->planes == 1)
@@ -216,6 +237,11 @@ void sh_present(const struct ss_screen *ss)
                     }
                 }
                 row[x] = palette[c];
+                for (int i = 0; i < nrt; i++) {
+                    const struct sh_tint *t = &tint[rt[i]];
+                    if (x >= t->x && x < t->x + t->w && c == t->pen)
+                        row[x] = 0xFF000000u | (t->rgb & 0xFFFFFFu);
+                }
             }
         }
         if (skip)

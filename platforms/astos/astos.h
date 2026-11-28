@@ -53,6 +53,7 @@ void g_icon(int x, int y, int kind);                 /* 32x16 logical  */
 /* palette + pack + pointer */
 void g_set_mode(int mono);
 int  g_mono(void);
+int  g_pen(int c);                                   /* palette index  */
 void g_palette_st(uint16_t pal[4]);                  /* ST $0RGB       */
 void g_palette_rgb(uint32_t rgb[4]);                 /* for HDMI/shots */
 void g_pack(struct ss_screen *ss);                   /* canvas -> base */

@@ -28,6 +28,15 @@ void sh_present(const struct ss_screen *ss);
 /* The four pens as 0xRRGGBB (ASTOS; the page uses the defaults). */
 void sh_set_palette(const uint32_t rgb[4]);
 
+/* Colour beyond the Shifter's pens, on HDMI only (ASTOS: a green OK, a
+ * red UV in the taskbar). Inside each rectangle - in the screen's own
+ * pixels, x 0..639, y 0..199 or 0..399 - pixels of pen `pen` (0-3, as
+ * sh_present indexes the palette; mono ink is 3) are drawn `rgb`
+ * (0xRRGGBB). n = 0 clears them. At most SH_MAX_TINT. */
+#define SH_MAX_TINT 8
+struct sh_tint { int x, y, w, h, pen; uint32_t rgb; };
+void sh_set_tints(const struct sh_tint *t, int n);
+
 /* Restore whatever the console had and let go of DRM. */
 void sh_close(void);
 
