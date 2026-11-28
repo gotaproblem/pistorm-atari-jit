@@ -48,6 +48,11 @@ struct fat_img {
     char     path[PATH_MAX];
     int      fd, ro, refs;
     int      nvol;
+    /* an .msa (Magic Shadow Archiver) floppy: unpacked into memory, read
+     * and written there, packed back into the file at each sync */
+    uint8_t *mem;
+    size_t   memlen;
+    int      msa_dirty, msa_spt, msa_sides, msa_tracks;
     struct vol v[MAX_VOL];
     struct fat_img *next;
 };
@@ -79,9 +84,15 @@ static void swab_buf(uint8_t *b, size_t n)
 }
 
 /* raw file access, the word order undone; off and len are always even */
-static int rd(int fd, int sw, uint64_t off, void *buf, size_t len)
+static int rd(struct fat_img *im, int sw, uint64_t off, void *buf, size_t len)
 {
-    if (pread(fd, buf, len, (off_t)off) != (ssize_t)len) {
+    if (im->mem) {
+        if (off + len > im->memlen) {
+            ferr("read past the end of the disk");
+            return -1;
+        }
+        memcpy(buf, im->mem + off, len);
+    } else if (pread(im->fd, buf, len, (off_t)off) != (ssize_t)len) {
         ferr("read error at %llu", (unsigned long long)off);
         return -1;
     }
@@ -95,6 +106,17 @@ static int wr(struct fat_img *im, int sw, uint64_t off, const void *buf, size_t 
     if (im->ro) {
         ferr("the image is read-only");
         return -1;
+    }
+    if (im->mem) {
+        if (off + len > im->memlen) {
+            ferr("write past the end of the disk");
+            return -1;
+        }
+        memcpy(im->mem + off, buf, len);
+        if (sw)
+            swab_buf(im->mem + off, len);
+        im->msa_dirty = 1;
+        return 0;
     }
     const void *src = buf;
     uint8_t *tmp = NULL;
@@ -116,7 +138,7 @@ static int wr(struct fat_img *im, int sw, uint64_t off, const void *buf, size_t 
 
 static int vrd(struct fat_img *im, struct vol *v, uint64_t off, void *b, size_t n)
 {
-    return rd(im->fd, v->swapped, v->base + off, b, n);
+    return rd(im, v->swapped, v->base + off, b, n);
 }
 
 static int vwr(struct fat_img *im, struct vol *v, uint64_t off, const void *b, size_t n)
@@ -133,7 +155,7 @@ static int try_bpb(struct fat_img *im, struct vol *v, uint64_t base, uint64_t ps
                    int sw, int hint)
 {
     uint8_t s[512];
-    if (rd(im->fd, sw, base, s, 512) != 0)
+    if (rd(im, sw, base, s, 512) != 0)
         return -1;
     uint32_t bps = le16(s + 11), spc = s[13], rsv = le16(s + 14), nfats = s[16];
     uint32_t rootents = le16(s + 17), tot = le16(s + 19), spf = le16(s + 22);
@@ -204,8 +226,8 @@ static void add_vol(struct fat_img *im, uint64_t sec, uint64_t nsec, int sw, int
         snprintf(v->label, sizeof v->label, "%c: %s %s FAT%d%s", 'C' + im->nvol, kind, sz,
                  v->type, v->swapped ? " swapped" : "");
     else
-        snprintf(v->label, sizeof v->label, "FAT%d %s%s", v->type, sz,
-                 v->swapped ? " swapped" : "");
+        snprintf(v->label, sizeof v->label, "FAT%d %s%s%s", v->type, sz,
+                 im->mem ? " MSA" : "", v->swapped ? " swapped" : "");
     im->nvol++;
 }
 
@@ -253,7 +275,7 @@ static int scan_ahdi(struct fat_img *im, const uint8_t *s, int sw)
                     uint8_t x[512];
                     char xid[4];
                     uint32_t xst, xsz;
-                    if (rd(im->fd, sw, cur * 512, x, 512) != 0)
+                    if (rd(im, sw, cur * 512, x, 512) != 0)
                         break;
                     if (ahdi_entry(x + 0x1C6, xid, &xst, &xsz))
                         ahdi_part(im, xid, cur + xst, xsz, sw);
@@ -300,7 +322,7 @@ static int scan_mbr(struct fat_img *im, const uint8_t *s, int sw)
             uint64_t ext = st, cur = st;
             for (int hop = 0; hop < 64; hop++) {
                 uint8_t x[512];
-                if (rd(im->fd, sw, cur * 512, x, 512) != 0 || x[510] != 0x55 || x[511] != 0xAA)
+                if (rd(im, sw, cur * 512, x, 512) != 0 || x[510] != 0x55 || x[511] != 0xAA)
                     break;
                 const uint8_t *a = x + 0x1BE, *b = x + 0x1CE;
                 int ah = dos_type(a[4]);
@@ -313,6 +335,133 @@ static int scan_mbr(struct fat_img *im, const uint8_t *s, int sw)
         }
     }
     return found;
+}
+
+/* ---- .msa ------------------------------------------------------------- *
+ * A 10-byte header (big-endian words): $0E0F, sectors per track, sides - 1,
+ * first track, last track. Then each track, side 0 before side 1: a word
+ * with its length, and the data - raw when the length is a whole track,
+ * else run-length packed: $E5 byte count(word) is count of byte, any other
+ * byte is itself. */
+static int msa_load(struct fat_img *im, char *why, int why_len)
+{
+    struct stat st;
+    if (fstat(im->fd, &st) != 0 || st.st_size < 10 || st.st_size > 8 << 20) {
+        snprintf(why, (size_t)why_len, "not an MSA file");
+        return -1;
+    }
+    uint8_t *f = malloc((size_t)st.st_size);
+    if (!f || pread(im->fd, f, (size_t)st.st_size, 0) != st.st_size) {
+        free(f);
+        snprintf(why, (size_t)why_len, "cannot read it");
+        return -1;
+    }
+    int spt = f[2] << 8 | f[3], sides = (f[4] << 8 | f[5]) + 1;
+    int t0 = f[6] << 8 | f[7], t1 = f[8] << 8 | f[9];
+    if (spt < 1 || spt > 36 || sides < 1 || sides > 2 || t0 != 0 || t1 < t0 || t1 > 85) {
+        free(f);
+        snprintf(why, (size_t)why_len, t0 ? "MSA of part of a disk (from track %d)" :
+                 "MSA header not understood", t0);
+        return -1;
+    }
+    size_t tlen = (size_t)spt * 512, n = (size_t)(t1 + 1) * (size_t)sides * tlen;
+    im->mem = calloc(1, n);
+    if (!im->mem) { free(f); snprintf(why, (size_t)why_len, "out of memory"); return -1; }
+    im->memlen = n;
+    im->msa_spt = spt; im->msa_sides = sides; im->msa_tracks = t1 + 1;
+    size_t at = 10;
+    for (size_t t = 0; t < (size_t)(t1 + 1) * (size_t)sides; t++) {
+        if (at + 2 > (size_t)st.st_size) goto bad;
+        size_t len = (size_t)(f[at] << 8 | f[at + 1]);
+        at += 2;
+        if (at + len > (size_t)st.st_size) goto bad;
+        uint8_t *out = im->mem + t * tlen;
+        if (len == tlen) {
+            memcpy(out, f + at, tlen);
+        } else {
+            size_t o = 0, i = at, end = at + len;
+            while (i < end && o < tlen) {
+                if (f[i] == 0xE5) {
+                    if (i + 4 > end) goto bad;
+                    size_t cnt = (size_t)(f[i + 2] << 8 | f[i + 3]);
+                    if (o + cnt > tlen) goto bad;
+                    memset(out + o, f[i + 1], cnt);
+                    o += cnt;
+                    i += 4;
+                } else
+                    out[o++] = f[i++];
+            }
+            if (o != tlen) goto bad;
+        }
+        at += len;
+    }
+    free(f);
+    return 0;
+bad:
+    free(f);
+    free(im->mem);
+    im->mem = NULL;
+    snprintf(why, (size_t)why_len, "MSA data broken");
+    return -1;
+}
+
+/* packed again, into a new file put in place of the old one */
+static int msa_flush(struct fat_img *im)
+{
+    if (!im->msa_dirty)
+        return 0;
+    size_t tlen = (size_t)im->msa_spt * 512, ntr = im->memlen / tlen;
+    uint8_t *o = malloc(10 + ntr * (tlen + 2));
+    if (!o) { ferr("out of memory"); return -1; }
+    o[0] = 0x0E; o[1] = 0x0F;
+    o[2] = (uint8_t)(im->msa_spt >> 8); o[3] = (uint8_t)im->msa_spt;
+    o[4] = 0; o[5] = (uint8_t)(im->msa_sides - 1);
+    o[6] = 0; o[7] = 0;
+    o[8] = (uint8_t)((im->msa_tracks - 1) >> 8); o[9] = (uint8_t)(im->msa_tracks - 1);
+    size_t at = 10;
+    uint8_t *pk = malloc(tlen * 2);
+    if (!pk) { free(o); ferr("out of memory"); return -1; }
+    for (size_t t = 0; t < ntr; t++) {
+        const uint8_t *in = im->mem + t * tlen;
+        size_t n = 0;
+        for (size_t i = 0; i < tlen; ) {
+            size_t run = 1;
+            while (i + run < tlen && in[i + run] == in[i] && run < 65535)
+                run++;
+            if (run >= 4 || in[i] == 0xE5) {
+                pk[n++] = 0xE5; pk[n++] = in[i];
+                pk[n++] = (uint8_t)(run >> 8); pk[n++] = (uint8_t)run;
+                i += run;
+            } else
+                pk[n++] = in[i++];
+        }
+        const uint8_t *src = n < tlen ? pk : in;
+        size_t len = n < tlen ? n : tlen;
+        o[at++] = (uint8_t)(len >> 8); o[at++] = (uint8_t)len;
+        memcpy(o + at, src, len);
+        at += len;
+    }
+    free(pk);
+    char tmp[PATH_MAX + 8];
+    snprintf(tmp, sizeof tmp, "%s.new", im->path);
+    struct stat st;
+    fstat(im->fd, &st);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    int bad = fd < 0 || write(fd, o, at) != (ssize_t)at || fsync(fd) != 0;
+    free(o);
+    if (fd >= 0) {
+        (void)!fchown(fd, st.st_uid, st.st_gid);
+        if (close(fd) != 0) bad = 1;
+    }
+    if (bad || rename(tmp, im->path) != 0) {
+        unlink(tmp);
+        ferr("cannot write the MSA file: %s", strerror(errno));
+        return -1;
+    }
+    close(im->fd);
+    im->fd = open(im->path, O_RDONLY);
+    im->msa_dirty = 0;
+    return 0;
 }
 
 struct fat_img *fat_open(const char *path, char *why, int why_len)
@@ -339,7 +488,14 @@ struct fat_img *fat_open(const char *path, char *why, int why_len)
         im->ro = 1;
     }
     uint8_t s[512];
-    if (im->fd < 0 || rd(im->fd, 0, 0, s, 512) != 0) {
+    uint8_t magic[2] = { 0, 0 };
+    if (im->fd >= 0 && pread(im->fd, magic, 2, 0) == 2 && magic[0] == 0x0E && magic[1] == 0x0F &&
+        msa_load(im, why, why_len) != 0) {
+        close(im->fd);
+        free(im);
+        return NULL;
+    }
+    if (im->fd < 0 || rd(im, 0, 0, s, 512) != 0) {
         snprintf(why, (size_t)why_len, "cannot read it");
         if (im->fd >= 0) close(im->fd);
         free(im);
@@ -353,18 +509,20 @@ struct fat_img *fat_open(const char *path, char *why, int why_len)
         !scan_mbr(im, s, 0) && !scan_mbr(im, w, 1)) {
         struct stat st;
         fstat(im->fd, &st);
-        add_vol(im, 0, (uint64_t)st.st_size / 512, 0, 0, NULL);
+        add_vol(im, 0, (im->mem ? (uint64_t)im->memlen : (uint64_t)st.st_size) / 512, 0, 0, NULL);
     }
     if (!im->nvol) {
         snprintf(why, (size_t)why_len, "no FAT volume in it");
         close(im->fd);
+        free(im->mem);
         free(im);
         return NULL;
     }
     im->refs = 1;
     im->next = open_list;
     open_list = im;
-    printf("[ASTOS] image %s: %d volume(s)%s\n", real, im->nvol, im->ro ? ", read-only" : "");
+    printf("[ASTOS] image %s: %d volume(s)%s%s\n", real, im->nvol, im->mem ? ", MSA" : "",
+           im->ro ? ", read-only" : "");
     for (int i = 0; i < im->nvol; i++)
         printf("[ASTOS]   %s at %llu, %u-byte sectors, %u clusters of %u\n", im->v[i].label,
                (unsigned long long)im->v[i].base, im->v[i].bps, im->v[i].nclus, im->v[i].csize);
@@ -380,6 +538,7 @@ void fat_close(struct fat_img *im)
     for (int i = 0; i < im->nvol; i++)
         free(im->v[i].fat);
     close(im->fd);
+    free(im->mem);
     free(im);
 }
 
@@ -443,7 +602,7 @@ static int valid_clus(const struct vol *v, uint32_t c) { return c >= 2 && c <= v
 static int fat_sync(struct fat_img *im, struct vol *v)
 {
     if (!v->fat_dirty)
-        return 0;
+        return im->mem ? msa_flush(im) : 0;
     size_t n = (size_t)v->spf * v->bps;
     for (uint32_t i = 0; i < v->nfats; i++)
         if (vwr(im, v, v->fat_off + (uint64_t)i * n, v->fat, n) != 0)
@@ -464,6 +623,8 @@ static int fat_sync(struct fat_img *im, struct vol *v)
         }
     }
     v->fat_dirty = 0;
+    if (im->mem)
+        return msa_flush(im);
     fsync(im->fd);
     return 0;
 }
