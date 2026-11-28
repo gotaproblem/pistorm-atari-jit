@@ -66,6 +66,8 @@ static int autolaunch = -1, countdown_s;      /* index, seconds left */
 static int mx = 320, my = 100;                 /* pointer, physical px */
 static int mrem_x, mrem_y;
 static int buttons_prev;
+#define BOUNCE_S 0.06                          /* a press this soon after a */
+static double btn_up_t[2] = { -1.0, -1.0 };    /* release is switch bounce  */
 static double last_click_t;
 static int last_click_env = -1;
 
@@ -1021,12 +1023,31 @@ int main(int argc, char **argv)
             moved = mx != ox || my != oy;
             if (moved && on_hover(mx, log_y(my)))
                 redraw = 1;
-            if ((e.buttons & 1) && !(buttons_prev & 1)) {
+            /* Mouse-button bounce: the ST mouse's microswitches chatter, and
+             * the IKBD reports every edge, so a release could arrive as
+             * release-press-release - a second click that closed the list
+             * the first one opened. A press within BOUNCE_S of that button's
+             * last release is taken as the same click, not a new one. */
+            double tb = now_s();
+            int left_down = (e.buttons & 1) && !(buttons_prev & 1);
+            int right_down = (e.buttons & 2) && !(buttons_prev & 2);
+            if (!(e.buttons & 1) && (buttons_prev & 1)) {
+                btn_up_t[0] = tb;
+                if (set_is_open() && !dlg && set_release(mx, log_y(my)))
+                    redraw = 1;
+            }
+            if (!(e.buttons & 2) && (buttons_prev & 2))
+                btn_up_t[1] = tb;
+            if (left_down && tb - btn_up_t[0] < BOUNCE_S)
+                left_down = 0;
+            if (right_down && tb - btn_up_t[1] < BOUNCE_S)
+                right_down = 0;
+            if (left_down) {
                 if (on_click(mx, log_y(my), &exit_code))
                     break;
                 redraw = 1;
             }
-            if ((e.buttons & 2) && !(buttons_prev & 2)) {
+            if (right_down) {
                 /* right: on an icon its menu (Launch, Settings), else
                  * the start menu */
                 cancel_autolaunch();

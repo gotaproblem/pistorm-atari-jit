@@ -45,6 +45,7 @@ static int pop, pop_sel, pop_top, pop_n, pop_row;
 static struct { char label[48]; int act, arg; } item[160];
 static char edit[256];
 static int asked_close;
+static int press_opened;            /* the button that is down opened a list */
 
 static int nrows(void) { return spm_rows(); }
 
@@ -457,7 +458,7 @@ int set_click(int x, int y)
             pop = POP_NONE;
         return 0;
     }
-    if (inside(x, y, CAT_X, CAT_Y, CAT_W, 10)) { open_cat(); return 0; }
+    if (inside(x, y, CAT_X, CAT_Y, CAT_W, 10)) { open_cat(); press_opened = 1; return 0; }
     if (inside(x, y, 16, FOOT_Y, BTN_W, 12))  { spm_save(); asked_close = 0; return 0; }
     if (inside(x, y, 16 + BTN_W + 8, FOOT_Y, BTN_W, 12)) return try_close();
     asked_close = 0;
@@ -470,8 +471,10 @@ int set_click(int x, int y)
             if (r.kind == SPM_LABEL)
                 return 0;
             sel = i;
-            if (x >= VAL_X)              /* the value: open its list */
+            if (x >= VAL_X) {            /* the value: open its list */
                 open_value(i);
+                press_opened = pop == POP_CAT || pop == POP_VALUE;
+            }
             return 0;
         }
     }
@@ -480,6 +483,29 @@ int set_click(int x, int y)
     if (inside(x, y, WX + WW - 24, LIST_Y + (NVIS - 1) * ROW_H, 16, 10) && top + NVIS < n) {
         top++;
         if (sel < top) sel = top;
+    }
+    return 0;
+}
+
+/* The left button came up. A list opened by this press stays open when
+ * the button is released on its box (click, then click an item), and
+ * takes the item when the pointer was dragged onto one first (press,
+ * drag, release) - the usual drop-down behaviour either way. */
+int set_release(int x, int y)
+{
+    if (!press_opened)
+        return 0;
+    press_opened = 0;
+    if (pop != POP_CAT && pop != POP_VALUE)
+        return 0;
+    int px, py, pw, ph;
+    pop_rect(&px, &py, &pw, &ph);
+    if (!inside(x, y, px, py + 2, pw, ph - 4))
+        return 0;
+    int k = pop_top + (y - py - 2) / ROW_H;
+    if (k >= pop_top && k < pop_n) {
+        accept(k);
+        return 1;
     }
     return 0;
 }
