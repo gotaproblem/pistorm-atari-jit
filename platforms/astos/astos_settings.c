@@ -344,14 +344,7 @@ void set_draw(void)
             g_frame(VAL_X, y, VAL_W, 10, C_ACCENT);
             g_textn(VAL_X + 4, y + 1, len > maxc ? e + len - maxc : e, maxc, C_TEXT);
         } else {
-            const char *v = r.value;
-            char vb[112];
-            if (!r.on && !r.is_switch && r.usable && strcmp(v, "empty") &&
-                !strstr(v, "default") && !strstr(v, "not set")) {
-                snprintf(vb, sizeof vb, "%s (default)", v);   /* not in the file */
-                v = vb;
-            }
-            box(VAL_X, y, VAL_W, v, !grey, 0, grey);
+            box(VAL_X, y, VAL_W, r.value, !grey, 0, grey);
         }
         const char *tail = r.why ? r.why : r.hint;
         if (tail)

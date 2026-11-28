@@ -2147,6 +2147,15 @@ void spm_row(int i, struct spm_row *o)
         return;
     }
     const char *val = row_value(&mst, r, vbuf, sizeof vbuf);
+    /* A list key with no line: the page shows what TICKING would write
+     * (beside an empty box); with no box here that read as the setting.
+     * Show what applies instead - the list's own "not set" choice, else
+     * "not set" (machine: config_file.c's st). */
+    if (!r->ticked && se_kind(k) == SE_K_LIST && !se_known_default(k)) {
+        int ns = se_index_exact(k, "");
+        val = ns >= 0 ? se_label(k, ns) :
+              !strcasecmp(k, "machine") ? "st (not set)" : "not set";
+    }
     if ((r->why || r->blocked) && !r->ticked)
         val = "empty";
     snprintf(o->value, sizeof o->value, "%s", val);
