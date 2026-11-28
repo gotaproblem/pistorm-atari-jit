@@ -321,7 +321,6 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "ym_gain",        SE_TAB_SOUND,   SE_K_INT,    "100"     },
     { "ym_lag_ms",      SE_TAB_SOUND,   SE_K_INT,    "100"     },
     { "lmc",            SE_TAB_SOUND,   SE_K_SWITCH, "1"       },
-    { "audio_frames",   SE_TAB_SOUND,   SE_K_LIST,   "2048"    },
     /* Input */
     { "kbd",            SE_TAB_INPUT,   SE_K_SWITCH, "usb"     },
     { "usb",            SE_TAB_INPUT,   SE_K_SWITCH, "gamepad" },
@@ -356,6 +355,9 @@ static const struct { const char *key; int tab; int kind; const char *tick; } ca
     { "stbox_telemetry",SE_TAB_TUNING,  SE_K_SWITCH, "1"       },
     { "ipl_confirm_ns", SE_TAB_TUNING,  SE_K_INT,    "2000"    },
     { "blit_trace",     SE_TAB_TUNING,  SE_K_INT,    "0"       },
+    /* the HDMI audio buffer (SDL device frames): a tuning knob, not a
+     * sound choice - the default suits everything but very heavy JIT load */
+    { "audio_frames",   SE_TAB_TUNING,  SE_K_LIST,   "2048"    },
     { "debug",          SE_TAB_TUNING,  SE_K_TEXT,   ""        },
 };
 #define NCAT ((int)(sizeof cat / sizeof cat[0]))
