@@ -24,6 +24,7 @@
 #include <stdatomic.h>
 #include <linux/input.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -46,10 +47,12 @@
 static struct {
     int fd, is_pad, is_kbd, is_mouse;
     char node[16];                      /* "event5"                         */
+    int dbg_n;                          /* raw events logged so far         */
     struct { int centre, on, off; } ax[2];
     int stick[2];
 } dev[MAX_DEV];
 static int ndev, n_kbd, n_mouse, n_pad, have_st, grabbed;
+static int in_debug;                   /* PISTORM_ASTOS_INPUT_DEBUG=1      */
 static int ino_fd = -1;                /* /dev/input watched: hotplug      */
 static int shift_usb, shift_st;
 static int usb_buttons;
@@ -243,6 +246,12 @@ static void try_dev(const char *node, int grab)
     int mouse = !pad && has_bit(evb, EV_REL) && has_bit(relb, REL_X) &&
                 has_bit(relb, REL_Y) && has_bit(keyb, BTN_LEFT);
     if (!pad && !kbd && !mouse) {
+        if (in_debug) {
+            char nm[80] = "?";
+            ioctl(fd, EVIOCGNAME(sizeof nm), nm);
+            printf("[ASTOS] input: skip %s \"%s\" ev %lx rel %lx abs %lx BTN_LEFT %d\n", node, nm,
+                   evb[0], relb[0], absb[0], has_bit(keyb, BTN_LEFT));
+        }
         close(fd);
         return;
     }
@@ -261,6 +270,11 @@ static void try_dev(const char *node, int grab)
     memset(&id, 0, sizeof id);
     ioctl(fd, EVIOCGNAME(sizeof name), name);
     ioctl(fd, EVIOCGID, &id);
+    if (in_debug)
+        printf("[ASTOS] input: %s bits ev %lx rel %lx abs %lx key(BTN_LEFT %d BTN_MOUSE.. %d KEY_A %d BTN_JOYSTICK %d BTN_GAMEPAD %d BTN_THUMB %d)\n",
+               node, evb[0], relb[0], absb[0], has_bit(keyb, BTN_LEFT), has_bit(keyb, BTN_MOUSE),
+               has_bit(keyb, KEY_A), has_bit(keyb, BTN_JOYSTICK), has_bit(keyb, BTN_GAMEPAD),
+               has_bit(keyb, BTN_THUMB));
     printf("[ASTOS] input: + %s \"%s\" (%s) %s\n", node, name,
            id.bustype == BUS_BLUETOOTH ? "bluetooth" : id.bustype == BUS_USB ? "usb" : "other",
            pad ? "pad" : kbd && mouse ? "keyboard+mouse" : kbd ? "keyboard" : "mouse");
@@ -286,6 +300,8 @@ int ai_open(int want_st, int grab)
     ndev = n_kbd = n_mouse = n_pad = have_st = 0;
     grabbed = grab;
     /* the watch first, so nothing that appears during the scan is missed */
+    const char *dbg = getenv("PISTORM_ASTOS_INPUT_DEBUG");
+    in_debug = dbg && *dbg && *dbg != '0';
     ino_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (ino_fd >= 0 && inotify_add_watch(ino_fd, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) {
         close(ino_fd);
@@ -374,6 +390,11 @@ static struct ai_event usb_poll(void)
                     mouse_changed = 0;
                 }
                 break;
+            }
+            if (in_debug && ie.type != EV_SYN && dev[i].dbg_n < 60) {
+                dev[i].dbg_n++;
+                printf("[ASTOS] input: %s type %d code %d value %d\n", dev[i].node, ie.type,
+                       ie.code, ie.value);
             }
             if (dev[i].is_pad) {
                 if (ie.type == EV_ABS && ie.code == ABS_HAT0X && ie.value)
