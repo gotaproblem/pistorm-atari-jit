@@ -187,8 +187,8 @@ static void draw_icons(void)
     if (nenv == 0) {
         g_fill(GRID_X, GRID_Y, 320, 22, C_WHITE);
         g_frame(GRID_X, GRID_Y, 320, 22, C_TEXT);
-        g_text(GRID_X + 8, GRID_Y + 3, "No environments in psctrl.cfg", C_TEXT);
-        g_text(GRID_X + 8, GRID_Y + 12, "Add a [build] section to it", C_DIM);
+        g_text(GRID_X + 8, GRID_Y + 3, "No environments yet", C_TEXT);
+        g_text(GRID_X + 8, GRID_Y + 12, "Start menu: New environment...", C_DIM);
     }
 }
 
@@ -557,7 +557,8 @@ static void hdmi_start(void);
 static void toggle_hdmi(void)
 {
     if (hdmi_only) {
-        message("HDMI is on: hdmi_only is set", "(in [psctrl] or the last environment)");
+        message("HDMI stays on: the last environment, or ASTOS,",
+                "is set to HDMI only (hdmi_only)");
         return;
     }
     hdmi_on = !hdmi_on;
@@ -580,7 +581,10 @@ static void open_settings(int i)
     if (i < 0 || i >= nenv)
         return;
     if (set_open(cfg_path, envs[i].sec, envs[i].title) != 0)
-        message("Could not read psctrl.cfg", cfg_path);
+    {
+        fprintf(stderr, "[ASTOS] cannot read %s\n", cfg_path);
+        message("Could not read the settings file", "(see the console for its path)");
+    }
     else
         printf("[ASTOS] settings: [%s]\n", envs[i].sec);
 }
@@ -613,7 +617,7 @@ static int name_ok(void)
         }
     }
     if (!strcmp(name_buf, "psctrl") || !strcmp(name_buf, "astos")) {
-        snprintf(name_err, sizeof name_err, "[%s] is reserved", name_buf);
+        snprintf(name_err, sizeof name_err, "that name is reserved");
         return 0;
     }
     char secs[64][SC_SEC_LEN];
@@ -652,7 +656,7 @@ static void ask_delete(int i)
     dlg = DLG_DELETE;
     dlg_sel = 1;
     snprintf(dlg_text[0], sizeof dlg_text[0], "Delete %.40s?", envs[i].title);
-    snprintf(dlg_text[1], sizeof dlg_text[1], "Its section goes from psctrl.cfg.");
+    snprintf(dlg_text[1], sizeof dlg_text[1], "Its settings are removed for good.");
 }
 
 static void delete_env(void)
@@ -671,7 +675,8 @@ static void delete_env(void)
             sc_set(&cfg, "psctrl", refs[k], NULL);
     }
     if (sc_save(&cfg, cfg_path) != 0) {
-        message("Could not save psctrl.cfg", sc_save_error(&cfg));
+        fprintf(stderr, "[ASTOS] could not save %s: %s\n", cfg_path, sc_save_error(&cfg));
+        message("Could not save the settings file", sc_save_error(&cfg));
         return;
     }
     printf("[ASTOS] deleted [%s]\n", gone);
